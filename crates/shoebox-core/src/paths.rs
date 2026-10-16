@@ -30,6 +30,28 @@ pub fn default_data_dir() -> Result<PathBuf> {
     }
 }
 
+/// Where thumbnails live: `~/Library/Caches/<bundle id>` on macOS (which
+/// macOS may purge; they rebuild), `$XDG_CACHE_HOME/shoebox` elsewhere.
+pub fn default_cache_dir() -> Result<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(home()?.join("Library/Caches").join(BUNDLE_ID))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let base = match std::env::var_os("XDG_CACHE_HOME").filter(|v| !v.is_empty()) {
+            Some(d) => PathBuf::from(d),
+            None => home()?.join(".cache"),
+        };
+        Ok(base.join("shoebox"))
+    }
+}
+
+/// User settings (library roots); not part of the rebuildable cache.
+pub fn settings_file(data_dir: &Path) -> PathBuf {
+    data_dir.join("settings.json")
+}
+
 /// The rebuildable cache database.
 pub fn cache_db(data_dir: &Path) -> PathBuf {
     data_dir.join("cache.sqlite")

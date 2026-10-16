@@ -62,3 +62,24 @@ pub fn ifd0_dimensions(data: &[u8]) -> Result<Option<(u32, u32)>, DecodeError> {
         _ => Ok(None),
     }
 }
+
+/// The largest ImageWidth × ImageLength declared in any IFD (for a NEF, the
+/// raw image; close enough to the JpgFromRaw size for layout).
+pub fn max_dimensions(data: &[u8]) -> Result<Option<(u32, u32)>, DecodeError> {
+    let tiff = Tiff::parse(data)?;
+    let mut best: Option<(u32, u32)> = None;
+    for ifd in tiff.all_ifds()? {
+        if let (Some(w), Some(h)) = (
+            tiff.uint(&ifd, TAG_IMAGE_WIDTH)?,
+            tiff.uint(&ifd, TAG_IMAGE_LENGTH)?,
+        ) {
+            let (w, h) = (w as u32, h as u32);
+            if best
+                .is_none_or(|(bw, bh)| u64::from(w) * u64::from(h) > u64::from(bw) * u64::from(bh))
+            {
+                best = Some((w, h));
+            }
+        }
+    }
+    Ok(best)
+}

@@ -29,6 +29,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Scan folders and cache their metadata (what the app's grid shows).
+    /// Read-only.
+    Scan {
+        /// Folders to scan.
+        #[arg(required = true)]
+        folders: Vec<PathBuf>,
+    },
     /// Find duplicates and write a report for review. Never moves files.
     Dupes(DupesArgs),
     /// Move the files a person confirmed in a `dupes` report (`confirm` = y).
@@ -96,6 +103,7 @@ fn main() -> Result<()> {
         None => paths::default_data_dir()?,
     };
     match cli.cmd {
+        Cmd::Scan { folders } => scan_cmd(&data_dir, &folders),
         Cmd::Dupes(args) => dupes_cmd(&data_dir, args),
         Cmd::Apply {
             report,
@@ -152,6 +160,38 @@ fn print_moves(moves: &[PlannedMove]) {
     for (i, m) in moves.iter().enumerate() {
         println!("{:<4} {:<60} {}", i + 1, m.src.display(), m.dst.display());
     }
+}
+
+fn scan_cmd(data_dir: &Path, folders: &[PathBuf]) -> Result<()> {
+    use shoebox_core::catalog::Catalog;
+    let roots = folders
+        .iter()
+        .map(|f| Root::new(f, Role::Scan))
+        .collect::<shoebox_core::Result<Vec<_>>>()?;
+    let mut cache = Cache::open(&paths::cache_db(data_dir)).context("opening cache")?;
+    let t = std::time::Instant::now();
+    let (catalog, s) = Catalog::refresh(&mut cache, roots, &|done, total| {
+        if done % 500 == 0 || done == total {
+            eprint!("\rReading metadata {done}/{total}");
+        }
+    })?;
+    eprintln!();
+    let dated = catalog
+        .photos
+        .iter()
+        .filter(|p| p.meta.capture_seconds().is_some())
+        .count();
+    println!(
+        "{} files ({} cached, {} read, {} failed, {} forgotten) in {:.2} s; {} dated",
+        s.files,
+        s.cached,
+        s.read,
+        s.failed,
+        s.forgotten,
+        t.elapsed().as_secs_f64(),
+        dated
+    );
+    Ok(())
 }
 
 fn dupes_cmd(data_dir: &Path, a: DupesArgs) -> Result<()> {

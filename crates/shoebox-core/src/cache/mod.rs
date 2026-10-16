@@ -1,5 +1,6 @@
 //! SQLite cache of per-file analysis, keyed by (root, relative path, size, mtime).
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -7,8 +8,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::error::{CoreError, Result, io};
 use crate::exif::ExifInfo;
 use crate::hash::{ANALYZER_VERSION, Analysis, Digest, PHashes};
+use crate::meta::{META_VERSION, Meta};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// Rebuildable tables, dropped when the schema version changes.
 /// `dupe_ignores` holds user decisions and is never dropped.
@@ -16,6 +18,16 @@ const REBUILDABLE: &[&str] = &["phash", "exif", "files", "roots"];
 
 pub struct Cache {
     conn: Connection,
+}
+
+/// Browsing metadata for one file, ready to be written to the cache.
+pub struct MetaEntry<'a> {
+    pub root_id: i64,
+    pub rel: &'a str,
+    pub ext: &'a str,
+    pub size: u64,
+    pub mtime_ns: i64,
+    pub meta: &'a Meta,
 }
 
 /// One analysed file ready to be written to the cache.
@@ -151,21 +163,154 @@ impl Cache {
         }))
     }
 
+    /// Store browsing metadata. If a file's size or mtime changed, its hashes
+    /// are cleared (they describe the old contents); otherwise they're kept.
+    pub fn store_meta(&mut self, entries: &[MetaEntry<'_>]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut file = tx.prepare_cached(
+                "INSERT INTO files(root_id, rel_path, ext, size, mtime, width, height, meta_version)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(root_id, rel_path) DO UPDATE SET
+                   ext = excluded.ext, width = excluded.width, height = excluded.height,
+                   meta_version = excluded.meta_version,
+                   blake3 = CASE WHEN size = excluded.size AND mtime = excluded.mtime
+                                 THEN blake3 ELSE NULL END,
+                   image_data_hash = CASE WHEN size = excluded.size AND mtime = excluded.mtime
+                                 THEN image_data_hash ELSE NULL END,
+                   analyzer_version = CASE WHEN size = excluded.size AND mtime = excluded.mtime
+                                 THEN analyzer_version ELSE NULL END,
+                   size = excluded.size, mtime = excluded.mtime
+                 RETURNING id",
+            )?;
+            let mut exif = tx.prepare_cached(
+                "INSERT OR REPLACE INTO exif(file_id, capture_time, subsec, offset, make, model,
+                    serial, lens, focal, fnumber, exposure, iso, width, height, orientation)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            )?;
+            for e in entries {
+                let m = e.meta;
+                let id: i64 = file.query_row(
+                    params![
+                        e.root_id,
+                        e.rel,
+                        e.ext,
+                        e.size as i64,
+                        e.mtime_ns,
+                        m.width,
+                        m.height,
+                        META_VERSION
+                    ],
+                    |r| r.get(0),
+                )?;
+                let x = &m.exif;
+                exif.execute(params![
+                    id,
+                    x.capture_time,
+                    x.subsec,
+                    x.offset,
+                    x.make,
+                    x.model,
+                    x.serial,
+                    x.lens,
+                    x.focal,
+                    x.fnumber,
+                    x.exposure,
+                    x.iso,
+                    m.width,
+                    m.height,
+                    x.orientation,
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Every file of a root with current metadata: `rel → (size, mtime, meta)`.
+    pub fn load_meta(&self, root_id: i64) -> Result<HashMap<String, (u64, i64, Meta)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT f.rel_path, f.size, f.mtime, f.width, f.height,
+                    e.capture_time, e.subsec, e.offset, e.make, e.model, e.serial, e.lens,
+                    e.focal, e.fnumber, e.exposure, e.iso, e.orientation
+             FROM files f LEFT JOIN exif e ON e.file_id = f.id
+             WHERE f.root_id = ?1 AND f.meta_version = ?2",
+        )?;
+        let rows = stmt.query_map(params![root_id, META_VERSION], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                (
+                    r.get::<_, i64>(1)? as u64,
+                    r.get::<_, i64>(2)?,
+                    Meta {
+                        width: r.get(3)?,
+                        height: r.get(4)?,
+                        exif: ExifInfo {
+                            capture_time: r.get(5)?,
+                            subsec: r.get(6)?,
+                            offset: r.get(7)?,
+                            make: r.get(8)?,
+                            model: r.get(9)?,
+                            serial: r.get(10)?,
+                            lens: r.get(11)?,
+                            focal: r.get(12)?,
+                            fnumber: r.get(13)?,
+                            exposure: r.get(14)?,
+                            iso: r.get(15)?,
+                            orientation: r.get(16)?,
+                        },
+                    },
+                ),
+            ))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Drop cache rows for files of `root_id` that are no longer on disk.
+    /// (Cache rows only; nothing in the library is touched.)
+    pub fn forget_missing(
+        &mut self,
+        root_id: i64,
+        present: &std::collections::HashSet<String>,
+    ) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let gone: Vec<i64> = {
+            let mut stmt = tx.prepare("SELECT id, rel_path FROM files WHERE root_id = ?1")?;
+            let rows = stmt.query_map([root_id], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })?;
+            rows.filter_map(|r| r.ok())
+                .filter(|(_, rel)| !present.contains(rel))
+                .map(|(id, _)| id)
+                .collect()
+        };
+        {
+            let mut del = tx.prepare("DELETE FROM files WHERE id = ?1")?;
+            for id in &gone {
+                del.execute([id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(gone.len())
+    }
+
     /// Write many entries in one transaction.
     pub fn store_all(&mut self, entries: &[Entry<'_>]) -> Result<()> {
         let tx = self.conn.transaction()?;
         {
             let mut file = tx.prepare_cached(
                 "INSERT INTO files(root_id, rel_path, ext, size, mtime, blake3, image_data_hash,
-                                   width, height, analyzer_version, analyze_error, luma_stddev)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                                   width, height, analyzer_version, analyze_error, luma_stddev,
+                                   meta_version)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                  ON CONFLICT(root_id, rel_path) DO UPDATE SET
                    ext = excluded.ext, size = excluded.size, mtime = excluded.mtime,
                    blake3 = excluded.blake3, image_data_hash = excluded.image_data_hash,
                    width = excluded.width, height = excluded.height,
                    analyzer_version = excluded.analyzer_version,
                    analyze_error = excluded.analyze_error,
-                   luma_stddev = excluded.luma_stddev
+                   luma_stddev = excluded.luma_stddev,
+                   meta_version = excluded.meta_version
                  RETURNING id",
             )?;
             let mut exif = tx.prepare_cached(
@@ -193,6 +338,7 @@ impl Cache {
                         ANALYZER_VERSION,
                         a.error,
                         a.luma_stddev,
+                        META_VERSION,
                     ],
                     |r| r.get(0),
                 )?;
