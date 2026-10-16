@@ -14,6 +14,7 @@ pub mod pipeline;
 pub mod scan;
 pub mod settings;
 pub mod sidecar;
+pub mod stacks;
 pub mod thumbs;
 pub mod xmp;
 

@@ -191,6 +191,21 @@ fn scan_cmd(data_dir: &Path, folders: &[PathBuf]) -> Result<()> {
         t.elapsed().as_secs_f64(),
         dated
     );
+    let (stacks, _) = shoebox_core::stacks::build(&catalog.photos);
+    let mut badges: HashMap<String, usize> = HashMap::new();
+    for st in &stacks {
+        let mut b = st.badge(&catalog.photos);
+        if !st.variants.is_empty() {
+            b.push_str(&format!(" +{} variant", st.variants.len()));
+        }
+        *badges.entry(b).or_default() += 1;
+    }
+    let mut badges: Vec<_> = badges.into_iter().collect();
+    badges.sort_by_key(|b| std::cmp::Reverse(b.1));
+    println!("{} stacks:", stacks.len());
+    for (b, n) in badges.iter().take(8) {
+        println!("  {n:>6}  {b}");
+    }
     Ok(())
 }
 

@@ -37,6 +37,10 @@ pub struct Catalog {
     pub roots: Vec<Root>,
     /// Sorted by capture time (undated last), then path.
     pub photos: Vec<Photo>,
+    /// Frames: each photo belongs to exactly one stack.
+    pub stacks: Vec<crate::stacks::Stack>,
+    /// `stack_of[i]` is the stack index of `photos[i]`.
+    pub stack_of: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -81,8 +85,12 @@ impl Catalog {
                 });
             }
         }
-        let mut c = Self { roots, photos };
-        c.sort();
+        let mut c = Self {
+            roots,
+            photos,
+            ..Default::default()
+        };
+        c.finish();
         Ok(c)
     }
 
@@ -216,8 +224,12 @@ impl Catalog {
                 .collect();
             stats.forgotten += cache.forget_missing(id, &present)?;
         }
-        let mut c = Self { roots, photos };
-        c.sort();
+        let mut c = Self {
+            roots,
+            photos,
+            ..Default::default()
+        };
+        c.finish();
         Ok((c, stats))
     }
 
@@ -288,6 +300,14 @@ impl Catalog {
             },
         )?;
         Ok(Some(batch))
+    }
+
+    /// Sort photos and rebuild stacks (indices change).
+    fn finish(&mut self) {
+        self.sort();
+        let (stacks, of) = crate::stacks::build(&self.photos);
+        self.stacks = stacks;
+        self.stack_of = of;
     }
 
     fn sort(&mut self) {
