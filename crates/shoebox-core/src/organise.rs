@@ -221,3 +221,15 @@ pub fn reference_writes(
     }
     Ok(out)
 }
+
+/// Every file "Move to Trash" takes for these stacks: their members and the
+/// sidecars that go with them (the same set a move would take).
+pub fn trash_files(c: &Catalog, stacks: &[usize]) -> Result<Vec<PathBuf>> {
+    // Plan a move to a folder that doesn't exist; only the sources matter.
+    let nowhere = Path::new("/nonexistent-shoebox-trash-plan");
+    Ok(plan_move_to(c, stacks, nowhere)?
+        .moves
+        .into_iter()
+        .map(|m| m.src)
+        .collect())
+}

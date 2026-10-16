@@ -31,6 +31,43 @@ pub struct Settings {
     /// Saved filters, shown under Smart filters.
     #[serde(default)]
     pub smart_filters: Vec<crate::query::SmartFilter>,
+    /// Import naming template (empty = the default).
+    #[serde(default)]
+    pub import_template: String,
+    /// Batch rename template (empty = the default).
+    #[serde(default)]
+    pub rename_template: String,
+}
+
+impl Settings {
+    pub fn import_template(&self) -> &str {
+        if self.import_template.trim().is_empty() {
+            crate::template::DEFAULT_IMPORT
+        } else {
+            &self.import_template
+        }
+    }
+
+    pub fn rename_template(&self) -> &str {
+        if self.rename_template.trim().is_empty() {
+            crate::template::DEFAULT_RENAME
+        } else {
+            &self.rename_template
+        }
+    }
+
+    /// Paths of the roots Shoebox may change.
+    pub fn writable_roots(&self) -> Vec<PathBuf> {
+        self.roots
+            .iter()
+            .filter(|r| !r.reference)
+            .map(|r| r.path.clone())
+            .collect()
+    }
+
+    pub fn all_roots(&self) -> Vec<PathBuf> {
+        self.roots.iter().map(|r| r.path.clone()).collect()
+    }
 }
 
 impl Settings {

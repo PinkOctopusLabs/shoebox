@@ -2,6 +2,7 @@
 
 pub mod compare;
 pub mod duplicates;
+pub mod files;
 pub mod filmstrip;
 pub mod grid;
 pub mod loupe;
@@ -14,6 +15,9 @@ use crate::app::ShoeboxApp;
 use crate::jobs::{Priority, Size};
 
 pub const GAP: f32 = 6.0;
+
+/// Photos being dragged (onto a folder to move them, or a collection).
+pub struct DragPhotos(pub Vec<crate::jobs::PhotoId>);
 
 /// The thumbnail size to load for a cell of `px` points.
 pub fn size_for(px: f32, ppp: f32) -> Size {
@@ -156,7 +160,20 @@ pub fn cell(
 ) -> egui::Response {
     let idx = app.shown[pos];
     let id = app.ids[idx];
-    let resp = ui.interact(rect, ui.scope_id().with(("cell", id)), egui::Sense::click());
+    let resp = ui.interact(
+        rect,
+        ui.scope_id().with(("cell", id)),
+        egui::Sense::click_and_drag(),
+    );
+    if resp.drag_started() {
+        // Drag the selection if this photo is in it, else just this one.
+        let ids: Vec<crate::jobs::PhotoId> = if app.selection.contains(&id) {
+            app.selection.iter().copied().collect()
+        } else {
+            vec![id]
+        };
+        resp.dnd_set_drag_payload(DragPhotos(ids));
+    }
     let painter = ui.painter_at(rect);
     let visuals = ui.visuals().clone();
     let size = size_for(rect.width().max(rect.height()), ui.ctx().pixels_per_point());
@@ -328,6 +345,43 @@ pub fn photo_menu(app: &mut ShoeboxApp, resp: &egui::Response, pos: usize) {
         };
         if ui.button(label).clicked() {
             app.reveal_selection();
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Move to Folder…").clicked() {
+            let start = app
+                .selected_paths()
+                .first()
+                .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+            let mut dialog = rfd::FileDialog::new().set_title("Move to folder");
+            if let Some(d) = start {
+                dialog = dialog.set_directory(d);
+            }
+            if let Some(folder) = dialog.pick_folder() {
+                app.move_selection_to(folder.canonicalize().unwrap_or(folder));
+            }
+            ui.close();
+        }
+        if ui.button("Rename…").clicked() {
+            app.start_rename();
+            ui.close();
+        }
+        if ui.button("Move to _rejected  (⌘Backspace)").clicked() {
+            app.reject_selection();
+            ui.close();
+        }
+        let rejects = app.rejected_shown().len();
+        if rejects > 0
+            && ui
+                .button(format!("Move all {rejects} rejected to _rejected"))
+                .clicked()
+        {
+            app.reject_all_rejected();
+            ui.close();
+        }
+        if ui.button("Move to Trash…").clicked() {
+            let photos = app.selected_paths();
+            app.request_org(crate::jobs::OrgRequest::Trash { photos });
             ui.close();
         }
         if app.selection_has_changes() && ui.button("Mark as Seen").clicked() {

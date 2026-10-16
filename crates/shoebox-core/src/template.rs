@@ -187,7 +187,7 @@ impl Template {
         let Some(w) = f.capture_time.as_deref().and_then(parse_time) else {
             let size = match (f.width, f.height) {
                 (Some(w), Some(h)) => format!("{w}x{h}"),
-                _ => "unknown size".to_owned(),
+                _ => "unknown".to_owned(),
             };
             let name = clean(&f.file_name);
             let name = if name.is_empty() {

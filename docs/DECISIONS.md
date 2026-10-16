@@ -3,6 +3,45 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-17 — M5 file operations and import
+- **Templates** add `{YY} {MM} {DD} {HH} {mm} {ss} {name} {camera} {width}
+  {height} {seq} {EXT}` to the spec's tokens. `{ext}` is lower case (as the
+  existing library is). Without a date and without dimensions the fallback
+  is `_undated/unknown/{name}`. Token values can never add folders, `..`, or
+  hidden names (property-tested).
+- **Import copies** go to a hidden temporary file, are BLAKE3-checked
+  against the source, get the source's modification time, then are renamed
+  into place without replacing anything (`renamex_np` / `renameat2`). A frame's
+  files share one `-N` suffix; card sidecars (`DSC_0001.NEF.xmp`,
+  `DSC_0001.xmp`) come along under the new name. "Already in the library"
+  hashes only same-size library files.
+- **Undoing an import moves the copies to the Trash** (only if they still
+  match what was copied); the card still has the originals. That's the only
+  way to undo a copy without deleting. Move to Trash itself is an explicit
+  command with its own dry-run table; the system Trash can't be undone from
+  Shoebox (Finder's Put Back does it). macOS uses NSFileManager (no Finder
+  scripting). Tests and `SHOEBOX_TRASH_DIR` use a folder instead.
+- **Stacks move together**: one `-N` suffix for the whole stack on a
+  collision; `name.ext.xmp` follows each file; a shared `name.xmp` follows
+  only when every image sharing it moves to one new name. Batch rename
+  renders from the primary, so a frame keeps one name, and `-N` copies keep
+  their suffix. Undated stacks are left alone by rename.
+- **References follow moves**: events (`include`/`exclude`), collections
+  and stack links name files by path, so a move or rename rewrites those
+  `.shoebox/*.json` files in the same batch. The cache rows move too (no
+  re-read, no false "changed" badge).
+- **Collections** live in `.shoebox/collections.json` in every writable
+  root (like events), not in the cache.
+- **History** lists every batch and can undo any still consistent with the
+  disk. An interrupted batch (the app quit mid-way) is flagged in the status
+  bar and History offers **Roll back** (its finished steps reversed). Resume
+  isn't offered: only steps about to run are journaled, so the rest of an
+  interrupted plan isn't known.
+- New folders are journaled (undo leaves them: nothing is deleted). The
+  folder tree now shows empty folders, so they can be drop targets.
+- Not in M5: creating an event during import, and the optional event
+  folder rename (moving directories isn't an operation yet).
+
 ## 2026-10-17 — M4 Compare, Survey and duplicate review
 - **Compare** syncs zoom as a factor over each pane's fit and pan as a
   centre in image fractions, so a 6048 px original and a 2560 px export

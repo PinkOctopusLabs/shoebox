@@ -137,3 +137,25 @@ pub fn mtime_of(meta: &std::fs::Metadata) -> i64 {
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map_or(0, |d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX))
 }
+
+/// Every folder under the roots that the scanner would look in (including
+/// empty ones, so they can be shown and used as move targets).
+pub fn folders(roots: &[Root]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for root in roots {
+        let walker = WalkDir::new(&root.path).follow_links(false).into_iter();
+        for e in walker
+            .filter_entry(|e| {
+                e.depth() == 0
+                    || (e.file_type().is_dir() && !skip_dir(&e.file_name().to_string_lossy()))
+            })
+            .flatten()
+        {
+            if e.depth() > 0 && e.file_type().is_dir() {
+                out.push(e.into_path());
+            }
+        }
+    }
+    out.sort();
+    out
+}

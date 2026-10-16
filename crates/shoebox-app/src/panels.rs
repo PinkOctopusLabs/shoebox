@@ -221,6 +221,23 @@ pub fn status(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             ui.separator();
             ui.label(RichText::new(p.path.display().to_string()).weak());
         }
+        let interrupted = app.history.interrupted();
+        if interrupted > 0 {
+            ui.separator();
+            if ui
+                .link(
+                    RichText::new("An operation was interrupted: review in History")
+                        .color(ui.visuals().warn_fg_color),
+                )
+                .clicked()
+            {
+                app.set_view(View::History);
+            }
+        }
+        if let Some(n) = app.notice.clone() {
+            ui.separator();
+            ui.label(RichText::new(n).color(Color32::from_rgb(80, 200, 120)));
+        }
         if let Some(e) = app.error.clone() {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("×").clicked() {
@@ -278,8 +295,7 @@ pub fn library(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         });
     ui.separator();
     events_panel(app, ui);
-    ui.label(RichText::new("Collections").strong());
-    ui.weak("Arrive in M5");
+    collections_panel(app, ui);
     smart_filters(app, ui);
     ui.separator();
     ui.label(RichText::new("Tasks").strong());
@@ -295,7 +311,95 @@ pub fn library(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     {
         app.set_view(View::Duplicates);
     }
-    ui.weak("Import and History arrive in M5");
+    if ui
+        .selectable_label(app.view == View::Import, "Import…")
+        .on_hover_text("Copy photos from a card or folder into the library")
+        .clicked()
+    {
+        app.set_view(View::Import);
+    }
+    let interrupted = app.history.interrupted();
+    let label = if interrupted > 0 {
+        RichText::new(format!("History  ⚠ {interrupted} interrupted"))
+            .color(ui.visuals().warn_fg_color)
+    } else {
+        RichText::new("History")
+    };
+    if ui
+        .selectable_label(app.view == View::History, label)
+        .on_hover_text("Every file operation, with undo")
+        .clicked()
+    {
+        app.command(LibraryCommand::LoadHistory);
+        app.set_view(View::History);
+    }
+}
+
+fn collections_panel(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Collections").strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add_enabled(
+                    app.collection_edit.is_none(),
+                    egui::Button::new("+").small(),
+                )
+                .on_hover_text("New collection from the selection")
+                .clicked()
+            {
+                app.collection_edit = Some((None, String::new()));
+            }
+        });
+    });
+    if let Some((id, name)) = app.collection_edit.as_mut() {
+        let r = ui.add(egui::TextEdit::singleline(name).hint_text("Name, then Enter"));
+        r.request_focus();
+        if r.lost_focus() {
+            let (id, name) = (id.clone(), name.clone());
+            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                match id {
+                    Some(id) => app.rename_collection(&id, &name),
+                    None => app.new_collection(&name),
+                }
+            }
+            app.collection_edit = None;
+        }
+    }
+    let mut delete = None;
+    for c in app.collections.clone() {
+        let n = app.collection_members.get(&c.id).map_or(0, |m| m.len());
+        let selected = app.selected_collection.as_deref() == Some(c.id.as_str());
+        let r = ui.selectable_label(selected, format!("{}  {n}", c.name));
+        if r.clicked() {
+            app.select_collection(if selected { None } else { Some(c.id.clone()) });
+        }
+        // Drop photos on a collection to add them.
+        if let Some(ids) = r.dnd_release_payload::<crate::views::DragPhotos>() {
+            app.selection = ids.0.iter().copied().collect();
+            app.collection_add_selection(&c.id, true);
+        }
+        r.context_menu(|ui| {
+            if ui.button("Add selected photos").clicked() {
+                app.collection_add_selection(&c.id, true);
+                ui.close();
+            }
+            if ui.button("Remove selected photos").clicked() {
+                app.collection_add_selection(&c.id, false);
+                ui.close();
+            }
+            if ui.button("Rename…").clicked() {
+                app.collection_edit = Some((Some(c.id.clone()), c.name.clone()));
+                ui.close();
+            }
+            if ui.button("Delete collection (photos untouched)").clicked() {
+                delete = Some(c.id.clone());
+                ui.close();
+            }
+        });
+    }
+    if let Some(id) = delete {
+        app.delete_collection(&id);
+    }
 }
 
 fn events_panel(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
@@ -541,9 +645,40 @@ fn folder_node(
         if r.clicked() {
             app.set_folder(Some(node.path.clone()));
         }
+        // Drop photos on a folder to move them there.
+        if r.dnd_hover_payload::<crate::views::DragPhotos>().is_some() {
+            ui.painter().rect_stroke(
+                r.rect.expand(1.0),
+                3.0,
+                egui::Stroke::new(1.5, ui.visuals().selection.stroke.color),
+                egui::StrokeKind::Outside,
+            );
+        }
+        if let Some(ids) = r.dnd_release_payload::<crate::views::DragPhotos>() {
+            let photos = app.photos_for(&ids.0);
+            app.request_org(crate::jobs::OrgRequest::MoveTo {
+                photos,
+                folder: node.path.clone(),
+            });
+        }
         r.context_menu(|ui| {
             if ui.button("Reveal in Finder").clicked() {
                 reveal(&node.path);
+                ui.close();
+            }
+            if ui.button("New Folder…").clicked() {
+                app.org.new_folder = Some((node.path.clone(), String::new()));
+                ui.close();
+            }
+            if !app.selection.is_empty()
+                && ui
+                    .button(format!(
+                        "Move {} here…",
+                        crate::views::duplicates::plural(app.selection.len(), "selected photo")
+                    ))
+                    .clicked()
+            {
+                app.move_selection_to(node.path.clone());
                 ui.close();
             }
             if ui.button("Rescan").clicked() {
@@ -666,9 +801,16 @@ pub fn info(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 .circle_filled(dot.center(), 4.0, crate::views::change_colour(ch));
             ui.add(egui::Label::new(crate::views::describe_change(ch)).wrap());
         });
-        if ui.small_button("Mark as Seen").clicked() {
-            app.mark_selection_seen();
-        }
+        ui.horizontal(|ui| {
+            if ui.small_button("Mark as Seen").clicked() {
+                app.mark_selection_seen();
+            }
+            if let shoebox_core::changes::By::Shoebox { batch, .. } = ch.by
+                && ui.small_button("Show in History").clicked()
+            {
+                app.show_batch(batch);
+            }
+        });
     }
     ui.add_space(6.0);
     ui.label(RichText::new("Path").weak());

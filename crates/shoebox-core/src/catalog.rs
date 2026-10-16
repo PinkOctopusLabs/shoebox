@@ -80,6 +80,8 @@ pub struct Catalog {
     pub stack_of: Vec<usize>,
     /// Files added to other stacks by hand (from `.shoebox/stacks.json`).
     pub links: Vec<crate::stacks::Link>,
+    /// Every folder under the roots, empty ones included (after a refresh).
+    pub folders: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -322,10 +324,12 @@ impl Catalog {
         }
         let links =
             crate::stacks::load_links(&roots.iter().map(|r| r.path.clone()).collect::<Vec<_>>());
+        let folders = scan::folders(&roots);
         let mut c = Self {
             roots,
             photos,
             links,
+            folders,
             ..Default::default()
         };
         c.finish();

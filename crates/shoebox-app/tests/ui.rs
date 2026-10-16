@@ -30,6 +30,7 @@ fn paths(tmp: &Path, roots: &[PathBuf]) -> AppPaths {
         cache_db: tmp.join("data/cache.sqlite"),
         journal: tmp.join("data/journal.sqlite"),
         thumbs: tmp.join("cache/thumbs"),
+        trash_dir: Some(tmp.join("trash")),
     }
 }
 
@@ -870,4 +871,169 @@ fn real_undated_cleanup() {
         "undo restores every file"
     );
     assert_eq!(listing(&lib), lib_before, "reference library untouched");
+}
+
+/// M5: import a card in the app (dry-run table, then verified copies with
+/// the default names), then undo it from History.
+#[test]
+fn import_in_the_app_and_undo() {
+    let t = tempfile::tempdir().unwrap();
+    let base = t.path().canonicalize().unwrap();
+    let fx = base.join("fixtures");
+    shoebox_fixtures::build_library(&fx).unwrap();
+    let card = fx.join("ref/2026"); // two NEFs and a JPG with EXIF
+    let lib = base.join("library");
+    std::fs::create_dir_all(&lib).unwrap();
+    // A photo so the library isn't empty.
+    std::fs::copy(fx.join("scan/recovered/f0005.jpg"), lib.join("f0005.jpg")).unwrap();
+    let p = paths(&base, std::slice::from_ref(&lib));
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+
+    h.get_by_label("Import…").click();
+    h.run_steps(2);
+    assert_eq!(h.state().view_name(), View::Import);
+    h.state_mut().set_import_source(card.clone());
+    h.run_steps(2);
+    h.get_by_label("Find photos").click();
+    wait_for(&mut h, Duration::from_secs(30), "import plan", |a| {
+        a.import_counts().is_some()
+    });
+    assert_eq!(h.state().import_counts(), Some((3, 0)));
+    h.run_steps(2);
+    snapshot(&mut h, "17-import-plan");
+    assert!(
+        !lib.join("2026").exists(),
+        "nothing copied before confirming"
+    );
+    h.get_by_label("Import 3 files").click();
+    wait_for(&mut h, Duration::from_secs(30), "import", |a| {
+        a.import_message().is_some()
+    });
+    let d = lib.join("2026/2026-04-24");
+    for f in [
+        "20260424-140311-42.nef",
+        "20260424-140311-42.jpg",
+        "20260424-140502-07.nef",
+    ] {
+        assert!(d.join(f).exists(), "{f}");
+    }
+    wait_for(&mut h, Duration::from_secs(30), "catalog", |a| {
+        a.photo_count() == 4
+    });
+
+    // Importing again finds nothing new.
+    h.get_by_label("Find photos").click();
+    wait_for(&mut h, Duration::from_secs(30), "re-plan", |a| {
+        a.import_counts().is_some()
+    });
+    assert_eq!(h.state().import_counts(), Some((0, 3)));
+
+    // Undo from History: the copies go to the (test) trash.
+    h.get_by_label("History").click();
+    wait_for(&mut h, Duration::from_secs(10), "history", |a| {
+        !a.batches().is_empty()
+    });
+    h.run_steps(2);
+    snapshot(&mut h, "18-history");
+    // (The toolbar has an Undo too; the History row's comes after it.)
+    h.get_all_by_label("Undo").last().unwrap().click();
+    wait_for(&mut h, Duration::from_secs(30), "undo import", |_| {
+        !d.join("20260424-140311-42.nef").exists()
+    });
+    assert_eq!(std::fs::read_dir(base.join("trash")).unwrap().count(), 3);
+    assert!(
+        card.join("2026-04-24/DSC_0001.NEF").exists(),
+        "the card is untouched"
+    );
+}
+
+/// M5: rename, new folder + move, reject (Cmd+Backspace), a collection, and
+/// undo; each through the dry-run table.
+#[test]
+fn organise_files_in_the_app() {
+    let t = tempfile::tempdir().unwrap();
+    let base = t.path().canonicalize().unwrap();
+    let fx = base.join("fixtures");
+    shoebox_fixtures::build_library(&fx).unwrap();
+    let lib = fx.join("scan");
+    let p = paths(&base, std::slice::from_ref(&lib));
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+    let preview = |h: &mut Harness<'_, ShoeboxApp>| {
+        wait_for(h, Duration::from_secs(10), "dry run", |a| {
+            a.org_preview().is_some()
+        });
+        h.run_steps(2);
+    };
+
+    // Rename f0004 (it has EXIF) with the default template.
+    h.get_by_label("f0004.jpg").click_secondary();
+    h.run_steps(2);
+    h.get_by_label("Rename…").click();
+    h.run_steps(2);
+    snapshot(&mut h, "19-rename-dialog");
+    h.get_by_label("Preview…").click();
+    preview(&mut h);
+    assert_eq!(h.state().org_preview(), Some(Ok(1)));
+    snapshot(&mut h, "20-rename-preview");
+    h.get_by_label("Rename 1 file").click();
+    let renamed = lib.join("recovered/20260424-140311-42.jpg");
+    wait_for(&mut h, Duration::from_secs(30), "rename", |_| {
+        renamed.exists()
+    });
+    assert!(!lib.join("recovered/f0004.jpg").exists());
+
+    // New folder, then move f0003 there.
+    let keep = lib.join("keepers");
+    h.state().new_folder(keep.clone());
+    wait_for(&mut h, Duration::from_secs(10), "folder", |_| keep.is_dir());
+    h.state_mut().select_names(&["f0003.jpg"]);
+    h.state_mut().move_selection_to(keep.clone());
+    preview(&mut h);
+    h.get_by_label("Move 1 file").click();
+    wait_for(&mut h, Duration::from_secs(30), "move", |_| {
+        keep.join("f0003.jpg").exists()
+    });
+
+    // Reject f0001 (it has a sidecar) and send it to _rejected with ⌘⌫.
+    h.state_mut().select_names(&["f0001.jpg"]);
+    h.key_press(egui::Key::X);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Backspace);
+    preview(&mut h);
+    assert_eq!(h.state().org_preview(), Some(Ok(2)), "image and sidecar");
+    h.get_by_label("Move to _rejected 2 files").click();
+    let rej = lib.join("_rejected/recovered");
+    wait_for(&mut h, Duration::from_secs(30), "reject", |_| {
+        rej.join("f0001.jpg").exists() && rej.join("f0001.jpg.xmp").exists()
+    });
+
+    // A collection of two photos filters the grid and lives in the root.
+    h.state_mut().select_names(&["f0005.jpg", "f0006.jpg"]);
+    h.state_mut().new_collection("Best");
+    wait_for(&mut h, Duration::from_secs(10), "collection", |_| {
+        lib.join(".shoebox/collections.json").exists()
+    });
+    h.run_steps(2);
+    h.get_by_label("Best  2").click();
+    h.run_steps(2);
+    assert_eq!(h.state().shown_count(), 2);
+    snapshot(&mut h, "21-collection");
+
+    // Undo the reject and the rename from History; the move with ⌘Z order.
+    wait_for(&mut h, Duration::from_secs(10), "batches", |a| {
+        a.batches().len() >= 5
+    });
+    let batches = h.state().batches();
+    let id = |label: &str| batches.iter().find(|b| b.1.contains(label)).unwrap().0;
+    let (rename, reject) = (id("rename"), id("rejects"));
+    h.state_mut().undo_batch(reject);
+    wait_for(&mut h, Duration::from_secs(30), "undo reject", |_| {
+        lib.join("recovered/f0001.jpg.xmp").exists()
+    });
+    h.state_mut().undo_batch(rename);
+    wait_for(&mut h, Duration::from_secs(30), "undo rename", |_| {
+        lib.join("recovered/f0004.jpg").exists()
+    });
+    assert!(!renamed.exists());
 }

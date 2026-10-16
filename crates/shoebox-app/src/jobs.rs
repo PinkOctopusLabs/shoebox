@@ -15,6 +15,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use crossbeam_channel::{Receiver, Sender};
 use shoebox_core::catalog::Catalog;
 use shoebox_core::changes::By;
+use shoebox_core::collections::Collection;
 use shoebox_core::events::{self, Event};
 use shoebox_core::fileops::{FileOps, Journal, PlannedMove};
 use shoebox_core::marks::Marks;
@@ -251,6 +252,31 @@ pub enum LibraryCommand {
     SaveSettings(Box<Settings>),
     /// Clear the unseen changes of these photos.
     MarkSeen(Vec<PathBuf>),
+    /// Work out an import (reads and hashes the source; nothing is copied).
+    PlanImport {
+        source: PathBuf,
+        root: PathBuf,
+        template: String,
+    },
+    /// Run the last planned import: verified copies as one batch.
+    RunImport,
+    /// Work out a move, reject, rename or trash (the dry-run table).
+    PreviewOrganise(OrgRequest),
+    /// Run it as one batch (references to moved files updated with it).
+    RunOrganise(OrgRequest),
+    /// Create an empty folder (journaled).
+    NewFolder(PathBuf),
+    /// Replace the collections (written to every writable root).
+    SaveCollections {
+        list: Vec<Collection>,
+        label: String,
+    },
+    /// Send the journal's batches (for the History panel).
+    LoadHistory,
+    /// The operations of one batch.
+    LoadBatch(i64),
+    /// Undo any batch still consistent with the disk (History panel).
+    UndoBatch(i64),
     /// Find duplicate groups across the library (hashing what isn't cached).
     FindDuplicates(shoebox_core::dupes::Config),
     /// Work out what applying these decisions would do (the dry-run table).
@@ -259,6 +285,68 @@ pub enum LibraryCommand {
     /// batch, and remember dismissed pairs.
     ApplyDuplicates(HashMap<PathBuf, Decision>),
 }
+
+/// A move, reject, rename or trash of stacks, by the paths of their files.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OrgRequest {
+    MoveTo {
+        photos: Vec<PathBuf>,
+        folder: PathBuf,
+    },
+    Reject {
+        photos: Vec<PathBuf>,
+    },
+    Rename {
+        photos: Vec<PathBuf>,
+        template: String,
+    },
+    Trash {
+        photos: Vec<PathBuf>,
+    },
+}
+
+impl OrgRequest {
+    pub fn photos(&self) -> &[PathBuf] {
+        match self {
+            OrgRequest::MoveTo { photos, .. }
+            | OrgRequest::Reject { photos }
+            | OrgRequest::Rename { photos, .. }
+            | OrgRequest::Trash { photos } => photos,
+        }
+    }
+
+    /// "Move", "Rename", "Move to Trash".
+    pub fn verb(&self) -> &'static str {
+        match self {
+            OrgRequest::MoveTo { .. } => "Move",
+            OrgRequest::Reject { .. } => "Move to _rejected",
+            OrgRequest::Rename { .. } => "Rename",
+            OrgRequest::Trash { .. } => "Move to Trash",
+        }
+    }
+
+    fn label(&self) -> String {
+        match self {
+            OrgRequest::MoveTo { folder, .. } => format!("move to {}", folder.display()),
+            OrgRequest::Reject { .. } => "move rejects to _rejected".to_owned(),
+            OrgRequest::Rename { template, .. } => format!("rename with {template}"),
+            OrgRequest::Trash { .. } => "move to Trash".to_owned(),
+        }
+    }
+}
+
+/// The dry-run table for an organise request.
+#[derive(Debug, Clone)]
+pub struct OrgPreview {
+    pub request: OrgRequest,
+    /// Source → destination (for the Trash, destination = source).
+    pub moves: Vec<PlannedMove>,
+    /// Things left alone, and why.
+    pub notes: Vec<String>,
+}
+
+/// One batch for the History panel.
+pub type BatchRow = shoebox_core::fileops::BatchSummary;
 
 /// The dry-run table for applying duplicate decisions.
 #[derive(Debug, Clone, Default)]
@@ -285,6 +373,32 @@ pub enum LibraryEvent {
     /// Unseen changes after Shoebox wrote these photos' sidecars (lighter
     /// than republishing the catalog on every keystroke).
     Changes(Vec<(PathBuf, Option<shoebox_core::changes::Change>)>),
+    ImportProgress {
+        done: usize,
+        total: usize,
+    },
+    /// The import plan (or why it couldn't be made).
+    ImportPlanned(Result<Arc<shoebox_core::import::Plan>, String>),
+    /// Import done as this batch.
+    Imported {
+        batch: i64,
+        copied: usize,
+    },
+    /// The dry-run table for an organise request (or why it's refused).
+    OrgPreview(Result<OrgPreview, String>),
+    /// An organise request ran as this batch.
+    Organised {
+        batch: i64,
+        files: usize,
+        verb: &'static str,
+    },
+    Collections(Vec<Collection>),
+    /// Every journal batch, oldest first.
+    Batches(Vec<BatchRow>),
+    /// One batch's operations: (op, source, destination, done).
+    BatchOps(i64, Vec<(String, PathBuf, PathBuf, bool)>),
+    /// A History undo finished (Ok: the undo batch).
+    BatchUndone(Result<i64, String>),
     /// Duplicate groups found (also after applying decisions, or undo).
     Duplicates(Arc<Review>),
     DupeProgress {
@@ -315,6 +429,8 @@ pub struct LibraryPaths {
     pub settings: PathBuf,
     pub cache_db: PathBuf,
     pub journal: PathBuf,
+    /// Send trashed files here instead of the system Trash (tests).
+    pub trash_dir: Option<PathBuf>,
 }
 
 impl Library {
@@ -369,7 +485,13 @@ fn library_worker(
         Settings::default()
     });
     let mut fileops = match Journal::open(&paths.journal) {
-        Ok(j) => FileOps::new(j, reference_roots(&settings)),
+        Ok(j) => {
+            let fo = FileOps::new(j, reference_roots(&settings));
+            match &paths.trash_dir {
+                Some(d) => fo.with_trash(shoebox_core::fileops::TrashMode::Folder(d.clone())),
+                None => fo,
+            }
+        }
         Err(e) => {
             emit(LibraryEvent::Error(format!("opening journal: {e}")));
             return;
@@ -378,6 +500,14 @@ fn library_worker(
     let mut catalog = Catalog::default();
     // The last duplicate search, kept so decisions can be applied to it.
     let mut dupes: Option<Review> = None;
+    // The last import plan, run as planned when confirmed.
+    let mut import_plan: Option<shoebox_core::import::Plan> = None;
+    let batches = |fileops: &FileOps| {
+        if let Ok(b) = fileops.journal().batches() {
+            emit(LibraryEvent::Batches(b));
+        }
+    };
+    batches(&fileops);
     let mut index: HashMap<PathBuf, usize> = HashMap::new();
     // Batches made in this session, for Cmd+Z / Cmd+Shift+Z.
     let (mut undo, mut redo): (Vec<i64>, Vec<i64>) = (Vec::new(), Vec::new());
@@ -567,34 +697,15 @@ fn library_worker(
                     (&mut redo, &mut undo)
                 };
                 let Some(batch) = from.pop() else { continue };
-                let touched: Vec<PathBuf> = fileops
-                    .journal()
-                    .ops(batch)
-                    .map(|ops| ops.into_iter().flat_map(|o| [o.src, o.dst]).collect())
-                    .unwrap_or_default();
-                match fileops.undo(batch) {
-                    Ok(u) => {
-                        to.push(u);
-                        // Record the reversal as Shoebox's own change.
-                        let label = fileops
-                            .journal()
-                            .batch(u)
-                            .ok()
-                            .flatten()
-                            .map_or_else(String::new, |b| b.label);
-                        let a = catalog.affected(&touched);
-                        if let Err(e) =
-                            catalog.reread(&a.photos, &By::Shoebox { batch: u, label }, &mut cache)
-                        {
-                            tracing::warn!("re-reading after undo: {e}");
-                        }
-                    }
+                match undo_batch(batch, &fileops, &mut catalog, &mut cache) {
+                    Ok(u) => to.push(u),
                     Err(e) => emit(LibraryEvent::Error(format!(
                         "{}: {e}",
                         if is_undo { "undo" } else { "redo" }
                     ))),
                 }
                 history(&undo, &redo);
+                batches(&fileops);
                 if let Some(config) = dupes.as_ref().map(|r| r.config) {
                     refresh_impl(&mut cache, &settings, &mut catalog, &mut index, &emit);
                     find_dupes(&mut cache, &settings, &catalog, config, &mut dupes, &emit);
@@ -602,6 +713,140 @@ fn library_worker(
                 } else {
                     (false, true)
                 }
+            }
+            LibraryCommand::UndoBatch(batch) => {
+                let r = undo_batch(batch, &fileops, &mut catalog, &mut cache);
+                if r.is_ok() {
+                    undo.retain(|&b| b != batch);
+                    history(&undo, &redo);
+                }
+                emit(LibraryEvent::BatchUndone(r));
+                batches(&fileops);
+                (false, true)
+            }
+            LibraryCommand::LoadHistory => {
+                batches(&fileops);
+                (false, false)
+            }
+            LibraryCommand::LoadBatch(id) => {
+                let ops = fileops
+                    .journal()
+                    .ops(id)
+                    .map(|ops| {
+                        ops.into_iter()
+                            .map(|o| {
+                                (
+                                    format!("{:?}", o.op).to_lowercase(),
+                                    o.src,
+                                    o.dst,
+                                    o.status == shoebox_core::fileops::OpStatus::Done,
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                emit(LibraryEvent::BatchOps(id, ops));
+                (false, false)
+            }
+            LibraryCommand::PlanImport {
+                source,
+                root,
+                template,
+            } => {
+                let progress = |done: usize, total: usize| {
+                    if done.is_multiple_of(8) || done == total {
+                        emit(LibraryEvent::ImportProgress { done, total });
+                    }
+                };
+                let r = shoebox_core::template::Template::parse(&template)
+                    .and_then(|t| {
+                        shoebox_core::import::plan(&source, &root, &t, &catalog, &progress)
+                    })
+                    .map_err(|e| e.to_string());
+                match r {
+                    Ok(p) => {
+                        emit(LibraryEvent::ImportPlanned(Ok(Arc::new(p.clone()))));
+                        import_plan = Some(p);
+                    }
+                    Err(e) => emit(LibraryEvent::ImportPlanned(Err(e))),
+                }
+                (false, false)
+            }
+            LibraryCommand::RunImport => {
+                let Some(p) = import_plan.take() else {
+                    continue;
+                };
+                if p.copies.is_empty() {
+                    continue;
+                }
+                let source = p
+                    .copies
+                    .first()
+                    .and_then(|c| c.src.parent())
+                    .map(|d| d.display().to_string())
+                    .unwrap_or_default();
+                match fileops.import(&format!("import from {source}"), &p.copies) {
+                    Ok(b) => {
+                        undo.push(b);
+                        redo.clear();
+                        history(&undo, &redo);
+                        emit(LibraryEvent::Imported {
+                            batch: b,
+                            copied: p.copies.len(),
+                        });
+                    }
+                    Err(e) => emit(LibraryEvent::Error(format!("import: {e}"))),
+                }
+                batches(&fileops);
+                (false, true)
+            }
+            LibraryCommand::PreviewOrganise(req) => {
+                let r = plan_organise(&catalog, &req).map(|(plan, notes)| OrgPreview {
+                    moves: plan,
+                    notes,
+                    request: req,
+                });
+                emit(LibraryEvent::OrgPreview(r));
+                (false, false)
+            }
+            LibraryCommand::RunOrganise(req) => {
+                match run_organise(&req, &settings, &mut catalog, &fileops, &mut cache) {
+                    Ok((b, files)) => {
+                        undo.push(b);
+                        redo.clear();
+                        history(&undo, &redo);
+                        emit(LibraryEvent::Organised {
+                            batch: b,
+                            files,
+                            verb: req.verb(),
+                        });
+                    }
+                    Err(e) => emit(LibraryEvent::OrgPreview(Err(e))),
+                }
+                batches(&fileops);
+                (false, true)
+            }
+            LibraryCommand::NewFolder(dir) => {
+                match fileops.create_folder(&format!("new folder {}", dir.display()), &dir) {
+                    Ok(_) => batches(&fileops),
+                    Err(e) => emit(LibraryEvent::Error(format!("new folder: {e}"))),
+                }
+                (false, true)
+            }
+            LibraryCommand::SaveCollections { list, label } => {
+                let r = shoebox_core::collections::plan_save(&settings.writable_roots(), &list)
+                    .and_then(|w| fileops.write_sidecars(&label, w));
+                match r {
+                    Ok(b) => {
+                        undo.push(b);
+                        redo.clear();
+                        history(&undo, &redo);
+                        emit(LibraryEvent::Collections(list));
+                    }
+                    Err(e) => emit(LibraryEvent::Error(format!("saving collections: {e}"))),
+                }
+                batches(&fileops);
+                (false, false)
             }
             LibraryCommand::FindDuplicates(config) => {
                 find_dupes(&mut cache, &settings, &catalog, config, &mut dupes, &emit);
@@ -691,6 +936,9 @@ fn library_worker(
                     .collect();
                 let roots: Vec<PathBuf> = settings.roots.iter().map(|r| r.path.clone()).collect();
                 emit(LibraryEvent::Events(events::load(&roots)));
+                emit(LibraryEvent::Collections(shoebox_core::collections::load(
+                    &roots,
+                )));
                 emit(LibraryEvent::Catalog {
                     catalog: Arc::new(catalog.clone()),
                     settings: settings.clone(),
@@ -700,6 +948,151 @@ fn library_worker(
             Err(e) => emit(LibraryEvent::Error(format!("scanning: {e}"))),
         }
     }
+}
+
+/// Undo one batch, carrying catalog entries back across reversed moves and
+/// recording the reversal as Shoebox's change. Returns the undo batch.
+fn undo_batch(
+    batch: i64,
+    fileops: &FileOps,
+    catalog: &mut Catalog,
+    cache: &mut shoebox_core::cache::Cache,
+) -> Result<i64, String> {
+    let ops = fileops.journal().ops(batch).unwrap_or_default();
+    let touched: Vec<PathBuf> = ops
+        .iter()
+        .flat_map(|o| [o.src.clone(), o.dst.clone()])
+        .collect();
+    let u = fileops.undo(batch).map_err(|e| e.to_string())?;
+    let back: Vec<PlannedMove> = ops
+        .iter()
+        .filter(|o| o.op == shoebox_core::fileops::Op::Move)
+        .map(|o| PlannedMove {
+            src: o.dst.clone(),
+            dst: o.src.clone(),
+        })
+        .collect();
+    if let Err(e) = catalog.note_moved(&back, cache) {
+        tracing::warn!("carrying the cache across undo: {e}");
+    }
+    let label = fileops
+        .journal()
+        .batch(u)
+        .ok()
+        .flatten()
+        .map_or_else(String::new, |b| b.label);
+    let a = catalog.affected(&touched);
+    if let Err(e) = catalog.reread(&a.photos, &By::Shoebox { batch: u, label }, cache) {
+        tracing::warn!("re-reading after undo: {e}");
+    }
+    Ok(u)
+}
+
+/// Stacks of these files.
+fn stacks_of(catalog: &Catalog, photos: &[PathBuf]) -> Vec<usize> {
+    let mut v: Vec<usize> = photos
+        .iter()
+        .filter_map(|p| catalog.photos.iter().position(|x| &x.path == p))
+        .map(|i| catalog.stack_of[i])
+        .collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+/// The moves (or, for the Trash, the files) an organise request means.
+fn plan_organise(
+    catalog: &Catalog,
+    req: &OrgRequest,
+) -> Result<(Vec<PlannedMove>, Vec<String>), String> {
+    use shoebox_core::organise;
+    let stacks = stacks_of(catalog, req.photos());
+    if stacks.is_empty() {
+        return Err("nothing selected".into());
+    }
+    let mut notes = Vec::new();
+    let moves = match req {
+        OrgRequest::MoveTo { folder, .. } => {
+            if !catalog.roots.iter().any(|r| folder.starts_with(&r.path)) {
+                return Err(format!("{} isn't in the library", folder.display()));
+            }
+            organise::plan_move_to(catalog, &stacks, folder)
+                .map_err(|e| e.to_string())?
+                .moves
+        }
+        OrgRequest::Reject { .. } => {
+            organise::plan_reject(catalog, &stacks)
+                .map_err(|e| e.to_string())?
+                .moves
+        }
+        OrgRequest::Rename { template, .. } => {
+            let t = shoebox_core::template::Template::parse(template).map_err(|e| e.to_string())?;
+            let r = organise::plan_rename(catalog, &stacks, &t).map_err(|e| e.to_string())?;
+            for u in &r.undated {
+                notes.push(format!(
+                    "{} has no capture date; left as it is",
+                    u.display()
+                ));
+            }
+            r.plan.moves
+        }
+        OrgRequest::Trash { .. } => organise::trash_files(catalog, &stacks)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|p| PlannedMove {
+                src: p.clone(),
+                dst: p,
+            })
+            .collect(),
+    };
+    Ok((moves, notes))
+}
+
+/// Run an organise request as one batch: moves with the reference files
+/// they affect, or the Trash. Returns (batch, files).
+fn run_organise(
+    req: &OrgRequest,
+    settings: &Settings,
+    catalog: &mut Catalog,
+    fileops: &FileOps,
+    cache: &mut shoebox_core::cache::Cache,
+) -> Result<(i64, usize), String> {
+    let (moves, _) = plan_organise(catalog, req)?;
+    if moves.is_empty() {
+        return Err("nothing to do: every file already has that name".into());
+    }
+    if let OrgRequest::Trash { .. } = req {
+        let files: Vec<(PathBuf, [u8; 32])> = moves
+            .iter()
+            .map(|m| {
+                let mut h = blake3::Hasher::new();
+                std::fs::File::open(&m.src)
+                    .and_then(|f| h.update_reader(f).map(|_| ()))
+                    .map(|()| (m.src.clone(), *h.finalize().as_bytes()))
+                    .map_err(|e| format!("{}: {e}", m.src.display()))
+            })
+            .collect::<Result<_, _>>()?;
+        let b = fileops
+            .trash(&req.label(), &files)
+            .map_err(|e| e.to_string())?;
+        return Ok((b, files.len()));
+    }
+    let plan = shoebox_core::fileops::Plan {
+        moves: moves.clone(),
+    };
+    let writes = shoebox_core::organise::reference_writes(
+        &settings.all_roots(),
+        &settings.writable_roots(),
+        &moves,
+    )
+    .map_err(|e| e.to_string())?;
+    let b = fileops
+        .execute_with_writes(&req.label(), &plan, writes)
+        .map_err(|e| e.to_string())?;
+    if let Err(e) = catalog.note_moved(&moves, cache) {
+        tracing::warn!("carrying the cache across moves: {e}");
+    }
+    Ok((b, moves.len()))
 }
 
 /// Run duplicate detection and publish the groups.

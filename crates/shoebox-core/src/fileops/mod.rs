@@ -519,6 +519,36 @@ impl FileOps {
         self.run("move", label, None, &ops, |_| Ok(()))
     }
 
+    /// Create an empty folder, journaled (undo leaves folders in place:
+    /// nothing is ever deleted).
+    pub fn create_folder(&self, label: &str, dir: &Path) -> Result<i64> {
+        self.check_unprotected(dir)?;
+        if exists(dir) {
+            return Err(CoreError::Refused(format!(
+                "{} already exists",
+                dir.display()
+            )));
+        }
+        let j = &self.journal;
+        let batch = j.begin_batch("mkdir", label, None)?;
+        let op = j.record(batch, 0, Op::Mkdir, dir, dir, None)?;
+        match std::fs::create_dir(dir) {
+            Ok(()) => {
+                j.complete(op)?;
+                j.set_batch_status(batch, "done")?;
+                Ok(batch)
+            }
+            Err(e) => {
+                j.fail(op, &e.to_string())?;
+                j.set_batch_status(batch, "failed")?;
+                Err(CoreError::Io {
+                    path: dir.to_path_buf(),
+                    source: e,
+                })
+            }
+        }
+    }
+
     /// Import: copy each file, verify the copy's BLAKE3 against the source's,
     /// and only then give it its name (never replacing anything). One batch.
     pub fn import(&self, label: &str, copies: &[PlannedCopy]) -> Result<i64> {

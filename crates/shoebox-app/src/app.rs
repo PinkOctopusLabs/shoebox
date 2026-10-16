@@ -16,11 +16,12 @@ use shoebox_core::query;
 use shoebox_core::review::{Decision, Review};
 
 use crate::jobs::{
-    DupePreview, Job, Key, Library, LibraryCommand, LibraryEvent, LibraryPaths, Loader, PhotoId,
-    Priority, Size, photo_id,
+    BatchRow, DupePreview, Job, Key, Library, LibraryCommand, LibraryEvent, LibraryPaths, Loader,
+    OrgPreview, OrgRequest, PhotoId, Priority, Size, photo_id,
 };
 use crate::textures::Textures;
 use crate::{panels, views};
+use shoebox_core::collections::Collection;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -32,6 +33,10 @@ pub enum View {
     Timeline,
     /// Tasks → Duplicates: the list of duplicate groups.
     Duplicates,
+    /// Tasks → Import.
+    Import,
+    /// Tasks → History: every batch, with undo.
+    History,
 }
 
 impl View {
@@ -76,6 +81,49 @@ impl Default for CompareState {
     }
 }
 
+/// Tasks → Import.
+#[derive(Default)]
+pub struct ImportState {
+    pub source: Option<PathBuf>,
+    pub root: Option<PathBuf>,
+    pub template: String,
+    pub running: bool,
+    pub progress: Option<(usize, usize)>,
+    pub plan: Option<Result<Arc<shoebox_core::import::Plan>, String>>,
+    pub message: Option<String>,
+}
+
+/// Move, rename, reject and trash: dialogs and the dry-run table.
+#[derive(Default)]
+pub struct OrgState {
+    pub preview: Option<Result<OrgPreview, String>>,
+    /// Rename dialog: (files, template being typed).
+    pub rename: Option<(Vec<PathBuf>, String)>,
+    /// New folder dialog: (parent, name being typed).
+    pub new_folder: Option<(PathBuf, String)>,
+}
+
+/// Tasks → History.
+#[derive(Default)]
+pub struct HistoryState {
+    pub batches: Vec<BatchRow>,
+    /// Batches shown expanded, with their operations once loaded.
+    pub open: HashMap<i64, Vec<(String, PathBuf, PathBuf, bool)>>,
+    /// Scroll to and highlight this batch.
+    pub focus: Option<i64>,
+    pub message: Option<Result<String, String>>,
+}
+
+impl HistoryState {
+    /// Batches started but never finished (the app quit or crashed).
+    pub fn interrupted(&self) -> usize {
+        self.batches
+            .iter()
+            .filter(|b| b.status == "running")
+            .count()
+    }
+}
+
 /// Duplicate review state.
 #[derive(Default)]
 pub struct DupeState {
@@ -111,6 +159,8 @@ pub struct AppPaths {
     pub cache_db: PathBuf,
     pub journal: PathBuf,
     pub thumbs: PathBuf,
+    /// Trash folder instead of the system Trash (tests only).
+    pub trash_dir: Option<PathBuf>,
 }
 
 impl AppPaths {
@@ -122,6 +172,7 @@ impl AppPaths {
             cache_db: shoebox_core::paths::cache_db(&data),
             journal: shoebox_core::paths::journal_db(&data),
             thumbs: cache.join("thumbs"),
+            trash_dir: None,
         })
     }
 }
@@ -219,6 +270,18 @@ pub struct ShoeboxApp {
     /// Photos in Survey, in order.
     pub(crate) survey: Vec<PhotoId>,
     pub(crate) dupes: DupeState,
+    pub(crate) import: ImportState,
+    pub(crate) org: OrgState,
+    pub(crate) history: HistoryState,
+    pub(crate) collections: Vec<Collection>,
+    /// Member stacks per collection id.
+    pub(crate) collection_members: HashMap<String, HashSet<usize>>,
+    /// Collection chosen in the left panel (restricts the grid to it).
+    pub(crate) selected_collection: Option<String>,
+    /// Name being typed for a new collection, or (id, name) when renaming.
+    pub(crate) collection_edit: Option<(Option<String>, String)>,
+    /// A short note for the status bar (what the last operation did).
+    pub(crate) notice: Option<String>,
 }
 
 impl ShoeboxApp {
@@ -238,6 +301,7 @@ impl ShoeboxApp {
                 settings: paths.settings,
                 cache_db: paths.cache_db,
                 journal: paths.journal,
+                trash_dir: paths.trash_dir,
             },
             move || c2.request_repaint(),
         );
@@ -300,6 +364,14 @@ impl ShoeboxApp {
             compare: CompareState::default(),
             survey: Vec::new(),
             dupes: DupeState::default(),
+            import: ImportState::default(),
+            org: OrgState::default(),
+            history: HistoryState::default(),
+            collections: Vec::new(),
+            collection_members: HashMap::new(),
+            selected_collection: None,
+            collection_edit: None,
+            notice: None,
         }
     }
 
@@ -515,6 +587,49 @@ impl ShoeboxApp {
                     self.recompute_events();
                     self.refilter();
                 }
+                LibraryEvent::ImportProgress { done, total } => {
+                    self.import.running = true;
+                    self.import.progress = Some((done, total));
+                }
+                LibraryEvent::ImportPlanned(p) => {
+                    self.import.running = false;
+                    self.import.progress = None;
+                    self.import.plan = Some(p);
+                }
+                LibraryEvent::Imported { batch, copied } => {
+                    self.import.plan = None;
+                    let m = format!(
+                        "Imported {copied} files (batch {batch}). Undo moves the copies to the Trash."
+                    );
+                    self.import.message = Some(m.clone());
+                    self.notice = Some(m);
+                }
+                LibraryEvent::OrgPreview(p) => self.org.preview = Some(p),
+                LibraryEvent::Organised { batch, files, verb } => {
+                    self.org.preview = None;
+                    self.notice = Some(format!(
+                        "{verb}: {files} files (batch {batch}). ⌘Z undoes it."
+                    ));
+                }
+                LibraryEvent::Collections(list) => {
+                    self.collections = list;
+                    if self
+                        .selected_collection
+                        .as_ref()
+                        .is_some_and(|id| !self.collections.iter().any(|c| &c.id == id))
+                    {
+                        self.selected_collection = None;
+                    }
+                    self.recompute_collections();
+                    self.refilter();
+                }
+                LibraryEvent::Batches(b) => self.history.batches = b,
+                LibraryEvent::BatchOps(id, ops) => {
+                    self.history.open.insert(id, ops);
+                }
+                LibraryEvent::BatchUndone(r) => {
+                    self.history.message = Some(r.map(|u| format!("Undone (as batch {u}).")));
+                }
                 LibraryEvent::Duplicates(r) => {
                     self.dupes.running = false;
                     self.dupes.progress = None;
@@ -622,6 +737,7 @@ impl ShoeboxApp {
         self.cameras = query::distinct(&self.catalog, |x| x.model.as_ref());
         self.lenses = query::distinct(&self.catalog, |x| x.lens.as_ref());
         self.recompute_events();
+        self.recompute_collections();
         self.refilter();
     }
 
@@ -644,6 +760,13 @@ impl ShoeboxApp {
         {
             stacks.retain(|s| members.contains(s));
         }
+        if let Some(members) = self
+            .selected_collection
+            .as_ref()
+            .and_then(|id| self.collection_members.get(id))
+        {
+            stacks.retain(|s| members.contains(s));
+        }
         self.shown.clear();
         for s in stacks {
             let st = &self.catalog.stacks[s];
@@ -653,6 +776,19 @@ impl ShoeboxApp {
             }
         }
         self.shown_gen += 1;
+    }
+
+    fn recompute_collections(&mut self) {
+        self.collection_members = self
+            .collections
+            .iter()
+            .map(|c| {
+                (
+                    c.id.clone(),
+                    shoebox_core::collections::members(&self.catalog, c),
+                )
+            })
+            .collect();
     }
 
     fn recompute_events(&mut self) {
@@ -1040,6 +1176,280 @@ impl ShoeboxApp {
             .count()
     }
 
+    // --- files: move, rename, reject, trash, import ----------------------------
+
+    /// Files of the selected stacks (primaries stand for their stacks).
+    pub(crate) fn selected_paths(&self) -> Vec<PathBuf> {
+        self.selected_stacks()
+            .into_iter()
+            .map(|s| {
+                self.catalog.photos[self.catalog.stacks[s].primary]
+                    .path
+                    .clone()
+            })
+            .collect()
+    }
+
+    /// Ask for the dry-run table of a move, rename, reject or trash.
+    pub fn request_org(&mut self, req: OrgRequest) {
+        if req.photos().is_empty() {
+            return;
+        }
+        self.org.preview = None;
+        self.library.send(LibraryCommand::PreviewOrganise(req));
+    }
+
+    /// The person confirmed the dry-run table.
+    pub fn confirm_org(&mut self) {
+        if let Some(Ok(p)) = self.org.preview.take() {
+            self.library.send(LibraryCommand::RunOrganise(p.request));
+        }
+    }
+
+    /// Cmd+Backspace: the selection to `_rejected/`.
+    pub fn reject_selection(&mut self) {
+        let photos = self.selected_paths();
+        self.request_org(OrgRequest::Reject { photos });
+    }
+
+    /// Every rejected stack shown to `_rejected/`.
+    pub(crate) fn reject_all_rejected(&mut self) {
+        let photos = self.rejected_shown();
+        self.request_org(OrgRequest::Reject { photos });
+    }
+
+    pub(crate) fn rejected_shown(&self) -> Vec<PathBuf> {
+        self.shown
+            .iter()
+            .map(|&i| &self.catalog.photos[i])
+            .filter(|p| p.marks.pick == Some(Pick::Reject))
+            .map(|p| p.path.clone())
+            .collect()
+    }
+
+    /// Open the rename dialog for the selection.
+    pub fn start_rename(&mut self) {
+        let photos = self.selected_paths();
+        if !photos.is_empty() {
+            self.org.rename = Some((photos, self.settings.rename_template().to_owned()));
+        }
+    }
+
+    /// Move the selection into `folder` (after the dry-run table).
+    pub fn move_selection_to(&mut self, folder: PathBuf) {
+        let photos = self.selected_paths();
+        self.request_org(OrgRequest::MoveTo { photos, folder });
+    }
+
+    pub(crate) fn photos_for(&self, ids: &[PhotoId]) -> Vec<PathBuf> {
+        ids.iter()
+            .filter_map(|&id| self.photo(id).map(|p| p.path.clone()))
+            .collect()
+    }
+
+    pub fn plan_import(&mut self) {
+        let (Some(source), Some(root)) = (self.import.source.clone(), self.import.root.clone())
+        else {
+            return;
+        };
+        self.import.plan = None;
+        self.import.message = None;
+        self.import.running = true;
+        let template = if self.import.template.trim().is_empty() {
+            self.settings.import_template().to_owned()
+        } else {
+            self.import.template.clone()
+        };
+        if template != self.settings.import_template() {
+            let mut s = self.settings.clone();
+            s.import_template = template.clone();
+            self.settings = s.clone();
+            self.library.send(LibraryCommand::SaveSettings(Box::new(s)));
+        }
+        self.library.send(LibraryCommand::PlanImport {
+            source,
+            root,
+            template,
+        });
+    }
+
+    pub fn run_import(&mut self) {
+        self.library.send(LibraryCommand::RunImport);
+    }
+
+    // --- history ---------------------------------------------------------------
+
+    /// Open History at a batch (from a change badge's link).
+    pub(crate) fn show_batch(&mut self, batch: i64) {
+        self.history.focus = Some(batch);
+        self.library.send(LibraryCommand::LoadBatch(batch));
+        self.history.open.entry(batch).or_default();
+        self.set_view(View::History);
+    }
+
+    pub(crate) fn toggle_batch(&mut self, batch: i64) {
+        if self.history.open.remove(&batch).is_none() {
+            self.history.open.insert(batch, Vec::new());
+            self.library.send(LibraryCommand::LoadBatch(batch));
+        }
+    }
+
+    pub fn undo_batch(&mut self, batch: i64) {
+        self.history.message = None;
+        self.library.send(LibraryCommand::UndoBatch(batch));
+    }
+
+    // --- collections -----------------------------------------------------------
+
+    fn save_collections(&mut self, list: Vec<Collection>, label: &str) {
+        self.collections = list.clone();
+        self.recompute_collections();
+        self.library.send(LibraryCommand::SaveCollections {
+            list,
+            label: label.to_owned(),
+        });
+    }
+
+    /// A new collection holding the selection.
+    pub fn new_collection(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        let mut list = self.collections.clone();
+        list.push(Collection {
+            id: shoebox_core::collections::new_id(),
+            name: name.to_owned(),
+            members: self.selected_paths(),
+            updated: events::now_ms(),
+        });
+        self.save_collections(list, &format!("collection: {name}"));
+    }
+
+    /// Add the selection to a collection (or take it out).
+    pub(crate) fn collection_add_selection(&mut self, id: &str, add: bool) {
+        let stacks = self.selected_stacks();
+        let mut list = self.collections.clone();
+        let Some(c) = list.iter_mut().find(|c| c.id == id) else {
+            return;
+        };
+        let files: HashSet<PathBuf> = stacks
+            .iter()
+            .flat_map(|&s| self.catalog.stacks[s].all())
+            .map(|i| self.catalog.photos[i].path.clone())
+            .collect();
+        c.members.retain(|p| !files.contains(p));
+        if add {
+            c.members.extend(stacks.iter().map(|&s| {
+                self.catalog.photos[self.catalog.stacks[s].primary]
+                    .path
+                    .clone()
+            }));
+        }
+        c.updated = events::now_ms();
+        let label = format!("collection: {}", c.name);
+        self.save_collections(list, &label);
+        self.refilter();
+    }
+
+    pub(crate) fn rename_collection(&mut self, id: &str, name: &str) {
+        let mut list = self.collections.clone();
+        if let Some(c) = list.iter_mut().find(|c| c.id == id)
+            && !name.trim().is_empty()
+        {
+            c.name = name.trim().to_owned();
+            c.updated = events::now_ms();
+            self.save_collections(list, &format!("rename collection: {}", name.trim()));
+        }
+    }
+
+    pub(crate) fn delete_collection(&mut self, id: &str) {
+        let Some(gone) = self.collections.iter().find(|c| c.id == id).cloned() else {
+            return;
+        };
+        let list: Vec<Collection> = self
+            .collections
+            .iter()
+            .filter(|c| c.id != id)
+            .cloned()
+            .collect();
+        if self.selected_collection.as_deref() == Some(id) {
+            self.selected_collection = None;
+            self.refilter();
+        }
+        self.save_collections(list, &format!("delete collection: {}", gone.name));
+    }
+
+    pub(crate) fn select_collection(&mut self, id: Option<String>) {
+        self.selected_collection = id;
+        self.refilter();
+        self.scroll_to_current = true;
+    }
+
+    /// Create a folder (the New Folder dialog's action; tests).
+    pub fn new_folder(&self, dir: PathBuf) {
+        self.library.send(LibraryCommand::NewFolder(dir));
+    }
+
+    pub fn set_import_source(&mut self, dir: PathBuf) {
+        self.import.source = Some(dir);
+        self.import.plan = None;
+    }
+
+    /// The import plan: (copies, skipped), once planned.
+    pub fn import_counts(&self) -> Option<(usize, usize)> {
+        match &self.import.plan {
+            Some(Ok(p)) => Some((p.copies.len(), p.skipped.len())),
+            _ => None,
+        }
+    }
+
+    pub fn import_message(&self) -> Option<&str> {
+        self.import.message.as_deref()
+    }
+
+    /// The organise dry-run table: Ok(number of files) or the refusal.
+    pub fn org_preview(&self) -> Option<Result<usize, String>> {
+        self.org
+            .preview
+            .as_ref()
+            .map(|p| p.as_ref().map(|p| p.moves.len()).map_err(Clone::clone))
+    }
+
+    pub fn notice(&self) -> Option<&str> {
+        self.notice.as_deref()
+    }
+
+    /// Journal batches: (id, label, status), oldest first.
+    pub fn batches(&self) -> Vec<(i64, String, String)> {
+        self.history
+            .batches
+            .iter()
+            .map(|b| (b.id, b.label.clone(), b.status.clone()))
+            .collect()
+    }
+
+    /// Select photos by file name (tests).
+    pub fn select_names(&mut self, names: &[&str]) {
+        self.selection = self
+            .catalog
+            .photos
+            .iter()
+            .filter(|p| {
+                p.path
+                    .file_name()
+                    .is_some_and(|n| names.iter().any(|x| n == *x))
+            })
+            .map(|p| photo_id(&p.path))
+            .collect();
+        self.current = self.selection.iter().next().copied();
+    }
+
+    /// Collection names (tests).
+    pub fn collection_names(&self) -> Vec<String> {
+        self.collections.iter().map(|c| c.name.clone()).collect()
+    }
+
     // --- changes -----------------------------------------------------------
 
     /// The unseen change shown on a cell: for a collapsed stack, any member's
@@ -1381,6 +1791,9 @@ impl ShoeboxApp {
             if pressed(egui::Key::R) {
                 self.reveal_selection();
             }
+            if pressed(egui::Key::Backspace) {
+                self.reject_selection();
+            }
             return;
         }
         for (v, _, key) in View::ALL {
@@ -1487,7 +1900,7 @@ impl ShoeboxApp {
                 }
                 return;
             }
-            View::Duplicates => return,
+            View::Duplicates | View::Import | View::History => return,
             _ => {}
         }
         if pressed(egui::Key::ArrowRight) {
@@ -1571,10 +1984,13 @@ impl eframe::App for ShoeboxApp {
                 View::Compare => views::compare::show(self, ui),
                 View::Survey => views::survey::show(self, ui),
                 View::Duplicates => views::duplicates::show(self, ui),
+                View::Import => views::files::import(self, ui),
+                View::History => views::files::history(self, ui),
                 View::Timeline => panels::not_yet(self.view, ui),
             }
         });
         views::duplicates::apply_dialog(self, &ctx);
+        views::files::dialogs(self, &ctx);
         self.scroll_to_current = false;
 
         let wanted = std::mem::take(&mut self.wanted);

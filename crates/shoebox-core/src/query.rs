@@ -308,6 +308,7 @@ mod tests {
             stacks,
             stack_of,
             links: Vec::new(),
+            folders: Vec::new(),
         }
     }
 
