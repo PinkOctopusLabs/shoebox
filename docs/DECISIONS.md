@@ -3,6 +3,16 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-16 — Multi-index hash instead of a BK-tree
+The spec names a BK-tree, but at radius 10 over 64-bit hashes a BK-tree visits
+nearly every node, so grouping was quadratic (10k items: 2.19 s; 200k
+infeasible). `dupes::mih` splits pHashes into four 16-bit chunks and probes
+every bucket within 2 bits per chunk (pigeonhole), then verifies; radii above
+15 fall back to a linear scan. Matching runs in parallel, assignment
+sequentially. Benchmarks (random hashes, every 10th a near-copy):
+10k 7.8 ms, 25k 25 ms, 100k 330 ms, 200k 1.47 s. Reports on the real-library
+copy are byte-identical to the BK-tree version.
+
 ## 2026-10-16 — Fewer, better duplicate candidates
 Measured on a copy of the real library (4,460 files) after the change above.
 - **Siblings aren't duplicates.** Files in the same folder with the same base

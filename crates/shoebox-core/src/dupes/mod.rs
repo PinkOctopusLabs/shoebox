@@ -1,7 +1,7 @@
 //! Duplicate detection: exact, same-image-data and perceptual matches,
 //! merged into groups.
 
-pub mod bktree;
+pub mod mih;
 pub mod report;
 
 use std::collections::HashMap;
@@ -10,7 +10,7 @@ use shoebox_decode::Format;
 
 use crate::hash::{Digest, PHashes};
 use crate::scan::Role;
-use bktree::BkTree;
+use mih::MultiIndex;
 
 /// Defaults from the spec; starting points to tune against real files.
 pub const DEFAULT_NEAR_IDENTICAL: u32 = 4;
@@ -224,19 +224,19 @@ fn keeper_key(items: &[Item], i: usize) -> (bool, u8, std::cmp::Reverse<u64>, us
     )
 }
 
-/// Candidate lookups: equal hashes, plus a BK-tree over every rotation of
-/// every file's pHash.
+/// Candidate lookups: equal hashes, plus a multi-index hash over every
+/// rotation of every file's pHash.
 struct Index {
     exact: HashMap<Digest, Vec<usize>>,
     data: HashMap<Digest, Vec<usize>>,
-    tree: BkTree,
+    tree: MultiIndex,
 }
 
 impl Index {
     fn new(items: &[Item]) -> Self {
         let mut exact: HashMap<Digest, Vec<usize>> = HashMap::new();
         let mut data: HashMap<Digest, Vec<usize>> = HashMap::new();
-        let mut tree = BkTree::new();
+        let mut tree = MultiIndex::new();
         for (i, it) in items.iter().enumerate() {
             exact.entry(it.blake3).or_default().push(i);
             if let Some(h) = it.image_data_hash {
@@ -249,15 +249,33 @@ impl Index {
         Self { exact, data, tree }
     }
 
-    /// Superset of the files `j` for which `compare(items[k], items[j])` or
-    /// `compare(items[j], items[k])` can succeed.
-    fn candidates(&self, items: &[Item], k: usize, cfg: &Config) -> Vec<usize> {
+    /// Superset of the files `j` for which `compare(items[k], items[j])` can
+    /// succeed (`k` as the first argument). The index holds every rotation,
+    /// so `k`'s upright hash alone is enough.
+    fn matches_of(&self, items: &[Item], k: usize, cfg: &Config) -> Vec<usize> {
+        self.collect(items, k, cfg, items[k].hashes.first().into_iter())
+    }
+
+    /// Superset of the files `r` for which `compare(items[r], items[j])` can
+    /// succeed (`j` as the second argument): `r`'s upright hash is in the
+    /// index, so query with every rotation of `j`.
+    fn matched_by(&self, items: &[Item], j: usize, cfg: &Config) -> Vec<usize> {
+        self.collect(items, j, cfg, items[j].hashes.iter())
+    }
+
+    fn collect<'a>(
+        &self,
+        items: &[Item],
+        k: usize,
+        cfg: &Config,
+        queries: impl Iterator<Item = &'a PHashes>,
+    ) -> Vec<usize> {
         let it = &items[k];
         let mut out: Vec<usize> = self.exact.get(&it.blake3).cloned().unwrap_or_default();
         if let Some(h) = it.image_data_hash.and_then(|h| self.data.get(&h)) {
             out.extend(h);
         }
-        for h in &it.hashes {
+        for h in queries {
             out.extend(
                 self.tree
                     .find(h.phash, cfg.threshold)
@@ -276,59 +294,79 @@ impl Index {
 /// and each unassigned file collects the unassigned files that match it
 /// directly. Matches of matches never join a group.
 pub fn find_groups(items: &[Item], cfg: &Config) -> Vec<Group> {
+    use rayon::prelude::*;
+
     let index = Index::new(items);
     let mut order: Vec<usize> = (0..items.len()).collect();
     order.sort_by_key(|&i| keeper_key(items, i));
 
+    // The expensive part, every file's direct matches, runs in parallel; the
+    // greedy assignment below is cheap and sequential.
+    let matches: Vec<Vec<(usize, Match)>> = (0..items.len())
+        .into_par_iter()
+        .map(|k| {
+            index
+                .matches_of(items, k, cfg)
+                .into_iter()
+                .filter_map(|j| compare(&items[k], &items[j], cfg).map(|m| (j, m)))
+                .collect()
+        })
+        .collect();
+
+    let mut assigned = vec![false; items.len()];
+    let mut raw: Vec<(usize, Vec<(usize, Match)>)> = Vec::new();
+    for &k in &order {
+        if assigned[k] {
+            continue;
+        }
+        let members: Vec<(usize, Match)> = matches[k]
+            .iter()
+            .copied()
+            .filter(|&(j, _)| !assigned[j])
+            .collect();
+        if members.is_empty() {
+            continue;
+        }
+        assigned[k] = true;
+        for &(j, _) in &members {
+            assigned[j] = true;
+        }
+        raw.push((k, members));
+    }
+
     let best_ref = |j: usize| -> Option<(usize, Match)> {
         index
-            .candidates(items, j, cfg)
+            .matched_by(items, j, cfg)
             .into_iter()
             .filter(|&r| items[r].role == Role::Reference)
             .filter_map(|r| compare(&items[r], &items[j], cfg).map(|m| (r, m)))
             .min_by_key(|(r, m)| (m.level, m.distance, keeper_key(items, *r)))
     };
-
-    let mut assigned = vec![false; items.len()];
-    let mut groups = Vec::new();
-    for &k in &order {
-        if assigned[k] {
-            continue;
-        }
-        let mut members: Vec<(usize, Match)> = index
-            .candidates(items, k, cfg)
-            .into_iter()
-            .filter(|&j| !assigned[j])
-            .filter_map(|j| compare(&items[k], &items[j], cfg).map(|m| (j, m)))
-            .collect();
-        if members.is_empty() {
-            continue;
-        }
-        members.sort_by_key(|&(j, _)| j);
-        assigned[k] = true;
-        for &(j, _) in &members {
-            assigned[j] = true;
-        }
-        let has_reference = std::iter::once(k)
-            .chain(members.iter().map(|&(j, _)| j))
-            .any(|i| items[i].role == Role::Reference);
-        groups.push(Group {
-            keeper: k,
-            has_reference,
-            members: members
-                .into_iter()
-                .map(|(j, m)| Member {
-                    item: j,
-                    to_keeper: Some(m),
-                    matched_ref: if items[j].role == Role::Scan {
-                        best_ref(j)
-                    } else {
-                        None
-                    },
-                })
-                .collect(),
-        });
-    }
+    let mut groups: Vec<Group> = raw
+        .into_par_iter()
+        .map(|(k, mut members)| {
+            members.sort_by_key(|&(j, _)| j);
+            let has_reference = std::iter::once(k)
+                .chain(members.iter().map(|&(j, _)| j))
+                .any(|i| items[i].role == Role::Reference);
+            Group {
+                keeper: k,
+                has_reference,
+                members: members
+                    .into_iter()
+                    .map(|(j, m)| Member {
+                        item: j,
+                        to_keeper: Some(m),
+                        matched_ref: if items[j].role == Role::Scan {
+                            best_ref(j)
+                        } else {
+                            None
+                        },
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
     groups.sort_by_key(|g| g.keeper);
     groups
 }

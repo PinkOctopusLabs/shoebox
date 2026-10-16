@@ -58,7 +58,7 @@ fn bench(c: &mut Criterion) {
 
     let mut g = c.benchmark_group("find_groups_t10");
     g.sample_size(10);
-    for n in [1_000usize, 10_000] {
+    for n in [10_000usize, 25_000, 100_000, 200_000] {
         let it = items(n);
         g.bench_with_input(BenchmarkId::from_parameter(n), &it, |b, it| {
             b.iter(|| dupes::find_groups(black_box(it), &Config::default()))
