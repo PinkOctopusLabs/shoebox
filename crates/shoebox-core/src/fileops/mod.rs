@@ -206,6 +206,11 @@ impl FileOps {
         Self { journal, protected }
     }
 
+    /// Replace the reference roots (after the user marks or unmarks one).
+    pub fn set_protected(&mut self, protected: Vec<PathBuf>) {
+        self.protected = protected;
+    }
+
     pub fn journal(&self) -> &Journal {
         &self.journal
     }

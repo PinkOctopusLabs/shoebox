@@ -9,6 +9,9 @@ use shoebox_core::catalog::{Catalog, Photo};
 use shoebox_core::settings::Settings;
 use shoebox_core::thumbs::ThumbCache;
 
+use shoebox_core::marks::{Label, Marks, Pick};
+use shoebox_core::query;
+
 use crate::jobs::{
     Job, Key, Library, LibraryCommand, LibraryEvent, LibraryPaths, Loader, PhotoId, Priority, Size,
     photo_id,
@@ -45,6 +48,7 @@ impl View {
 pub struct AppPaths {
     pub settings: PathBuf,
     pub cache_db: PathBuf,
+    pub journal: PathBuf,
     pub thumbs: PathBuf,
 }
 
@@ -55,6 +59,7 @@ impl AppPaths {
         Ok(Self {
             settings: shoebox_core::paths::settings_file(&data),
             cache_db: shoebox_core::paths::cache_db(&data),
+            journal: shoebox_core::paths::journal_db(&data),
             thumbs: cache.join("thumbs"),
         })
     }
@@ -120,6 +125,24 @@ pub struct ShoeboxApp {
     pub(crate) error: Option<String>,
     /// When set, the centre view scrolls so this photo is visible.
     pub(crate) scroll_to_current: bool,
+    pub(crate) filter: query::Filter,
+    pub(crate) sort: query::Sort,
+    pub(crate) sort_desc: bool,
+    /// Stacks shown expanded, by their primary's id.
+    pub(crate) expanded: HashSet<PhotoId>,
+    pub(crate) can_undo: bool,
+    pub(crate) can_redo: bool,
+    /// Auto-advance after marking (also on while Caps Lock is down, macOS).
+    pub(crate) auto_advance: bool,
+    pub(crate) keyword_input: String,
+    pub(crate) focus_keywords: bool,
+    pub(crate) focus_search: bool,
+    /// Name being typed when saving a smart filter.
+    pub(crate) new_smart_filter: Option<String>,
+    /// Keywords in use (for autocomplete), cameras and lenses (for filters).
+    pub(crate) all_keywords: Vec<(String, usize)>,
+    pub(crate) cameras: Vec<String>,
+    pub(crate) lenses: Vec<String>,
     /// Tags the window Display P3 on macOS (None in tests / elsewhere).
     display: Option<crate::display::DisplayTagger>,
     /// Colour space images are rendered in for this display.
@@ -142,6 +165,7 @@ impl ShoeboxApp {
             LibraryPaths {
                 settings: paths.settings,
                 cache_db: paths.cache_db,
+                journal: paths.journal,
             },
             move || c2.request_repaint(),
         );
@@ -183,6 +207,20 @@ impl ShoeboxApp {
             scroll_to_current: false,
             display,
             target,
+            filter: query::Filter::default(),
+            sort: query::Sort::CaptureTime,
+            sort_desc: false,
+            expanded: HashSet::new(),
+            can_undo: false,
+            can_redo: false,
+            auto_advance: false,
+            keyword_input: String::new(),
+            focus_keywords: false,
+            focus_search: false,
+            new_smart_filter: None,
+            all_keywords: Vec::new(),
+            cameras: Vec::new(),
+            lenses: Vec::new(),
         }
     }
 
@@ -203,6 +241,21 @@ impl ShoeboxApp {
 
     pub fn loupe_zoomed(&self) -> bool {
         self.loupe.zoom != Zoom::Fit
+    }
+
+    /// Marks of the photo with this file name (tests and diagnostics).
+    pub fn marks_of(&self, file_name: &str) -> Option<Marks> {
+        self.catalog
+            .photos
+            .iter()
+            .find(|p| p.path.file_name().is_some_and(|n| n == file_name))
+            .map(|p| p.marks.clone())
+    }
+
+    /// Replace the filter and rebuild the visible items.
+    pub fn set_filter(&mut self, f: query::Filter) {
+        self.filter = f;
+        self.refilter();
     }
 
     pub fn view_name(&self) -> View {
@@ -250,6 +303,10 @@ impl ShoeboxApp {
                     self.scanning = true;
                     self.scan_progress = Some((done, total));
                 }
+                LibraryEvent::History { can_undo, can_redo } => {
+                    self.can_undo = can_undo;
+                    self.can_redo = can_redo;
+                }
                 LibraryEvent::Error(e) => {
                     self.scanning = false;
                     self.error = Some(e);
@@ -290,6 +347,9 @@ impl ShoeboxApp {
             self.current = None;
         }
         self.siblings_of = None;
+        self.all_keywords = query::keywords(&self.catalog);
+        self.cameras = query::distinct(&self.catalog, |x| x.model.as_ref());
+        self.lenses = query::distinct(&self.catalog, |x| x.lens.as_ref());
         self.refilter();
     }
 
@@ -299,15 +359,159 @@ impl ShoeboxApp {
         self.scroll_to_current = true;
     }
 
-    fn refilter(&mut self) {
-        self.shown = (0..self.catalog.photos.len())
-            .filter(|&i| {
-                self.folder
-                    .as_ref()
-                    .is_none_or(|f| self.catalog.photos[i].path.starts_with(f))
-            })
-            .collect();
+    /// Rebuild the visible items: one per stack passing the filter (its
+    /// primary), followed by its other members when expanded.
+    pub(crate) fn refilter(&mut self) {
+        let mut f = self.filter.clone();
+        f.folder = self.folder.clone();
+        let stacks = query::run(&self.catalog, &f, self.sort, self.sort_desc);
+        self.shown.clear();
+        for s in stacks {
+            let st = &self.catalog.stacks[s];
+            self.shown.push(st.primary);
+            if self.expanded.contains(&self.ids[st.primary]) {
+                self.shown.extend(st.all().skip(1));
+            }
+        }
         self.shown_gen += 1;
+    }
+
+    /// The stack of photo `idx`.
+    pub(crate) fn stack_of(&self, idx: usize) -> &shoebox_core::stacks::Stack {
+        &self.catalog.stacks[self.catalog.stack_of[idx]]
+    }
+
+    /// Toggle the current photo's stack open/closed (S).
+    fn toggle_stack(&mut self) {
+        let Some(idx) = self.current.and_then(|c| self.index(c)) else {
+            return;
+        };
+        let primary = self.ids[self.stack_of(idx).primary];
+        if !self.expanded.remove(&primary) {
+            self.expanded.insert(primary);
+        }
+        self.refilter();
+    }
+
+    // --- marks -------------------------------------------------------------
+
+    /// Photos a mark applies to: the selection (or the current photo). A
+    /// collapsed stack's primary stands for the whole stack when the
+    /// "marks to all stack members" setting is on.
+    fn mark_targets(&self) -> Vec<usize> {
+        let mut base: Vec<usize> = self
+            .shown
+            .iter()
+            .copied()
+            .filter(|&i| self.selection.contains(&self.ids[i]))
+            .collect();
+        if base.is_empty()
+            && let Some(i) = self.current.and_then(|c| self.index(c))
+        {
+            base.push(i);
+        }
+        let mut out = Vec::new();
+        for i in base {
+            let st = self.stack_of(i);
+            let collapsed = st.primary == i && !self.expanded.contains(&self.ids[i]);
+            if collapsed && self.settings.marks_to_all_stack_members {
+                out.extend(st.all());
+            } else {
+                out.push(i);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// The marks shown for the current photo.
+    pub(crate) fn current_marks(&self) -> Option<Marks> {
+        self.current
+            .and_then(|c| self.photo(c))
+            .map(|p| p.marks.clone())
+    }
+
+    /// Change marks on the targets: shown at once, written to sidecars in
+    /// the background as one undoable batch.
+    pub(crate) fn change_marks(&mut self, label: &str, f: impl Fn(&Marks) -> Marks) {
+        let targets = self.mark_targets();
+        if targets.is_empty() {
+            return;
+        }
+        let catalog = Arc::make_mut(&mut self.catalog);
+        let mut updates = Vec::new();
+        for i in targets {
+            let p = &mut catalog.photos[i];
+            let new = f(&p.marks);
+            if new != p.marks {
+                p.marks = new.clone();
+                updates.push((p.path.clone(), new));
+            }
+        }
+        if !updates.is_empty() {
+            self.library.send(LibraryCommand::SetMarks {
+                updates,
+                label: label.to_owned(),
+            });
+            self.all_keywords = query::keywords(&self.catalog);
+        }
+        // Caps Lock only counts with a real window (never in headless tests).
+        if self.auto_advance || (self.display.is_some() && crate::platform::caps_lock()) {
+            self.step(1);
+        }
+    }
+
+    pub(crate) fn set_rating(&mut self, r: u8) {
+        self.change_marks(&format!("rating {r}"), |m| Marks {
+            rating: r,
+            ..m.clone()
+        });
+    }
+
+    pub(crate) fn set_pick(&mut self, pick: Option<Pick>) {
+        self.change_marks("flag", |m| Marks { pick, ..m.clone() });
+    }
+
+    /// Set a colour label; setting the label a photo already has clears it.
+    pub(crate) fn toggle_label(&mut self, label: Label) {
+        let all_have = self
+            .mark_targets()
+            .iter()
+            .all(|&i| self.catalog.photos[i].marks.label == Some(label));
+        let new = if all_have { None } else { Some(label) };
+        self.change_marks("label", |m| Marks {
+            label: new,
+            ..m.clone()
+        });
+    }
+
+    pub(crate) fn add_keyword(&mut self, k: &str) {
+        let k = normalise_keyword(k);
+        if k.is_empty() {
+            return;
+        }
+        let saved = self.auto_advance;
+        self.auto_advance = false; // typing keywords shouldn't jump photos
+        self.change_marks("keyword", |m| {
+            let mut m = m.clone();
+            if !m.keywords.contains(&k) {
+                m.keywords.push(k.clone());
+            }
+            m
+        });
+        self.auto_advance = saved;
+    }
+
+    pub(crate) fn remove_keyword(&mut self, k: &str) {
+        let saved = self.auto_advance;
+        self.auto_advance = false;
+        self.change_marks("keyword", |m| {
+            let mut m = m.clone();
+            m.keywords.retain(|x| x != k);
+            m
+        });
+        self.auto_advance = saved;
     }
 
     pub(crate) fn photo(&self, id: PhotoId) -> Option<&Photo> {
@@ -444,6 +648,21 @@ impl ShoeboxApp {
             }
         }
         if m.command {
+            if pressed(egui::Key::Z) {
+                self.library.send(if m.shift {
+                    LibraryCommand::Redo
+                } else {
+                    LibraryCommand::Undo
+                });
+            }
+            if pressed(egui::Key::K) {
+                self.focus_keywords = true;
+                self.right_open = true;
+            }
+            if pressed(egui::Key::F) {
+                self.focus_search = true;
+                self.bars_open = true;
+            }
             if pressed(egui::Key::A) {
                 self.selection = self.shown.iter().map(|&i| self.ids[i]).collect();
             }
@@ -459,6 +678,45 @@ impl ShoeboxApp {
             if pressed(key) {
                 self.set_view(v);
             }
+        }
+        let digits = [
+            egui::Key::Num0,
+            egui::Key::Num1,
+            egui::Key::Num2,
+            egui::Key::Num3,
+            egui::Key::Num4,
+            egui::Key::Num5,
+        ];
+        for (r, k) in digits.into_iter().enumerate() {
+            if pressed(k) {
+                self.set_rating(r as u8);
+            }
+        }
+        for (k, l) in [
+            (egui::Key::Num6, Label::Red),
+            (egui::Key::Num7, Label::Yellow),
+            (egui::Key::Num8, Label::Green),
+            (egui::Key::Num9, Label::Blue),
+        ] {
+            if pressed(k) {
+                self.toggle_label(l);
+            }
+        }
+        if pressed(egui::Key::P) {
+            self.set_pick(Some(Pick::Pick));
+        }
+        if pressed(egui::Key::X) {
+            self.set_pick(Some(Pick::Reject));
+        }
+        if pressed(egui::Key::U) {
+            self.set_pick(None);
+        }
+        if pressed(egui::Key::S) {
+            self.toggle_stack();
+        }
+        if pressed(egui::Key::Slash) {
+            self.focus_search = true;
+            self.bars_open = true;
         }
         if pressed(egui::Key::F) {
             self.fullscreen = !self.fullscreen;
@@ -624,4 +882,14 @@ pub(crate) fn reveal_all(paths: &[&Path]) {
     if let Err(e) = result {
         tracing::warn!("reveal {}: {e}", paths[0].display());
     }
+}
+
+/// Keywords are stored as `|` paths; accept `>` or `/` as separators too
+/// (`Places > Japan > Kyoto`).
+pub(crate) fn normalise_keyword(k: &str) -> String {
+    k.split(['|', '>', '/'])
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("|")
 }

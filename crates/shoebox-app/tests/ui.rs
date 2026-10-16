@@ -28,6 +28,7 @@ fn paths(tmp: &Path, roots: &[PathBuf]) -> AppPaths {
     AppPaths {
         settings,
         cache_db: tmp.join("data/cache.sqlite"),
+        journal: tmp.join("data/journal.sqlite"),
         thumbs: tmp.join("cache/thumbs"),
     }
 }
@@ -87,7 +88,7 @@ fn browse_views_render() {
 
     // Right-click a photo: it becomes the selection and the menu offers
     // Reveal in Finder. (The item isn't clicked, so Finder doesn't open.)
-    h.get_by_label("f0004.jpg").click_secondary();
+    h.get_by_label("f0005.jpg").click_secondary();
     h.run_steps(3);
     assert_eq!(h.state().selected_count(), 1);
     assert!(
@@ -258,4 +259,89 @@ fn real_library() {
         t0.elapsed().as_secs_f64()
     );
     snapshot(&mut h, "real-3-loupe-nef");
+}
+
+/// Marking through the keyboard writes sidecars, undo restores them, and
+/// stacks and filters shape the grid.
+#[test]
+fn organise_marks_stacks_and_filters() {
+    use shoebox_core::marks::{Label, Pick};
+    let t = tempfile::tempdir().unwrap();
+    let lib = t.path().join("lib");
+    shoebox_fixtures::build_library(&lib).unwrap();
+    let p = paths(t.path(), &[lib.join("ref"), lib.join("scan")]);
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+    // 17 files → 14 items: DSC_0001.JPG and f0004 (same capture time and
+    // serial) join DSC_0001.NEF's stack; DSC_0001-2.tif is a variant.
+    assert_eq!(h.state().photo_count(), 17);
+    assert_eq!(h.state().shown_count(), 14);
+    snapshot(&mut h, "5-stacks");
+
+    let side = lib.join("scan/recovered/f0003.jpg.xmp");
+    h.get_by_label("f0003.jpg").click();
+    h.run_steps(2);
+    for k in [egui::Key::Num4, egui::Key::P, egui::Key::Num6] {
+        h.key_press(k);
+        h.run_steps(2);
+    }
+    let wait_for = |h: &mut Harness<'_, ShoeboxApp>, ok: &dyn Fn() -> bool| {
+        let start = Instant::now();
+        while !ok() {
+            h.step();
+            std::thread::sleep(Duration::from_millis(20));
+            assert!(start.elapsed() < Duration::from_secs(10), "timed out");
+        }
+    };
+    let read = |p: &Path| -> shoebox_core::marks::Marks {
+        let props = std::fs::read(p)
+            .ok()
+            .and_then(|b| shoebox_core::xmp::read(&b).ok())
+            .unwrap_or_default();
+        shoebox_core::marks::Marks::from_props(&props)
+    };
+    wait_for(&mut h, &|| read(&side).label == Some(Label::Red));
+    let m = read(&side);
+    assert_eq!(
+        (m.rating, m.pick, m.label),
+        (4, Some(Pick::Pick), Some(Label::Red))
+    );
+    assert_eq!(h.state().marks_of("f0003.jpg").unwrap().rating, 4);
+    snapshot(&mut h, "6-marked");
+
+    // Keyword via ⌘K, typed with '>' separators.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+    h.run_steps(2);
+    h.event(egui::Event::Text("Places > Rome".into()));
+    h.run_steps(1);
+    h.key_press(egui::Key::Enter);
+    h.run_steps(2);
+    wait_for(&mut h, &|| {
+        read(&side).keywords == vec!["Places|Rome".to_owned()]
+    });
+
+    // ⌘Z undoes the keyword, then the label.
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    for _ in 0..2 {
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+        h.run_steps(2);
+        settle(&mut h, Duration::from_secs(30));
+    }
+    let m = read(&side);
+    assert!(m.keywords.is_empty() && m.label.is_none(), "{m:?}");
+    assert_eq!((m.rating, m.pick), (4, Some(Pick::Pick)));
+    assert_eq!(
+        h.state().marks_of("f0003.jpg").unwrap().label,
+        None,
+        "UI reflects the undo"
+    );
+
+    // Filter: rating ≥ 4 leaves just that stack.
+    h.state_mut().set_filter(shoebox_core::query::Filter {
+        min_rating: 4,
+        ..Default::default()
+    });
+    h.run_steps(2);
+    assert_eq!(h.state().shown_count(), 1);
 }

@@ -25,7 +25,9 @@ thiserror = "2.0.21"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 eframe = { version = "0.37.0", default-features = false, features = ["wgpu", "default_fonts", "accesskit"] }
-egui = "0.37.0"
+# Monochrome emoji fonts cover the symbols the UI draws (★ ✔ ✖ ⚠ …);
+# tests/glyphs.rs fails if a label uses a glyph no bundled font has.
+egui = { version = "0.37.0", features = ["monochrome_emoji_fonts"] }
 
 [profile.release]
 lto = "thin"

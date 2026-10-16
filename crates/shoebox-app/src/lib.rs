@@ -4,6 +4,7 @@ pub mod app;
 mod display;
 pub mod jobs;
 mod panels;
+mod platform;
 pub mod textures;
 mod views;
 

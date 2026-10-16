@@ -101,16 +101,74 @@ pub fn cell(
             }
         }
     }
-    // File-type badge, bottom left.
-    let label = photo.format.label();
+    // Badges. Bottom left: file type, or the stack's formats and size.
+    let st = app.stack_of(idx);
+    let expanded = app.expanded.contains(&app.ids[st.primary]);
+    let label = if st.len() > 1 && st.primary == idx && !expanded {
+        format!("{} · {}", st.badge(&app.catalog.photos), st.len())
+    } else if st.variants.contains(&idx) {
+        format!("{} copy", photo.format.label())
+    } else {
+        photo.format.label().to_owned()
+    };
+    let marks = photo.marks.clone();
     let font = egui::FontId::monospace(9.5);
-    let galley = painter.layout_no_wrap(label.to_owned(), font, Color32::WHITE);
+    let galley = painter.layout_no_wrap(label, font, Color32::WHITE);
     let badge = Rect::from_min_size(
         pos2(inner.left() + 3.0, inner.bottom() - galley.size().y - 5.0),
         galley.size() + vec2(6.0, 2.0),
     );
     painter.rect_filled(badge, 2.0, Color32::from_black_alpha(150));
     painter.galley(badge.min + vec2(3.0, 1.0), galley, Color32::WHITE);
+
+    // Rejects are dimmed, as in Lightroom.
+    if marks.pick == Some(shoebox_core::marks::Pick::Reject) {
+        painter.rect_filled(inner, 0.0, Color32::from_black_alpha(140));
+    }
+    // Top left: flag.
+    let flag = match marks.pick {
+        Some(shoebox_core::marks::Pick::Pick) => Some(("✔", Color32::from_rgb(80, 200, 120))),
+        Some(shoebox_core::marks::Pick::Reject) => Some(("✖", Color32::from_rgb(235, 80, 80))),
+        None => None,
+    };
+    if let Some((glyph, colour)) = flag {
+        let r = Rect::from_min_size(inner.left_top() + vec2(3.0, 3.0), vec2(16.0, 16.0));
+        painter.rect_filled(r, 3.0, Color32::from_black_alpha(160));
+        painter.text(
+            r.center(),
+            egui::Align2::CENTER_CENTER,
+            glyph,
+            egui::FontId::proportional(11.0),
+            colour,
+        );
+    }
+    // Bottom right: rating.
+    if marks.rating > 0 {
+        let stars = "★".repeat(usize::from(marks.rating));
+        let g = painter.layout_no_wrap(
+            stars,
+            egui::FontId::proportional(10.0),
+            Color32::from_rgb(250, 210, 80),
+        );
+        let r = Rect::from_min_size(
+            pos2(
+                inner.right() - g.size().x - 9.0,
+                inner.bottom() - g.size().y - 5.0,
+            ),
+            g.size() + vec2(6.0, 2.0),
+        );
+        painter.rect_filled(r, 2.0, Color32::from_black_alpha(150));
+        painter.galley(r.min + vec2(3.0, 1.0), g, Color32::WHITE);
+    }
+    // Colour label: a strip along the top of the cell.
+    if let Some(l) = marks.label {
+        // Inset, so the selection border doesn't cover it.
+        let strip = Rect::from_min_size(
+            rect.left_top() + vec2(4.0, 4.0),
+            vec2(rect.width() - 8.0, 4.0),
+        );
+        painter.rect_filled(strip, 2.0, label_colour(l));
+    }
 
     if selected || current {
         let color = if current {
@@ -165,4 +223,16 @@ pub fn handle_click(app: &mut ShoeboxApp, ui: &egui::Ui, resp: &egui::Response, 
         app.click(pos, ui.input(|i| i.modifiers));
     }
     photo_menu(app, resp, pos);
+}
+
+/// Display colour of a colour label.
+pub fn label_colour(l: shoebox_core::marks::Label) -> Color32 {
+    use shoebox_core::marks::Label;
+    match l {
+        Label::Red => Color32::from_rgb(229, 72, 77),
+        Label::Yellow => Color32::from_rgb(245, 217, 10),
+        Label::Green => Color32::from_rgb(70, 167, 88),
+        Label::Blue => Color32::from_rgb(62, 99, 221),
+        Label::Purple => Color32::from_rgb(142, 78, 198),
+    }
 }

@@ -13,6 +13,8 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use crossbeam_channel::{Receiver, Sender};
 use shoebox_core::catalog::Catalog;
+use shoebox_core::fileops::{FileOps, Journal};
+use shoebox_core::marks::Marks;
 use shoebox_core::settings::Settings;
 use shoebox_core::thumbs::{self, Source, ThumbCache};
 use shoebox_decode::{Format, Rgb8};
@@ -228,6 +230,15 @@ pub enum LibraryCommand {
     AddRoot(PathBuf),
     RemoveRoot(PathBuf),
     SetReference(PathBuf, bool),
+    /// Write marks to sidecars as one undoable batch.
+    SetMarks {
+        updates: Vec<(PathBuf, Marks)>,
+        label: String,
+    },
+    Undo,
+    Redo,
+    /// Replace settings other than roots (options, smart filters).
+    SaveSettings(Box<Settings>),
 }
 
 pub enum LibraryEvent {
@@ -241,6 +252,11 @@ pub enum LibraryEvent {
         done: usize,
         total: usize,
     },
+    /// Undo/redo availability changed.
+    History {
+        can_undo: bool,
+        can_redo: bool,
+    },
     Error(String),
 }
 
@@ -252,6 +268,7 @@ pub struct Library {
 pub struct LibraryPaths {
     pub settings: PathBuf,
     pub cache_db: PathBuf,
+    pub journal: PathBuf,
 }
 
 impl Library {
@@ -275,6 +292,15 @@ impl Library {
     }
 }
 
+fn reference_roots(settings: &Settings) -> Vec<PathBuf> {
+    settings
+        .roots
+        .iter()
+        .filter(|r| r.reference)
+        .map(|r| r.path.clone())
+        .collect()
+}
+
 fn library_worker(
     paths: &LibraryPaths,
     commands: &Receiver<LibraryCommand>,
@@ -296,21 +322,50 @@ fn library_worker(
         emit(LibraryEvent::Error(format!("settings: {e}")));
         Settings::default()
     });
+    let mut fileops = match Journal::open(&paths.journal) {
+        Ok(j) => FileOps::new(j, reference_roots(&settings)),
+        Err(e) => {
+            emit(LibraryEvent::Error(format!("opening journal: {e}")));
+            return;
+        }
+    };
+    let mut catalog = Catalog::default();
+    let mut index: HashMap<PathBuf, usize> = HashMap::new();
+    // Batches made in this session, for Cmd+Z / Cmd+Shift+Z.
+    let (mut undo, mut redo): (Vec<i64>, Vec<i64>) = (Vec::new(), Vec::new());
+
+    let publish = |catalog: &Catalog, settings: &Settings, complete: bool| {
+        emit(LibraryEvent::Catalog {
+            catalog: Arc::new(catalog.clone()),
+            settings: settings.clone(),
+            complete,
+        });
+    };
+    let history = |undo: &[i64], redo: &[i64]| {
+        emit(LibraryEvent::History {
+            can_undo: !undo.is_empty(),
+            can_redo: !redo.is_empty(),
+        });
+    };
+
     while let Ok(cmd) = commands.recv() {
-        let changed = match cmd {
+        let (settings_changed, rescan) = match cmd {
             LibraryCommand::Open => {
                 if let Ok(c) = Catalog::from_cache(&cache, settings.scan_roots()) {
-                    emit(LibraryEvent::Catalog {
-                        catalog: Arc::new(c),
-                        settings: settings.clone(),
-                        complete: false,
-                    });
+                    catalog = c;
+                    index = catalog
+                        .photos
+                        .iter()
+                        .enumerate()
+                        .map(|(i, p)| (p.path.clone(), i))
+                        .collect();
+                    publish(&catalog, &settings, false);
                 }
-                false
+                (false, true)
             }
-            LibraryCommand::Rescan => false,
+            LibraryCommand::Rescan => (false, true),
             LibraryCommand::AddRoot(p) => match settings.add_root(&p) {
-                Ok(_) => true,
+                Ok(_) => (true, true),
                 Err(e) => {
                     emit(LibraryEvent::Error(e.to_string()));
                     continue;
@@ -318,28 +373,91 @@ fn library_worker(
             },
             LibraryCommand::RemoveRoot(p) => {
                 settings.remove_root(&p);
-                true
+                (true, true)
             }
             LibraryCommand::SetReference(p, r) => {
                 settings.set_reference(&p, r);
-                true
+                (true, true)
+            }
+            LibraryCommand::SaveSettings(new) => {
+                settings = Settings {
+                    roots: settings.roots.clone(),
+                    ..*new
+                };
+                (true, false)
+            }
+            LibraryCommand::SetMarks { updates, label } => {
+                let resolved: Vec<(usize, Marks)> = updates
+                    .into_iter()
+                    .filter_map(|(path, m)| index.get(&path).map(|&i| (i, m)))
+                    .collect();
+                match catalog.set_marks(
+                    &resolved,
+                    &fileops,
+                    &cache,
+                    settings.write_stem_sidecar_for_raw,
+                    &label,
+                ) {
+                    Ok(Some(batch)) => {
+                        undo.push(batch);
+                        redo.clear();
+                        history(&undo, &redo);
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        emit(LibraryEvent::Error(format!("saving marks: {e}")));
+                        publish(&catalog, &settings, true); // revert the optimistic display
+                    }
+                }
+                (false, false)
+            }
+            LibraryCommand::Undo => {
+                let Some(batch) = undo.pop() else { continue };
+                match fileops.undo(batch) {
+                    Ok(u) => redo.push(u),
+                    Err(e) => emit(LibraryEvent::Error(format!("undo: {e}"))),
+                }
+                history(&undo, &redo);
+                (false, true)
+            }
+            LibraryCommand::Redo => {
+                let Some(batch) = redo.pop() else { continue };
+                match fileops.undo(batch) {
+                    Ok(r) => undo.push(r),
+                    Err(e) => emit(LibraryEvent::Error(format!("redo: {e}"))),
+                }
+                history(&undo, &redo);
+                (false, true)
             }
         };
-        if changed && let Err(e) = settings.save(&paths.settings) {
-            emit(LibraryEvent::Error(format!("saving settings: {e}")));
+        if settings_changed {
+            fileops.set_protected(reference_roots(&settings));
+            if let Err(e) = settings.save(&paths.settings) {
+                emit(LibraryEvent::Error(format!("saving settings: {e}")));
+            }
+            if !rescan {
+                publish(&catalog, &settings, true);
+            }
         }
-        let progress = |done: usize, total: usize| {
-            if done.is_multiple_of(64) || done == total {
-                emit(LibraryEvent::Progress { done, total });
+        if rescan {
+            let progress = |done: usize, total: usize| {
+                if done.is_multiple_of(64) || done == total {
+                    emit(LibraryEvent::Progress { done, total });
+                }
+            };
+            match Catalog::refresh(&mut cache, settings.scan_roots(), &progress) {
+                Ok((c, _)) => {
+                    catalog = c;
+                    index = catalog
+                        .photos
+                        .iter()
+                        .enumerate()
+                        .map(|(i, p)| (p.path.clone(), i))
+                        .collect();
+                    publish(&catalog, &settings, true);
+                }
+                Err(e) => emit(LibraryEvent::Error(format!("scanning: {e}"))),
             }
-        };
-        match Catalog::refresh(&mut cache, settings.scan_roots(), &progress) {
-            Ok((c, _)) => emit(LibraryEvent::Catalog {
-                catalog: Arc::new(c),
-                settings: settings.clone(),
-                complete: true,
-            }),
-            Err(e) => emit(LibraryEvent::Error(format!("scanning: {e}"))),
         }
     }
 }
