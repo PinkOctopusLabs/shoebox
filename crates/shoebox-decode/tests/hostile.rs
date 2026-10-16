@@ -57,3 +57,13 @@ fn many_sub_ifds_are_capped_not_walked() {
     assert_eq!(shoebox_decode::nef::jpg_from_raw(&t).unwrap(), None);
     assert!(start.elapsed().as_secs() < 2);
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn imageio_thumbnail_matches_requested_size_and_rejects_garbage() {
+    let img = shoebox_fixtures::scene(5, 1800, 1200);
+    let j = shoebox_fixtures::jpeg(&img, 90).unwrap();
+    let t = shoebox_decode::imageio::thumbnail_luma(&j, 256, false, None).unwrap();
+    assert_eq!((t.width, t.height), (256, 171));
+    assert!(shoebox_decode::imageio::thumbnail_luma(b"not an image", 256, false, None).is_err());
+}

@@ -3068,6 +3068,7 @@ dependencies = [
 name = "shoebox-core"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "blake3",
  "criterion",
  "csv",
@@ -3091,6 +3092,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "png",
+ "rayon",
  "shoebox-fixtures",
  "thiserror 2.0.21",
  "tiff",

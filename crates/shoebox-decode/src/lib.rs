@@ -3,6 +3,8 @@
 //! Everything here is read-only and works on in-memory bytes.
 
 pub mod gray;
+#[cfg(target_os = "macos")]
+pub mod imageio;
 pub mod jpeg;
 pub mod nef;
 pub mod png;

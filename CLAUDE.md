@@ -14,7 +14,7 @@ A Rust + egui photo library app for macOS. **`docs/SPEC.md` is the source of tru
 - One milestone at a time, in order, each as a reviewable chunk.
 - Before finishing any task: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
 - `thiserror` in library crates, `anyhow` in binaries. No `unwrap()`/`expect()` outside tests (enforced by workspace clippy lints).
-- No `unsafe` except in thin FFI wrappers (`shoebox-core/src/fileops/sys.rs`).
+- No `unsafe` except in thin FFI wrappers (`shoebox-core/src/fileops/sys.rs`, `shoebox-decode/src/imageio.rs`).
 - `shoebox-core` must not depend on egui. Every file operation goes through `shoebox_core::fileops`.
 - Target `aarch64-apple-darwin`, toolchain pinned in `rust-toolchain.toml`, minimum macOS 27, release `lto = "thin"`.
 - Prefer pure-Rust crates.

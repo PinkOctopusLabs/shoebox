@@ -3,6 +3,29 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-16 — ImageIO benchmark (for M2 thumbnails)
+`shoebox_decode::imageio` is a thin FFI wrapper (ImageIO + CoreGraphics),
+needed for HEIC in M2 anyway. RAW files need a UTI type hint, since a NEF
+looks like a TIFF from its bytes. Real Z f files, median per image:
+
+| Input | ours | ImageIO |
+| --- | --- | --- |
+| camera JPG 6048×4032 → 256 px | 110 ms | 58 ms |
+| camera JPG → 1024 px | 132 ms | 33 ms |
+| 48 JPGs in parallel → 256 px | 12.2 ms/img | 6.6 ms/img |
+| Lightroom 16-bit TIFF 2560 px → 256 px | 6.5 ms | 15 ms |
+| NEF → 256 px | 28 ms (JpgFromRaw + zune) | 78 ms |
+| turbojpeg 1/8 scaled (reference) | 65 ms | |
+
+Hashes from ImageIO differ from ours by 0–3 bits (different resampling and
+gray conversion), so the two paths must never be mixed in one cache.
+
+Decision: keep our decoders for **hashing** (deterministic, pure Rust, not
+tied to macOS version changes; cached hashes stay valid). For **display**
+thumbnails in M2, use ImageIO for JPEG and HEIC (2–4× faster, and it does
+ICC colour management, which M2 requires), and our own path for NEF
+(embedded preview) and TIFF.
+
 ## 2026-10-16 — Multi-index hash instead of a BK-tree
 The spec names a BK-tree, but at radius 10 over 64-bit hashes a BK-tree visits
 nearly every node, so grouping was quadratic (10k items: 2.19 s; 200k

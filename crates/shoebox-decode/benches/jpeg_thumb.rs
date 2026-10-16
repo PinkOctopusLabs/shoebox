@@ -64,6 +64,61 @@ fn bench(c: &mut Criterion) {
     g.bench_function("area_downscale_only", |b| {
         b.iter(|| black_box(&full).fit_long_edge(EDGE))
     });
+    #[cfg(target_os = "macos")]
+    {
+        use shoebox_decode::imageio::thumbnail_luma;
+        g.bench_function("imageio_256", |b| {
+            b.iter(|| thumbnail_luma(black_box(&data), EDGE, false, None).unwrap())
+        });
+        g.bench_function("imageio_1024", |b| {
+            b.iter(|| thumbnail_luma(black_box(&data), 1024, false, None).unwrap())
+        });
+        g.bench_function("zune_full_then_area_1024", |b| {
+            b.iter(|| {
+                shoebox_decode::jpeg::decode_luma(black_box(&data))
+                    .unwrap()
+                    .fit_long_edge(1024)
+            })
+        });
+        // Throughput with every core busy (how a library scan runs).
+        use rayon::prelude::*;
+        let batch = 48;
+        g.bench_function("parallel48_zune_256", |b| {
+            b.iter(|| {
+                (0..batch)
+                    .into_par_iter()
+                    .map(|_| zune_thumb(&data).px.len())
+                    .sum::<usize>()
+            })
+        });
+        g.bench_function("parallel48_imageio_256", |b| {
+            b.iter(|| {
+                (0..batch)
+                    .into_par_iter()
+                    .map(|_| thumbnail_luma(&data, EDGE, false, None).unwrap().px.len())
+                    .sum::<usize>()
+            })
+        });
+        if let Some(nef) = std::env::var_os("SHOEBOX_BENCH_NEF").map(|p| std::fs::read(p).unwrap())
+        {
+            g.bench_function("nef_extract_then_zune_256", |b| {
+                b.iter(|| {
+                    shoebox_decode::luma_thumbnail(
+                        shoebox_decode::Format::Nef,
+                        black_box(&nef),
+                        EDGE,
+                    )
+                    .unwrap()
+                })
+            });
+            g.bench_function("nef_imageio_256", |b| {
+                b.iter(|| {
+                    thumbnail_luma(black_box(&nef), EDGE, false, Some("com.nikon.raw-image"))
+                        .unwrap()
+                })
+            });
+        }
+    }
     #[cfg(feature = "bench-turbojpeg")]
     {
         use turbojpeg::ScalingFactor;
