@@ -290,9 +290,15 @@ impl FileOps {
         let is_xmp = path
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("xmp"));
-        if !is_xmp {
+        // The app's own files in a root (`.shoebox/events.json` etc.).
+        let is_app_file = path.extension().is_some_and(|e| e == "json")
+            && path
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|d| d == ".shoebox");
+        if !is_xmp && !is_app_file {
             return Err(CoreError::Refused(format!(
-                "{} is not an .xmp sidecar; image files are never written",
+                "{} is not an .xmp sidecar or a .shoebox file; image files are never written",
                 path.display()
             )));
         }
@@ -432,10 +438,13 @@ impl FileOps {
                     if !happened {
                         continue;
                     }
-                    // Restore the previous bytes; a sidecar Shoebox created is
-                    // emptied of our properties rather than deleted.
+                    // Restore the previous bytes. A file Shoebox created is
+                    // emptied rather than deleted: a sidecar loses our
+                    // properties, an app JSON file becomes `{}`.
+                    let is_json = op.dst.extension().is_some_and(|e| e == "json");
                     let bytes = match (&op.before, &current) {
                         (Some(b), _) => b.clone(),
+                        (None, Some(_)) if is_json => b"{}".to_vec(),
                         (None, Some(c)) => {
                             let all: Vec<_> =
                                 crate::xmp::Prop::ALL.iter().map(|p| (*p, None)).collect();

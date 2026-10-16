@@ -42,7 +42,7 @@ fn label_from(s: Option<String>) -> Option<Label> {
     s.and_then(|s| Label::ALL.into_iter().find(|l| l.name() == s))
 }
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// Rebuildable tables, dropped when the schema version changes.
 /// `dupe_ignores` holds user decisions and is never dropped.
@@ -222,8 +222,8 @@ impl Cache {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             )?;
             let mut marks = tx.prepare_cached(
-                "INSERT OR REPLACE INTO marks(file_id, rating, pick, label, keywords, sidecar, sidecar_sig)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT OR REPLACE INTO marks(file_id, rating, pick, label, keywords, sidecar, sidecar_sig, event)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?;
             for e in entries {
                 let m = e.meta;
@@ -267,6 +267,7 @@ impl Cache {
                     k.marks.keywords.join("\n"),
                     k.sidecar.as_ref().and_then(|p| p.to_str()),
                     k.sig,
+                    k.marks.event,
                 ])?;
             }
         }
@@ -277,8 +278,8 @@ impl Cache {
     /// Update just the marks of one file (after Shoebox writes its sidecar).
     pub fn update_marks(&self, root_id: i64, rel: &str, m: &CachedMarks) -> Result<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO marks(file_id, rating, pick, label, keywords, sidecar, sidecar_sig)
-             SELECT id, ?3, ?4, ?5, ?6, ?7, ?8 FROM files WHERE root_id = ?1 AND rel_path = ?2",
+            "INSERT OR REPLACE INTO marks(file_id, rating, pick, label, keywords, sidecar, sidecar_sig, event)
+             SELECT id, ?3, ?4, ?5, ?6, ?7, ?8, ?9 FROM files WHERE root_id = ?1 AND rel_path = ?2",
             params![
                 root_id,
                 rel,
@@ -288,6 +289,7 @@ impl Cache {
                 m.marks.keywords.join("\n"),
                 m.sidecar.as_ref().and_then(|p| p.to_str()),
                 m.sig,
+                m.marks.event,
             ],
         )?;
         Ok(())
@@ -299,7 +301,7 @@ impl Cache {
             "SELECT f.rel_path, f.size, f.mtime, f.width, f.height,
                     e.capture_time, e.subsec, e.offset, e.make, e.model, e.serial, e.lens,
                     e.focal, e.fnumber, e.exposure, e.iso, e.orientation,
-                    k.rating, k.pick, k.label, k.keywords, k.sidecar, k.sidecar_sig
+                    k.rating, k.pick, k.label, k.keywords, k.sidecar, k.sidecar_sig, k.event
              FROM files f LEFT JOIN exif e ON e.file_id = f.id
                           LEFT JOIN marks k ON k.file_id = f.id
              WHERE f.root_id = ?1 AND f.meta_version = ?2",
@@ -340,6 +342,7 @@ impl Cache {
                                     .filter(|k| !k.is_empty())
                                     .map(str::to_owned)
                                     .collect(),
+                                event: r.get(23)?,
                             },
                             sidecar: r.get::<_, Option<String>>(21)?.map(Into::into),
                             sig: r.get(22)?,

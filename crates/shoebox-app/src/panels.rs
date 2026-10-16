@@ -263,14 +263,166 @@ pub fn library(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             app.tree = tree;
         });
     ui.separator();
-    ui.label(RichText::new("Events").strong());
-    ui.weak("Next in M3");
+    events_panel(app, ui);
     ui.label(RichText::new("Collections").strong());
     ui.weak("Arrive in M5");
     smart_filters(app, ui);
     ui.separator();
     ui.label(RichText::new("Tasks").strong());
     ui.weak("Duplicates review (M4), Import and History (M5)");
+}
+
+fn events_panel(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Events").strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add_enabled(app.event_edit.is_none(), egui::Button::new("+").small())
+                .on_hover_text("New event from the selection (⌘E), or type a date range")
+                .clicked()
+            {
+                app.new_event_from_selection(None);
+            }
+        });
+    });
+    event_editor(app, ui);
+    if app.selected_event.is_some() && ui.small_button("Show all photos").clicked() {
+        app.select_event(None);
+    }
+    let events = app.events.clone();
+    let ids: std::collections::HashSet<&str> = events.iter().map(|e| e.id.as_str()).collect();
+    // Top-level events (no parent, or a parent that no longer exists), by year.
+    let mut years: std::collections::BTreeMap<String, Vec<&shoebox_core::events::Event>> =
+        Default::default();
+    for e in events
+        .iter()
+        .filter(|e| e.parent.as_deref().is_none_or(|p| !ids.contains(p)))
+    {
+        years
+            .entry(e.start.get(..4).unwrap_or("Undated").to_owned())
+            .or_default()
+            .push(e);
+    }
+    for (year, list) in years.iter().rev() {
+        egui::CollapsingHeader::new(year)
+            .id_salt(("event-year", year))
+            .default_open(true)
+            .show(ui, |ui| {
+                for e in list {
+                    event_node(app, ui, e, &events);
+                }
+            });
+    }
+}
+
+fn event_editor(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    let mut save = false;
+    let mut cancel = false;
+    let Some(ed) = app.event_edit.as_mut() else {
+        return;
+    };
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.label(if ed.id.is_some() {
+            "Edit event"
+        } else {
+            "New event"
+        });
+        let name =
+            ui.add(egui::TextEdit::singleline(&mut ed.name).hint_text("Name, e.g. Japan Trip"));
+        if ed.name.is_empty() && !name.has_focus() {
+            name.request_focus();
+        }
+        ui.add(egui::TextEdit::singleline(&mut ed.start).hint_text("Start YYYY-MM-DD [HH:MM]"));
+        ui.add(egui::TextEdit::singleline(&mut ed.end).hint_text("End YYYY-MM-DD [HH:MM]"));
+        if let Some(err) = &ed.error {
+            ui.colored_label(ui.visuals().warn_fg_color, err);
+        }
+        ui.horizontal(|ui| {
+            save = ui.button("Save").clicked()
+                || (name.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+            cancel = ui.button("Cancel").clicked();
+        });
+    });
+    if save {
+        app.save_event_edit();
+    }
+    if cancel {
+        app.event_edit = None;
+    }
+}
+
+fn event_node(
+    app: &mut ShoeboxApp,
+    ui: &mut egui::Ui,
+    e: &shoebox_core::events::Event,
+    all: &[shoebox_core::events::Event],
+) {
+    let members = app.event_members.get(&e.id).cloned().unwrap_or_default();
+    let selected = app.selected_event.as_deref() == Some(e.id.as_str());
+    let id = ui.make_persistent_id(("event", &e.id));
+    let state =
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+    let header = state.show_header(ui, |ui| {
+        let r = ui
+            .selectable_label(selected, format!("{}  {}", e.name, members.len()))
+            .on_hover_text(format!("{} to {}", e.start, e.end));
+        if r.clicked() {
+            app.select_event(if selected { None } else { Some(e.id.clone()) });
+        }
+        r.context_menu(|ui| {
+            if ui.button("Edit…").clicked() {
+                app.edit_event(&e.id);
+                ui.close();
+            }
+            if ui.button("Add selected photos").clicked() {
+                app.event_include_selection(&e.id, true);
+                ui.close();
+            }
+            if ui.button("Exclude selected photos").clicked() {
+                app.event_include_selection(&e.id, false);
+                ui.close();
+            }
+            if ui.button("New sub-event from selection").clicked() {
+                app.new_event_from_selection(Some(e.id.clone()));
+                ui.close();
+            }
+            if ui.button("Delete event (photos untouched)").clicked() {
+                app.delete_event(&e.id);
+                ui.close();
+            }
+        });
+    });
+    header.body(|ui| {
+        for child in all
+            .iter()
+            .filter(|c| c.parent.as_deref() == Some(e.id.as_str()))
+        {
+            event_node(app, ui, child, all);
+        }
+        // The day folders the event covers.
+        let mut days: Vec<std::path::PathBuf> = members
+            .iter()
+            .filter_map(|&s| {
+                app.catalog.photos[app.catalog.stacks[s].primary]
+                    .path
+                    .parent()
+                    .map(std::path::Path::to_path_buf)
+            })
+            .collect();
+        days.sort();
+        days.dedup();
+        for d in days {
+            let name = d
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let sel = app.folder.as_deref() == Some(d.as_path());
+            if ui.selectable_label(sel, format!("📁 {name}")).clicked() {
+                app.selected_event = None;
+                app.set_folder(Some(d.clone()));
+            }
+        }
+    });
 }
 
 fn smart_filters(app: &mut ShoeboxApp, ui: &mut egui::Ui) {

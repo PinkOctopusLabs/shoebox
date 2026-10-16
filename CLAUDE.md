@@ -3,7 +3,8 @@
 A Rust + egui photo library app for macOS. **`docs/SPEC.md` is the source of truth**: read the relevant section before changing behaviour, and flag any conflict rather than silently diverging.
 
 ## Layout
-- `crates/shoebox-core`: library model, scanning, hashing, duplicate index, SQLite cache, and `fileops` (the only module that moves, renames or copies files; it journals everything). No egui.
+- `crates/shoebox-core`: library model, scanning, hashing, duplicate index, SQLite cache, and `fileops` (the only module that moves, renames, copies or writes files; it journals everything). No egui.
+  M3: `xmp` (read any form, edit by splicing original bytes), `marks`, `sidecar` (precedence + write planning), `stacks`, `query` (filters, sort, smart filters), `events`.
 - `crates/shoebox-decode`: JPEG/TIFF/PNG decoding, NEF embedded-preview extraction, grayscale thumbnails.
 - `crates/shoebox-app`: the eframe/egui app (`cargo run --release -p shoebox-app`).
   `jobs.rs` (background loader + library worker; the UI thread never reads
@@ -30,7 +31,7 @@ A Rust + egui photo library app for macOS. **`docs/SPEC.md` is the source of tru
 ## Safety rules (hard requirements)
 1. Never delete files outside the app's own cache directories. "Remove" means move to `_rejected/`/`_duplicates/`, or the macOS Trash on explicit command.
 2. Journal every move, rename and copy, with a batch id, *before* it runs.
-3. Never write to image files. Marks go to XMP sidecars only.
+3. Never write to image files. Marks go to XMP sidecars only; the only other files Shoebox writes in a library are `<root>/.shoebox/*.json`.
 4. Never overwrite: collisions get `-1`, `-2` suffixes.
 5. Reference roots are read-only.
 6. Multi-file operations show a dry-run table and need confirmation.

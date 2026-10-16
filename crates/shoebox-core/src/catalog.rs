@@ -254,15 +254,17 @@ impl Catalog {
     /// Write new marks for several photos as one journaled batch (one undo
     /// step), and update the catalog and cache. Returns the batch, or None if
     /// nothing changed. Raw files also get `name.xmp` when `stem_for_raw`.
+    /// `extra` writes (such as `.shoebox/events.json`) join the same batch.
     pub fn set_marks(
         &mut self,
         updates: &[(usize, Marks)],
+        extra: Vec<(PathBuf, Vec<u8>)>,
         fileops: &crate::fileops::FileOps,
         cache: &Cache,
         stem_for_raw: bool,
         label: &str,
     ) -> Result<Option<i64>> {
-        let mut writes = Vec::new();
+        let mut writes = extra;
         for (i, new) in updates {
             let p = &self.photos[*i];
             let also_stem = stem_for_raw && p.format == Format::Nef;

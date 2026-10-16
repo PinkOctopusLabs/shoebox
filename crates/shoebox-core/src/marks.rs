@@ -77,6 +77,8 @@ pub struct Marks {
     pub label: Option<Label>,
     /// Hierarchical keywords, `|`-separated, in the order read or added.
     pub keywords: Vec<String>,
+    /// `Iptc4xmpExt:Event`: the innermost event the photo belongs to.
+    pub event: Option<String>,
 }
 
 impl Marks {
@@ -144,6 +146,10 @@ impl Marks {
             pick,
             label,
             keywords,
+            event: props
+                .get(&Prop::Event)
+                .and_then(Value::first)
+                .filter(|e| !e.trim().is_empty()),
         }
     }
 
@@ -176,6 +182,9 @@ impl Marks {
                     out.push((Prop::ColorLabel, None));
                 }
             }
+        }
+        if self.event != old.event {
+            out.push((Prop::Event, self.event.clone().map(Value::LangAlt)));
         }
         if self.keywords != old.keywords {
             if self.keywords.is_empty() {
@@ -228,6 +237,7 @@ mod tests {
                 "temple".into(),
                 "Events|Japan Trip".into(),
             ],
+            event: Some("Japan Trip".into()),
         };
         assert_eq!(round_trip(&m), m);
         assert_eq!(round_trip(&Marks::default()), Marks::default());

@@ -260,6 +260,7 @@ mod tests {
                 pick,
                 label: None,
                 keywords: kw.iter().map(|s| (*s).to_owned()).collect(),
+                event: None,
             },
             sidecar: None,
             sidecar_sig: String::new(),

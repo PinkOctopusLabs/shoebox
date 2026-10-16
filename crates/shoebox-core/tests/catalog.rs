@@ -109,9 +109,10 @@ fn marks_round_trip_through_sidecars_and_rescans() {
         pick: Some(Pick::Pick),
         label: Some(Label::Blue),
         keywords: vec!["Places|Italy|Rome".into()],
+        event: None,
     };
     let batch = c
-        .set_marks(&[(i, new.clone())], &fo, &cache, false, "test")
+        .set_marks(&[(i, new.clone())], vec![], &fo, &cache, false, "test")
         .unwrap()
         .unwrap();
     let side = lib.join("scan/recovered/f0003.jpg.xmp");
@@ -163,7 +164,7 @@ fn marks_round_trip_through_sidecars_and_rescans() {
         ..Marks::default()
     };
     assert!(
-        c.set_marks(&[(r, rated)], &fo, &cache, false, "test")
+        c.set_marks(&[(r, rated)], vec![], &fo, &cache, false, "test")
             .is_err()
     );
     assert!(!lib.join("ref/2026/2026-04-24/DSC_0001.JPG.xmp").exists());

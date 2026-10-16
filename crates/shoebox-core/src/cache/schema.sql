@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS marks (
     pick        TEXT,
     label       TEXT,
     keywords    TEXT NOT NULL,
+    event       TEXT,
     sidecar     TEXT,
     sidecar_sig TEXT NOT NULL
 );

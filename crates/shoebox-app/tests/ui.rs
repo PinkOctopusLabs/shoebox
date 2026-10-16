@@ -345,3 +345,68 @@ fn organise_marks_stacks_and_filters() {
     h.run_steps(2);
     assert_eq!(h.state().shown_count(), 1);
 }
+
+/// Cmd+E makes an event from the selection: events.json in every writable
+/// root, the event in members' sidecars, and one undo step.
+#[test]
+fn events_from_selection_and_undo() {
+    let t = tempfile::tempdir().unwrap();
+    let lib = t.path().join("lib");
+    shoebox_fixtures::build_library(&lib).unwrap();
+    let p = paths(t.path(), &[lib.join("ref"), lib.join("scan")]);
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+
+    h.get_by_label("DSC_0001.NEF").click();
+    h.run_steps(2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::E);
+    h.run_steps(3);
+    h.event(egui::Event::Text("Japan Trip".into()));
+    h.run_steps(1);
+    h.key_press(egui::Key::Enter);
+    h.run_steps(2);
+
+    let nef_side = lib.join("ref/2026/2026-04-24/DSC_0001.NEF.xmp");
+    let read = |p: &Path| -> shoebox_core::marks::Marks {
+        let props = std::fs::read(p)
+            .ok()
+            .and_then(|b| shoebox_core::xmp::read(&b).ok())
+            .unwrap_or_default();
+        shoebox_core::marks::Marks::from_props(&props)
+    };
+    let start = Instant::now();
+    while read(&nef_side).event.is_none() {
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "event not written"
+        );
+    }
+    settle(&mut h, Duration::from_secs(30));
+    let m = read(&nef_side);
+    assert_eq!(m.event.as_deref(), Some("Japan Trip"));
+    assert_eq!(m.keywords, vec!["Events|Japan Trip"]);
+    for root in ["ref", "scan"] {
+        let f = lib.join(root).join(".shoebox/events.json");
+        assert!(
+            std::fs::read_to_string(&f).unwrap().contains("Japan Trip"),
+            "{}",
+            f.display()
+        );
+    }
+    assert!(
+        !lib.join("scan/recovered/f0010.jpg.xmp").exists(),
+        "the burst frame a second later isn't in it"
+    );
+    assert_eq!(h.state().event_names(), vec!["Japan Trip"]);
+    snapshot(&mut h, "7-event");
+
+    // One undo removes the event everywhere.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(2);
+    settle(&mut h, Duration::from_secs(30));
+    let m = read(&nef_side);
+    assert_eq!((m.event, m.keywords.len()), (None, 0));
+    assert!(h.state().event_names().is_empty());
+}

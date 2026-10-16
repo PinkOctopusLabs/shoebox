@@ -3,6 +3,37 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-16 — M3 stacks, organising and events
+- **Stacks**: same folder + base name, or identical capture time with
+  sub-seconds + camera serial (exports elsewhere join; bursts don't).
+  Variants are `-N` names whose format already exists in the stack (a
+  name rule; comparing pixels would need full decodes). Real copy: 4,460
+  files → 1,537 stacks.
+- **Marks on a stack** go to the primary's sidecar; the settings option
+  "marks to all stack members" copies them to every member.
+- **Writes are off the UI thread**: the app shows a change at once and the
+  library worker writes it as one journaled batch per action, so Cmd+Z
+  undoes a whole action (rating 20 photos = one undo).
+- **Caps Lock** auto-advance is read via CoreGraphics on macOS (only with a
+  real window); a toolbar toggle does the same everywhere.
+- **Events** live in `<root>/.shoebox/events.json` in every writable root,
+  merged on load (newest edit per event wins); manual additions and
+  exclusions are stored by the primary's absolute path (M5's moves will
+  need to update them). Members' sidecars get `Iptc4xmpExt:Event` (the
+  innermost event) and an `Events|Parent|Child` keyword per event. The
+  events file and sidecar changes are one batch; undoing the creation of
+  `events.json` leaves `{}` (nothing is deleted). Renaming day folders after
+  an event (spec: optional, off by default) is a file operation, left for M5.
+- **Fonts**: egui 0.37 dropped symbols from its default fonts and panics
+  on missing glyphs; `monochrome_emoji_fonts` is on, and `tests/glyphs.rs`
+  fails if any UI string uses an unsupported glyph.
+- **Acceptance stand-ins** (no digiKam or DxO here): ExifTool reads ratings
+  Shoebox writes, Shoebox reads ratings ExifTool writes, a rescan picks up a
+  sidecar changed by another app, and the golden test uses real LightCraft
+  sidecars in place of DxO's.
+- **Not in M3**: the file watcher (spec "Staying in sync") and change badges;
+  a rescan picks up external changes for now.
+
 ## 2026-10-16 — M3 sidecars and marks
 - **Edit by splicing.** `xmp::edit` never re-serialises: it copies the
   original bytes and only removes the owned properties being changed

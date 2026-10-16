@@ -4,6 +4,7 @@ pub mod cache;
 pub mod catalog;
 pub mod dupes;
 pub mod error;
+pub mod events;
 pub mod exif;
 pub mod fileops;
 pub mod hash;

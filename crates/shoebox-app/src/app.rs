@@ -9,6 +9,7 @@ use shoebox_core::catalog::{Catalog, Photo};
 use shoebox_core::settings::Settings;
 use shoebox_core::thumbs::ThumbCache;
 
+use shoebox_core::events::{self, Event};
 use shoebox_core::marks::{Label, Marks, Pick};
 use shoebox_core::query;
 
@@ -143,6 +144,13 @@ pub struct ShoeboxApp {
     pub(crate) all_keywords: Vec<(String, usize)>,
     pub(crate) cameras: Vec<String>,
     pub(crate) lenses: Vec<String>,
+    pub(crate) events: Vec<Event>,
+    /// Member stacks per event id.
+    pub(crate) event_members: HashMap<String, HashSet<usize>>,
+    /// Event chosen in the left panel (restricts the grid to its stacks).
+    pub(crate) selected_event: Option<String>,
+    /// The event being created or edited.
+    pub(crate) event_edit: Option<EventEdit>,
     /// Tags the window Display P3 on macOS (None in tests / elsewhere).
     display: Option<crate::display::DisplayTagger>,
     /// Colour space images are rendered in for this display.
@@ -207,6 +215,10 @@ impl ShoeboxApp {
             scroll_to_current: false,
             display,
             target,
+            events: Vec::new(),
+            event_members: HashMap::new(),
+            selected_event: None,
+            event_edit: None,
             filter: query::Filter::default(),
             sort: query::Sort::CaptureTime,
             sort_desc: false,
@@ -250,6 +262,10 @@ impl ShoeboxApp {
             .iter()
             .find(|p| p.path.file_name().is_some_and(|n| n == file_name))
             .map(|p| p.marks.clone())
+    }
+
+    pub fn event_names(&self) -> Vec<String> {
+        self.events.iter().map(|e| e.name.clone()).collect()
     }
 
     /// Replace the filter and rebuild the visible items.
@@ -303,6 +319,18 @@ impl ShoeboxApp {
                     self.scanning = true;
                     self.scan_progress = Some((done, total));
                 }
+                LibraryEvent::Events(events) => {
+                    self.events = events;
+                    if self
+                        .selected_event
+                        .as_ref()
+                        .is_some_and(|id| !self.events.iter().any(|e| &e.id == id))
+                    {
+                        self.selected_event = None;
+                    }
+                    self.recompute_events();
+                    self.refilter();
+                }
                 LibraryEvent::History { can_undo, can_redo } => {
                     self.can_undo = can_undo;
                     self.can_redo = can_redo;
@@ -350,6 +378,7 @@ impl ShoeboxApp {
         self.all_keywords = query::keywords(&self.catalog);
         self.cameras = query::distinct(&self.catalog, |x| x.model.as_ref());
         self.lenses = query::distinct(&self.catalog, |x| x.lens.as_ref());
+        self.recompute_events();
         self.refilter();
     }
 
@@ -364,7 +393,14 @@ impl ShoeboxApp {
     pub(crate) fn refilter(&mut self) {
         let mut f = self.filter.clone();
         f.folder = self.folder.clone();
-        let stacks = query::run(&self.catalog, &f, self.sort, self.sort_desc);
+        let mut stacks = query::run(&self.catalog, &f, self.sort, self.sort_desc);
+        if let Some(members) = self
+            .selected_event
+            .as_ref()
+            .and_then(|id| self.event_members.get(id))
+        {
+            stacks.retain(|s| members.contains(s));
+        }
         self.shown.clear();
         for s in stacks {
             let st = &self.catalog.stacks[s];
@@ -374,6 +410,179 @@ impl ShoeboxApp {
             }
         }
         self.shown_gen += 1;
+    }
+
+    fn recompute_events(&mut self) {
+        self.event_members = self
+            .events
+            .iter()
+            .map(|e| (e.id.clone(), events::members(&self.catalog, e)))
+            .collect();
+    }
+
+    /// Stacks of the selected photos (or the current one).
+    fn selected_stacks(&self) -> Vec<usize> {
+        let mut v: Vec<usize> = self
+            .selection
+            .iter()
+            .chain(self.current.as_ref().filter(|_| self.selection.is_empty()))
+            .filter_map(|id| self.index(*id))
+            .map(|i| self.catalog.stack_of[i])
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// Open the editor for a new event spanning the selection (Cmd+E).
+    pub(crate) fn new_event_from_selection(&mut self, parent: Option<String>) {
+        let stacks = self.selected_stacks();
+        let times: Vec<String> = stacks
+            .iter()
+            .filter_map(|&s| {
+                self.catalog.photos[self.catalog.stacks[s].primary]
+                    .meta
+                    .exif
+                    .capture_time
+                    .as_deref()
+            })
+            .map(events::exif_to_event_time)
+            .collect();
+        let undated: Vec<PathBuf> = stacks
+            .iter()
+            .map(|&s| &self.catalog.photos[self.catalog.stacks[s].primary])
+            .filter(|p| p.meta.exif.capture_time.is_none())
+            .map(|p| p.path.clone())
+            .collect();
+        self.event_edit = Some(EventEdit {
+            id: None,
+            parent,
+            name: String::new(),
+            start: times.iter().min().cloned().unwrap_or_default(),
+            end: times.iter().max().cloned().unwrap_or_default(),
+            include: undated,
+            error: None,
+        });
+        self.left_open = true;
+    }
+
+    pub(crate) fn edit_event(&mut self, id: &str) {
+        if let Some(e) = self.events.iter().find(|e| e.id == id) {
+            self.event_edit = Some(EventEdit {
+                id: Some(e.id.clone()),
+                parent: e.parent.clone(),
+                name: e.name.clone(),
+                start: e.start.clone(),
+                end: e.end.clone(),
+                include: Vec::new(),
+                error: None,
+            });
+        }
+    }
+
+    /// Validate and save the editor's event.
+    pub(crate) fn save_event_edit(&mut self) {
+        let Some(ed) = self.event_edit.as_mut() else {
+            return;
+        };
+        let (Some(start), Some(end)) = (
+            parse_event_time(&ed.start, false),
+            parse_event_time(&ed.end, true),
+        ) else {
+            ed.error = Some("Dates are YYYY-MM-DD or YYYY-MM-DD HH:MM:SS".into());
+            return;
+        };
+        if ed.name.trim().is_empty() {
+            ed.error = Some("Give the event a name".into());
+            return;
+        }
+        if start > end {
+            ed.error = Some("The start is after the end".into());
+            return;
+        }
+        let ed = self.event_edit.take().unwrap_or_default();
+        let mut list = self.events.clone();
+        match ed
+            .id
+            .as_ref()
+            .and_then(|id| list.iter_mut().find(|e| &e.id == id))
+        {
+            Some(e) => {
+                e.name = ed.name.trim().to_owned();
+                e.start = start;
+                e.end = end;
+                e.updated = events::now_ms();
+            }
+            None => list.push(Event {
+                id: events::new_id(),
+                name: ed.name.trim().to_owned(),
+                parent: ed.parent.clone(),
+                start,
+                end,
+                include: ed.include.clone(),
+                exclude: Vec::new(),
+                updated: events::now_ms(),
+            }),
+        }
+        self.save_events(list, &format!("event: {}", ed.name.trim()));
+    }
+
+    /// Add the selection to an event by hand, or exclude it.
+    pub(crate) fn event_include_selection(&mut self, id: &str, include: bool) {
+        let paths: Vec<PathBuf> = self
+            .selected_stacks()
+            .into_iter()
+            .map(|s| {
+                self.catalog.photos[self.catalog.stacks[s].primary]
+                    .path
+                    .clone()
+            })
+            .collect();
+        let mut list = self.events.clone();
+        let Some(e) = list.iter_mut().find(|e| e.id == id) else {
+            return;
+        };
+        for p in paths {
+            e.include.retain(|x| x != &p);
+            e.exclude.retain(|x| x != &p);
+            if include {
+                e.include.push(p)
+            } else {
+                e.exclude.push(p)
+            }
+        }
+        e.updated = events::now_ms();
+        let name = e.name.clone();
+        self.save_events(list, &format!("event: {name}"));
+    }
+
+    /// Delete an event; its sub-events move up to its parent.
+    pub(crate) fn delete_event(&mut self, id: &str) {
+        let Some(gone) = self.events.iter().find(|e| e.id == id).cloned() else {
+            return;
+        };
+        let mut list: Vec<Event> = self.events.iter().filter(|e| e.id != id).cloned().collect();
+        for e in list.iter_mut().filter(|e| e.parent.as_deref() == Some(id)) {
+            e.parent = gone.parent.clone();
+            e.updated = events::now_ms();
+        }
+        if self.selected_event.as_deref() == Some(id) {
+            self.selected_event = None;
+        }
+        self.save_events(list, &format!("delete event: {}", gone.name));
+    }
+
+    fn save_events(&mut self, list: Vec<Event>, label: &str) {
+        self.library.send(LibraryCommand::SaveEvents {
+            events: list,
+            label: label.to_owned(),
+        });
+    }
+
+    pub(crate) fn select_event(&mut self, id: Option<String>) {
+        self.selected_event = id;
+        self.refilter();
+        self.scroll_to_current = true;
     }
 
     /// The stack of photo `idx`.
@@ -655,6 +864,9 @@ impl ShoeboxApp {
                     LibraryCommand::Undo
                 });
             }
+            if pressed(egui::Key::E) {
+                self.new_event_from_selection(None);
+            }
             if pressed(egui::Key::K) {
                 self.focus_keywords = true;
                 self.right_open = true;
@@ -892,4 +1104,56 @@ pub(crate) fn normalise_keyword(k: &str) -> String {
         .filter(|p| !p.is_empty())
         .collect::<Vec<_>>()
         .join("|")
+}
+
+/// The event editor's fields.
+#[derive(Debug, Clone, Default)]
+pub struct EventEdit {
+    /// None for a new event.
+    pub id: Option<String>,
+    pub parent: Option<String>,
+    pub name: String,
+    pub start: String,
+    pub end: String,
+    /// Undated photos to add by hand (new events from a selection).
+    pub include: Vec<PathBuf>,
+    pub error: Option<String>,
+}
+
+/// `YYYY-MM-DD` or `YYYY-MM-DD HH:MM[:SS]` → `YYYY-MM-DD HH:MM:SS`. A bare
+/// date means the start or end of that day.
+pub(crate) fn parse_event_time(s: &str, end_of_day: bool) -> Option<String> {
+    let s = s.trim().replace('T', " ");
+    let (date, time) = match s.split_once(' ') {
+        Some((d, t)) => (d.to_owned(), t.trim().to_owned()),
+        None => (
+            s.clone(),
+            if end_of_day {
+                "23:59:59".into()
+            } else {
+                "00:00:00".into()
+            },
+        ),
+    };
+    let d: Vec<&str> = date.split('-').collect();
+    let ok_date = d.len() == 3
+        && d[0].len() == 4
+        && d[1].len() == 2
+        && d[2].len() == 2
+        && d.iter().all(|p| p.chars().all(|c| c.is_ascii_digit()));
+    let t: Vec<&str> = time.split(':').collect();
+    let ok_time = (t.len() == 2 || t.len() == 3)
+        && t.iter()
+            .all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_digit()));
+    if !(ok_date && ok_time) {
+        return None;
+    }
+    let secs = if t.len() == 3 {
+        t[2]
+    } else if end_of_day {
+        "59"
+    } else {
+        "00"
+    };
+    Some(format!("{date} {}:{}:{secs}", t[0], t[1]))
 }

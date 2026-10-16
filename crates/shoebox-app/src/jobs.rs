@@ -13,6 +13,7 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use crossbeam_channel::{Receiver, Sender};
 use shoebox_core::catalog::Catalog;
+use shoebox_core::events::{self, Event};
 use shoebox_core::fileops::{FileOps, Journal};
 use shoebox_core::marks::Marks;
 use shoebox_core::settings::Settings;
@@ -235,6 +236,12 @@ pub enum LibraryCommand {
         updates: Vec<(PathBuf, Marks)>,
         label: String,
     },
+    /// Replace the events: writes `.shoebox/events.json` in every writable
+    /// root and the affected sidecars, as one undoable batch.
+    SaveEvents {
+        events: Vec<Event>,
+        label: String,
+    },
     Undo,
     Redo,
     /// Replace settings other than roots (options, smart filters).
@@ -252,6 +259,8 @@ pub enum LibraryEvent {
         done: usize,
         total: usize,
     },
+    /// The events (after loading, saving or undo).
+    Events(Vec<Event>),
     /// Undo/redo availability changed.
     History {
         can_undo: bool,
@@ -393,6 +402,7 @@ fn library_worker(
                     .collect();
                 match catalog.set_marks(
                     &resolved,
+                    Vec::new(),
                     &fileops,
                     &cache,
                     settings.write_stem_sidecar_for_raw,
@@ -408,6 +418,39 @@ fn library_worker(
                         emit(LibraryEvent::Error(format!("saving marks: {e}")));
                         publish(&catalog, &settings, true); // revert the optimistic display
                     }
+                }
+                (false, false)
+            }
+            LibraryCommand::SaveEvents { events: new, label } => {
+                let writable: Vec<PathBuf> = settings
+                    .roots
+                    .iter()
+                    .filter(|r| !r.reference)
+                    .map(|r| r.path.clone())
+                    .collect();
+                let updates =
+                    events::mark_updates(&catalog, &new, settings.marks_to_all_stack_members);
+                let result = events::plan_save(&writable, &new).and_then(|files| {
+                    catalog.set_marks(
+                        &updates,
+                        files,
+                        &fileops,
+                        &cache,
+                        settings.write_stem_sidecar_for_raw,
+                        &label,
+                    )
+                });
+                match result {
+                    Ok(batch) => {
+                        if let Some(b) = batch {
+                            undo.push(b);
+                            redo.clear();
+                            history(&undo, &redo);
+                        }
+                        emit(LibraryEvent::Events(new));
+                        publish(&catalog, &settings, true);
+                    }
+                    Err(e) => emit(LibraryEvent::Error(format!("saving events: {e}"))),
                 }
                 (false, false)
             }
@@ -454,6 +497,9 @@ fn library_worker(
                         .enumerate()
                         .map(|(i, p)| (p.path.clone(), i))
                         .collect();
+                    let roots: Vec<PathBuf> =
+                        settings.roots.iter().map(|r| r.path.clone()).collect();
+                    emit(LibraryEvent::Events(events::load(&roots)));
                     publish(&catalog, &settings, true);
                 }
                 Err(e) => emit(LibraryEvent::Error(format!("scanning: {e}"))),
