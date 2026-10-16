@@ -174,6 +174,24 @@ impl Catalog {
         Ok((c, stats))
     }
 
+    /// Indices of the files of the same frame as `i` (same folder and base
+    /// name, as duplicate detection defines siblings), including `i`.
+    pub fn siblings(&self, i: usize) -> Vec<usize> {
+        let Some(dir) = self.photos.get(i).and_then(|p| p.path.parent()) else {
+            return Vec::new();
+        };
+        let here: Vec<usize> = (0..self.photos.len())
+            .filter(|&j| self.photos[j].path.parent() == Some(dir))
+            .collect();
+        let stems: HashSet<crate::pipeline::FolderStem> = here
+            .iter()
+            .filter_map(|&j| crate::pipeline::folder_stem(&self.photos[j].path))
+            .collect();
+        let key = |j: usize| crate::pipeline::sibling_key(&self.photos[j].path, &stems);
+        let mine = key(i);
+        here.into_iter().filter(|&j| key(j) == mine).collect()
+    }
+
     fn sort(&mut self) {
         self.photos.sort_by(|a, b| {
             let (ta, tb) = (a.meta.capture_seconds(), b.meta.capture_seconds());

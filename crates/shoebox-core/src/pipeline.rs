@@ -101,9 +101,9 @@ pub fn analyze_all(
     Ok((done, stats))
 }
 
-type FolderStem = (std::path::PathBuf, String);
+pub(crate) type FolderStem = (std::path::PathBuf, String);
 
-fn folder_stem(path: &std::path::Path) -> Option<FolderStem> {
+pub(crate) fn folder_stem(path: &std::path::Path) -> Option<FolderStem> {
     Some((
         path.parent()?.to_path_buf(),
         path.file_stem()?.to_str()?.to_lowercase(),
@@ -114,7 +114,7 @@ fn folder_stem(path: &std::path::Path) -> Option<FolderStem> {
 /// (copy or virtual-copy suffix) is ignored only when the name without it is
 /// also present in the folder, so `x-1.tif` joins `x.nef`, but names that end
 /// in a sub-second (`20260501-091502-65`) are not cut short.
-fn sibling_key(
+pub(crate) fn sibling_key(
     path: &std::path::Path,
     stems: &std::collections::HashSet<FolderStem>,
 ) -> Option<FolderStem> {

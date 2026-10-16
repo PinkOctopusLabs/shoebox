@@ -10,6 +10,13 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "shoebox-app"
+path = "src/main.rs"
+
 [dependencies]
 shoebox-core.workspace = true
 anyhow.workspace = true
@@ -17,3 +24,12 @@ eframe.workspace = true
 egui.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+shoebox-decode = { version = "0.1.0", path = "../shoebox-decode" }
+rfd = "0.17.2"
+crossbeam-channel = "0.5.17"
+
+[dev-dependencies]
+egui_kittest = { version = "0.37.0", features = ["eframe", "snapshot", "wgpu"] }
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+shoebox-fixtures = { path = "../shoebox-fixtures" }
+tempfile = "3.27.0"

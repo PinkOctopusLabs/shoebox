@@ -1,0 +1,562 @@
+//! Application state and the frame loop.
+
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use eframe::egui;
+use shoebox_core::catalog::{Catalog, Photo};
+use shoebox_core::settings::Settings;
+use shoebox_core::thumbs::ThumbCache;
+
+use crate::jobs::{
+    Job, Key, Library, LibraryCommand, LibraryEvent, LibraryPaths, Loader, PhotoId, Priority, Size,
+    photo_id,
+};
+use crate::textures::Textures;
+use crate::{panels, views};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    Grid,
+    Masonry,
+    Loupe,
+    Compare,
+    Survey,
+    Timeline,
+}
+
+impl View {
+    pub const ALL: [(View, &'static str, egui::Key); 6] = [
+        (View::Grid, "Grid", egui::Key::G),
+        (View::Masonry, "Masonry", egui::Key::M),
+        (View::Loupe, "Loupe", egui::Key::E),
+        (View::Compare, "Compare", egui::Key::C),
+        (View::Survey, "Survey", egui::Key::N),
+        (View::Timeline, "Timeline", egui::Key::T),
+    ];
+
+    pub fn has_filmstrip(self) -> bool {
+        matches!(self, View::Loupe | View::Compare | View::Survey)
+    }
+}
+
+/// Where the app keeps its state; tests point these at temp folders.
+pub struct AppPaths {
+    pub settings: PathBuf,
+    pub cache_db: PathBuf,
+    pub thumbs: PathBuf,
+}
+
+impl AppPaths {
+    pub fn default_locations() -> anyhow::Result<Self> {
+        let data = shoebox_core::paths::default_data_dir()?;
+        let cache = shoebox_core::paths::default_cache_dir()?;
+        Ok(Self {
+            settings: shoebox_core::paths::settings_file(&data),
+            cache_db: shoebox_core::paths::cache_db(&data),
+            thumbs: cache.join("thumbs"),
+        })
+    }
+}
+
+/// Loupe zoom: fit to the window, or a scale where 1.0 = one image pixel
+/// per screen pixel.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Zoom {
+    Fit,
+    Scale(f32),
+}
+
+pub struct LoupeState {
+    pub zoom: Zoom,
+    pub pan: egui::Vec2,
+}
+
+/// A folder in the left panel, with the recursive count of images.
+#[derive(Debug, Default)]
+pub struct FolderNode {
+    pub path: PathBuf,
+    pub name: String,
+    pub count: usize,
+    pub children: std::collections::BTreeMap<String, FolderNode>,
+}
+
+pub struct ShoeboxApp {
+    pub(crate) loader: Loader,
+    library: Library,
+    pub(crate) catalog: Arc<Catalog>,
+    pub(crate) settings: Settings,
+    /// `ids[i]` is the stable id of `catalog.photos[i]`.
+    pub(crate) ids: Vec<PhotoId>,
+    index_of: HashMap<PhotoId, usize>,
+    pub(crate) tree: Vec<FolderNode>,
+    /// Folder filter from the left panel (None = whole library).
+    pub(crate) folder: Option<PathBuf>,
+    /// Catalog indices shown in the centre, in display order.
+    pub(crate) shown: Vec<usize>,
+    /// Bumped whenever `shown` changes (layout caches key on it).
+    pub(crate) shown_gen: u64,
+    pub(crate) selection: BTreeSet<PhotoId>,
+    pub(crate) current: Option<PhotoId>,
+    anchor: Option<PhotoId>,
+    pub(crate) view: View,
+    pub(crate) thumb_size: f32,
+    /// Columns in the grid as last drawn (for Up/Down).
+    pub(crate) grid_cols: usize,
+    pub(crate) left_open: bool,
+    pub(crate) right_open: bool,
+    pub(crate) bars_open: bool,
+    fullscreen: bool,
+    pub(crate) loupe: LoupeState,
+    pub(crate) textures: Textures,
+    pub(crate) histograms: HashMap<PhotoId, Box<[[u32; 256]; 4]>>,
+    pub(crate) siblings_of: Option<(PhotoId, Vec<usize>)>,
+    pub(crate) masonry: views::masonry::Layout,
+    /// Loads wanted this frame, sent to the loader at the end of the frame.
+    wanted: Vec<(Key, Priority, Job)>,
+    pub(crate) scan_progress: Option<(usize, usize)>,
+    pub(crate) scanning: bool,
+    pub(crate) error: Option<String>,
+    /// When set, the centre view scrolls so this photo is visible.
+    pub(crate) scroll_to_current: bool,
+}
+
+impl ShoeboxApp {
+    pub fn new(ctx: &egui::Context, paths: AppPaths) -> Self {
+        let threads =
+            std::thread::available_parallelism().map_or(4, |n| n.get().saturating_sub(1).max(2));
+        let (c1, c2) = (ctx.clone(), ctx.clone());
+        let loader = Loader::new(threads, ThumbCache::new(paths.thumbs), move || {
+            c1.request_repaint()
+        });
+        let library = Library::new(
+            LibraryPaths {
+                settings: paths.settings,
+                cache_db: paths.cache_db,
+            },
+            move || c2.request_repaint(),
+        );
+        library.send(LibraryCommand::Open);
+        Self {
+            loader,
+            library,
+            catalog: Arc::new(Catalog::default()),
+            settings: Settings::default(),
+            ids: Vec::new(),
+            index_of: HashMap::new(),
+            tree: Vec::new(),
+            folder: None,
+            shown: Vec::new(),
+            shown_gen: 0,
+            selection: BTreeSet::new(),
+            current: None,
+            anchor: None,
+            view: View::Grid,
+            thumb_size: 180.0,
+            grid_cols: 1,
+            left_open: true,
+            right_open: true,
+            bars_open: true,
+            fullscreen: false,
+            loupe: LoupeState {
+                zoom: Zoom::Fit,
+                pan: egui::Vec2::ZERO,
+            },
+            // 768 MB: ~3,000 small thumbnails plus a few full-size images.
+            textures: Textures::new(768 << 20),
+            histograms: HashMap::new(),
+            siblings_of: None,
+            masonry: views::masonry::Layout::default(),
+            wanted: Vec::new(),
+            scan_progress: None,
+            scanning: true,
+            error: None,
+            scroll_to_current: false,
+        }
+    }
+
+    /// True when no scan or image load is outstanding (used by tests).
+    pub fn idle(&self) -> bool {
+        !self.scanning && self.loader.busy() == 0
+    }
+
+    pub fn photo_count(&self) -> usize {
+        self.catalog.photos.len()
+    }
+
+    pub fn current_is_nef(&self) -> bool {
+        self.current
+            .and_then(|c| self.photo(c))
+            .is_some_and(|p| p.format == shoebox_decode::Format::Nef)
+    }
+
+    pub fn loupe_zoomed(&self) -> bool {
+        self.loupe.zoom != Zoom::Fit
+    }
+
+    pub fn view_name(&self) -> View {
+        self.view
+    }
+
+    pub fn shown_count(&self) -> usize {
+        self.shown.len()
+    }
+
+    pub fn set_view(&mut self, v: View) {
+        if v == View::Loupe && self.current.is_none() {
+            self.current = self.shown.first().map(|&i| self.ids[i]);
+        }
+        self.view = v;
+        self.loupe = LoupeState {
+            zoom: Zoom::Fit,
+            pan: egui::Vec2::ZERO,
+        };
+        self.scroll_to_current = true;
+    }
+
+    pub fn command(&self, c: LibraryCommand) {
+        self.library.send(c);
+    }
+
+    // --- catalog -----------------------------------------------------------
+
+    fn apply_events(&mut self, ctx: &egui::Context) {
+        while let Ok(ev) = self.library.events.try_recv() {
+            match ev {
+                LibraryEvent::Catalog {
+                    catalog,
+                    settings,
+                    complete,
+                } => {
+                    self.settings = settings;
+                    self.set_catalog(catalog);
+                    if complete {
+                        self.scanning = false;
+                        self.scan_progress = None;
+                    }
+                }
+                LibraryEvent::Progress { done, total } => {
+                    self.scanning = true;
+                    self.scan_progress = Some((done, total));
+                }
+                LibraryEvent::Error(e) => {
+                    self.scanning = false;
+                    self.error = Some(e);
+                }
+            }
+        }
+        for loaded in self.loader.drain() {
+            match loaded.result {
+                Ok(img) => {
+                    if let Some(h) = loaded.histogram {
+                        self.histograms.insert(loaded.key.photo, h);
+                    }
+                    self.textures.insert(ctx, loaded.key, &img);
+                }
+                Err(e) => {
+                    tracing::warn!("{e}");
+                    self.textures.failed.insert(loaded.key, e);
+                }
+            }
+        }
+    }
+
+    fn set_catalog(&mut self, catalog: Arc<Catalog>) {
+        self.ids = catalog.photos.iter().map(|p| photo_id(&p.path)).collect();
+        self.index_of = self
+            .ids
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| (id, i))
+            .collect();
+        self.tree = build_tree(&catalog);
+        self.catalog = catalog;
+        let keep: HashSet<PhotoId> = self.ids.iter().copied().collect();
+        self.textures.retain_photos(&keep);
+        self.textures.failed.clear();
+        self.selection.retain(|id| keep.contains(id));
+        if self.current.is_some_and(|c| !keep.contains(&c)) {
+            self.current = None;
+        }
+        self.siblings_of = None;
+        self.refilter();
+    }
+
+    pub(crate) fn set_folder(&mut self, folder: Option<PathBuf>) {
+        self.folder = folder;
+        self.refilter();
+        self.scroll_to_current = true;
+    }
+
+    fn refilter(&mut self) {
+        self.shown = (0..self.catalog.photos.len())
+            .filter(|&i| {
+                self.folder
+                    .as_ref()
+                    .is_none_or(|f| self.catalog.photos[i].path.starts_with(f))
+            })
+            .collect();
+        self.shown_gen += 1;
+    }
+
+    pub(crate) fn photo(&self, id: PhotoId) -> Option<&Photo> {
+        self.index_of.get(&id).map(|&i| &self.catalog.photos[i])
+    }
+
+    pub(crate) fn index(&self, id: PhotoId) -> Option<usize> {
+        self.index_of.get(&id).copied()
+    }
+
+    // --- loading -----------------------------------------------------------
+
+    /// Ask for an image this frame (no-op if loaded or failed).
+    pub(crate) fn want(&mut self, idx: usize, size: Size, priority: Priority) {
+        let key = Key {
+            photo: self.ids[idx],
+            size,
+        };
+        if self.textures.contains(&key) || self.textures.failed.contains_key(&key) {
+            return;
+        }
+        let p = &self.catalog.photos[idx];
+        self.wanted.push((
+            key,
+            priority,
+            Job {
+                path: p.path.clone(),
+                format: p.format,
+                size: p.size,
+                mtime_ns: p.mtime_ns,
+                orientation: p.meta.orientation(),
+            },
+        ));
+    }
+
+    // --- selection ---------------------------------------------------------
+
+    /// Click with modifiers, as in Lightroom: plain = select one,
+    /// Cmd = toggle, Shift = range from the anchor.
+    pub(crate) fn click(&mut self, pos_in_shown: usize, modifiers: egui::Modifiers) {
+        let id = self.ids[self.shown[pos_in_shown]];
+        if modifiers.command {
+            if !self.selection.remove(&id) {
+                self.selection.insert(id);
+            }
+            self.anchor = Some(id);
+        } else if modifiers.shift
+            && let Some(a) = self
+                .anchor
+                .and_then(|a| self.shown.iter().position(|&i| self.ids[i] == a))
+        {
+            let (lo, hi) = (a.min(pos_in_shown), a.max(pos_in_shown));
+            self.selection = self.shown[lo..=hi].iter().map(|&i| self.ids[i]).collect();
+        } else {
+            self.selection = BTreeSet::from([id]);
+            self.anchor = Some(id);
+        }
+        self.current = Some(id);
+    }
+
+    fn step(&mut self, delta: isize) {
+        if self.shown.is_empty() {
+            return;
+        }
+        let pos = self
+            .current
+            .and_then(|c| self.shown.iter().position(|&i| self.ids[i] == c))
+            .map_or(0, |p| {
+                (p as isize + delta).clamp(0, self.shown.len() as isize - 1) as usize
+            });
+        let id = self.ids[self.shown[pos]];
+        self.current = Some(id);
+        self.selection = BTreeSet::from([id]);
+        self.anchor = Some(id);
+        self.loupe = LoupeState {
+            zoom: Zoom::Fit,
+            pan: egui::Vec2::ZERO,
+        };
+        self.scroll_to_current = true;
+    }
+
+    pub(crate) fn current_pos(&self) -> Option<usize> {
+        let c = self.current?;
+        self.shown.iter().position(|&i| self.ids[i] == c)
+    }
+
+    // --- input -------------------------------------------------------------
+
+    fn handle_keys(&mut self, ctx: &egui::Context) {
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let input = ctx.input(|i| i.clone());
+        let m = input.modifiers;
+        let pressed = |k| input.key_pressed(k);
+        if pressed(egui::Key::Tab) {
+            if m.shift {
+                let show = !(self.left_open || self.right_open || self.bars_open);
+                (self.left_open, self.right_open, self.bars_open) = (show, show, show);
+            } else {
+                let show = !(self.left_open || self.right_open);
+                (self.left_open, self.right_open) = (show, show);
+            }
+        }
+        if m.command {
+            if pressed(egui::Key::A) {
+                self.selection = self.shown.iter().map(|&i| self.ids[i]).collect();
+            }
+            if pressed(egui::Key::D) {
+                self.selection.clear();
+            }
+            if pressed(egui::Key::R)
+                && let Some(p) = self.current.and_then(|c| self.photo(c))
+            {
+                reveal(&p.path);
+            }
+            return;
+        }
+        for (v, _, key) in View::ALL {
+            if pressed(key) {
+                self.set_view(v);
+            }
+        }
+        if pressed(egui::Key::F) {
+            self.fullscreen = !self.fullscreen;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
+        }
+        if pressed(egui::Key::Escape) && self.fullscreen {
+            self.fullscreen = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        }
+        if pressed(egui::Key::Enter) && self.current.is_some() {
+            self.set_view(View::Loupe);
+        }
+        let cols = self.grid_cols as isize;
+        if pressed(egui::Key::ArrowRight) {
+            self.step(1);
+        }
+        if pressed(egui::Key::ArrowLeft) {
+            self.step(-1);
+        }
+        if self.view == View::Grid {
+            if pressed(egui::Key::ArrowDown) {
+                self.step(cols);
+            }
+            if pressed(egui::Key::ArrowUp) {
+                self.step(-cols);
+            }
+        }
+        if self.view == View::Loupe && (pressed(egui::Key::Space) || pressed(egui::Key::Z)) {
+            self.loupe.zoom = match self.loupe.zoom {
+                Zoom::Fit => Zoom::Scale(1.0),
+                Zoom::Scale(_) => Zoom::Fit,
+            };
+            self.loupe.pan = egui::Vec2::ZERO;
+        }
+    }
+}
+
+impl eframe::App for ShoeboxApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        self.textures.begin_frame();
+        self.apply_events(&ctx);
+        self.handle_keys(&ctx);
+        self.wanted.clear();
+
+        let mut bars = self.bars_open;
+        egui::Panel::top("toolbar").show_collapsible(ui, &mut bars, |ui| panels::toolbar(self, ui));
+        egui::Panel::bottom("status")
+            .show_collapsible(ui, &mut bars, |ui| panels::status(self, ui));
+        self.bars_open = bars;
+
+        let mut film = self.view.has_filmstrip() && self.bars_open;
+        egui::Panel::bottom("filmstrip")
+            .exact_size(92.0)
+            .resizable(false)
+            .show_collapsible(ui, &mut film, |ui| views::filmstrip::show(self, ui));
+
+        let mut left = self.left_open;
+        egui::Panel::left("library")
+            .resizable(true)
+            .default_size(260.0)
+            .show_collapsible(ui, &mut left, |ui| panels::library(self, ui));
+        self.left_open = left;
+        let mut right = self.right_open;
+        egui::Panel::right("info")
+            .resizable(true)
+            .default_size(280.0)
+            .show_collapsible(ui, &mut right, |ui| panels::info(self, ui));
+        self.right_open = right;
+
+        egui::CentralPanel::default().show(ui, |ui| {
+            if self.settings.roots.is_empty() && !self.scanning {
+                panels::empty_library(self, ui);
+                return;
+            }
+            match self.view {
+                View::Grid => views::grid::show(self, ui),
+                View::Masonry => views::masonry::show(self, ui),
+                View::Loupe => views::loupe::show(self, ui),
+                View::Compare | View::Survey | View::Timeline => panels::not_yet(self.view, ui),
+            }
+        });
+        self.scroll_to_current = false;
+
+        let wanted = std::mem::take(&mut self.wanted);
+        self.loader.demand(wanted);
+    }
+}
+
+fn build_tree(catalog: &Catalog) -> Vec<FolderNode> {
+    catalog
+        .roots
+        .iter()
+        .enumerate()
+        .map(|(ri, root)| {
+            let mut node = FolderNode {
+                path: root.path.clone(),
+                name: root.path.file_name().map_or_else(
+                    || root.path.display().to_string(),
+                    |n| n.to_string_lossy().into_owned(),
+                ),
+                ..Default::default()
+            };
+            for p in catalog.photos.iter().filter(|p| p.root == ri) {
+                node.count += 1;
+                let mut cur = &mut node;
+                let parts: Vec<&str> = p.rel.split('/').collect();
+                for part in &parts[..parts.len().saturating_sub(1)] {
+                    let path = cur.path.join(part);
+                    cur = cur
+                        .children
+                        .entry((*part).to_owned())
+                        .or_insert_with(|| FolderNode {
+                            path,
+                            name: (*part).to_owned(),
+                            ..Default::default()
+                        });
+                    cur.count += 1;
+                }
+            }
+            node
+        })
+        .collect()
+}
+
+/// Show a file in Finder (macOS) or its folder in the file manager (Linux).
+pub(crate) fn reveal(path: &Path) {
+    #[cfg(target_os = "macos")]
+    let r = std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .spawn();
+    #[cfg(not(target_os = "macos"))]
+    let r = std::process::Command::new("xdg-open")
+        .arg(path.parent().unwrap_or(path))
+        .spawn();
+    if let Err(e) = r {
+        tracing::warn!("reveal {}: {e}", path.display());
+    }
+}

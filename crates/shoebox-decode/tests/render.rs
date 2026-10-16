@@ -98,3 +98,32 @@ fn real_nef_renders_from_embedded_jpeg() {
     let r = render_srgb(Format::Nef, &n, Some(256), 1).unwrap();
     assert_eq!(r.width.max(r.height), 256);
 }
+
+/// HEIC goes through ImageIO on macOS. `sips` makes a real HEIC from a JPEG.
+#[cfg(target_os = "macos")]
+#[test]
+fn heic_renders_through_imageio() {
+    let t = tempfile::tempdir().unwrap();
+    let (jpg, heic) = (t.path().join("a.jpg"), t.path().join("a.heic"));
+    let img = shoebox_fixtures::scene(8, 1200, 800);
+    std::fs::write(&jpg, shoebox_fixtures::jpeg(&img, 92).unwrap()).unwrap();
+    let ok = std::process::Command::new("sips")
+        .args(["-s", "format", "heic"])
+        .arg(&jpg)
+        .arg("--out")
+        .arg(&heic)
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !ok {
+        eprintln!("sips can't write HEIC here; skipping");
+        return;
+    }
+    let data = std::fs::read(&heic).unwrap();
+    let r = render_srgb(Format::Heic, &data, Some(300), 1).unwrap();
+    assert_eq!((r.width, r.height), (300, 200));
+    let ours = render_srgb(Format::Jpeg, &std::fs::read(&jpg).unwrap(), Some(300), 1).unwrap();
+    let d = mean_abs_diff(&r, &ours);
+    eprintln!("HEIC vs source JPEG: mean |Δ| {d:.2}");
+    assert!(d < 6.0, "HEIC render differs from its source by {d:.2}");
+    assert!(shoebox_decode::luma_thumbnail(Format::Heic, &data, 64).is_ok());
+}

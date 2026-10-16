@@ -171,7 +171,7 @@ fn scan_cmd(data_dir: &Path, folders: &[PathBuf]) -> Result<()> {
     let mut cache = Cache::open(&paths::cache_db(data_dir)).context("opening cache")?;
     let t = std::time::Instant::now();
     let (catalog, s) = Catalog::refresh(&mut cache, roots, &|done, total| {
-        if done % 500 == 0 || done == total {
+        if done.is_multiple_of(500) || done == total {
             eprint!("\rReading metadata {done}/{total}");
         }
     })?;
