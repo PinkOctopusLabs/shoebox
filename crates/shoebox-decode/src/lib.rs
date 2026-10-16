@@ -13,6 +13,20 @@ use std::path::Path;
 
 pub use gray::Gray;
 
+/// Largest image we will decode (200 MP). Bounds memory for hostile or corrupt
+/// headers; a Z f frame is 24 MP.
+pub const MAX_PIXELS: u64 = 200_000_000;
+
+/// Refuse dimensions whose decode buffer would exceed [`MAX_PIXELS`].
+pub fn check_dimensions(width: u32, height: u32) -> Result<(), DecodeError> {
+    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > MAX_PIXELS {
+        return Err(DecodeError::Unsupported(format!(
+            "image dimensions {width}x{height} exceed the {MAX_PIXELS}-pixel limit"
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
     #[error("truncated or out-of-bounds data")]

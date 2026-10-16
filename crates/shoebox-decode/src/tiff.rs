@@ -24,6 +24,15 @@ pub fn image_data_ranges(data: &[u8]) -> Result<Vec<Range<usize>>, DecodeError> 
     Err(DecodeError::Format("TIFF has no strips or tiles".into()))
 }
 
+/// 200 MP of 16-bit RGBA fits in 1.6 GB; anything larger is refused before
+/// allocation.
+fn limits() -> Limits {
+    let mut l = Limits::default();
+    l.decoding_buffer_size = (crate::MAX_PIXELS * 8) as usize;
+    l.intermediate_buffer_size = 256 * 1024 * 1024;
+    l
+}
+
 fn tiff_err(e: tiff::TiffError) -> DecodeError {
     DecodeError::Format(format!("TIFF: {e}"))
 }
@@ -32,8 +41,9 @@ fn tiff_err(e: tiff::TiffError) -> DecodeError {
 pub fn decode_luma(data: &[u8]) -> Result<Gray, DecodeError> {
     let mut d = Decoder::new(Cursor::new(data))
         .map_err(tiff_err)?
-        .with_limits(Limits::unlimited());
+        .with_limits(limits());
     let (w, h) = d.dimensions().map_err(tiff_err)?;
+    crate::check_dimensions(w, h)?;
     let ct = d.colortype().map_err(tiff_err)?;
     let channels = match ct {
         ColorType::Gray(_) => 1,

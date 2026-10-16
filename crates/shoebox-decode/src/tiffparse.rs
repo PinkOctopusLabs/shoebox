@@ -21,6 +21,9 @@ pub const TAG_JPEG_IF_LENGTH: u16 = 0x0202;
 /// Upper bound on entries per IFD and IFDs visited, so corrupt files can't loop.
 const MAX_ENTRIES: u16 = 4096;
 const MAX_IFDS: usize = 64;
+/// Upper bound on values read from one entry (strip/tile tables, SubIFD lists).
+/// 1M strips is far beyond any real file and caps allocation at 8 MB.
+const MAX_VALUES: usize = 1 << 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Endian {
@@ -142,7 +145,13 @@ impl<'a> Tiff<'a> {
     pub fn uints(&self, e: &Entry) -> Result<Vec<u64>, DecodeError> {
         let size = type_size(e.typ).ok_or(DecodeError::Truncated)?;
         let count = e.count as usize;
-        // Guard against absurd counts before allocating.
+        if count > MAX_VALUES {
+            return Err(DecodeError::Format(format!(
+                "tag {:#x} has an implausible {count} values",
+                e.tag
+            )));
+        }
+        // Guard against values past the end of the file before allocating.
         self.bytes(e.value_at, size.saturating_mul(count))?;
         (0..count)
             .map(|i| {
@@ -177,17 +186,23 @@ impl<'a> Tiff<'a> {
     pub fn all_ifds(&self) -> Result<Vec<Ifd>, DecodeError> {
         let mut out = Vec::new();
         let mut stack = vec![self.first_ifd];
-        let mut seen = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         while let Some(at) = stack.pop() {
-            if at == 0 || seen.contains(&at) || out.len() >= MAX_IFDS {
+            if out.len() >= MAX_IFDS {
+                break;
+            }
+            if at == 0 || !seen.insert(at) {
                 continue;
             }
-            seen.push(at);
             let (ifd, next) = self.read_ifd(at)?;
             if let Some(e) = ifd.get(TAG_SUB_IFDS) {
-                for off in self.uints(e)? {
-                    stack.push(off as usize);
-                }
+                // Only the first few SubIFDs can ever be visited.
+                stack.extend(
+                    self.uints(e)?
+                        .into_iter()
+                        .take(MAX_IFDS)
+                        .map(|o| o as usize),
+                );
             }
             stack.push(next);
             out.push(ifd);

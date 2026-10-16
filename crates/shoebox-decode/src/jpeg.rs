@@ -77,9 +77,14 @@ pub fn dimensions(data: &[u8]) -> Result<(u32, u32), DecodeError> {
 pub fn decode_luma(data: &[u8]) -> Result<Gray, DecodeError> {
     let opts = DecoderOptions::default()
         .jpeg_set_out_colorspace(ColorSpace::Luma)
-        .set_max_width(1 << 16)
-        .set_max_height(1 << 16);
+        .set_max_width(1 << 15)
+        .set_max_height(1 << 15);
     let mut d = JpegDecoder::new_with_options(ZCursor::new(data), opts);
+    d.decode_headers()
+        .map_err(|e| DecodeError::Format(format!("JPEG: {e:?}")))?;
+    let info = d.info().ok_or(DecodeError::Truncated)?;
+    // Check before decode() allocates the output buffer.
+    crate::check_dimensions(u32::from(info.width), u32::from(info.height))?;
     let px = d
         .decode()
         .map_err(|e| DecodeError::Format(format!("JPEG: {e:?}")))?;
