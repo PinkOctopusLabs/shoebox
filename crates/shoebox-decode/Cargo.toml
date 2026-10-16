@@ -26,6 +26,7 @@ bench-turbojpeg = ["dep:turbojpeg"]
 
 [dev-dependencies]
 criterion = "0.8.2"
+image = { version = "0.25.10", default-features = false }
 moxcms = "0.9.1"
 rayon = "1.12.0"
 shoebox-fixtures = { path = "../shoebox-fixtures" }

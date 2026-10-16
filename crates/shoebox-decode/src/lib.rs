@@ -15,7 +15,7 @@ pub mod tiffparse;
 use std::path::Path;
 
 pub use gray::Gray;
-pub use rgb::Rgb8;
+pub use rgb::{Rgb8, Target};
 
 /// Largest image we will decode (200 MP). Bounds memory for hostile or corrupt
 /// headers; a Z f frame is 24 MP.
@@ -199,15 +199,26 @@ fn pick(cands: &[(std::ops::Range<usize>, (u32, u32))], want: Option<u32>) -> Op
     big_enough.or_else(|| (0..cands.len()).max_by_key(|&i| long(i)))
 }
 
-/// A display-ready image: sRGB, upright, long edge at most `long_edge`
-/// (full size if None). Uses the smallest embedded preview that's big
-/// enough, so grid thumbnails of camera JPGs and NEFs decode a few hundred
-/// KB instead of the whole file.
+/// A display-ready sRGB image (see [`render`]).
 pub fn render_srgb(
     format: Format,
     data: &[u8],
     long_edge: Option<u32>,
     orientation: u16,
+) -> Result<Rgb8, DecodeError> {
+    render(format, data, long_edge, orientation, Target::Srgb)
+}
+
+/// A display-ready image in `target`'s colour space, upright, long edge at
+/// most `long_edge` (full size if None). Uses the smallest embedded preview
+/// that's big enough, so grid thumbnails of camera JPGs and NEFs decode a few
+/// hundred KB instead of the whole file.
+pub fn render(
+    format: Format,
+    data: &[u8],
+    long_edge: Option<u32>,
+    orientation: u16,
+    target: Target,
 ) -> Result<Rgb8, DecodeError> {
     let (mut img, icc) = match format {
         Format::Jpeg | Format::Nef => {
@@ -225,12 +236,12 @@ pub fn render_srgb(
         }
         Format::Tiff => tiff::decode_rgb(data)?,
         Format::Png => png::decode_rgb(data)?,
-        Format::Heic => return heic_srgb(data, long_edge.unwrap_or(1 << 14)),
+        Format::Heic => return heic_render(data, long_edge.unwrap_or(1 << 14), target),
     };
     if let Some(l) = long_edge {
         img = img.fit_long_edge(l);
     }
-    rgb::to_srgb(&mut img, icc.as_deref());
+    rgb::convert(&mut img, icc.as_deref(), target);
     Ok(img.orient(orientation))
 }
 
@@ -242,11 +253,17 @@ fn jpeg_icc(data: &[u8]) -> Option<Vec<u8>> {
 
 /// HEIC through ImageIO, which also applies orientation and colour management.
 #[cfg(target_os = "macos")]
-fn heic_srgb(data: &[u8], max: u32) -> Result<Rgb8, DecodeError> {
-    imageio::thumbnail_srgb(data, max, true, Some(imageio::type_hint(Format::Heic)))
+fn heic_render(data: &[u8], max: u32, target: Target) -> Result<Rgb8, DecodeError> {
+    imageio::thumbnail_rgb(
+        data,
+        max,
+        true,
+        Some(imageio::type_hint(Format::Heic)),
+        target,
+    )
 }
 
 #[cfg(not(target_os = "macos"))]
-fn heic_srgb(_data: &[u8], _max: u32) -> Result<Rgb8, DecodeError> {
+fn heic_render(_data: &[u8], _max: u32, _target: Target) -> Result<Rgb8, DecodeError> {
     Err(heic_unsupported())
 }

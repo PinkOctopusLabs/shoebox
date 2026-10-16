@@ -33,3 +33,11 @@ egui_kittest = { version = "0.37.0", features = ["eframe", "snapshot", "wgpu"] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 shoebox-fixtures = { path = "../shoebox-fixtures" }
 tempfile = "3.27.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+raw-window-handle = "0.6.2"
+objc2 = "0.6.5"
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std", "CALayer", "CAMetalLayer", "objc2-core-graphics"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGColorSpace"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFString"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray"] }

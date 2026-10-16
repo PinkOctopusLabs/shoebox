@@ -59,6 +59,7 @@ pub struct Job {
     pub size: u64,
     pub mtime_ns: i64,
     pub orientation: u16,
+    pub target: shoebox_decode::Target,
 }
 
 pub struct Loaded {
@@ -190,6 +191,7 @@ fn worker(q: &Queue, tx: &Sender<Loaded>, thumbs: &ThumbCache, repaint: &(dyn Fn
             size: job.size,
             mtime_ns: job.mtime_ns,
             orientation: job.orientation,
+            target: job.target,
         };
         let result = match key.size {
             Size::Small => thumbs.get(&src, thumbs::SMALL).map_err(|e| e.to_string()),
@@ -197,7 +199,7 @@ fn worker(q: &Queue, tx: &Sender<Loaded>, thumbs: &ThumbCache, repaint: &(dyn Fn
             Size::Full => std::fs::read(&job.path)
                 .map_err(|e| format!("{}: {e}", job.path.display()))
                 .and_then(|data| {
-                    shoebox_decode::render_srgb(job.format, &data, None, job.orientation)
+                    shoebox_decode::render(job.format, &data, None, job.orientation, job.target)
                         .map_err(|e| format!("{}: {e}", job.path.display()))
                 }),
         };

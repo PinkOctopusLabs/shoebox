@@ -3,12 +3,12 @@
 
 use std::path::{Path, PathBuf};
 
-use shoebox_decode::{Format, Rgb8};
+use shoebox_decode::{Format, Rgb8, Target};
 
 use crate::error::{CoreError, Result, io};
 
 /// Bump when rendering changes (colour, resampling), to regenerate.
-pub const RENDER_VERSION: u32 = 1;
+pub const RENDER_VERSION: u32 = 2;
 
 /// The two cached sizes from the spec.
 pub const SMALL: u32 = 256;
@@ -29,6 +29,8 @@ pub struct Source<'a> {
     pub size: u64,
     pub mtime_ns: i64,
     pub orientation: u16,
+    /// Colour space the thumbnail is rendered in (part of the cache key).
+    pub target: Target,
 }
 
 impl ThumbCache {
@@ -42,6 +44,10 @@ impl ThumbCache {
         h.update(&src.size.to_le_bytes());
         h.update(&src.mtime_ns.to_le_bytes());
         h.update(&src.orientation.to_le_bytes());
+        h.update(match src.target {
+            Target::Srgb => b"srgb",
+            Target::DisplayP3 => b"dp3_",
+        });
         h.update(&RENDER_VERSION.to_le_bytes());
         let k = h.finalize().to_hex();
         self.dir
@@ -64,11 +70,12 @@ impl ThumbCache {
             return Ok(img);
         }
         let data = std::fs::read(src.path).map_err(io(src.path))?;
-        let img = shoebox_decode::render_srgb(src.format, &data, Some(edge), src.orientation)
-            .map_err(|e| CoreError::Decode {
-                path: src.path.to_path_buf(),
-                source: e,
-            })?;
+        let img =
+            shoebox_decode::render(src.format, &data, Some(edge), src.orientation, src.target)
+                .map_err(|e| CoreError::Decode {
+                    path: src.path.to_path_buf(),
+                    source: e,
+                })?;
         if let Err(e) = self.store(src, edge, &img) {
             tracing::warn!("thumbnail cache write failed: {e}");
         }
@@ -122,6 +129,7 @@ mod tests {
             size: 1,
             mtime_ns: 1,
             orientation: 6,
+            target: Target::Srgb,
         };
         assert!(cache.cached(&src, SMALL).is_none());
         let a = cache.get(&src, SMALL).unwrap();

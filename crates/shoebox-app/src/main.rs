@@ -23,7 +23,7 @@ fn main() -> anyhow::Result<()> {
     eframe::run_native(
         "Shoebox",
         options,
-        Box::new(|cc| Ok(Box::new(ShoeboxApp::new(&cc.egui_ctx, paths)))),
+        Box::new(|cc| Ok(Box::new(ShoeboxApp::new(cc, paths)))),
     )
     .map_err(|e| anyhow::anyhow!("eframe failed: {e}"))
 }

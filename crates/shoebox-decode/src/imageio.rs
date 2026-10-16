@@ -100,6 +100,7 @@ unsafe extern "C" {
     fn CGImageGetWidth(img: CFTypeRef) -> usize;
     fn CGImageGetHeight(img: CFTypeRef) -> usize;
     static kCGColorSpaceSRGB: CFTypeRef;
+    static kCGColorSpaceDisplayP3: CFTypeRef;
     fn CGColorSpaceCreateDeviceGray() -> CFTypeRef;
     fn CGColorSpaceCreateWithName(name: CFTypeRef) -> CFTypeRef;
     fn CGBitmapContextCreate(
@@ -149,8 +150,8 @@ pub fn type_hint(format: crate::Format) -> &'static str {
 #[derive(Clone, Copy)]
 enum Out {
     Gray,
-    /// Colour-managed to sRGB by ColorSync.
-    Srgb,
+    /// Colour-managed by ColorSync into the target space.
+    Rgb(crate::Target),
 }
 
 /// Decode a thumbnail whose long edge is at most `max_px`, as 8-bit gray.
@@ -168,14 +169,26 @@ pub fn thumbnail_luma(
 }
 
 /// Decode to sRGB (ImageIO/ColorSync does the colour management), with the
-/// long edge at most `max_px`. Used for HEIC, which has no pure-Rust decoder.
+/// long edge at most `max_px`.
 pub fn thumbnail_srgb(
     data: &[u8],
     max_px: u32,
     apply_orientation: bool,
     uti: Option<&str>,
 ) -> Result<crate::Rgb8, DecodeError> {
-    let (w, h, rgbx) = render(data, max_px, apply_orientation, uti, Out::Srgb)?;
+    thumbnail_rgb(data, max_px, apply_orientation, uti, crate::Target::Srgb)
+}
+
+/// Decode to RGB in `target`'s colour space via ColorSync. Used for HEIC,
+/// which has no pure-Rust decoder, and as the reference in colour tests.
+pub fn thumbnail_rgb(
+    data: &[u8],
+    max_px: u32,
+    apply_orientation: bool,
+    uti: Option<&str>,
+    target: crate::Target,
+) -> Result<crate::Rgb8, DecodeError> {
+    let (w, h, rgbx) = render(data, max_px, apply_orientation, uti, Out::Rgb(target))?;
     let rgb = rgbx
         .as_chunks::<4>()
         .0
@@ -286,9 +299,12 @@ fn render(
         crate::check_dimensions(w32, h32)?;
         let (bpp, space, info) = match out {
             Out::Gray => (1, CGColorSpaceCreateDeviceGray(), K_CG_IMAGE_ALPHA_NONE),
-            Out::Srgb => (
+            Out::Rgb(t) => (
                 4,
-                CGColorSpaceCreateWithName(kCGColorSpaceSRGB),
+                CGColorSpaceCreateWithName(match t {
+                    crate::Target::Srgb => kCGColorSpaceSRGB,
+                    crate::Target::DisplayP3 => kCGColorSpaceDisplayP3,
+                }),
                 K_CG_IMAGE_ALPHA_NONE_SKIP_LAST,
             ),
         };

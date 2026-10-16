@@ -120,10 +120,18 @@ pub struct ShoeboxApp {
     pub(crate) error: Option<String>,
     /// When set, the centre view scrolls so this photo is visible.
     pub(crate) scroll_to_current: bool,
+    /// Tags the window Display P3 on macOS (None in tests / elsewhere).
+    display: Option<crate::display::DisplayTagger>,
+    /// Colour space images are rendered in for this display.
+    target: shoebox_decode::Target,
 }
 
 impl ShoeboxApp {
-    pub fn new(ctx: &egui::Context, paths: AppPaths) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, paths: AppPaths) -> Self {
+        let ctx = &cc.egui_ctx;
+        let display = crate::display::DisplayTagger::new(cc);
+        let target = crate::display::DisplayTagger::target(display.as_ref());
+        tracing::info!("rendering images in {target:?}");
         let threads =
             std::thread::available_parallelism().map_or(4, |n| n.get().saturating_sub(1).max(2));
         let (c1, c2) = (ctx.clone(), ctx.clone());
@@ -173,6 +181,8 @@ impl ShoeboxApp {
             scanning: true,
             error: None,
             scroll_to_current: false,
+            display,
+            target,
         }
     }
 
@@ -329,6 +339,7 @@ impl ShoeboxApp {
                 size: p.size,
                 mtime_ns: p.mtime_ns,
                 orientation: p.meta.orientation(),
+                target: self.target,
             },
         ));
     }
@@ -460,6 +471,9 @@ impl ShoeboxApp {
 impl eframe::App for ShoeboxApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        if let Some(d) = &self.display {
+            d.ensure();
+        }
         self.textures.begin_frame();
         self.apply_events(&ctx);
         self.handle_keys(&ctx);

@@ -127,3 +127,42 @@ fn heic_renders_through_imageio() {
     assert!(d < 6.0, "HEIC render differs from its source by {d:.2}");
     assert!(shoebox_decode::luma_thumbnail(Format::Heic, &data, 64).is_ok());
 }
+
+/// Display P3 output matches ColorSync's, and keeps colours sRGB would clip.
+#[cfg(target_os = "macos")]
+#[test]
+fn adobe_rgb_to_display_p3_matches_imageio_and_keeps_gamut() {
+    use shoebox_decode::{Target, imageio, render};
+    let icc = moxcms::ColorProfile::new_adobe_rgb().encode().unwrap();
+    // A scene plus a band of deep Adobe RGB green (outside sRGB, inside P3).
+    let mut img = shoebox_fixtures::scene(7, 600, 400);
+    for y in 0..60 {
+        for x in 0..600 {
+            img.put_pixel(x, y, image::Rgb([20, 200, 40]));
+        }
+    }
+    let t = shoebox_fixtures::tiff_with_icc(&img, &icc);
+    let ours = render(Format::Tiff, &t, Some(300), 1, Target::DisplayP3).unwrap();
+    let theirs =
+        imageio::thumbnail_rgb(&t, 300, false, Some("public.tiff"), Target::DisplayP3).unwrap();
+    let d = mean_abs_diff(&ours, &theirs);
+    eprintln!("Display P3: mean |Δ| vs ImageIO {d:.2}");
+    assert!(d < 2.0, "P3 render differs from ImageIO by {d:.2}");
+
+    // In the green band sRGB clips both red and blue to 0; P3 (a wider
+    // gamut) still needs red at 0 but keeps the blue component.
+    let srgb = render(Format::Tiff, &t, Some(300), 1, Target::Srgb).unwrap();
+    let px = |im: &Rgb8| im.px[(10 * im.width as usize + 150) * 3..][..3].to_vec();
+    eprintln!("deep green: sRGB {:?}, P3 {:?}", px(&srgb), px(&ours));
+    // sRGB clips both red and blue to 0; P3, a wider gamut, still needs red
+    // at 0 for this green but keeps its blue component.
+    assert_eq!(
+        (px(&srgb)[0], px(&srgb)[2]),
+        (0, 0),
+        "sRGB should clip this green"
+    );
+    assert!(
+        px(&ours)[2] > 20,
+        "P3 should keep more of this green's gamut"
+    );
+}

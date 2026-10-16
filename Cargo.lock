@@ -3207,6 +3207,12 @@ dependencies = [
  "egui",
  "egui_kittest",
  "image",
+ "objc2 0.6.5",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
+ "raw-window-handle",
  "rfd",
  "shoebox-core",
  "shoebox-decode",
@@ -3261,6 +3267,7 @@ name = "shoebox-decode"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "image",
  "moxcms 0.9.1",
  "png",
  "rayon",

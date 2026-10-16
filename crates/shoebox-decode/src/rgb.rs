@@ -117,35 +117,53 @@ impl Rgb8 {
 }
 
 type Transform = Arc<Transform8BitExecutor>;
+type TransformCache = Mutex<HashMap<(u64, Target), Option<Transform>>>;
+
+/// The colour space display images are rendered into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Target {
+    Srgb,
+    /// Wide gamut (P3 primaries, sRGB tone curve, D65), as Apple displays use.
+    DisplayP3,
+}
+
+impl Target {
+    fn profile(self) -> ColorProfile {
+        match self {
+            Target::Srgb => ColorProfile::new_srgb(),
+            Target::DisplayP3 => ColorProfile::new_display_p3(),
+        }
+    }
+}
 
 /// Transforms are costly to build and most libraries use a handful of
-/// profiles (sRGB, Adobe RGB, ProPhoto), so they're cached by profile bytes.
-fn transform_for(icc: &[u8]) -> Result<Option<Transform>, DecodeError> {
-    static CACHE: OnceLock<Mutex<HashMap<u64, Option<Transform>>>> = OnceLock::new();
+/// profiles (sRGB, Adobe RGB, ProPhoto), so they're cached by profile bytes
+/// and target. `None` means the source already is the target space.
+fn transform_for(icc: Option<&[u8]>, target: Target) -> Result<Option<Transform>, DecodeError> {
+    static CACHE: OnceLock<TransformCache> = OnceLock::new();
     let key = {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         icc.hash(&mut h);
-        h.finish()
+        (h.finish(), target)
     };
     let cache = CACHE.get_or_init(Default::default);
     if let Some(t) = cache.lock().map_err(|_| DecodeError::Truncated)?.get(&key) {
         return Ok(t.clone());
     }
-    let src = ColorProfile::new_from_slice(icc)
-        .map_err(|e| DecodeError::Format(format!("ICC profile: {e:?}")))?;
-    // An sRGB-equivalent source needs no work.
-    let t = if is_srgb(&src) {
+    // Untagged images are sRGB (the spec's fallback).
+    let src = match icc {
+        Some(bytes) => ColorProfile::new_from_slice(bytes)
+            .map_err(|e| DecodeError::Format(format!("ICC profile: {e:?}")))?,
+        None => ColorProfile::new_srgb(),
+    };
+    let dst = target.profile();
+    let t = if equivalent(&src, &dst) {
         None
     } else {
         Some(
-            src.create_transform_8bit(
-                Layout::Rgb,
-                &ColorProfile::new_srgb(),
-                Layout::Rgb,
-                TransformOptions::default(),
-            )
-            .map_err(|e| DecodeError::Format(format!("ICC transform: {e:?}")))?,
+            src.create_transform_8bit(Layout::Rgb, &dst, Layout::Rgb, TransformOptions::default())
+                .map_err(|e| DecodeError::Format(format!("ICC transform: {e:?}")))?,
         )
     };
     cache
@@ -155,21 +173,19 @@ fn transform_for(icc: &[u8]) -> Result<Option<Transform>, DecodeError> {
     Ok(t)
 }
 
-/// True when converting from `p` to sRGB would change nothing: same
+/// True when converting from `p` to `dst` would change nothing: same
 /// colourants, and a grey ramp maps to itself (so the tone curves match too).
-fn is_srgb(p: &ColorProfile) -> bool {
-    let srgb = ColorProfile::new_srgb();
+fn equivalent(p: &ColorProfile, dst: &ColorProfile) -> bool {
     let close = |a: moxcms::Xyzd, b: moxcms::Xyzd| {
         (a.x - b.x).abs() < 2e-3 && (a.y - b.y).abs() < 2e-3 && (a.z - b.z).abs() < 2e-3
     };
-    if !(close(p.red_colorant, srgb.red_colorant)
-        && close(p.green_colorant, srgb.green_colorant)
-        && close(p.blue_colorant, srgb.blue_colorant))
+    if !(close(p.red_colorant, dst.red_colorant)
+        && close(p.green_colorant, dst.green_colorant)
+        && close(p.blue_colorant, dst.blue_colorant))
     {
         return false;
     }
-    let Ok(t) =
-        p.create_transform_8bit(Layout::Rgb, &srgb, Layout::Rgb, TransformOptions::default())
+    let Ok(t) = p.create_transform_8bit(Layout::Rgb, dst, Layout::Rgb, TransformOptions::default())
     else {
         return false;
     };
@@ -178,21 +194,28 @@ fn is_srgb(p: &ColorProfile) -> bool {
     t.transform(&ramp, &mut out).is_ok() && ramp.iter().zip(&out).all(|(a, b)| a.abs_diff(*b) <= 1)
 }
 
-/// Convert from the embedded profile to sRGB in place. Missing or unreadable
-/// profiles are treated as sRGB (the spec's fallback).
-pub fn to_srgb(img: &mut Rgb8, icc: Option<&[u8]>) {
-    let Some(icc) = icc else { return };
-    match transform_for(icc) {
-        Ok(Some(t)) => {
-            let src = img.px.clone();
-            if let Err(e) = t.transform(&src, &mut img.px) {
-                img.px = src;
-                tracing::warn!("ICC transform failed: {e:?}");
-            }
+/// Convert from the embedded profile (sRGB if none) to `target`, in place.
+/// An unreadable profile is treated as sRGB.
+pub fn convert(img: &mut Rgb8, icc: Option<&[u8]>, target: Target) {
+    let t = match transform_for(icc, target) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("ignoring ICC profile: {e}");
+            transform_for(None, target).ok().flatten()
         }
-        Ok(None) => {}
-        Err(e) => tracing::warn!("ignoring ICC profile: {e}"),
+    };
+    if let Some(t) = t {
+        let src = img.px.clone();
+        if let Err(e) = t.transform(&src, &mut img.px) {
+            img.px = src;
+            tracing::warn!("ICC transform failed: {e:?}");
+        }
     }
+}
+
+/// Convert from the embedded profile to sRGB in place.
+pub fn to_srgb(img: &mut Rgb8, icc: Option<&[u8]>) {
+    convert(img, icc, Target::Srgb);
 }
 
 #[cfg(test)]
@@ -222,6 +245,19 @@ mod tests {
         let before = img.clone();
         to_srgb(&mut img, Some(&srgb));
         assert_eq!(img, before);
+    }
+
+    #[test]
+    fn untagged_srgb_red_widens_into_p3() {
+        let mut img = Rgb8::new(1, 1, vec![255, 0, 0]).unwrap();
+        convert(&mut img, None, Target::DisplayP3);
+        // sRGB red sits inside P3, so it's less than full P3 red.
+        let [r, g, b] = [img.px[0], img.px[1], img.px[2]];
+        assert!(
+            (230..=236).contains(&r) && (45..=58).contains(&g) && (30..=42).contains(&b),
+            "{:?}",
+            img.px
+        );
     }
 
     #[test]

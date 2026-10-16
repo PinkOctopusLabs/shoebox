@@ -14,12 +14,18 @@ deliberately differ and why.
   1620×1080) and NEF embedded JPEGs; 6.7 ms vs 202 ms for a full decode.
   Thumbnails are cached as sRGB, upright JPEGs keyed by path, size, mtime
   and orientation (an edited file gets a new one).
-- **Display colour is sRGB.** ICC profiles are converted to sRGB with
-  moxcms (Adobe RGB within 0.72 levels of ImageIO); wgpu declares the
-  window surface as sRGB, so macOS colour-matches it to the display. On a
-  wide-gamut (P3) screen, colours outside sRGB in Adobe RGB/ProPhoto files
-  are clipped where Preview.app would show them. Rendering to Display P3
-  would close that gap; not done yet.
+- **Display colour is Display P3 on macOS** (sRGB elsewhere). Images are
+  converted from their ICC profile (untagged = sRGB) to Display P3 with
+  moxcms, and the window's Metal layer is tagged Display P3, so macOS
+  colour-matches to the actual screen, as Preview.app does; wide-gamut
+  Adobe RGB/ProPhoto colours are no longer clipped to sRGB. egui-wgpu has no
+  surface colour-space option and wgpu resets the layer's colour space when
+  it reconfigures (on resize), so `display::DisplayTagger` re-applies the tag
+  each frame. Thumbnails are cached per target colour space.
+  Checks: Adobe RGB → P3 within 0.76 levels of ImageIO; a deep Adobe RGB
+  green that sRGB clips keeps its blue component in P3. egui's own UI
+  colours are sRGB values drawn into a P3 surface, so accent colours are a
+  touch more saturated than egui intends; greys are identical.
 - **Headless UI verification** with egui_kittest: the real app renders to
   PNGs in tests, and a 10,000-photo scroll test measures UI frame time
   (p99 0.88 ms CPU; GPU time isn't measured headlessly).

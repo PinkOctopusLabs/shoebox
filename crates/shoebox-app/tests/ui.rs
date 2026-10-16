@@ -30,7 +30,7 @@ fn harness<'a>(paths: AppPaths, size: egui::Vec2) -> Harness<'a, ShoeboxApp> {
     Harness::builder()
         .with_size(size)
         .wgpu()
-        .build_eframe(move |cc| ShoeboxApp::new(&cc.egui_ctx, paths))
+        .build_eframe(move |cc| ShoeboxApp::new(cc, paths))
 }
 
 /// Step until the library is loaded and no image loads are outstanding.
