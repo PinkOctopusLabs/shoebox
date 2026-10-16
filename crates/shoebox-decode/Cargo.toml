@@ -11,4 +11,21 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+png = "0.18.1"
 thiserror.workspace = true
+tiff = "0.11.3"
+turbojpeg = { version = "1.5.1", optional = true, default-features = false }
+zune-core = "0.5.3"
+zune-jpeg = "0.5.15"
+
+[features]
+# Benchmark-only: links Homebrew's libjpeg-turbo. See benches/jpeg_thumb.rs.
+bench-turbojpeg = ["dep:turbojpeg"]
+
+[dev-dependencies]
+criterion = "0.8.2"
+shoebox-fixtures = { path = "../shoebox-fixtures" }
+
+[[bench]]
+name = "jpeg_thumb"
+harness = false

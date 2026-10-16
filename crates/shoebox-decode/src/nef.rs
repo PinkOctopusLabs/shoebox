@@ -1,0 +1,59 @@
+//! NEF embedded-preview extraction by walking the TIFF IFDs.
+
+use std::ops::Range;
+
+use crate::DecodeError;
+use crate::tiffparse::{
+    TAG_IMAGE_LENGTH, TAG_IMAGE_WIDTH, TAG_JPEG_IF_LENGTH, TAG_JPEG_IF_OFFSET, TAG_ORIENTATION,
+    Tiff,
+};
+
+/// Byte range of the largest embedded JPEG (`JpgFromRaw`) in a NEF.
+///
+/// Every IFD in the file (IFD0 chain and SubIFDs) is considered; the one whose
+/// JPEG is largest wins. For Nikon bodies that is the full-size preview.
+pub fn jpg_from_raw(data: &[u8]) -> Result<Option<Range<usize>>, DecodeError> {
+    let tiff = Tiff::parse(data)?;
+    let mut best: Option<Range<usize>> = None;
+    for ifd in tiff.all_ifds()? {
+        let (Some(off), Some(len)) = (
+            tiff.uint(&ifd, TAG_JPEG_IF_OFFSET)?,
+            tiff.uint(&ifd, TAG_JPEG_IF_LENGTH)?,
+        ) else {
+            continue;
+        };
+        let (off, len) = (off as usize, len as usize);
+        let Some(bytes) = off.checked_add(len).and_then(|end| data.get(off..end)) else {
+            continue; // out of bounds: corrupt pointer, ignore this IFD
+        };
+        if !bytes.starts_with(&[0xFF, 0xD8]) {
+            continue;
+        }
+        if best.as_ref().is_none_or(|b| b.len() < len) {
+            best = Some(off..off + len);
+        }
+    }
+    Ok(best)
+}
+
+/// Orientation and declared dimensions from IFD0 of a TIFF-based file.
+pub fn ifd0_orientation(data: &[u8]) -> Result<Option<u16>, DecodeError> {
+    let tiff = Tiff::parse(data)?;
+    let ifd0 = tiff.ifd0()?;
+    Ok(tiff
+        .uint(&ifd0, TAG_ORIENTATION)?
+        .and_then(|v| u16::try_from(v).ok()))
+}
+
+/// Width and height declared in IFD0.
+pub fn ifd0_dimensions(data: &[u8]) -> Result<Option<(u32, u32)>, DecodeError> {
+    let tiff = Tiff::parse(data)?;
+    let ifd0 = tiff.ifd0()?;
+    match (
+        tiff.uint(&ifd0, TAG_IMAGE_WIDTH)?,
+        tiff.uint(&ifd0, TAG_IMAGE_LENGTH)?,
+    ) {
+        (Some(w), Some(h)) => Ok(Some((w as u32, h as u32))),
+        _ => Ok(None),
+    }
+}

@@ -1,0 +1,211 @@
+//! SQLite cache of per-file analysis, keyed by (root, relative path, size, mtime).
+
+use std::path::Path;
+
+use rusqlite::{Connection, OptionalExtension, params};
+
+use crate::error::{CoreError, Result, io};
+use crate::exif::ExifInfo;
+use crate::hash::{ANALYZER_VERSION, Analysis, Digest, PHashes};
+
+const SCHEMA_VERSION: i64 = 1;
+
+pub struct Cache {
+    conn: Connection,
+}
+
+/// One analysed file ready to be written to the cache.
+pub struct Entry<'a> {
+    pub root_id: i64,
+    pub rel: &'a str,
+    pub ext: &'a str,
+    pub size: u64,
+    pub mtime_ns: i64,
+    pub analysis: &'a Analysis,
+}
+
+fn digest(v: Vec<u8>) -> Result<Digest> {
+    v.try_into()
+        .map_err(|_| CoreError::Invalid("cache holds a malformed digest".into()))
+}
+
+impl Cache {
+    pub fn open(path: &Path) -> Result<Self> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(io(dir))?;
+        }
+        Self::init(Connection::open(path)?)
+    }
+
+    pub fn open_in_memory() -> Result<Self> {
+        Self::init(Connection::open_in_memory()?)
+    }
+
+    fn init(conn: Connection) -> Result<Self> {
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "foreign_keys", true)?;
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version > SCHEMA_VERSION {
+            return Err(CoreError::Invalid(format!(
+                "cache schema {version} is newer than this build ({SCHEMA_VERSION})"
+            )));
+        }
+        conn.execute_batch(include_str!("schema.sql"))?;
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        Ok(Self { conn })
+    }
+
+    pub fn root_id(&self, path: &Path, is_reference: bool) -> Result<i64> {
+        let p = path
+            .to_str()
+            .ok_or_else(|| CoreError::Invalid(format!("non-UTF-8 root {}", path.display())))?;
+        self.conn.execute(
+            "INSERT INTO roots(path, is_reference) VALUES (?1, ?2)
+             ON CONFLICT(path) DO UPDATE SET is_reference = excluded.is_reference",
+            params![p, is_reference],
+        )?;
+        Ok(self
+            .conn
+            .query_row("SELECT id FROM roots WHERE path = ?1", [p], |r| r.get(0))?)
+    }
+
+    /// Cached analysis if the file is unchanged since it was analysed.
+    pub fn lookup(
+        &self,
+        root_id: i64,
+        rel: &str,
+        size: u64,
+        mtime_ns: i64,
+    ) -> Result<Option<Analysis>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT f.id, f.blake3, f.image_data_hash, f.width, f.height, f.analyze_error,
+                        e.capture_time, e.subsec, e.offset, e.make, e.model, e.serial, e.lens,
+                        e.focal, e.fnumber, e.exposure, e.iso, e.orientation
+                 FROM files f LEFT JOIN exif e ON e.file_id = f.id
+                 WHERE f.root_id = ?1 AND f.rel_path = ?2 AND f.size = ?3 AND f.mtime = ?4
+                   AND f.analyzer_version = ?5",
+                params![root_id, rel, size as i64, mtime_ns, ANALYZER_VERSION],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, Vec<u8>>(1)?,
+                        r.get::<_, Option<Vec<u8>>>(2)?,
+                        r.get::<_, Option<u32>>(3)?,
+                        r.get::<_, Option<u32>>(4)?,
+                        r.get::<_, Option<String>>(5)?,
+                        ExifInfo {
+                            capture_time: r.get(6)?,
+                            subsec: r.get(7)?,
+                            offset: r.get(8)?,
+                            make: r.get(9)?,
+                            model: r.get(10)?,
+                            serial: r.get(11)?,
+                            lens: r.get(12)?,
+                            focal: r.get(13)?,
+                            fnumber: r.get(14)?,
+                            exposure: r.get(15)?,
+                            iso: r.get(16)?,
+                            orientation: r.get(17)?,
+                        },
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((id, b3, idh, width, height, error, exif)) = row else {
+            return Ok(None);
+        };
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT dhash, phash FROM phash WHERE file_id = ?1 ORDER BY rotation",
+        )?;
+        let hashes = stmt
+            .query_map([id], |r| {
+                Ok(PHashes {
+                    dhash: r.get::<_, i64>(0)? as u64,
+                    phash: r.get::<_, i64>(1)? as u64,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Some(Analysis {
+            blake3: digest(b3)?,
+            image_data_hash: idh.map(digest).transpose()?,
+            width,
+            height,
+            exif,
+            hashes,
+            error,
+        }))
+    }
+
+    /// Write many entries in one transaction.
+    pub fn store_all(&mut self, entries: &[Entry<'_>]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut file = tx.prepare_cached(
+                "INSERT INTO files(root_id, rel_path, ext, size, mtime, blake3, image_data_hash,
+                                   width, height, analyzer_version, analyze_error)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT(root_id, rel_path) DO UPDATE SET
+                   ext = excluded.ext, size = excluded.size, mtime = excluded.mtime,
+                   blake3 = excluded.blake3, image_data_hash = excluded.image_data_hash,
+                   width = excluded.width, height = excluded.height,
+                   analyzer_version = excluded.analyzer_version,
+                   analyze_error = excluded.analyze_error
+                 RETURNING id",
+            )?;
+            let mut exif = tx.prepare_cached(
+                "INSERT OR REPLACE INTO exif(file_id, capture_time, subsec, offset, make, model,
+                    serial, lens, focal, fnumber, exposure, iso, width, height, orientation)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            )?;
+            let mut clear = tx.prepare_cached("DELETE FROM phash WHERE file_id = ?1")?;
+            let mut ph = tx.prepare_cached(
+                "INSERT INTO phash(file_id, rotation, dhash, phash) VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for e in entries {
+                let a = e.analysis;
+                let id: i64 = file.query_row(
+                    params![
+                        e.root_id,
+                        e.rel,
+                        e.ext,
+                        e.size as i64,
+                        e.mtime_ns,
+                        &a.blake3[..],
+                        a.image_data_hash.as_ref().map(|d| &d[..]),
+                        a.width,
+                        a.height,
+                        ANALYZER_VERSION,
+                        a.error,
+                    ],
+                    |r| r.get(0),
+                )?;
+                let x = &a.exif;
+                exif.execute(params![
+                    id,
+                    x.capture_time,
+                    x.subsec,
+                    x.offset,
+                    x.make,
+                    x.model,
+                    x.serial,
+                    x.lens,
+                    x.focal,
+                    x.fnumber,
+                    x.exposure,
+                    x.iso,
+                    a.width,
+                    a.height,
+                    x.orientation,
+                ])?;
+                clear.execute([id])?;
+                for (rot, h) in a.hashes.iter().enumerate() {
+                    ph.execute(params![id, rot as i64 * 90, h.dhash as i64, h.phash as i64])?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+}
