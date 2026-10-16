@@ -8,13 +8,45 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::error::{CoreError, Result, io};
 use crate::exif::ExifInfo;
 use crate::hash::{ANALYZER_VERSION, Analysis, Digest, PHashes};
+use crate::marks::{Label, Marks, Pick};
 use crate::meta::{META_VERSION, Meta};
 
-const SCHEMA_VERSION: i64 = 3;
+/// A root's cached files: `rel → (size, mtime, metadata, marks)`.
+pub type KnownFiles = HashMap<String, (u64, i64, Meta, Option<CachedMarks>)>;
+
+/// Marks as cached: the marks, the per-file sidecar, and a signature of the
+/// sidecars present when they were read.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CachedMarks {
+    pub marks: Marks,
+    pub sidecar: Option<std::path::PathBuf>,
+    pub sig: String,
+}
+
+fn pick_str(p: Option<Pick>) -> Option<&'static str> {
+    p.map(|p| match p {
+        Pick::Pick => "pick",
+        Pick::Reject => "reject",
+    })
+}
+
+fn pick_from(s: Option<String>) -> Option<Pick> {
+    match s.as_deref() {
+        Some("pick") => Some(Pick::Pick),
+        Some("reject") => Some(Pick::Reject),
+        _ => None,
+    }
+}
+
+fn label_from(s: Option<String>) -> Option<Label> {
+    s.and_then(|s| Label::ALL.into_iter().find(|l| l.name() == s))
+}
+
+const SCHEMA_VERSION: i64 = 4;
 
 /// Rebuildable tables, dropped when the schema version changes.
 /// `dupe_ignores` holds user decisions and is never dropped.
-const REBUILDABLE: &[&str] = &["phash", "exif", "files", "roots"];
+const REBUILDABLE: &[&str] = &["marks", "phash", "exif", "files", "roots"];
 
 pub struct Cache {
     conn: Connection,
@@ -28,6 +60,7 @@ pub struct MetaEntry<'a> {
     pub size: u64,
     pub mtime_ns: i64,
     pub meta: &'a Meta,
+    pub marks: &'a CachedMarks,
 }
 
 /// One analysed file ready to be written to the cache.
@@ -188,6 +221,10 @@ impl Cache {
                     serial, lens, focal, fnumber, exposure, iso, width, height, orientation)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             )?;
+            let mut marks = tx.prepare_cached(
+                "INSERT OR REPLACE INTO marks(file_id, rating, pick, label, keywords, sidecar, sidecar_sig)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )?;
             for e in entries {
                 let m = e.meta;
                 let id: i64 = file.query_row(
@@ -221,19 +258,50 @@ impl Cache {
                     m.height,
                     x.orientation,
                 ])?;
+                let k = e.marks;
+                marks.execute(params![
+                    id,
+                    k.marks.rating,
+                    pick_str(k.marks.pick),
+                    k.marks.label.map(Label::name),
+                    k.marks.keywords.join("\n"),
+                    k.sidecar.as_ref().and_then(|p| p.to_str()),
+                    k.sig,
+                ])?;
             }
         }
         tx.commit()?;
         Ok(())
     }
 
+    /// Update just the marks of one file (after Shoebox writes its sidecar).
+    pub fn update_marks(&self, root_id: i64, rel: &str, m: &CachedMarks) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO marks(file_id, rating, pick, label, keywords, sidecar, sidecar_sig)
+             SELECT id, ?3, ?4, ?5, ?6, ?7, ?8 FROM files WHERE root_id = ?1 AND rel_path = ?2",
+            params![
+                root_id,
+                rel,
+                m.marks.rating,
+                pick_str(m.marks.pick),
+                m.marks.label.map(Label::name),
+                m.marks.keywords.join("\n"),
+                m.sidecar.as_ref().and_then(|p| p.to_str()),
+                m.sig,
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Every file of a root with current metadata: `rel → (size, mtime, meta)`.
-    pub fn load_meta(&self, root_id: i64) -> Result<HashMap<String, (u64, i64, Meta)>> {
+    pub fn load_meta(&self, root_id: i64) -> Result<KnownFiles> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT f.rel_path, f.size, f.mtime, f.width, f.height,
                     e.capture_time, e.subsec, e.offset, e.make, e.model, e.serial, e.lens,
-                    e.focal, e.fnumber, e.exposure, e.iso, e.orientation
+                    e.focal, e.fnumber, e.exposure, e.iso, e.orientation,
+                    k.rating, k.pick, k.label, k.keywords, k.sidecar, k.sidecar_sig
              FROM files f LEFT JOIN exif e ON e.file_id = f.id
+                          LEFT JOIN marks k ON k.file_id = f.id
              WHERE f.root_id = ?1 AND f.meta_version = ?2",
         )?;
         let rows = stmt.query_map(params![root_id, META_VERSION], |r| {
@@ -259,6 +327,24 @@ impl Cache {
                             iso: r.get(15)?,
                             orientation: r.get(16)?,
                         },
+                    },
+                    match r.get::<_, Option<u8>>(17)? {
+                        Some(rating) => Some(CachedMarks {
+                            marks: Marks {
+                                rating,
+                                pick: pick_from(r.get(18)?),
+                                label: label_from(r.get(19)?),
+                                keywords: r
+                                    .get::<_, String>(20)?
+                                    .split('\n')
+                                    .filter(|k| !k.is_empty())
+                                    .map(str::to_owned)
+                                    .collect(),
+                            },
+                            sidecar: r.get::<_, Option<String>>(21)?.map(Into::into),
+                            sig: r.get(22)?,
+                        }),
+                        None => None,
                     },
                 ),
             ))

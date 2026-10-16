@@ -7,12 +7,15 @@ pub mod error;
 pub mod exif;
 pub mod fileops;
 pub mod hash;
+pub mod marks;
 pub mod meta;
 pub mod paths;
 pub mod pipeline;
 pub mod scan;
 pub mod settings;
+pub mod sidecar;
 pub mod thumbs;
+pub mod xmp;
 
 pub use error::{CoreError, Result};
 

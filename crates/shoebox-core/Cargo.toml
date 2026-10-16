@@ -16,6 +16,7 @@ csv = "1.4.0"
 jpeg-encoder = "0.7.1"
 kamadak-exif = "0.6.1"
 libc = "0.2.190"
+quick-xml = "0.42.0"
 rayon = "1.12.0"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }

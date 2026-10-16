@@ -7,10 +7,12 @@ use std::path::PathBuf;
 use rayon::prelude::*;
 use shoebox_decode::Format;
 
-use crate::cache::{Cache, MetaEntry};
+use crate::cache::{Cache, CachedMarks, MetaEntry};
 use crate::error::Result;
+use crate::marks::Marks;
 use crate::meta::{self, Meta};
-use crate::scan::{self, Role, Root};
+use crate::scan::{self, Role, Root, Sidecars};
+use crate::sidecar;
 
 #[derive(Debug, Clone)]
 pub struct Photo {
@@ -22,6 +24,12 @@ pub struct Photo {
     pub size: u64,
     pub mtime_ns: i64,
     pub meta: Meta,
+    /// Effective marks (sidecar > embedded XMP > EXIF).
+    pub marks: Marks,
+    /// The per-file sidecar (`name.ext.xmp`), if it exists.
+    pub sidecar: Option<PathBuf>,
+    /// Signature of the sidecars the marks were read from.
+    pub sidecar_sig: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -49,7 +57,12 @@ impl Catalog {
         let mut photos = Vec::new();
         for (i, root) in roots.iter().enumerate() {
             let id = cache.root_id(&root.path, root.role == Role::Reference)?;
-            for (rel, (size, mtime_ns, meta)) in cache.load_meta(id)? {
+            for (rel, (size, mtime_ns, meta, marks)) in cache.load_meta(id)? {
+                let marks = marks.unwrap_or_else(|| CachedMarks {
+                    marks: Marks::default(),
+                    sidecar: None,
+                    sig: String::new(),
+                });
                 let path = root.path.join(&rel);
                 let Some(format) = Format::from_path(&path) else {
                     continue;
@@ -62,6 +75,9 @@ impl Catalog {
                     size,
                     mtime_ns,
                     meta,
+                    marks: marks.marks,
+                    sidecar: marks.sidecar,
+                    sidecar_sig: marks.sig,
                 });
             }
         }
@@ -77,7 +93,7 @@ impl Catalog {
         roots: Vec<Root>,
         progress: &(dyn Fn(usize, usize) + Sync),
     ) -> Result<(Self, RefreshStats)> {
-        let files = scan::scan(&roots, &[])?;
+        let (files, sidecars) = scan::scan_with_sidecars(&roots, &[])?;
         let mut stats = RefreshStats {
             files: files.len(),
             ..Default::default()
@@ -92,22 +108,31 @@ impl Catalog {
             .collect::<Result<_>>()?;
 
         let mut photos = Vec::with_capacity(files.len());
-        let mut todo = Vec::new();
+        // (file, metadata if it's still valid) for files needing a read.
+        let mut todo: Vec<(scan::ScannedFile, Option<Meta>)> = Vec::new();
         for f in files {
+            let sig = signature(&f.path, &sidecars);
             match known[f.root].get(&f.rel) {
-                Some((size, mtime, m)) if *size == f.size && *mtime == f.mtime_ns => {
-                    stats.cached += 1;
-                    photos.push(Photo {
-                        root: f.root,
-                        rel: f.rel,
-                        path: f.path,
-                        format: f.format,
-                        size: f.size,
-                        mtime_ns: f.mtime_ns,
-                        meta: m.clone(),
-                    });
-                }
-                _ => todo.push(f),
+                Some((size, mtime, m, cm)) if *size == f.size && *mtime == f.mtime_ns => match cm {
+                    Some(cm) if cm.sig == sig => {
+                        stats.cached += 1;
+                        photos.push(Photo {
+                            root: f.root,
+                            rel: f.rel,
+                            path: f.path,
+                            format: f.format,
+                            size: f.size,
+                            mtime_ns: f.mtime_ns,
+                            meta: m.clone(),
+                            marks: cm.marks.clone(),
+                            sidecar: cm.sidecar.clone(),
+                            sidecar_sig: sig,
+                        });
+                    }
+                    // Image unchanged, sidecar changed: re-read marks only.
+                    _ => todo.push((f, Some(m.clone()))),
+                },
+                _ => todo.push((f, None)),
             }
         }
 
@@ -116,14 +141,23 @@ impl Catalog {
         for chunk in todo.chunks(STORE_CHUNK) {
             let read: Vec<(Photo, bool)> = chunk
                 .par_iter()
-                .map(|f| {
-                    let (m, ok) = match meta::read(&f.path, f.format) {
-                        Ok(m) => (m, true),
-                        Err(e) => {
-                            tracing::warn!("metadata: {e}");
-                            (Meta::default(), false)
-                        }
+                .map(|(f, known_meta)| {
+                    let (m, ok) = match known_meta {
+                        Some(m) => (m.clone(), true),
+                        None => match meta::read(&f.path, f.format) {
+                            Ok(m) => (m, true),
+                            Err(e) => {
+                                tracing::warn!("metadata: {e}");
+                                (Meta::default(), false)
+                            }
+                        },
                     };
+                    let (stem, file) = sidecar::present(&f.path, &|p| sidecars.contains_key(p));
+                    let loaded = sidecar::load(&f.path, f.format, stem.as_deref(), file.as_deref())
+                        .unwrap_or_else(|e| {
+                            tracing::warn!("marks: {e}");
+                            sidecar::Loaded::default()
+                        });
                     let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                     progress(n, total);
                     let p = Photo {
@@ -134,6 +168,9 @@ impl Catalog {
                         size: f.size,
                         mtime_ns: f.mtime_ns,
                         meta: m,
+                        marks: loaded.marks,
+                        sidecar: loaded.sidecar,
+                        sidecar_sig: signature(&f.path, &sidecars),
                     };
                     (p, ok)
                 })
@@ -142,17 +179,27 @@ impl Catalog {
                 .iter()
                 .map(|(p, _)| p.format.label().to_ascii_lowercase())
                 .collect();
+            let cached: Vec<CachedMarks> = read
+                .iter()
+                .map(|(p, _)| CachedMarks {
+                    marks: p.marks.clone(),
+                    sidecar: p.sidecar.clone(),
+                    sig: p.sidecar_sig.clone(),
+                })
+                .collect();
             let entries: Vec<MetaEntry<'_>> = read
                 .iter()
                 .zip(&exts)
-                .filter(|((_, ok), _)| *ok)
-                .map(|((p, _), ext)| MetaEntry {
+                .zip(&cached)
+                .filter(|(((_, ok), _), _)| *ok)
+                .map(|(((p, _), ext), marks)| MetaEntry {
                     root_id: ids[p.root],
                     rel: &p.rel,
                     ext,
                     size: p.size,
                     mtime_ns: p.mtime_ns,
                     meta: &p.meta,
+                    marks,
                 })
                 .collect();
             cache.store_meta(&entries)?;
@@ -192,6 +239,57 @@ impl Catalog {
         here.into_iter().filter(|&j| key(j) == mine).collect()
     }
 
+    /// Write new marks for photo `i` (via `fileops`, journaled), and update
+    /// the catalog and cache. Returns the journal batch, or None if nothing
+    /// changed.
+    pub fn set_marks(
+        &mut self,
+        i: usize,
+        new: Marks,
+        fileops: &crate::fileops::FileOps,
+        cache: &Cache,
+        also_stem: bool,
+    ) -> Result<Option<i64>> {
+        let p = &self.photos[i];
+        let writes = sidecar::plan_write(&p.path, &p.marks, &new, also_stem)?;
+        if writes.is_empty() {
+            return Ok(None);
+        }
+        let name = p
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let batch = fileops.write_sidecars(&format!("marks: {name}"), writes)?;
+        let root = &self.roots[p.root];
+        let root_id = cache.root_id(&root.path, root.role == Role::Reference)?;
+        // Re-derive the signature from disk so the next rescan sees it as current.
+        let mut found = Sidecars::new();
+        for side in [sidecar::per_stem(&p.path), sidecar::per_file(&p.path)] {
+            for cand in [side.clone(), side.with_extension("XMP")] {
+                if let Ok(m) = std::fs::metadata(&cand) {
+                    found.insert(cand, scan::mtime_of(&m));
+                }
+            }
+        }
+        let sig = signature(&p.path, &found);
+        let (_, file) = sidecar::present(&p.path, &|q| found.contains_key(q));
+        let photo = &mut self.photos[i];
+        photo.marks = new;
+        photo.sidecar = file;
+        photo.sidecar_sig = sig;
+        cache.update_marks(
+            root_id,
+            &photo.rel,
+            &CachedMarks {
+                marks: photo.marks.clone(),
+                sidecar: photo.sidecar.clone(),
+                sig: photo.sidecar_sig.clone(),
+            },
+        )?;
+        Ok(Some(batch))
+    }
+
     fn sort(&mut self) {
         self.photos.sort_by(|a, b| {
             let (ta, tb) = (a.meta.capture_seconds(), b.meta.capture_seconds());
@@ -204,4 +302,15 @@ impl Catalog {
             .then_with(|| a.path.cmp(&b.path))
         });
     }
+}
+
+/// Which sidecars exist for `image`, and when they last changed.
+fn signature(image: &std::path::Path, sidecars: &Sidecars) -> String {
+    let (stem, file) = sidecar::present(image, &|p| sidecars.contains_key(p));
+    [stem, file]
+        .into_iter()
+        .flatten()
+        .map(|p| format!("{}@{}", p.display(), sidecars.get(&p).copied().unwrap_or(0)))
+        .collect::<Vec<_>>()
+        .join(";")
 }

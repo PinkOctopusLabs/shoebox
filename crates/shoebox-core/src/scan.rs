@@ -56,7 +56,19 @@ fn skip_dir(name: &str) -> bool {
 /// Walk every root and return supported image files, sorted by path.
 /// `exclude` lists canonical folders to skip (such as a move destination).
 pub fn scan(roots: &[Root], exclude: &[PathBuf]) -> Result<Vec<ScannedFile>> {
+    Ok(scan_with_sidecars(roots, exclude)?.0)
+}
+
+/// XMP sidecars found during a scan: path → modification time (ns).
+pub type Sidecars = std::collections::HashMap<PathBuf, i64>;
+
+/// Like [`scan`], also collecting every `.xmp` file in the same walk.
+pub fn scan_with_sidecars(
+    roots: &[Root],
+    exclude: &[PathBuf],
+) -> Result<(Vec<ScannedFile>, Sidecars)> {
     let mut out = Vec::new();
+    let mut sidecars = Sidecars::new();
     for (idx, root) in roots.iter().enumerate() {
         let walker = WalkDir::new(&root.path).follow_links(false).into_iter();
         let walker = walker.filter_entry(|e| {
@@ -80,6 +92,16 @@ pub fn scan(roots: &[Root], exclude: &[PathBuf]) -> Result<Vec<ScannedFile>> {
             if !entry.file_type().is_file() {
                 continue;
             }
+            let is_xmp = entry
+                .path()
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("xmp"));
+            if is_xmp {
+                if let Ok(m) = entry.metadata() {
+                    sidecars.insert(entry.path().to_path_buf(), mtime_of(&m));
+                }
+                continue;
+            }
             let Some(format) = Format::from_path(entry.path()) else {
                 continue;
             };
@@ -94,11 +116,7 @@ pub fn scan(roots: &[Root], exclude: &[PathBuf]) -> Result<Vec<ScannedFile>> {
                 path: entry.path().to_path_buf(),
                 source: e.into(),
             })?;
-            let mtime_ns = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map_or(0, |d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX));
+            let mtime_ns = mtime_of(&meta);
             out.push(ScannedFile {
                 root: idx,
                 path: entry.path().to_path_buf(),
@@ -110,5 +128,12 @@ pub fn scan(roots: &[Root], exclude: &[PathBuf]) -> Result<Vec<ScannedFile>> {
         }
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(out)
+    Ok((out, sidecars))
+}
+
+pub fn mtime_of(meta: &std::fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX))
 }

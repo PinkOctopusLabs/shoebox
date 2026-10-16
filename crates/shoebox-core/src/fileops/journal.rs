@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS journal (
     batch_id INTEGER NOT NULL REFERENCES batches(id),
     seq      INTEGER NOT NULL,
     ts       INTEGER NOT NULL,
-    op       TEXT NOT NULL,     -- move | mkdir
+    op       TEXT NOT NULL,     -- move | mkdir | sidecar
     src      TEXT NOT NULL,
     dst      TEXT NOT NULL,
     size     INTEGER,
@@ -39,6 +39,8 @@ CREATE INDEX IF NOT EXISTS journal_batch ON journal(batch_id, seq);
 pub enum Op {
     Move,
     Mkdir,
+    /// Rewrite of an XMP sidecar (`src` = `dst` = the sidecar path).
+    Sidecar,
 }
 
 impl Op {
@@ -46,12 +48,14 @@ impl Op {
         match self {
             Op::Move => "move",
             Op::Mkdir => "mkdir",
+            Op::Sidecar => "sidecar",
         }
     }
     fn parse(s: &str) -> Result<Self> {
         match s {
             "move" => Ok(Op::Move),
             "mkdir" => Ok(Op::Mkdir),
+            "sidecar" => Ok(Op::Sidecar),
             other => Err(CoreError::Invalid(format!("unknown journal op {other:?}"))),
         }
     }
@@ -85,6 +89,10 @@ pub struct OpRecord {
     pub size: Option<u64>,
     pub status: OpStatus,
     pub undone: bool,
+    /// Sidecar ops: the file's bytes before the write (None if it didn't
+    /// exist) and the BLAKE3 of what was written.
+    pub before: Option<Vec<u8>>,
+    pub after_hash: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +131,17 @@ impl Journal {
         conn.pragma_update(None, "synchronous", "FULL")?;
         conn.pragma_update(None, "foreign_keys", true)?;
         conn.execute_batch(SCHEMA)?;
+        // Migrate journals created before sidecar edits were journaled. The
+        // journal is user history, so it's migrated in place, never rebuilt.
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('journal')")?
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        for (col, ty) in [("before", "BLOB"), ("after_hash", "BLOB")] {
+            if !cols.iter().any(|c| c == col) {
+                conn.execute_batch(&format!("ALTER TABLE journal ADD COLUMN {col} {ty}"))?;
+            }
+        }
         Ok(Self { conn })
     }
 
@@ -168,6 +187,32 @@ impl Journal {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Record a pending sidecar write, with the previous contents.
+    pub fn record_sidecar(
+        &self,
+        batch: i64,
+        seq: usize,
+        path: &Path,
+        before: Option<&[u8]>,
+        after_hash: &[u8; 32],
+    ) -> Result<i64> {
+        let p = path_str(path)?;
+        self.conn.execute(
+            "INSERT INTO journal(batch_id, seq, ts, op, src, dst, size, status, before, after_hash)
+             VALUES (?1, ?2, ?3, 'sidecar', ?4, ?4, ?5, 'pending', ?6, ?7)",
+            params![
+                batch,
+                seq as i64,
+                now_ms(),
+                p,
+                before.map(|b| b.len() as i64),
+                before,
+                &after_hash[..]
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
     pub fn complete(&self, op_id: i64) -> Result<()> {
         self.conn
             .execute("UPDATE journal SET status = 'done' WHERE id = ?1", [op_id])?;
@@ -190,7 +235,7 @@ impl Journal {
 
     pub fn ops(&self, batch: i64) -> Result<Vec<OpRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, seq, op, src, dst, size, status, undone FROM journal
+            "SELECT id, seq, op, src, dst, size, status, undone, before, after_hash FROM journal
              WHERE batch_id = ?1 ORDER BY seq",
         )?;
         let rows = stmt.query_map([batch], |r| {
@@ -203,10 +248,12 @@ impl Journal {
                 r.get::<_, Option<i64>>(5)?,
                 r.get::<_, String>(6)?,
                 r.get::<_, bool>(7)?,
+                r.get::<_, Option<Vec<u8>>>(8)?,
+                r.get::<_, Option<Vec<u8>>>(9)?,
             ))
         })?;
         rows.map(|row| {
-            let (id, seq, op, src, dst, size, status, undone) = row?;
+            let (id, seq, op, src, dst, size, status, undone, before, after_hash) = row?;
             Ok(OpRecord {
                 id,
                 seq,
@@ -216,6 +263,8 @@ impl Journal {
                 size: size.map(|s| s as u64),
                 status: OpStatus::parse(&status)?,
                 undone,
+                before,
+                after_hash,
             })
         })
         .collect()
@@ -224,7 +273,7 @@ impl Journal {
     fn summaries(&self, filter: &str) -> Result<Vec<BatchSummary>> {
         let sql = format!(
             "SELECT b.id, b.ts, b.kind, b.label, b.status, b.undo_of,
-                    (SELECT COUNT(*) FROM journal j WHERE j.batch_id = b.id AND j.op = 'move')
+                    (SELECT COUNT(*) FROM journal j WHERE j.batch_id = b.id AND j.op IN ('move', 'sidecar'))
              FROM batches b {filter} ORDER BY b.id"
         );
         let mut stmt = self.conn.prepare(&sql)?;

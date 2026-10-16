@@ -80,3 +80,88 @@ fn prefix_metadata_matches_full_read_on_real_files() {
         eprintln!("{}: {:?}x{:?}", p.display(), fast.width, fast.height);
     }
 }
+
+#[test]
+fn marks_round_trip_through_sidecars_and_rescans() {
+    use shoebox_core::fileops::{FileOps, Journal};
+    use shoebox_core::marks::{Label, Marks, Pick};
+    use shoebox_core::xmp::{self, Prop, Value};
+
+    let t = tempfile::tempdir().unwrap();
+    let lib = t.path().join("lib");
+    shoebox_fixtures::build_library(&lib).unwrap();
+    let mut cache = Cache::open(&t.path().join("cache.sqlite")).unwrap();
+    let ref_root = lib.join("ref").canonicalize().unwrap();
+    let fo = FileOps::new(
+        Journal::open(&t.path().join("journal.sqlite")).unwrap(),
+        vec![ref_root],
+    );
+    let (mut c, _) = Catalog::refresh(&mut cache, roots(&lib), &|_, _| {}).unwrap();
+
+    let i = c
+        .photos
+        .iter()
+        .position(|p| p.rel == "recovered/f0003.jpg")
+        .unwrap();
+    assert_eq!(c.photos[i].marks, Marks::default());
+    let new = Marks {
+        rating: 4,
+        pick: Some(Pick::Pick),
+        label: Some(Label::Blue),
+        keywords: vec!["Places|Italy|Rome".into()],
+    };
+    let batch = c
+        .set_marks(i, new.clone(), &fo, &cache, false)
+        .unwrap()
+        .unwrap();
+    let side = lib.join("scan/recovered/f0003.jpg.xmp");
+    assert!(side.exists());
+    assert_eq!(c.photos[i].marks, new);
+
+    // Unchanged rescan: marks come from the cache, no re-read.
+    let (c2, s2) = Catalog::refresh(&mut cache, roots(&lib), &|_, _| {}).unwrap();
+    assert_eq!(s2.read, 0);
+    let j = c2
+        .photos
+        .iter()
+        .position(|p| p.rel == "recovered/f0003.jpg")
+        .unwrap();
+    assert_eq!(c2.photos[j].marks, new);
+
+    // Another app (say digiKam) changes the rating; a rescan picks it up.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let edited = xmp::edit(
+        Some(&std::fs::read(&side).unwrap()),
+        &[(Prop::Rating, Some(Value::Text("1".into())))],
+    )
+    .unwrap();
+    std::fs::write(&side, edited).unwrap();
+    let (c3, s3) = Catalog::refresh(&mut cache, roots(&lib), &|_, _| {}).unwrap();
+    assert_eq!(
+        s3.read, 1,
+        "only the photo whose sidecar changed is re-read"
+    );
+    let k = c3
+        .photos
+        .iter()
+        .position(|p| p.rel == "recovered/f0003.jpg")
+        .unwrap();
+    assert_eq!(c3.photos[k].marks.rating, 1);
+    assert_eq!(c3.photos[k].marks.label, Some(Label::Blue));
+
+    // Our batch can't be undone over the other app's change.
+    assert!(fo.undo(batch).is_err());
+
+    // Reference roots are read-only: no sidecar is written.
+    let r = c
+        .photos
+        .iter()
+        .position(|p| p.rel.ends_with("DSC_0001.JPG"))
+        .unwrap();
+    let rated = Marks {
+        rating: 5,
+        ..Marks::default()
+    };
+    assert!(c.set_marks(r, rated, &fo, &cache, false).is_err());
+    assert!(!lib.join("ref/2026/2026-04-24/DSC_0001.JPG.xmp").exists());
+}

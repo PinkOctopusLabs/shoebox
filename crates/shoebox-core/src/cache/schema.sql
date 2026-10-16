@@ -48,6 +48,18 @@ CREATE TABLE IF NOT EXISTS exif (
     shutter_count INTEGER
 );
 
+-- Effective culling marks (sidecar > embedded XMP > EXIF), and a signature
+-- of the sidecars they were read from, so a changed sidecar is re-read.
+CREATE TABLE IF NOT EXISTS marks (
+    file_id     INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+    rating      INTEGER NOT NULL,
+    pick        TEXT,
+    label       TEXT,
+    keywords    TEXT NOT NULL,
+    sidecar     TEXT,
+    sidecar_sig TEXT NOT NULL
+);
+
 -- One row per rotation (0, 90, 180, 270) of the upright image.
 CREATE TABLE IF NOT EXISTS phash (
     file_id  INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,

@@ -21,6 +21,34 @@ pub struct PlannedMove {
     pub dst: PathBuf,
 }
 
+/// One step of a batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Planned {
+    Move(PlannedMove),
+    /// Replace a sidecar's contents (or create it).
+    Sidecar {
+        path: PathBuf,
+        bytes: Vec<u8>,
+    },
+}
+
+/// Write via a temporary file in the same folder, then rename over the
+/// target, so readers never see a half-written sidecar. If the rename
+/// fails, the temporary file (ours, just created) is removed.
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = path.with_file_name(format!(".{name}.shoebox-tmp"));
+    std::fs::write(&tmp, bytes)?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Plan {
     pub moves: Vec<PlannedMove>,
@@ -234,7 +262,52 @@ impl FileOps {
     /// Run moves as one journaled batch. Returns the batch id.
     pub fn execute(&self, label: &str, plan: &Plan) -> Result<i64> {
         self.preflight(&plan.moves)?;
-        self.run("move", label, None, &plan.moves, |_| Ok(()))
+        let ops: Vec<Planned> = plan.moves.iter().cloned().map(Planned::Move).collect();
+        self.run("move", label, None, &ops, |_| Ok(()))
+    }
+
+    /// Rewrite XMP sidecars as one journaled batch: each write is recorded
+    /// (with the previous contents) before it happens, and lands atomically
+    /// (temporary file, then rename). Only `.xmp` files outside reference
+    /// roots can be written, so image files are never touched.
+    pub fn write_sidecars(&self, label: &str, writes: Vec<(PathBuf, Vec<u8>)>) -> Result<i64> {
+        for (path, _) in &writes {
+            self.check_sidecar_target(path)?;
+        }
+        let ops: Vec<Planned> = writes
+            .into_iter()
+            .map(|(path, bytes)| Planned::Sidecar { path, bytes })
+            .collect();
+        self.run("sidecar", label, None, &ops, |_| Ok(()))
+    }
+
+    fn check_sidecar_target(&self, path: &Path) -> Result<()> {
+        let is_xmp = path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("xmp"));
+        if !is_xmp {
+            return Err(CoreError::Refused(format!(
+                "{} is not an .xmp sidecar; image files are never written",
+                path.display()
+            )));
+        }
+        self.check_unprotected(path)?;
+        if let Ok(meta) = std::fs::symlink_metadata(path)
+            && !meta.file_type().is_file()
+        {
+            return Err(CoreError::Refused(format!(
+                "{} is not a regular file",
+                path.display()
+            )));
+        }
+        let parent = path.parent().unwrap_or(Path::new("/"));
+        if !parent.is_dir() {
+            return Err(CoreError::Refused(format!(
+                "{} does not exist",
+                parent.display()
+            )));
+        }
+        Ok(())
     }
 
     fn run(
@@ -242,7 +315,7 @@ impl FileOps {
         kind: &str,
         label: &str,
         undo_of: Option<i64>,
-        moves: &[PlannedMove],
+        ops: &[Planned],
         mut after_each: impl FnMut(usize) -> Result<()>,
     ) -> Result<i64> {
         let j = &self.journal;
@@ -253,41 +326,63 @@ impl FileOps {
             Err(CoreError::BatchFailed {
                 batch,
                 done,
-                total: moves.len(),
+                total: ops.len(),
                 reason,
             })
         };
-        for (i, m) in moves.iter().enumerate() {
-            let parent = m.dst.parent().unwrap_or(Path::new("/"));
-            for dir in missing_dirs(parent).1 {
-                let op = j.record(batch, seq, Op::Mkdir, &dir, &dir, None)?;
-                seq += 1;
-                match std::fs::create_dir(&dir) {
-                    Ok(()) => j.complete(op)?,
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => j.complete(op)?,
-                    Err(e) => {
-                        j.fail(op, &e.to_string())?;
-                        return fail(i, format!("creating {}: {e}", dir.display()));
+        for (i, planned) in ops.iter().enumerate() {
+            match planned {
+                Planned::Move(m) => {
+                    let parent = m.dst.parent().unwrap_or(Path::new("/"));
+                    for dir in missing_dirs(parent).1 {
+                        let op = j.record(batch, seq, Op::Mkdir, &dir, &dir, None)?;
+                        seq += 1;
+                        match std::fs::create_dir(&dir) {
+                            Ok(()) => j.complete(op)?,
+                            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                                j.complete(op)?
+                            }
+                            Err(e) => {
+                                j.fail(op, &e.to_string())?;
+                                return fail(i, format!("creating {}: {e}", dir.display()));
+                            }
+                        }
                     }
+                    let size = std::fs::symlink_metadata(&m.src).ok().map(|md| md.len());
+                    let op = j.record(batch, seq, Op::Move, &m.src, &m.dst, size)?;
+                    seq += 1;
+                    if let Err(e) = sys::rename_excl(&m.src, &m.dst) {
+                        j.fail(op, &e.to_string())?;
+                        return fail(i, format!("{} → {}: {e}", m.src.display(), m.dst.display()));
+                    }
+                    j.complete(op)?;
+                }
+                Planned::Sidecar { path, bytes } => {
+                    let before = match std::fs::read(path) {
+                        Ok(b) => Some(b),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                        Err(e) => return fail(i, format!("reading {}: {e}", path.display())),
+                    };
+                    let hash = *blake3::hash(bytes).as_bytes();
+                    let op = j.record_sidecar(batch, seq, path, before.as_deref(), &hash)?;
+                    seq += 1;
+                    if let Err(e) = write_atomic(path, bytes) {
+                        j.fail(op, &e.to_string())?;
+                        return fail(i, format!("writing {}: {e}", path.display()));
+                    }
+                    j.complete(op)?;
                 }
             }
-            let size = std::fs::symlink_metadata(&m.src).ok().map(|md| md.len());
-            let op = j.record(batch, seq, Op::Move, &m.src, &m.dst, size)?;
-            seq += 1;
-            if let Err(e) = sys::rename_excl(&m.src, &m.dst) {
-                j.fail(op, &e.to_string())?;
-                return fail(i, format!("{} → {}: {e}", m.src.display(), m.dst.display()));
-            }
-            j.complete(op)?;
             after_each(i)?;
         }
         j.set_batch_status(batch, "done")?;
         Ok(batch)
     }
 
-    /// Moves of `batch` that actually happened and are not yet undone, latest first.
-    /// A `pending` op (the process died mid-batch) counts if the disk shows it ran.
-    pub fn undo_plan(&self, batch: i64) -> Result<Vec<(OpRecord, PlannedMove)>> {
+    /// Operations of `batch` that actually happened and are not yet undone,
+    /// latest first, with what reverses each. A `pending` op (the process died
+    /// mid-batch) counts if the disk shows it ran.
+    pub fn undo_plan(&self, batch: i64) -> Result<Vec<(OpRecord, Planned)>> {
         let summary = self
             .journal
             .batch(batch)?
@@ -299,20 +394,56 @@ impl FileOps {
         }
         let mut out = Vec::new();
         for op in self.journal.ops(batch)?.into_iter().rev() {
-            if op.op != Op::Move || op.undone {
+            if op.undone {
                 continue;
             }
-            let happened = match op.status {
-                OpStatus::Done => true,
-                OpStatus::Pending => exists(&op.dst) && !exists(&op.src),
-                OpStatus::Failed => false,
-            };
-            if happened {
-                let back = PlannedMove {
-                    src: op.dst.clone(),
-                    dst: op.src.clone(),
-                };
-                out.push((op, back));
+            match op.op {
+                Op::Mkdir => {}
+                Op::Move => {
+                    let happened = match op.status {
+                        OpStatus::Done => true,
+                        OpStatus::Pending => exists(&op.dst) && !exists(&op.src),
+                        OpStatus::Failed => false,
+                    };
+                    if happened {
+                        let back = Planned::Move(PlannedMove {
+                            src: op.dst.clone(),
+                            dst: op.src.clone(),
+                        });
+                        out.push((op, back));
+                    }
+                }
+                Op::Sidecar => {
+                    let current = std::fs::read(&op.dst).ok();
+                    let wrote = current
+                        .as_ref()
+                        .zip(op.after_hash.as_ref())
+                        .is_some_and(|(c, h)| blake3::hash(c).as_bytes()[..] == h[..]);
+                    let happened = match op.status {
+                        OpStatus::Done => true,
+                        OpStatus::Pending => wrote,
+                        OpStatus::Failed => false,
+                    };
+                    if !happened {
+                        continue;
+                    }
+                    // Restore the previous bytes; a sidecar Shoebox created is
+                    // emptied of our properties rather than deleted.
+                    let bytes = match (&op.before, &current) {
+                        (Some(b), _) => b.clone(),
+                        (None, Some(c)) => {
+                            let all: Vec<_> =
+                                crate::xmp::Prop::ALL.iter().map(|p| (*p, None)).collect();
+                            crate::xmp::edit(Some(c), &all)?
+                        }
+                        (None, None) => continue,
+                    };
+                    let back = Planned::Sidecar {
+                        path: op.dst.clone(),
+                        bytes,
+                    };
+                    out.push((op, back));
+                }
             }
         }
         Ok(out)
@@ -323,29 +454,49 @@ impl FileOps {
     pub fn undo(&self, batch: i64) -> Result<i64> {
         let plan = self.undo_plan(batch)?;
         // Undo is only allowed while it is consistent with the disk.
+        let mut moves = Vec::new();
         for (op, back) in &plan {
-            let meta = std::fs::symlink_metadata(&back.src).map_err(|_| {
-                CoreError::Refused(format!(
-                    "{} is no longer there; cannot undo",
-                    back.src.display()
-                ))
-            })?;
-            if op.size.is_some_and(|s| s != meta.len()) {
-                return Err(CoreError::Refused(format!(
-                    "{} changed size since it was moved; cannot undo",
-                    back.src.display()
-                )));
+            match back {
+                Planned::Move(m) => {
+                    let meta = std::fs::symlink_metadata(&m.src).map_err(|_| {
+                        CoreError::Refused(format!(
+                            "{} is no longer there; cannot undo",
+                            m.src.display()
+                        ))
+                    })?;
+                    if op.size.is_some_and(|s| s != meta.len()) {
+                        return Err(CoreError::Refused(format!(
+                            "{} changed size since it was moved; cannot undo",
+                            m.src.display()
+                        )));
+                    }
+                    moves.push(m.clone());
+                }
+                Planned::Sidecar { path, .. } => {
+                    let current = std::fs::read(path).unwrap_or_default();
+                    let unchanged = op
+                        .after_hash
+                        .as_ref()
+                        .is_some_and(|h| blake3::hash(&current).as_bytes()[..] == h[..]);
+                    if !unchanged {
+                        return Err(CoreError::Refused(format!(
+                            "{} was changed since (by another app?); cannot undo",
+                            path.display()
+                        )));
+                    }
+                    self.check_sidecar_target(path)?;
+                }
             }
         }
-        let moves: Vec<PlannedMove> = plan.iter().map(|(_, b)| b.clone()).collect();
         self.preflight(&moves)?;
         let ids: Vec<i64> = plan.iter().map(|(op, _)| op.id).collect();
+        let ops: Vec<Planned> = plan.into_iter().map(|(_, b)| b).collect();
         let j = &self.journal;
         let undo = self.run(
             "undo",
             &format!("undo batch {batch}"),
             Some(batch),
-            &moves,
+            &ops,
             |i| j.mark_undone(ids[i]),
         )?;
         j.set_batch_status(batch, "undone")?;
@@ -521,6 +672,111 @@ mod tests {
             "nothing journaled or run"
         );
         assert!(src.exists());
+    }
+
+    #[test]
+    fn sidecar_edits_are_journaled_and_undone_exactly() {
+        use crate::xmp::{Prop, Value};
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        let fo = ops(&root, vec![]);
+        let side = root.join("a.jpg.xmp");
+        let rating = |v: &str| vec![(Prop::Rating, Some(Value::Text(v.into())))];
+
+        // New sidecar: undo empties our properties, never deletes the file.
+        let b1 = fo
+            .write_sidecars(
+                "rate",
+                vec![(side.clone(), crate::xmp::edit(None, &rating("3")).unwrap())],
+            )
+            .unwrap();
+        assert_eq!(fo.journal().ops(b1).unwrap()[0].op, Op::Sidecar);
+        fo.undo(b1).unwrap();
+        assert!(side.exists(), "never deleted");
+        assert!(
+            crate::xmp::read(&std::fs::read(&side).unwrap())
+                .unwrap()
+                .is_empty()
+        );
+
+        // Existing sidecar with foreign data: undo restores it byte for byte.
+        let foreign = std::fs::read(&side).unwrap();
+        let edited = crate::xmp::edit(Some(&foreign), &rating("5")).unwrap();
+        let b2 = fo
+            .write_sidecars("rate", vec![(side.clone(), edited)])
+            .unwrap();
+        fo.undo(b2).unwrap();
+        assert_eq!(std::fs::read(&side).unwrap(), foreign);
+
+        // Changed by another app after our write: undo refuses.
+        let b3 = fo
+            .write_sidecars(
+                "rate",
+                vec![(
+                    side.clone(),
+                    crate::xmp::edit(Some(&foreign), &rating("2")).unwrap(),
+                )],
+            )
+            .unwrap();
+        std::fs::write(&side, b"<x:xmpmeta xmlns:x='adobe:ns:meta/'/>").unwrap();
+        assert!(matches!(fo.undo(b3), Err(CoreError::Refused(_))));
+    }
+
+    #[test]
+    fn sidecar_writes_refuse_images_and_reference_roots() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        touch(&root.join("ref/a.jpg"), "image");
+        touch(&root.join("lib/b.jpg"), "image");
+        let fo = ops(&root, vec![root.join("ref")]);
+        let r = fo.write_sidecars(
+            "x",
+            vec![(root.join("lib/b.jpg"), b"not an image".to_vec())],
+        );
+        assert!(
+            matches!(r, Err(CoreError::Refused(_))),
+            "image files are never written"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("lib/b.jpg")).unwrap(),
+            "image"
+        );
+        let r = fo.write_sidecars("x", vec![(root.join("ref/a.jpg.xmp"), b"x".to_vec())]);
+        assert!(
+            matches!(r, Err(CoreError::Refused(_))),
+            "reference roots are read-only"
+        );
+        assert!(!root.join("ref/a.jpg.xmp").exists());
+        assert!(
+            fo.journal().batches().unwrap().is_empty(),
+            "refusals run nothing"
+        );
+    }
+
+    #[test]
+    fn old_journals_are_migrated_in_place() {
+        let t = tempfile::tempdir().unwrap();
+        let db = t.path().join("journal.sqlite");
+        {
+            // An M1-era journal: no before/after_hash columns, one batch.
+            let c = rusqlite::Connection::open(&db).unwrap();
+            c.execute_batch(
+                "CREATE TABLE batches (id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, kind TEXT NOT NULL,
+                   label TEXT NOT NULL, status TEXT NOT NULL, undo_of INTEGER);
+                 CREATE TABLE journal (id INTEGER PRIMARY KEY, batch_id INTEGER NOT NULL, seq INTEGER NOT NULL,
+                   ts INTEGER NOT NULL, op TEXT NOT NULL, src TEXT NOT NULL, dst TEXT NOT NULL, size INTEGER,
+                   status TEXT NOT NULL, undone INTEGER NOT NULL DEFAULT 0, error TEXT);
+                 INSERT INTO batches VALUES (1, 0, 'move', 'old', 'done', NULL);
+                 INSERT INTO journal(batch_id, seq, ts, op, src, dst, size, status) VALUES (1, 0, 0, 'move', '/a', '/b', 1, 'done');",
+            )
+            .unwrap();
+        }
+        let j = Journal::open(&db).unwrap();
+        let ops = j.ops(1).unwrap();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].op, Op::Move);
+        assert!(ops[0].before.is_none());
+        assert_eq!(j.batches().unwrap()[0].label, "old");
     }
 
     #[test]

@@ -3,6 +3,35 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-16 — M3 sidecars and marks
+- **Edit by splicing.** `xmp::edit` never re-serialises: it copies the
+  original bytes and only removes the owned properties being changed
+  (attribute or element form, in any rdf:Description, under any prefix
+  bound to the right namespace, e.g. the old `xap:`) and inserts the new
+  values in the first Description. Golden tests on two real LightCraft
+  sidecars: ExifTool reports all 14 foreign properties identical, and the
+  original bytes survive as a subsequence of the output. ExifTool also
+  serves as the stand-in for digiKam both ways (reads ours; we read its).
+  No DxO or digiKam samples were available.
+- **digiKam:TagsList uses `/`** (as digiKam writes it), not the spec's `|`
+  example; `lr:hierarchicalSubject` uses `|`; `dc:subject` gets leaf names.
+- **Precedence is per property:** EXIF → embedded XMP → `name.xmp` →
+  `name.ext.xmp`. Shoebox writes only `name.ext.xmp` (optionally `name.xmp`
+  for RAW) and only the marks that changed, so marks other tools keep
+  elsewhere stay valid. Unrecognised `xmp:Label` text (custom Lightroom
+  label sets) is left alone unless the label is changed.
+- **Sidecar edits are journaled** (not required by the spec, which lists
+  moves/renames/copies): each write records the previous bytes and the
+  hash of what was written, lands atomically (temp file + rename), and can
+  be undone only while the file is still what Shoebox wrote. Undoing a
+  sidecar Shoebox created empties our properties rather than deleting the
+  file. Only `.xmp` paths outside reference roots can be written.
+- The journal (user history) is migrated in place; the cache (schema v4,
+  now with a `marks` table) is rebuilt when its schema changes.
+- Found in the real library: two LightCraft sidecars named
+  `20260430-101010.xmp` beside `20260430-101010-46.tif`, i.e. orphaned by a
+  rename; no tool will associate them with their images.
+
 ## 2026-10-16 — M2 browsing choices
 - **Library roots live in `settings.json`** in the data folder, not only in
   the cache's `roots` table: they're user choices, and the cache must stay

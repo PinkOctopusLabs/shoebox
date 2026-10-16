@@ -582,9 +582,23 @@ fn undo_cmd(data_dir: &Path, batch: Option<i64>, yes: bool) -> Result<()> {
         println!("Batch {batch} has nothing left to undo.");
         return Ok(());
     }
-    let moves: Vec<PlannedMove> = plan.into_iter().map(|(_, m)| m).collect();
-    print_moves(&moves);
-    if !confirm(&format!("Undo batch {batch} ({} files)?", moves.len()), yes)? {
+    let n = plan.len();
+    for (i, (_, step)) in plan.iter().enumerate() {
+        match step {
+            fileops::Planned::Move(m) => {
+                println!(
+                    "{:<4} move {} → {}",
+                    i + 1,
+                    m.src.display(),
+                    m.dst.display()
+                )
+            }
+            fileops::Planned::Sidecar { path, .. } => {
+                println!("{:<4} restore sidecar {}", i + 1, path.display())
+            }
+        }
+    }
+    if !confirm(&format!("Undo batch {batch} ({n} changes)?"), yes)? {
         println!("Cancelled.");
         return Ok(());
     }

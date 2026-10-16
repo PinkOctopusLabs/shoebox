@@ -73,6 +73,40 @@ pub fn decode_rgb(data: &[u8]) -> Result<(crate::Rgb8, Option<Vec<u8>>), DecodeE
     Ok((crate::Rgb8::new(info.width, info.height, rgb)?, icc))
 }
 
+/// The XMP packet in an uncompressed `iTXt` chunk keyed `XML:com.adobe.xmp`.
+pub fn itxt_xmp(data: &[u8]) -> Option<Range<usize>> {
+    const KEY: &[u8] = b"XML:com.adobe.xmp\0";
+    if !data.starts_with(SIGNATURE) {
+        return None;
+    }
+    let mut i = SIGNATURE.len();
+    while i + 8 <= data.len() {
+        let len = u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]) as usize;
+        let body = i + 8;
+        let end = body.checked_add(len)?;
+        if end > data.len() {
+            return None;
+        }
+        if &data[i + 4..i + 8] == b"iTXt" && data[body..end].starts_with(KEY) {
+            // keyword\0, compression flag, method, language\0, translated\0, text
+            let mut p = body + KEY.len();
+            if data.get(p) != Some(&0) {
+                return None; // compressed: not supported
+            }
+            p += 2;
+            for _ in 0..2 {
+                p += data[p..end].iter().position(|&c| c == 0)? + 1;
+            }
+            return Some(p..end);
+        }
+        if &data[i + 4..i + 8] == b"IEND" {
+            return None;
+        }
+        i = end + 4;
+    }
+    None
+}
+
 pub fn decode_luma(data: &[u8]) -> Result<Gray, DecodeError> {
     let mut dec = png::Decoder::new(Cursor::new(data));
     dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);

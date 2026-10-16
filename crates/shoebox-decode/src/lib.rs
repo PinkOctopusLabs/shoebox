@@ -267,3 +267,25 @@ fn heic_render(data: &[u8], max: u32, target: Target) -> Result<Rgb8, DecodeErro
 fn heic_render(_data: &[u8], _max: u32, _target: Target) -> Result<Rgb8, DecodeError> {
     Err(heic_unsupported())
 }
+
+/// Byte range of the XMP packet embedded in the file itself, if any: JPEG
+/// APP1 (`http://ns.adobe.com/xap/1.0/`), TIFF/NEF tag 700 (XMLPacket), or
+/// PNG iTXt `XML:com.adobe.xmp` (uncompressed).
+pub fn embedded_xmp(format: Format, data: &[u8]) -> Option<std::ops::Range<usize>> {
+    const JPEG_XMP: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
+    match format {
+        Format::Jpeg => jpeg::header_segments(data).into_iter().find_map(|(m, r)| {
+            (m == 0xE1 && data[r.clone()].starts_with(JPEG_XMP))
+                .then(|| r.start + JPEG_XMP.len()..r.end)
+        }),
+        Format::Tiff | Format::Nef => {
+            let t = tiffparse::Tiff::parse(data).ok()?;
+            let ifd0 = t.ifd0().ok()?;
+            let raw = t.raw(ifd0.get(0x02BC)?).ok()?;
+            let start = raw.as_ptr() as usize - data.as_ptr() as usize;
+            Some(start..start + raw.len())
+        }
+        Format::Png => png::itxt_xmp(data),
+        Format::Heic => None,
+    }
+}
