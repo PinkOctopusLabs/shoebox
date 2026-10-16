@@ -37,6 +37,50 @@ fn tiff_err(e: tiff::TiffError) -> DecodeError {
     DecodeError::Format(format!("TIFF: {e}"))
 }
 
+/// The ICC profile in IFD0 (tag 34675), if any.
+pub fn icc_profile(data: &[u8]) -> Option<Vec<u8>> {
+    let t = Tiff::parse(data).ok()?;
+    let ifd0 = t.ifd0().ok()?;
+    t.raw(ifd0.get(0x8773)?).ok().map(<[u8]>::to_vec)
+}
+
+/// Decode the first image to 8-bit RGB (16-bit samples are reduced to 8).
+pub fn decode_rgb(data: &[u8]) -> Result<(crate::Rgb8, Option<Vec<u8>>), DecodeError> {
+    let mut d = Decoder::new(Cursor::new(data))
+        .map_err(tiff_err)?
+        .with_limits(limits());
+    let (w, h) = d.dimensions().map_err(tiff_err)?;
+    crate::check_dimensions(w, h)?;
+    let channels = match d.colortype().map_err(tiff_err)? {
+        ColorType::Gray(_) => 1,
+        ColorType::GrayA(_) => 2,
+        ColorType::RGB(_) => 3,
+        ColorType::RGBA(_) => 4,
+        other => {
+            return Err(DecodeError::Unsupported(format!(
+                "TIFF colour type {other:?}"
+            )));
+        }
+    };
+    let px8: Vec<u8> = match d.read_image().map_err(tiff_err)? {
+        DecodingResult::U8(v) => v,
+        DecodingResult::U16(v) => v.into_iter().map(|s| (s >> 8) as u8).collect(),
+        _ => return Err(DecodeError::Unsupported("TIFF sample format".into())),
+    };
+    let rgb: Vec<u8> = match channels {
+        1 | 2 => px8
+            .chunks_exact(channels)
+            .flat_map(|p| [p[0], p[0], p[0]])
+            .collect(),
+        3 => px8,
+        n => px8
+            .chunks_exact(n)
+            .flat_map(|p| [p[0], p[1], p[2]])
+            .collect(),
+    };
+    Ok((crate::Rgb8::new(w, h, rgb)?, icc_profile(data)))
+}
+
 /// Decode the first image to 8-bit luma.
 pub fn decode_luma(data: &[u8]) -> Result<Gray, DecodeError> {
     let mut d = Decoder::new(Cursor::new(data))

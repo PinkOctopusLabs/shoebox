@@ -171,6 +171,23 @@ impl<'a> Tiff<'a> {
             .collect()
     }
 
+    /// The raw value bytes of an entry (for UNDEFINED/BYTE blobs such as an
+    /// ICC profile or an MPF index).
+    pub fn raw(&self, e: &Entry) -> Result<&'a [u8], DecodeError> {
+        let size = type_size(e.typ).ok_or(DecodeError::Truncated)?;
+        self.bytes(e.value_at, size.saturating_mul(e.count as usize))
+    }
+
+    /// A u32 at `at` within `bytes`, in this file's byte order.
+    pub fn u32_in(&self, bytes: &[u8], at: usize) -> Option<u32> {
+        let b = bytes.get(at..at + 4)?;
+        let a = [b[0], b[1], b[2], b[3]];
+        Some(match self.endian {
+            Endian::Little => u32::from_le_bytes(a),
+            Endian::Big => u32::from_be_bytes(a),
+        })
+    }
+
     pub fn uint(&self, ifd: &Ifd, tag: u16) -> Result<Option<u64>, DecodeError> {
         match ifd.get(tag) {
             Some(e) => Ok(self.uints(e)?.first().copied()),

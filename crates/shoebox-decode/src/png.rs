@@ -36,6 +36,43 @@ pub fn idat_ranges(data: &[u8]) -> Result<Vec<Range<usize>>, DecodeError> {
     Ok(out)
 }
 
+/// Decode to 8-bit RGB, returning the embedded ICC profile (iCCP) if any.
+pub fn decode_rgb(data: &[u8]) -> Result<(crate::Rgb8, Option<Vec<u8>>), DecodeError> {
+    let mut dec = png::Decoder::new(Cursor::new(data));
+    dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = dec
+        .read_info()
+        .map_err(|e| DecodeError::Format(format!("PNG: {e}")))?;
+    crate::check_dimensions(reader.info().width, reader.info().height)?;
+    let icc = reader.info().icc_profile.as_ref().map(|c| c.to_vec());
+    let size = reader.output_buffer_size().ok_or(DecodeError::Truncated)?;
+    let mut buf = vec![0u8; size];
+    let info = reader
+        .next_frame(&mut buf)
+        .map_err(|e| DecodeError::Format(format!("PNG: {e}")))?;
+    buf.truncate(info.buffer_size());
+    let rgb: Vec<u8> = match info.color_type {
+        png::ColorType::Grayscale => buf.iter().flat_map(|&v| [v, v, v]).collect(),
+        png::ColorType::GrayscaleAlpha => buf
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .flat_map(|p| [p[0], p[0], p[0]])
+            .collect(),
+        png::ColorType::Rgb => buf,
+        png::ColorType::Rgba => buf
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|p| [p[0], p[1], p[2]])
+            .collect(),
+        png::ColorType::Indexed => {
+            return Err(DecodeError::Unsupported("indexed PNG after EXPAND".into()));
+        }
+    };
+    Ok((crate::Rgb8::new(info.width, info.height, rgb)?, icc))
+}
+
 pub fn decode_luma(data: &[u8]) -> Result<Gray, DecodeError> {
     let mut dec = png::Decoder::new(Cursor::new(data));
     dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);

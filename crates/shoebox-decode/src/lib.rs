@@ -8,12 +8,14 @@ pub mod imageio;
 pub mod jpeg;
 pub mod nef;
 pub mod png;
+pub mod rgb;
 pub mod tiff;
 pub mod tiffparse;
 
 use std::path::Path;
 
 pub use gray::Gray;
+pub use rgb::Rgb8;
 
 /// Largest image we will decode (200 MP). Bounds memory for hostile or corrupt
 /// headers; a Z f frame is 24 MP.
@@ -46,6 +48,9 @@ pub enum Format {
     Jpeg,
     Tiff,
     Png,
+    /// HEIC/HEIF: decoded by the platform (ImageIO on macOS); unsupported
+    /// elsewhere until a libheif backend exists.
+    Heic,
 }
 
 impl Format {
@@ -56,6 +61,7 @@ impl Format {
             "jpg" | "jpeg" => Format::Jpeg,
             "tif" | "tiff" => Format::Tiff,
             "png" => Format::Png,
+            "heic" | "heif" | "hif" => Format::Heic,
             _ => return None,
         })
     }
@@ -66,6 +72,7 @@ impl Format {
             Format::Jpeg => "JPG",
             Format::Tiff => "TIF",
             Format::Png => "PNG",
+            Format::Heic => "HEIC",
         }
     }
 }
@@ -83,6 +90,13 @@ pub fn display_source(format: Format, data: &[u8]) -> Result<(Format, &[u8]), De
     }
 }
 
+#[cfg(not(target_os = "macos"))]
+fn heic_unsupported() -> DecodeError {
+    DecodeError::Unsupported(
+        "HEIC decoding needs macOS ImageIO (libheif backend not built yet)".into(),
+    )
+}
+
 /// Full-resolution 8-bit luma of a file's display source (orientation not applied).
 pub fn decode_luma(format: Format, data: &[u8]) -> Result<Gray, DecodeError> {
     let (format, data) = display_source(format, data)?;
@@ -90,34 +104,50 @@ pub fn decode_luma(format: Format, data: &[u8]) -> Result<Gray, DecodeError> {
         Format::Jpeg | Format::Nef => jpeg::decode_luma(data),
         Format::Tiff => tiff::decode_luma(data),
         Format::Png => png::decode_luma(data),
+        Format::Heic => heic_luma(data, 1 << 14),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn heic_luma(data: &[u8], max: u32) -> Result<Gray, DecodeError> {
+    imageio::thumbnail_luma(data, max, false, Some(imageio::type_hint(Format::Heic)))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn heic_luma(_data: &[u8], _max: u32) -> Result<Gray, DecodeError> {
+    Err(heic_unsupported())
 }
 
 /// Luma thumbnail with the given long edge (orientation not applied).
 pub fn luma_thumbnail(format: Format, data: &[u8], long_edge: u32) -> Result<Gray, DecodeError> {
+    if format == Format::Heic {
+        return heic_luma(data, long_edge);
+    }
     Ok(decode_luma(format, data)?.fit_long_edge(long_edge))
 }
 
 /// Concatenation order of byte ranges that make up the image data, without
 /// metadata: JPEG SOS..EOI, TIFF strips/tiles, PNG IDAT payloads. For a NEF this
 /// is the image data of its embedded JPEG, so a byte-identical carved preview
-/// produces the same hash.
+/// produces the same hash. `None` for formats without a defined image-data hash
+/// (HEIC).
 pub fn image_data_ranges(
     format: Format,
     data: &[u8],
-) -> Result<Vec<std::ops::Range<usize>>, DecodeError> {
-    match format {
-        Format::Jpeg => Ok(vec![jpeg::scan_data_range(data)?]),
+) -> Result<Option<Vec<std::ops::Range<usize>>>, DecodeError> {
+    Ok(Some(match format {
+        Format::Jpeg => vec![jpeg::scan_data_range(data)?],
         Format::Nef => {
             let outer = nef::jpg_from_raw(data)?
                 .ok_or_else(|| DecodeError::Format("NEF has no embedded JPEG".into()))?;
             let inner = jpeg::scan_data_range(&data[outer.clone()])?;
             let abs = outer.start + inner.start..outer.start + inner.end;
-            Ok(std::iter::once(abs).collect())
+            std::iter::once(abs).collect()
         }
-        Format::Tiff => tiff::image_data_ranges(data),
-        Format::Png => png::idat_ranges(data),
-    }
+        Format::Tiff => tiff::image_data_ranges(data)?,
+        Format::Png => png::idat_ranges(data)?,
+        Format::Heic => return Ok(None),
+    }))
 }
 
 /// Pixel dimensions of the display source, from headers only where possible.
@@ -134,5 +164,89 @@ pub fn dimensions(format: Format, data: &[u8]) -> Result<(u32, u32), DecodeError
                 u32::from_be_bytes([d[4], d[5], d[6], d[7]]),
             ))
         }
+        Format::Heic => {
+            let g = heic_luma(data, 1 << 14)?;
+            Ok((g.width, g.height))
+        }
     }
+}
+
+/// Embedded JPEG streams that can stand in for the image, with their sizes:
+/// a JPEG's MPF previews (and the JPEG itself), or a NEF's embedded JPEGs.
+fn jpeg_candidates(format: Format, data: &[u8]) -> Vec<(std::ops::Range<usize>, (u32, u32))> {
+    let ranges = match format {
+        Format::Jpeg => std::iter::once(0..data.len())
+            .chain(jpeg::mpf_images(data))
+            .collect(),
+        Format::Nef => nef::embedded_jpegs(data).unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    ranges
+        .into_iter()
+        .filter_map(|r| jpeg::dimensions(&data[r.clone()]).ok().map(|d| (r, d)))
+        .collect()
+}
+
+/// Smallest candidate whose long edge is at least `want` (or the largest, if
+/// none is big enough or `want` is None).
+fn pick(cands: &[(std::ops::Range<usize>, (u32, u32))], want: Option<u32>) -> Option<usize> {
+    let long = |i: usize| cands[i].1.0.max(cands[i].1.1);
+    let big_enough = want.and_then(|w| {
+        (0..cands.len())
+            .filter(|&i| long(i) >= w)
+            .min_by_key(|&i| long(i))
+    });
+    big_enough.or_else(|| (0..cands.len()).max_by_key(|&i| long(i)))
+}
+
+/// A display-ready image: sRGB, upright, long edge at most `long_edge`
+/// (full size if None). Uses the smallest embedded preview that's big
+/// enough, so grid thumbnails of camera JPGs and NEFs decode a few hundred
+/// KB instead of the whole file.
+pub fn render_srgb(
+    format: Format,
+    data: &[u8],
+    long_edge: Option<u32>,
+    orientation: u16,
+) -> Result<Rgb8, DecodeError> {
+    let (mut img, icc) = match format {
+        Format::Jpeg | Format::Nef => {
+            let cands = jpeg_candidates(format, data);
+            let i = pick(&cands, long_edge)
+                .ok_or_else(|| DecodeError::Format("no decodable JPEG stream".into()))?;
+            let (img, icc) = jpeg::decode_rgb(&data[cands[i].0.clone()])?;
+            // MPF previews usually carry no profile; they share the primary's.
+            let icc = icc.or_else(|| {
+                (format == Format::Jpeg && cands[i].0.start != 0)
+                    .then(|| jpeg_icc(data))
+                    .flatten()
+            });
+            (img, icc)
+        }
+        Format::Tiff => tiff::decode_rgb(data)?,
+        Format::Png => png::decode_rgb(data)?,
+        Format::Heic => return heic_srgb(data, long_edge.unwrap_or(1 << 14)),
+    };
+    if let Some(l) = long_edge {
+        img = img.fit_long_edge(l);
+    }
+    rgb::to_srgb(&mut img, icc.as_deref());
+    Ok(img.orient(orientation))
+}
+
+fn jpeg_icc(data: &[u8]) -> Option<Vec<u8>> {
+    let mut d = zune_jpeg::JpegDecoder::new(zune_core::bytestream::ZCursor::new(data));
+    d.decode_headers().ok()?;
+    d.icc_profile()
+}
+
+/// HEIC through ImageIO, which also applies orientation and colour management.
+#[cfg(target_os = "macos")]
+fn heic_srgb(data: &[u8], max: u32) -> Result<Rgb8, DecodeError> {
+    imageio::thumbnail_srgb(data, max, true, Some(imageio::type_hint(Format::Heic)))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn heic_srgb(_data: &[u8], _max: u32) -> Result<Rgb8, DecodeError> {
+    Err(heic_unsupported())
 }

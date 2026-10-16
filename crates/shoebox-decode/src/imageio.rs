@@ -43,6 +43,7 @@ struct CFDictionaryValueCallBacks {
 
 const K_CF_NUMBER_SINT32: CFIndex = 3;
 const K_CG_IMAGE_ALPHA_NONE: u32 = 0;
+const K_CG_IMAGE_ALPHA_NONE_SKIP_LAST: u32 = 5;
 const K_CG_INTERPOLATION_HIGH: i32 = 3;
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -98,7 +99,9 @@ unsafe extern "C" {
 unsafe extern "C" {
     fn CGImageGetWidth(img: CFTypeRef) -> usize;
     fn CGImageGetHeight(img: CFTypeRef) -> usize;
+    static kCGColorSpaceSRGB: CFTypeRef;
     fn CGColorSpaceCreateDeviceGray() -> CFTypeRef;
+    fn CGColorSpaceCreateWithName(name: CFTypeRef) -> CFTypeRef;
     fn CGBitmapContextCreate(
         data: *mut c_void,
         width: usize,
@@ -139,7 +142,15 @@ pub fn type_hint(format: crate::Format) -> &'static str {
         crate::Format::Jpeg => "public.jpeg",
         crate::Format::Tiff => "public.tiff",
         crate::Format::Png => "public.png",
+        crate::Format::Heic => "public.heic",
     }
+}
+
+#[derive(Clone, Copy)]
+enum Out {
+    Gray,
+    /// Colour-managed to sRGB by ColorSync.
+    Srgb,
 }
 
 /// Decode a thumbnail whose long edge is at most `max_px`, as 8-bit gray.
@@ -152,6 +163,35 @@ pub fn thumbnail_luma(
     apply_orientation: bool,
     uti: Option<&str>,
 ) -> Result<Gray, DecodeError> {
+    let (w, h, px) = render(data, max_px, apply_orientation, uti, Out::Gray)?;
+    Gray::new(w, h, px)
+}
+
+/// Decode to sRGB (ImageIO/ColorSync does the colour management), with the
+/// long edge at most `max_px`. Used for HEIC, which has no pure-Rust decoder.
+pub fn thumbnail_srgb(
+    data: &[u8],
+    max_px: u32,
+    apply_orientation: bool,
+    uti: Option<&str>,
+) -> Result<crate::Rgb8, DecodeError> {
+    let (w, h, rgbx) = render(data, max_px, apply_orientation, uti, Out::Srgb)?;
+    let rgb = rgbx
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|p| [p[0], p[1], p[2]])
+        .collect();
+    crate::Rgb8::new(w, h, rgb)
+}
+
+fn render(
+    data: &[u8],
+    max_px: u32,
+    apply_orientation: bool,
+    uti: Option<&str>,
+    out: Out,
+) -> Result<(u32, u32, Vec<u8>), DecodeError> {
     let len = CFIndex::try_from(data.len()).map_err(|_| DecodeError::Truncated)?;
     let max =
         i32::try_from(max_px).map_err(|_| DecodeError::Unsupported("thumbnail size".into()))?;
@@ -159,6 +199,7 @@ pub fn thumbnail_luma(
     // the call (data, max, keys/values arrays) or a CF object kept alive by a
     // `Cf` guard; `data` outlives `cfdata` because both live in this frame and
     // the no-copy CFData uses kCFAllocatorNull (it never frees the bytes).
+    // The bitmap context writes only inside `px`, sized for w × h × bpp.
     unsafe {
         let cfdata = Cf::new(
             CFDataCreateWithBytesNoCopy(std::ptr::null(), data.as_ptr(), len, kCFAllocatorNull),
@@ -238,22 +279,23 @@ pub fn thumbnail_luma(
             "thumbnail decode",
         )?;
         let (w, h) = (CGImageGetWidth(img.0), CGImageGetHeight(img.0));
-        crate::check_dimensions(
+        let (w32, h32) = (
             u32::try_from(w).map_err(|_| DecodeError::Truncated)?,
             u32::try_from(h).map_err(|_| DecodeError::Truncated)?,
-        )?;
-        let mut px = vec![0u8; w * h];
-        let gray = Cf::new(CGColorSpaceCreateDeviceGray(), "gray colour space")?;
-        let ctx = Cf::new(
-            CGBitmapContextCreate(
-                px.as_mut_ptr().cast(),
-                w,
-                h,
-                8,
-                w,
-                gray.0,
-                K_CG_IMAGE_ALPHA_NONE,
+        );
+        crate::check_dimensions(w32, h32)?;
+        let (bpp, space, info) = match out {
+            Out::Gray => (1, CGColorSpaceCreateDeviceGray(), K_CG_IMAGE_ALPHA_NONE),
+            Out::Srgb => (
+                4,
+                CGColorSpaceCreateWithName(kCGColorSpaceSRGB),
+                K_CG_IMAGE_ALPHA_NONE_SKIP_LAST,
             ),
+        };
+        let space = Cf::new(space, "colour space")?;
+        let mut px = vec![0u8; w * h * bpp];
+        let ctx = Cf::new(
+            CGBitmapContextCreate(px.as_mut_ptr().cast(), w, h, 8, w * bpp, space.0, info),
             "bitmap context",
         )?;
         CGContextSetInterpolationQuality(ctx.0, K_CG_INTERPOLATION_HIGH);
@@ -266,6 +308,6 @@ pub fn thumbnail_luma(
         };
         CGContextDrawImage(ctx.0, rect, img.0);
         drop(ctx); // finish drawing before `px` is read
-        Gray::new(w as u32, h as u32, px)
+        Ok((w32, h32, px))
     }
 }

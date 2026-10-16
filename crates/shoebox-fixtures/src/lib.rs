@@ -125,6 +125,7 @@ pub fn edited_variant(img: &RgbImage) -> RgbImage {
 // Minimal little-endian TIFF writer for EXIF blocks and fake NEFs.
 
 pub enum Val {
+    Undefined(Vec<u8>),
     Short(Vec<u16>),
     Long(Vec<u32>),
     Ascii(String),
@@ -134,6 +135,7 @@ pub enum Val {
 impl Val {
     fn encode(&self) -> (u16, u32, Vec<u8>) {
         match self {
+            Val::Undefined(v) => (7, v.len() as u32, v.clone()),
             Val::Short(v) => (
                 3,
                 v.len() as u32,
@@ -222,6 +224,31 @@ impl TiffWriter {
         self.buf[4..8].copy_from_slice(&ifd0.to_le_bytes());
         self.buf
     }
+}
+
+/// An uncompressed 8-bit RGB TIFF (one strip) with an embedded ICC profile,
+/// like a Lightroom export in Adobe RGB or ProPhoto.
+pub fn tiff_with_icc(img: &RgbImage, icc: &[u8]) -> Vec<u8> {
+    let mut w = TiffWriter::new();
+    let strip = w.blob(img.as_raw());
+    let (width, height) = img.dimensions();
+    let ifd0 = w.ifd(
+        vec![
+            (0x0100, Val::Long(vec![width])),
+            (0x0101, Val::Long(vec![height])),
+            (0x0102, Val::Short(vec![8, 8, 8])),
+            (0x0103, Val::Short(vec![1])),
+            (0x0106, Val::Short(vec![2])),
+            (0x0111, Val::Long(vec![strip])),
+            (0x0115, Val::Short(vec![3])),
+            (0x0116, Val::Long(vec![height])),
+            (0x0117, Val::Long(vec![img.as_raw().len() as u32])),
+            (0x011C, Val::Short(vec![1])),
+            (0x8773, Val::Undefined(icc.to_vec())),
+        ],
+        0,
+    );
+    w.finish(ifd0)
 }
 
 /// Capture metadata for a synthetic frame.

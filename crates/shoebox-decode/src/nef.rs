@@ -13,8 +13,13 @@ use crate::tiffparse::{
 /// Every IFD in the file (IFD0 chain and SubIFDs) is considered; the one whose
 /// JPEG is largest wins. For Nikon bodies that is the full-size preview.
 pub fn jpg_from_raw(data: &[u8]) -> Result<Option<Range<usize>>, DecodeError> {
+    Ok(embedded_jpegs(data)?.into_iter().max_by_key(|r| r.len()))
+}
+
+/// Byte ranges of every embedded JPEG referenced from the file's IFDs.
+pub fn embedded_jpegs(data: &[u8]) -> Result<Vec<Range<usize>>, DecodeError> {
     let tiff = Tiff::parse(data)?;
-    let mut best: Option<Range<usize>> = None;
+    let mut out: Vec<Range<usize>> = Vec::new();
     for ifd in tiff.all_ifds()? {
         let (Some(off), Some(len)) = (
             tiff.uint(&ifd, TAG_JPEG_IF_OFFSET)?,
@@ -29,11 +34,11 @@ pub fn jpg_from_raw(data: &[u8]) -> Result<Option<Range<usize>>, DecodeError> {
         if !bytes.starts_with(&[0xFF, 0xD8]) {
             continue;
         }
-        if best.as_ref().is_none_or(|b| b.len() < len) {
-            best = Some(off..off + len);
+        if !out.contains(&(off..off + len)) {
+            out.push(off..off + len);
         }
     }
-    Ok(best)
+    Ok(out)
 }
 
 /// Orientation and declared dimensions from IFD0 of a TIFF-based file.

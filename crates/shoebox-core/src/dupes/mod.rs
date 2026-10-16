@@ -207,7 +207,8 @@ fn format_rank(f: Format) -> u8 {
     match f {
         Format::Nef => 0,
         Format::Tiff => 1,
-        Format::Jpeg => 2,
+        // HEIC is a camera original (phone), so it ranks with the JPG.
+        Format::Jpeg | Format::Heic => 2,
         Format::Png => 3,
     }
 }

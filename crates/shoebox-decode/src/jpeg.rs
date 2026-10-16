@@ -64,6 +64,90 @@ pub fn scan_data_range(data: &[u8]) -> Result<Range<usize>, DecodeError> {
     Err(DecodeError::Format("JPEG has no EOI".into()))
 }
 
+/// `(marker, payload range)` of every APPn/COM segment before the first SOS.
+pub fn header_segments(data: &[u8]) -> Vec<(u8, Range<usize>)> {
+    let mut out = Vec::new();
+    if data.get(0..2) != Some(&[0xFF, SOI]) {
+        return out;
+    }
+    let mut i = 2;
+    loop {
+        while data.get(i) == Some(&0xFF) && data.get(i + 1) == Some(&0xFF) {
+            i += 1;
+        }
+        match (data.get(i), data.get(i + 1)) {
+            (Some(0xFF), Some(&SOS)) | (Some(0xFF), Some(&EOI)) => return out,
+            (Some(0xFF), Some(&m)) => {
+                let Some(len) = seg_len(data, i + 2) else {
+                    return out;
+                };
+                let (start, end) = (i + 4, i + 2 + len);
+                if len < 2 || end > data.len() {
+                    return out;
+                }
+                out.push((m, start..end));
+                i = end;
+            }
+            _ => return out,
+        }
+    }
+}
+
+/// Byte ranges of the extra images listed in a JPEG's MPF index (CIPA
+/// DC-007), such as Nikon's 640×424 and full-HD "large thumbnails". The
+/// primary image (offset 0) is not included.
+pub fn mpf_images(data: &[u8]) -> Vec<Range<usize>> {
+    let mut out = Vec::new();
+    for (marker, r) in header_segments(data) {
+        if marker != 0xE2 || !data[r.clone()].starts_with(b"MPF\0") {
+            continue;
+        }
+        let base = r.start + 4; // offsets are relative to the MP endian field
+        let Ok(tiff) = crate::tiffparse::Tiff::parse(&data[base..r.end]) else {
+            continue;
+        };
+        let Ok(ifd) = tiff.ifd0() else { continue };
+        let Some(entries) = ifd.get(0xB002).and_then(|e| tiff.raw(e).ok()) else {
+            continue;
+        };
+        for chunk in entries.as_chunks::<16>().0 {
+            let (Some(size), Some(off)) = (tiff.u32_in(chunk, 4), tiff.u32_in(chunk, 8)) else {
+                continue;
+            };
+            if off == 0 {
+                continue; // the primary image
+            }
+            let start = base + off as usize;
+            let end = start.saturating_add(size as usize);
+            if end <= data.len() && data[start..].starts_with(&[0xFF, SOI]) {
+                out.push(start..end);
+            }
+        }
+    }
+    out
+}
+
+/// Decode to 8-bit RGB, returning the embedded ICC profile if any.
+pub fn decode_rgb(data: &[u8]) -> Result<(crate::Rgb8, Option<Vec<u8>>), DecodeError> {
+    let opts = DecoderOptions::default()
+        .jpeg_set_out_colorspace(ColorSpace::RGB)
+        .set_max_width(1 << 15)
+        .set_max_height(1 << 15);
+    let mut d = JpegDecoder::new_with_options(ZCursor::new(data), opts);
+    d.decode_headers()
+        .map_err(|e| DecodeError::Format(format!("JPEG: {e:?}")))?;
+    let info = d.info().ok_or(DecodeError::Truncated)?;
+    crate::check_dimensions(u32::from(info.width), u32::from(info.height))?;
+    let icc = d.icc_profile();
+    let px = d
+        .decode()
+        .map_err(|e| DecodeError::Format(format!("JPEG: {e:?}")))?;
+    Ok((
+        crate::Rgb8::new(u32::from(info.width), u32::from(info.height), px)?,
+        icc,
+    ))
+}
+
 /// Dimensions from the frame header, without decoding.
 pub fn dimensions(data: &[u8]) -> Result<(u32, u32), DecodeError> {
     let mut d = JpegDecoder::new(ZCursor::new(data));

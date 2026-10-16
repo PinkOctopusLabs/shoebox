@@ -43,12 +43,20 @@ pub fn blake3_of(data: &[u8]) -> Digest {
     *h.finalize().as_bytes()
 }
 
-pub fn image_data_hash(format: Format, data: &[u8]) -> Result<Digest, shoebox_decode::DecodeError> {
+/// BLAKE3 of the image data without metadata, or None for formats without a
+/// defined image-data hash (HEIC).
+pub fn image_data_hash(
+    format: Format,
+    data: &[u8],
+) -> Result<Option<Digest>, shoebox_decode::DecodeError> {
+    let Some(ranges) = shoebox_decode::image_data_ranges(format, data)? else {
+        return Ok(None);
+    };
     let mut h = blake3::Hasher::new();
-    for r in shoebox_decode::image_data_ranges(format, data)? {
+    for r in ranges {
         h.update(&data[r]);
     }
-    Ok(*h.finalize().as_bytes())
+    Ok(Some(*h.finalize().as_bytes()))
 }
 
 /// Analyse a file from its bytes. Never fails on bad image data: problems are
@@ -57,7 +65,8 @@ pub fn analyze_bytes(format: Format, data: &[u8]) -> Analysis {
     let mut errors = Vec::new();
     let image_data_hash = image_data_hash(format, data)
         .map_err(|e| errors.push(format!("image data: {e}")))
-        .ok();
+        .ok()
+        .flatten();
     let exif = exif::read(data);
     let (width, height, hashes, luma_stddev) =
         match shoebox_decode::luma_thumbnail(format, data, HASH_DECODE_EDGE) {

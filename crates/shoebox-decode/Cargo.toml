@@ -11,8 +11,10 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+moxcms = "0.9.1"
 png = "0.18.1"
 thiserror.workspace = true
+tracing.workspace = true
 tiff = "0.11.3"
 turbojpeg = { version = "1.5.1", optional = true, default-features = false }
 zune-core = "0.5.3"
@@ -24,6 +26,7 @@ bench-turbojpeg = ["dep:turbojpeg"]
 
 [dev-dependencies]
 criterion = "0.8.2"
+moxcms = "0.9.1"
 rayon = "1.12.0"
 shoebox-fixtures = { path = "../shoebox-fixtures" }
 
