@@ -1,0 +1,21 @@
+[package]
+name = "shoebox-cli"
+description = "Headless Shoebox commands."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "shoebox"
+path = "src/main.rs"
+
+[dependencies]
+shoebox-core.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

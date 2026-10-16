@@ -1,0 +1,3 @@
+[env]
+# Minimum macOS from the spec. CI overrides this to the runner's OS version.
+MACOSX_DEPLOYMENT_TARGET = { value = "27.0", force = false }
