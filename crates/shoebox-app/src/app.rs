@@ -390,6 +390,36 @@ impl ShoeboxApp {
         self.scroll_to_current = true;
     }
 
+    /// Reveal the selection (in display order), or the current photo if
+    /// nothing is selected.
+    pub(crate) fn reveal_selection(&self) {
+        let mut paths: Vec<&Path> = self
+            .shown
+            .iter()
+            .filter(|&&i| self.selection.contains(&self.ids[i]))
+            .map(|&i| self.catalog.photos[i].path.as_path())
+            .collect();
+        if paths.is_empty()
+            && let Some(p) = self.current.and_then(|c| self.photo(c))
+        {
+            paths.push(&p.path);
+        }
+        reveal_all(&paths);
+    }
+
+    /// Right-click on a photo: like Finder, a click outside the selection
+    /// selects just that photo first.
+    pub(crate) fn secondary_click(&mut self, pos_in_shown: usize) {
+        let id = self.ids[self.shown[pos_in_shown]];
+        if !self.selection.contains(&id) {
+            self.click(pos_in_shown, egui::Modifiers::NONE);
+        }
+    }
+
+    pub fn selected_count(&self) -> usize {
+        self.selection.len()
+    }
+
     pub(crate) fn current_pos(&self) -> Option<usize> {
         let c = self.current?;
         self.shown.iter().position(|&i| self.ids[i] == c)
@@ -420,10 +450,8 @@ impl ShoeboxApp {
             if pressed(egui::Key::D) {
                 self.selection.clear();
             }
-            if pressed(egui::Key::R)
-                && let Some(p) = self.current.and_then(|c| self.photo(c))
-            {
-                reveal(&p.path);
+            if pressed(egui::Key::R) {
+                self.reveal_selection();
             }
             return;
         }
@@ -559,18 +587,41 @@ fn build_tree(catalog: &Catalog) -> Vec<FolderNode> {
         .collect()
 }
 
+/// Menu label for [`reveal`] on this platform.
+#[cfg(target_os = "macos")]
+pub(crate) const REVEAL_LABEL: &str = "Reveal in Finder";
+#[cfg(not(target_os = "macos"))]
+pub(crate) const REVEAL_LABEL: &str = "Show in File Manager";
+
 /// Show a file in Finder (macOS) or its folder in the file manager (Linux).
 pub(crate) fn reveal(path: &Path) {
+    reveal_all(&[path]);
+}
+
+/// Show files in Finder, selected together (macOS), or open their folders
+/// in the file manager (Linux; at most a few windows).
+pub(crate) fn reveal_all(paths: &[&Path]) {
+    if paths.is_empty() {
+        return;
+    }
     #[cfg(target_os = "macos")]
-    let r = std::process::Command::new("open")
+    let result = std::process::Command::new("open")
         .arg("-R")
-        .arg(path)
-        .spawn();
+        .args(paths)
+        .spawn()
+        .map(|_| ());
     #[cfg(not(target_os = "macos"))]
-    let r = std::process::Command::new("xdg-open")
-        .arg(path.parent().unwrap_or(path))
-        .spawn();
-    if let Err(e) = r {
-        tracing::warn!("reveal {}: {e}", path.display());
+    let result = {
+        let mut dirs: Vec<&Path> = paths.iter().map(|p| p.parent().unwrap_or(p)).collect();
+        dirs.dedup();
+        dirs.into_iter().take(5).try_for_each(|d| {
+            std::process::Command::new("xdg-open")
+                .arg(d)
+                .spawn()
+                .map(|_| ())
+        })
+    };
+    if let Err(e) = result {
+        tracing::warn!("reveal {}: {e}", paths[0].display());
     }
 }

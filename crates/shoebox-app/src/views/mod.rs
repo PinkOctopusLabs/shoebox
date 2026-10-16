@@ -125,10 +125,35 @@ pub fn cell(
             StrokeKind::Inside,
         );
     }
+    let name = photo
+        .path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Image, true, &name));
     if resp.hovered() {
         resp.clone().on_hover_text(photo.rel.clone());
     }
     resp
+}
+
+/// The photo context menu (right-click).
+pub fn photo_menu(app: &mut ShoeboxApp, resp: &egui::Response, pos: usize) {
+    if resp.secondary_clicked() {
+        app.secondary_click(pos);
+    }
+    resp.context_menu(|ui| {
+        let n = app.selection.len();
+        let label = if n > 1 {
+            format!("{} ({n} photos)", crate::app::REVEAL_LABEL)
+        } else {
+            crate::app::REVEAL_LABEL.to_owned()
+        };
+        if ui.button(label).clicked() {
+            app.reveal_selection();
+            ui.close();
+        }
+    });
 }
 
 /// Handle a cell's clicks: select, and double-click opens the loupe.
@@ -139,4 +164,5 @@ pub fn handle_click(app: &mut ShoeboxApp, ui: &egui::Ui, resp: &egui::Response, 
     } else if resp.clicked() {
         app.click(pos, ui.input(|i| i.modifiers));
     }
+    photo_menu(app, resp, pos);
 }

@@ -29,6 +29,7 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             if resp.clicked() {
                 app.click(pos, egui::Modifiers::NONE);
             }
+            super::photo_menu(app, &resp, pos);
         }
     });
 }

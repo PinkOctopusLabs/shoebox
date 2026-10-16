@@ -24,6 +24,9 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
 
     let rect = ui.available_rect_before_wrap();
     let resp = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+    if let Some(pos) = app.current_pos() {
+        super::photo_menu(app, &resp, pos);
+    }
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, Color32::from_gray(18));
 

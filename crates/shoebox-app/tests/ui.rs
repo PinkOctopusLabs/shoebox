@@ -9,8 +9,14 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 use shoebox_app::{AppPaths, ShoeboxApp, View};
 use shoebox_core::settings::Settings;
+
+#[cfg(target_os = "macos")]
+const REVEAL: &str = "Reveal in Finder";
+#[cfg(not(target_os = "macos"))]
+const REVEAL: &str = "Show in File Manager";
 
 fn paths(tmp: &Path, roots: &[PathBuf]) -> AppPaths {
     let settings = tmp.join("data/settings.json");
@@ -78,6 +84,35 @@ fn browse_views_render() {
     settle(&mut h, Duration::from_secs(60));
     assert_eq!(h.state().photo_count(), 17); // 7 reference + 10 scan images
     snapshot(&mut h, "1-grid");
+
+    // Right-click a photo: it becomes the selection and the menu offers
+    // Reveal in Finder. (The item isn't clicked, so Finder doesn't open.)
+    h.get_by_label("f0004.jpg").click_secondary();
+    h.run_steps(3);
+    assert_eq!(h.state().selected_count(), 1);
+    assert!(
+        h.query_by_label(REVEAL).is_some(),
+        "context menu shows {REVEAL}"
+    );
+    snapshot(&mut h, "1b-context-menu");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+
+    // With two selected, right-clicking one of them reveals both.
+    h.get_by_label("f0003.jpg")
+        .click_modifiers(egui::Modifiers::COMMAND);
+    h.run_steps(2);
+    assert_eq!(h.state().selected_count(), 2);
+    h.get_by_label("f0003.jpg").click_secondary();
+    h.run_steps(3);
+    assert_eq!(
+        h.state().selected_count(),
+        2,
+        "right-click inside the selection keeps it"
+    );
+    assert!(h.query_by_label(&format!("{REVEAL} (2 photos)")).is_some());
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
 
     h.key_press(egui::Key::M);
     settle(&mut h, Duration::from_secs(30));
