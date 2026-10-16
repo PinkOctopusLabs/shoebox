@@ -3,6 +3,28 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-16 — M2 browsing choices
+- **Library roots live in `settings.json`** in the data folder, not only in
+  the cache's `roots` table: they're user choices, and the cache must stay
+  safe to delete.
+- **Header-only metadata.** Browsing reads the first 256 KB of each file
+  (EXIF, orientation, size); real NEFs and Lightroom TIFFs keep all of it in
+  the first ~40 KB. Full read only as a fallback. 4,460 files in 0.9 s.
+- **Thumbnails from embedded previews**: Z f JPG MPF previews (640×424,
+  1620×1080) and NEF embedded JPEGs; 6.7 ms vs 202 ms for a full decode.
+  Thumbnails are cached as sRGB, upright JPEGs keyed by path, size, mtime
+  and orientation (an edited file gets a new one).
+- **Display colour is sRGB.** ICC profiles are converted to sRGB with
+  moxcms (Adobe RGB within 0.72 levels of ImageIO); wgpu declares the
+  window surface as sRGB, so macOS colour-matches it to the display. On a
+  wide-gamut (P3) screen, colours outside sRGB in Adobe RGB/ProPhoto files
+  are clipped where Preview.app would show them. Rendering to Display P3
+  would close that gap; not done yet.
+- **Headless UI verification** with egui_kittest: the real app renders to
+  PNGs in tests, and a 10,000-photo scroll test measures UI frame time
+  (p99 0.88 ms CPU; GPU time isn't measured headlessly).
+- HEIC on Linux is still unsupported (libheif backend not built).
+
 ## 2026-10-16 — One portable decoder; Linux kept buildable
 The owner also uses Linux. Linux stays a non-goal for v1 releases (as the spec
 says), but the code must stay portable, so ImageIO is **not** the main
