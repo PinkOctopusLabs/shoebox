@@ -160,6 +160,16 @@ pub fn cell(
         painter.rect_filled(r, 2.0, Color32::from_black_alpha(150));
         painter.galley(r.min + vec2(3.0, 1.0), g, Color32::WHITE);
     }
+    // Top right: changed since you last viewed it.
+    if let Some(ch) = app.cell_change(idx) {
+        let c = egui::pos2(inner.right() - 9.0, inner.top() + 9.0);
+        painter.circle_filled(c, 5.5, Color32::from_black_alpha(160));
+        painter.circle_filled(c, 4.0, change_colour(ch));
+        let r = Rect::from_center_size(c, vec2(14.0, 14.0));
+        let tip = describe_change(ch);
+        ui.interact(r, ui.scope_id().with(("change", id)), egui::Sense::hover())
+            .on_hover_text(tip);
+    }
     // Colour label: a strip along the top of the cell.
     if let Some(l) = marks.label {
         // Inset, so the selection border doesn't cover it.
@@ -211,6 +221,10 @@ pub fn photo_menu(app: &mut ShoeboxApp, resp: &egui::Response, pos: usize) {
             app.reveal_selection();
             ui.close();
         }
+        if app.selection_has_changes() && ui.button("Mark as Seen").clicked() {
+            app.mark_selection_seen();
+            ui.close();
+        }
     });
 }
 
@@ -235,4 +249,28 @@ pub fn label_colour(l: shoebox_core::marks::Label) -> Color32 {
         Label::Blue => Color32::from_rgb(62, 99, 221),
         Label::Purple => Color32::from_rgb(142, 78, 198),
     }
+}
+
+/// Badge colour: another app's change stands out more than Shoebox's own.
+pub fn change_colour(c: &shoebox_core::changes::Change) -> Color32 {
+    if c.by_other() {
+        Color32::from_rgb(255, 149, 0)
+    } else {
+        Color32::from_rgb(100, 170, 255)
+    }
+}
+
+/// "Sidecar changed by another app, 16 Oct 2026 14:02".
+pub fn describe_change(c: &shoebox_core::changes::Change) -> String {
+    use shoebox_core::changes::By;
+    let who = match &c.by {
+        By::Other => "another app".to_owned(),
+        By::Shoebox { batch, label } if label.is_empty() => format!("Shoebox (batch {batch})"),
+        By::Shoebox { batch, label } => format!("Shoebox: {label} (batch {batch})"),
+    };
+    format!(
+        "{} changed by {who}, {}",
+        c.what.describe(),
+        crate::app::local_time_ms(c.at_ms)
+    )
 }

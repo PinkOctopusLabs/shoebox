@@ -169,3 +169,80 @@ fn marks_round_trip_through_sidecars_and_rescans() {
     );
     assert!(!lib.join("ref/2026/2026-04-24/DSC_0001.JPG.xmp").exists());
 }
+
+/// Changes made by other apps are noticed by a rescan or a targeted re-read,
+/// attributed, and cleared by Mark as Seen; first sight is not a change.
+#[test]
+fn changes_are_tracked_until_seen() {
+    use shoebox_core::changes::{By, What};
+    let t = tempfile::tempdir().unwrap();
+    let lib = t.path().join("lib");
+    shoebox_fixtures::build_library(&lib).unwrap();
+    let lib = lib.canonicalize().unwrap(); // roots are canonical
+    let mut cache = Cache::open(&t.path().join("cache.sqlite")).unwrap();
+    let (c, _) = Catalog::refresh(&mut cache, roots(&lib), &|_, _| {}).unwrap();
+    assert!(c.photos.iter().all(|p| p.change.is_none()), "first scan");
+
+    // Another app writes a sidecar: a rescan notices it.
+    let jpg = lib.join("scan/recovered/f0003.jpg");
+    let side = shoebox_core::sidecar::per_file(&jpg);
+    let xmp = shoebox_core::xmp::edit(
+        None,
+        &[(
+            shoebox_core::xmp::Prop::Rating,
+            Some(shoebox_core::xmp::Value::Text("2".into())),
+        )],
+    )
+    .unwrap();
+    std::fs::write(&side, &xmp).unwrap(); // test fixture, not library
+    let (mut c, s) = Catalog::refresh(&mut cache, roots(&lib), &|_, _| {}).unwrap();
+    assert_eq!(s.changed, 1);
+    let i = c.photos.iter().position(|p| p.path == jpg).unwrap();
+    let ch = c.photos[i].change.clone().unwrap();
+    assert_eq!((ch.what, ch.by), (What::SIDECAR, By::Other));
+    assert_eq!(c.photos[i].marks.rating, 2);
+    // Survives a reopen from the cache.
+    let again = Catalog::from_cache(&cache, roots(&lib)).unwrap();
+    assert!(
+        again
+            .photos
+            .iter()
+            .any(|p| p.path == jpg && p.change.is_some())
+    );
+
+    c.mark_seen(&[i], &mut cache).unwrap();
+    assert!(c.photos[i].change.is_none());
+    let again = Catalog::from_cache(&cache, roots(&lib)).unwrap();
+    assert!(again.photos.iter().all(|p| p.change.is_none()));
+
+    // The watcher's path: the sidecar maps to its photo, a re-read updates it.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let xmp = shoebox_core::xmp::edit(
+        Some(&xmp),
+        &[(
+            shoebox_core::xmp::Prop::Rating,
+            Some(shoebox_core::xmp::Value::Text("5".into())),
+        )],
+    )
+    .unwrap();
+    std::fs::write(&side, &xmp).unwrap();
+    let a = c.affected(&[side.clone(), lib.join("scan/.DS_Store")]);
+    assert_eq!(
+        (a.photos.clone(), a.rescan, a.events),
+        (vec![i], false, false)
+    );
+    let r = c.reread(&a.photos, &By::Other, &mut cache).unwrap();
+    assert_eq!(r.changed, vec![jpg.clone()]);
+    assert_eq!(c.photos[i].marks.rating, 5);
+    assert!(c.photos[i].change.as_ref().unwrap().by_other());
+    // Nothing more to see on a rescan: the cache is current.
+    let (_, s) = Catalog::refresh(&mut cache, roots(&lib), &|_, _| {}).unwrap();
+    assert_eq!((s.changed, s.read), (0, 0));
+
+    // A new image or folder asks for a rescan; events.json is flagged.
+    let a = c.affected(&[
+        lib.join("scan/new.jpg"),
+        lib.join("scan/.shoebox/events.json"),
+    ]);
+    assert!(a.rescan && a.events && a.photos.is_empty());
+}

@@ -49,7 +49,7 @@ pub struct ScannedFile {
 
 /// Folders the scanner never descends into: the app's own output folders and
 /// hidden folders such as `.shoebox`.
-fn skip_dir(name: &str) -> bool {
+pub(crate) fn skip_dir(name: &str) -> bool {
     name.starts_with('.') || name == "_duplicates" || name == "_rejected"
 }
 

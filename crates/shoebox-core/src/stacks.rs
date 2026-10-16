@@ -214,6 +214,7 @@ mod tests {
             marks: Default::default(),
             sidecar: None,
             sidecar_sig: String::new(),
+            change: None,
         }
     }
 

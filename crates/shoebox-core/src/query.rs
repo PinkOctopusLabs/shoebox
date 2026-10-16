@@ -79,6 +79,12 @@ pub struct Filter {
     /// Only within this folder (and below).
     #[serde(default)]
     pub folder: Option<std::path::PathBuf>,
+    /// Stacks with an image or sidecar modified within this many days.
+    #[serde(default)]
+    pub changed_within_days: Option<u32>,
+    /// Stacks with a change you haven't viewed yet.
+    #[serde(default)]
+    pub unseen_changes: bool,
 }
 
 impl Filter {
@@ -170,6 +176,15 @@ pub fn matches(c: &Catalog, s: usize, f: &Filter) -> bool {
     {
         return false;
     }
+    if let Some(days) = f.changed_within_days {
+        let since = crate::events::now_ms() * 1_000_000 - i64::from(days) * 86_400 * 1_000_000_000;
+        if stack_modified_ns(c, s) < since {
+            return false;
+        }
+    }
+    if f.unseen_changes && !st.all().any(|i| c.photos[i].change.is_some()) {
+        return false;
+    }
     if !f.search.trim().is_empty() {
         let q = f.search.trim().to_lowercase();
         let in_names = st.all().any(|i| {
@@ -186,6 +201,23 @@ pub fn matches(c: &Catalog, s: usize, f: &Filter) -> bool {
     true
 }
 
+/// When any file of stack `s` (image or sidecar) last changed on disk (ns).
+pub fn stack_modified_ns(c: &Catalog, s: usize) -> i64 {
+    c.stacks[s]
+        .all()
+        .map(|i| c.photos[i].modified_ns())
+        .max()
+        .unwrap_or(0)
+}
+
+/// The built-in "Recently changed" smart filter: the last 7 days, newest first.
+pub fn recently_changed() -> Filter {
+    Filter {
+        changed_within_days: Some(7),
+        ..Filter::default()
+    }
+}
+
 /// Stack indices passing `f`, in `sort` order (ties by capture time).
 pub fn run(c: &Catalog, f: &Filter, sort: Sort, descending: bool) -> Vec<usize> {
     let mut out: Vec<usize> = (0..c.stacks.len()).filter(|&s| matches(c, s, f)).collect();
@@ -197,7 +229,7 @@ pub fn run(c: &Catalog, f: &Filter, sort: Sort, descending: bool) -> Vec<usize> 
             out.sort_by_key(|&s| primary(s).path.file_name().map(|n| n.to_ascii_lowercase()))
         }
         Sort::Rating => out.sort_by_key(|&s| std::cmp::Reverse(primary(s).marks.rating)),
-        Sort::Modified => out.sort_by_key(|&s| std::cmp::Reverse(primary(s).mtime_ns)),
+        Sort::Modified => out.sort_by_key(|&s| std::cmp::Reverse(stack_modified_ns(c, s))),
     }
     if descending {
         out.reverse();
@@ -264,6 +296,7 @@ mod tests {
             },
             sidecar: None,
             sidecar_sig: String::new(),
+            change: None,
         }
     }
 

@@ -8,6 +8,7 @@ use rayon::prelude::*;
 use shoebox_decode::Format;
 
 use crate::cache::{Cache, CachedMarks, MetaEntry};
+use crate::changes::{By, Change, What};
 use crate::error::Result;
 use crate::marks::Marks;
 use crate::meta::{self, Meta};
@@ -30,6 +31,42 @@ pub struct Photo {
     pub sidecar: Option<PathBuf>,
     /// Signature of the sidecars the marks were read from.
     pub sidecar_sig: String,
+    /// A change since you last viewed this photo.
+    pub change: Option<Change>,
+}
+
+impl Photo {
+    /// Latest sidecar modification time (ns), if it has a sidecar.
+    pub fn sidecar_mtime_ns(&self) -> Option<i64> {
+        crate::changes::sig_mtime(&self.sidecar_sig)
+    }
+
+    /// When the image or its sidecar last changed on disk (ns).
+    pub fn modified_ns(&self) -> i64 {
+        self.mtime_ns.max(self.sidecar_mtime_ns().unwrap_or(0))
+    }
+}
+
+/// Photos affected by changed paths on disk (from the file watcher).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Affected {
+    /// Photos whose image or sidecar changed.
+    pub photos: Vec<usize>,
+    /// Images were added or removed, or folders changed: rescan.
+    pub rescan: bool,
+    /// A root's `.shoebox/events.json` changed.
+    pub events: bool,
+}
+
+/// Result of [`Catalog::reread`].
+#[derive(Debug, Default)]
+pub struct Reread {
+    /// Photos that changed (indices before any re-sort).
+    pub changed: Vec<std::path::PathBuf>,
+    /// Photos were re-sorted (an image changed): indices are stale.
+    pub reordered: bool,
+    /// A photo's image is gone: rescan.
+    pub missing: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -50,6 +87,19 @@ pub struct RefreshStats {
     pub read: usize,
     pub failed: usize,
     pub forgotten: usize,
+    /// Known files that changed on disk since the last scan.
+    pub changed: usize,
+}
+
+/// A file to read during a refresh.
+struct Todo {
+    f: scan::ScannedFile,
+    /// Metadata still valid (the image is unchanged).
+    meta: Option<Meta>,
+    /// What changed in a file Shoebox already knew.
+    what: Option<What>,
+    /// Its unseen change, if any.
+    prev: Option<Change>,
 }
 
 const STORE_CHUNK: usize = 512;
@@ -61,8 +111,8 @@ impl Catalog {
         let mut photos = Vec::new();
         for (i, root) in roots.iter().enumerate() {
             let id = cache.root_id(&root.path, root.role == Role::Reference)?;
-            for (rel, (size, mtime_ns, meta, marks)) in cache.load_meta(id)? {
-                let marks = marks.unwrap_or_else(|| CachedMarks {
+            for (rel, k) in cache.load_meta(id)? {
+                let marks = k.marks.unwrap_or_else(|| CachedMarks {
                     marks: Marks::default(),
                     sidecar: None,
                     sig: String::new(),
@@ -76,12 +126,13 @@ impl Catalog {
                     rel,
                     path,
                     format,
-                    size,
-                    mtime_ns,
-                    meta,
+                    size: k.size,
+                    mtime_ns: k.mtime_ns,
+                    meta: k.meta,
                     marks: marks.marks,
                     sidecar: marks.sidecar,
                     sidecar_sig: marks.sig,
+                    change: k.change,
                 });
             }
         }
@@ -116,12 +167,11 @@ impl Catalog {
             .collect::<Result<_>>()?;
 
         let mut photos = Vec::with_capacity(files.len());
-        // (file, metadata if it's still valid) for files needing a read.
-        let mut todo: Vec<(scan::ScannedFile, Option<Meta>)> = Vec::new();
+        let mut todo: Vec<Todo> = Vec::new();
         for f in files {
             let sig = signature(&f.path, &sidecars);
             match known[f.root].get(&f.rel) {
-                Some((size, mtime, m, cm)) if *size == f.size && *mtime == f.mtime_ns => match cm {
+                Some(k) if k.size == f.size && k.mtime_ns == f.mtime_ns => match &k.marks {
                     Some(cm) if cm.sig == sig => {
                         stats.cached += 1;
                         photos.push(Photo {
@@ -131,16 +181,39 @@ impl Catalog {
                             format: f.format,
                             size: f.size,
                             mtime_ns: f.mtime_ns,
-                            meta: m.clone(),
+                            meta: k.meta.clone(),
                             marks: cm.marks.clone(),
                             sidecar: cm.sidecar.clone(),
                             sidecar_sig: sig,
+                            change: k.change.clone(),
                         });
                     }
                     // Image unchanged, sidecar changed: re-read marks only.
-                    _ => todo.push((f, Some(m.clone()))),
+                    cm => todo.push(Todo {
+                        f,
+                        meta: Some(k.meta.clone()),
+                        what: cm.is_some().then_some(What::SIDECAR),
+                        prev: k.change.clone(),
+                    }),
                 },
-                _ => todo.push((f, None)),
+                Some(k) => {
+                    let sidecar = k.marks.as_ref().is_some_and(|cm| cm.sig != sig);
+                    todo.push(Todo {
+                        f,
+                        meta: None,
+                        what: Some(What {
+                            image: true,
+                            sidecar,
+                        }),
+                        prev: k.change.clone(),
+                    });
+                }
+                None => todo.push(Todo {
+                    f,
+                    meta: None,
+                    what: None,
+                    prev: None,
+                }),
             }
         }
 
@@ -149,8 +222,9 @@ impl Catalog {
         for chunk in todo.chunks(STORE_CHUNK) {
             let read: Vec<(Photo, bool)> = chunk
                 .par_iter()
-                .map(|(f, known_meta)| {
-                    let (m, ok) = match known_meta {
+                .map(|t| {
+                    let f = &t.f;
+                    let (m, ok) = match &t.meta {
                         Some(m) => (m.clone(), true),
                         None => match meta::read(&f.path, f.format) {
                             Ok(m) => (m, true),
@@ -179,6 +253,14 @@ impl Catalog {
                         marks: loaded.marks,
                         sidecar: loaded.sidecar,
                         sidecar_sig: signature(&f.path, &sidecars),
+                        change: match t.what {
+                            // Noticed now, made by something other than Shoebox
+                            // (Shoebox's own writes update the cache as they go).
+                            Some(w) => {
+                                Some(Change::merge(t.prev.as_ref(), Change::now(w, By::Other)))
+                            }
+                            None => t.prev.clone(),
+                        },
                     };
                     (p, ok)
                 })
@@ -211,6 +293,15 @@ impl Catalog {
                 })
                 .collect();
             cache.store_meta(&entries)?;
+            for ((p, ok), t) in read.iter().zip(chunk) {
+                if *ok
+                    && t.what.is_some()
+                    && let Some(c) = &p.change
+                {
+                    cache.record_change(ids[p.root], &p.rel, c)?;
+                    stats.changed += 1;
+                }
+            }
             stats.read += entries.len();
             stats.failed += read.len() - entries.len();
             photos.extend(read.into_iter().map(|(p, _)| p));
@@ -274,8 +365,13 @@ impl Catalog {
             return Ok(None);
         }
         let batch = fileops.write_sidecars(label, writes)?;
+        let by = By::Shoebox {
+            batch,
+            label: label.to_owned(),
+        };
         for (i, new) in updates {
             self.note_marks(*i, new.clone(), cache)?;
+            self.note_change(*i, Change::now(What::SIDECAR, by.clone()), cache)?;
         }
         Ok(Some(batch))
     }
@@ -283,14 +379,7 @@ impl Catalog {
     /// Record marks now on disk for photo `i` in the catalog and cache.
     fn note_marks(&mut self, i: usize, marks: Marks, cache: &Cache) -> Result<()> {
         let path = self.photos[i].path.clone();
-        let mut found = Sidecars::new();
-        for side in [sidecar::per_stem(&path), sidecar::per_file(&path)] {
-            for cand in [side.clone(), side.with_extension("XMP")] {
-                if let Ok(m) = std::fs::metadata(&cand) {
-                    found.insert(cand, scan::mtime_of(&m));
-                }
-            }
-        }
+        let found = sidecars_of(&path);
         let sig = signature(&path, &found);
         let (_, file) = sidecar::present(&path, &|q| found.contains_key(q));
         let root = &self.roots[self.photos[i].root];
@@ -308,6 +397,224 @@ impl Catalog {
                 sig: photo.sidecar_sig.clone(),
             },
         )
+    }
+
+    fn root_id(&self, i: usize, cache: &Cache) -> Result<i64> {
+        let root = &self.roots[self.photos[i].root];
+        cache.root_id(&root.path, root.role == Role::Reference)
+    }
+
+    /// Fold a change into photo `i`'s unseen change, in the catalog and cache.
+    fn note_change(&mut self, i: usize, c: Change, cache: &Cache) -> Result<()> {
+        let root_id = self.root_id(i, cache)?;
+        let p = &mut self.photos[i];
+        let merged = Change::merge(p.change.as_ref(), c);
+        cache.record_change(root_id, &p.rel, &merged)?;
+        p.change = Some(merged);
+        Ok(())
+    }
+
+    /// Clear the unseen changes of these photos (viewed, or Mark as Seen).
+    pub fn mark_seen(&mut self, photos: &[usize], cache: &mut Cache) -> Result<()> {
+        let mut rows = Vec::new();
+        for &i in photos {
+            if self.photos[i].change.is_some() {
+                rows.push((self.root_id(i, cache)?, i));
+            }
+        }
+        let keys: Vec<(i64, &str)> = rows
+            .iter()
+            .map(|&(r, i)| (r, self.photos[i].rel.as_str()))
+            .collect();
+        cache.mark_seen(&keys)?;
+        for (_, i) in rows {
+            self.photos[i].change = None;
+        }
+        Ok(())
+    }
+
+    /// Which photos changed paths on disk affect. Hidden files, Shoebox's
+    /// output folders and anything outside the roots are ignored.
+    pub fn affected(&self, paths: &[PathBuf]) -> Affected {
+        let mut out = Affected::default();
+        let index: std::collections::HashMap<&std::path::Path, usize> = self
+            .photos
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.path.as_path(), i))
+            .collect();
+        // (folder, lower-case stem) → photos, for `name.xmp` sidecars.
+        let mut by_stem: Option<std::collections::HashMap<(&std::path::Path, String), Vec<usize>>> =
+            None;
+        for path in paths {
+            let Some(root) = self.roots.iter().find(|r| path.starts_with(&r.path)) else {
+                continue;
+            };
+            let Ok(rel) = path.strip_prefix(&root.path) else {
+                continue;
+            };
+            let comps: Vec<String> = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            if comps.first().is_some_and(|c| c == ".shoebox") {
+                out.events |= comps.last().is_some_and(|c| c == "events.json");
+                continue;
+            }
+            let (dirs, name) = match comps.split_last() {
+                Some((n, d)) => (d, n),
+                None => {
+                    out.rescan = true; // the root itself
+                    continue;
+                }
+            };
+            if dirs.iter().any(|d| scan::skip_dir(d)) || name.starts_with('.') {
+                continue;
+            }
+            let ext = path
+                .extension()
+                .map(|e| e.to_string_lossy().to_ascii_lowercase());
+            if ext.as_deref() == Some("xmp") {
+                // `x.nef.xmp` → `x.nef`; `x.xmp` → every `x.*` in the folder.
+                let image = path.with_extension("");
+                if let Some(&i) = index.get(image.as_path()) {
+                    out.photos.push(i);
+                } else if let Some(i) = self
+                    .photos
+                    .iter()
+                    .position(|p| p.path.as_os_str().eq_ignore_ascii_case(image.as_os_str()))
+                {
+                    out.photos.push(i);
+                }
+                let map = by_stem.get_or_insert_with(|| {
+                    let mut m: std::collections::HashMap<_, Vec<usize>> = Default::default();
+                    for (i, p) in self.photos.iter().enumerate() {
+                        if let (Some(d), Some(s)) = (p.path.parent(), p.path.file_stem()) {
+                            m.entry((d, s.to_string_lossy().to_lowercase()))
+                                .or_default()
+                                .push(i);
+                        }
+                    }
+                    m
+                });
+                if let (Some(d), Some(s)) = (path.parent(), path.file_stem())
+                    && let Some(v) = map.get(&(d, s.to_string_lossy().to_lowercase()))
+                {
+                    out.photos.extend(v);
+                }
+            } else if Format::from_path(path).is_some() {
+                match index.get(path.as_path()) {
+                    Some(&i) if path.is_file() => out.photos.push(i),
+                    _ => out.rescan = true, // added, removed or renamed
+                }
+            } else if ext.is_none() && !path.is_file() {
+                out.rescan = true; // a folder appeared, went or was renamed
+            }
+        }
+        out.photos.sort_unstable();
+        out.photos.dedup();
+        out
+    }
+
+    /// Re-read these photos from disk (image metadata if the image changed,
+    /// marks if a sidecar changed), recording each change as made `by`.
+    pub fn reread(&mut self, photos: &[usize], by: &By, cache: &mut Cache) -> Result<Reread> {
+        let mut out = Reread::default();
+        let mut entries: Vec<(usize, bool)> = Vec::new();
+        for &i in photos {
+            let path = self.photos[i].path.clone();
+            let Ok(md) = std::fs::metadata(&path) else {
+                out.missing = true;
+                continue;
+            };
+            let (size, mtime_ns) = (md.len(), scan::mtime_of(&md));
+            let found = sidecars_of(&path);
+            let sig = signature(&path, &found);
+            let p = &self.photos[i];
+            let what = What {
+                image: size != p.size || mtime_ns != p.mtime_ns,
+                sidecar: sig != p.sidecar_sig,
+            };
+            if !what.any() {
+                continue;
+            }
+            let mut ok = true;
+            if what.image {
+                match meta::read(&path, p.format) {
+                    Ok(m) => self.photos[i].meta = m,
+                    Err(e) => {
+                        tracing::warn!("metadata: {e}");
+                        ok = false;
+                    }
+                }
+                out.reordered = true;
+            }
+            let p = &self.photos[i];
+            let (stem, file) = sidecar::present(&path, &|q| found.contains_key(q));
+            let loaded = sidecar::load(&path, p.format, stem.as_deref(), file.as_deref())
+                .unwrap_or_else(|e| {
+                    tracing::warn!("marks: {e}");
+                    sidecar::Loaded::default()
+                });
+            let p = &mut self.photos[i];
+            p.size = size;
+            p.mtime_ns = mtime_ns;
+            p.marks = loaded.marks;
+            p.sidecar = loaded.sidecar;
+            p.sidecar_sig = sig;
+            p.change = Some(Change::merge(
+                p.change.as_ref(),
+                Change::now(what, by.clone()),
+            ));
+            entries.push((i, ok));
+            out.changed.push(path);
+        }
+        let ids: Vec<i64> = entries
+            .iter()
+            .map(|&(i, _)| self.root_id(i, cache))
+            .collect::<Result<_>>()?;
+        let exts: Vec<String> = entries
+            .iter()
+            .map(|&(i, _)| self.photos[i].format.label().to_ascii_lowercase())
+            .collect();
+        let marks: Vec<CachedMarks> = entries
+            .iter()
+            .map(|&(i, _)| {
+                let p = &self.photos[i];
+                CachedMarks {
+                    marks: p.marks.clone(),
+                    sidecar: p.sidecar.clone(),
+                    sig: p.sidecar_sig.clone(),
+                }
+            })
+            .collect();
+        let rows: Vec<MetaEntry<'_>> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, ok))| *ok)
+            .map(|(k, &(i, _))| {
+                let p = &self.photos[i];
+                MetaEntry {
+                    root_id: ids[k],
+                    rel: &p.rel,
+                    ext: &exts[k],
+                    size: p.size,
+                    mtime_ns: p.mtime_ns,
+                    meta: &p.meta,
+                    marks: &marks[k],
+                }
+            })
+            .collect();
+        cache.store_meta(&rows)?;
+        for (k, &(i, _)) in entries.iter().enumerate() {
+            if let Some(c) = &self.photos[i].change {
+                cache.record_change(ids[k], &self.photos[i].rel, c)?;
+            }
+        }
+        if out.reordered {
+            self.finish();
+        }
+        Ok(out)
     }
 
     /// Sort photos and rebuild stacks (indices change).
@@ -330,6 +637,19 @@ impl Catalog {
             .then_with(|| a.path.cmp(&b.path))
         });
     }
+}
+
+/// The sidecars on disk for one image, with their modification times.
+fn sidecars_of(path: &std::path::Path) -> Sidecars {
+    let mut found = Sidecars::new();
+    for side in [sidecar::per_stem(path), sidecar::per_file(path)] {
+        for cand in [side.clone(), side.with_extension("XMP")] {
+            if let Ok(m) = std::fs::metadata(&cand) {
+                found.insert(cand, scan::mtime_of(&m));
+            }
+        }
+    }
+    found
 }
 
 /// Which sidecars exist for `image`, and when they last changed.

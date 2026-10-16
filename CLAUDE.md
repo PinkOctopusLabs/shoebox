@@ -4,11 +4,11 @@ A Rust + egui photo library app for macOS. **`docs/SPEC.md` is the source of tru
 
 ## Layout
 - `crates/shoebox-core`: library model, scanning, hashing, duplicate index, SQLite cache, and `fileops` (the only module that moves, renames, copies or writes files; it journals everything). No egui.
-  M3: `xmp` (read any form, edit by splicing original bytes), `marks`, `sidecar` (precedence + write planning), `stacks`, `query` (filters, sort, smart filters), `events`.
+  M3: `xmp` (read any form, edit by splicing original bytes), `marks`, `sidecar` (precedence + write planning), `stacks`, `query` (filters, sort, smart filters), `events`, `changes` (unseen-change tracking).
 - `crates/shoebox-decode`: JPEG/TIFF/PNG decoding, NEF embedded-preview extraction, grayscale thumbnails.
 - `crates/shoebox-app`: the eframe/egui app (`cargo run --release -p shoebox-app`).
   `jobs.rs` (background loader + library worker; the UI thread never reads
-  files), `textures.rs` (LRU budget), `views/` (grid, masonry, loupe,
+  files), `watch.rs` (file watcher feeding the library worker), `textures.rs` (LRU budget), `views/` (grid, masonry, loupe,
   filmstrip), `panels.rs`. Headless UI tests in `tests/ui.rs` render PNGs
   (`SHOEBOX_UI_SNAPSHOTS=<dir>`); `--ignored` runs the 10k scroll test and,
   with `SHOEBOX_UI_LIBRARY=<APFS clone>`, a read-only real-library run.

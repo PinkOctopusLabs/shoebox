@@ -2,6 +2,7 @@
 
 pub mod cache;
 pub mod catalog;
+pub mod changes;
 pub mod dupes;
 pub mod error;
 pub mod events;

@@ -7,5 +7,6 @@ mod panels;
 mod platform;
 pub mod textures;
 mod views;
+mod watch;
 
 pub use app::{AppPaths, ShoeboxApp, View};

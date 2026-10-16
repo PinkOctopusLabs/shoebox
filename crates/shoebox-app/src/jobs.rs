@@ -5,7 +5,8 @@
 //! - [`Loader`]: images (thumbnails and full decodes) by priority. Demand is
 //!   replaced every frame, so work for thumbnails scrolled out of view is
 //!   cancelled before it starts.
-//! - [`Library`]: settings and catalog scans, one at a time.
+//! - [`Library`]: settings and catalog scans, one at a time. It also watches
+//!   the roots, so changes made by other apps show up without a rescan.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -13,6 +14,7 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use crossbeam_channel::{Receiver, Sender};
 use shoebox_core::catalog::Catalog;
+use shoebox_core::changes::By;
 use shoebox_core::events::{self, Event};
 use shoebox_core::fileops::{FileOps, Journal};
 use shoebox_core::marks::Marks;
@@ -246,6 +248,8 @@ pub enum LibraryCommand {
     Redo,
     /// Replace settings other than roots (options, smart filters).
     SaveSettings(Box<Settings>),
+    /// Clear the unseen changes of these photos.
+    MarkSeen(Vec<PathBuf>),
 }
 
 pub enum LibraryEvent {
@@ -261,6 +265,9 @@ pub enum LibraryEvent {
     },
     /// The events (after loading, saving or undo).
     Events(Vec<Event>),
+    /// Unseen changes after Shoebox wrote these photos' sidecars (lighter
+    /// than republishing the catalog on every keystroke).
+    Changes(Vec<(PathBuf, Option<shoebox_core::changes::Change>)>),
     /// Undo/redo availability changed.
     History {
         can_undo: bool,
@@ -357,7 +364,64 @@ fn library_worker(
         });
     };
 
-    while let Ok(cmd) = commands.recv() {
+    // Changed paths from the file watcher, re-created when the roots change.
+    let (fs_tx, fs_rx) = crossbeam_channel::unbounded::<Vec<PathBuf>>();
+    let watch_roots = |s: &Settings| {
+        let roots: Vec<PathBuf> = s.roots.iter().map(|r| r.path.clone()).collect();
+        crate::watch::watch(&roots, fs_tx.clone())
+    };
+    let mut watcher = watch_roots(&settings);
+    let reindex = |catalog: &Catalog| -> HashMap<PathBuf, usize> {
+        catalog
+            .photos
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.path.clone(), i))
+            .collect()
+    };
+
+    loop {
+        let cmd = crossbeam_channel::select! {
+            recv(commands) -> c => match c {
+                Ok(c) => Command::App(c),
+                Err(_) => break, // the app is gone
+            },
+            recv(fs_rx) -> p => match p {
+                Ok(paths) => Command::Changed(paths),
+                Err(_) => continue,
+            },
+        };
+        let cmd = match cmd {
+            Command::App(c) => c,
+            Command::Changed(paths) => {
+                // Made elsewhere (Shoebox's own writes already updated the
+                // catalog, so re-reading finds nothing new for them).
+                let a = catalog.affected(&paths);
+                if a.events {
+                    let roots: Vec<PathBuf> =
+                        settings.roots.iter().map(|r| r.path.clone()).collect();
+                    emit(LibraryEvent::Events(events::load(&roots)));
+                }
+                let mut rescan = a.rescan;
+                if !a.photos.is_empty() {
+                    match catalog.reread(&a.photos, &By::Other, &mut cache) {
+                        Ok(r) => {
+                            rescan |= r.missing;
+                            if !r.changed.is_empty() {
+                                tracing::info!("{} photos changed on disk", r.changed.len());
+                                index = reindex(&catalog);
+                                publish(&catalog, &settings, true);
+                            }
+                        }
+                        Err(e) => emit(LibraryEvent::Error(format!("re-reading: {e}"))),
+                    }
+                }
+                if rescan {
+                    refresh_impl(&mut cache, &settings, &mut catalog, &mut index, &emit);
+                }
+                continue;
+            }
+        };
         let (settings_changed, rescan) = match cmd {
             LibraryCommand::Open => {
                 if let Ok(c) = Catalog::from_cache(&cache, settings.scan_roots()) {
@@ -412,6 +476,15 @@ fn library_worker(
                         undo.push(batch);
                         redo.clear();
                         history(&undo, &redo);
+                        emit(LibraryEvent::Changes(
+                            resolved
+                                .iter()
+                                .map(|&(i, _)| {
+                                    let p = &catalog.photos[i];
+                                    (p.path.clone(), p.change.clone())
+                                })
+                                .collect(),
+                        ));
                     }
                     Ok(None) => {}
                     Err(e) => {
@@ -454,27 +527,56 @@ fn library_worker(
                 }
                 (false, false)
             }
-            LibraryCommand::Undo => {
-                let Some(batch) = undo.pop() else { continue };
+            LibraryCommand::Undo | LibraryCommand::Redo => {
+                let is_undo = matches!(cmd, LibraryCommand::Undo);
+                let (from, to) = if is_undo {
+                    (&mut undo, &mut redo)
+                } else {
+                    (&mut redo, &mut undo)
+                };
+                let Some(batch) = from.pop() else { continue };
+                let touched: Vec<PathBuf> = fileops
+                    .journal()
+                    .ops(batch)
+                    .map(|ops| ops.into_iter().flat_map(|o| [o.src, o.dst]).collect())
+                    .unwrap_or_default();
                 match fileops.undo(batch) {
-                    Ok(u) => redo.push(u),
-                    Err(e) => emit(LibraryEvent::Error(format!("undo: {e}"))),
+                    Ok(u) => {
+                        to.push(u);
+                        // Record the reversal as Shoebox's own change.
+                        let label = fileops
+                            .journal()
+                            .batch(u)
+                            .ok()
+                            .flatten()
+                            .map_or_else(String::new, |b| b.label);
+                        let a = catalog.affected(&touched);
+                        if let Err(e) =
+                            catalog.reread(&a.photos, &By::Shoebox { batch: u, label }, &mut cache)
+                        {
+                            tracing::warn!("re-reading after undo: {e}");
+                        }
+                    }
+                    Err(e) => emit(LibraryEvent::Error(format!(
+                        "{}: {e}",
+                        if is_undo { "undo" } else { "redo" }
+                    ))),
                 }
                 history(&undo, &redo);
                 (false, true)
             }
-            LibraryCommand::Redo => {
-                let Some(batch) = redo.pop() else { continue };
-                match fileops.undo(batch) {
-                    Ok(r) => undo.push(r),
-                    Err(e) => emit(LibraryEvent::Error(format!("redo: {e}"))),
+            LibraryCommand::MarkSeen(paths) => {
+                let idx: Vec<usize> = paths.iter().filter_map(|p| index.get(p).copied()).collect();
+                if let Err(e) = catalog.mark_seen(&idx, &mut cache) {
+                    tracing::warn!("mark seen: {e}");
                 }
-                history(&undo, &redo);
-                (false, true)
+                (false, false)
             }
         };
         if settings_changed {
             fileops.set_protected(reference_roots(&settings));
+            drop(watcher.take()); // stop watching before re-watching the roots
+            watcher = watch_roots(&settings);
             if let Err(e) = settings.save(&paths.settings) {
                 emit(LibraryEvent::Error(format!("saving settings: {e}")));
             }
@@ -483,27 +585,48 @@ fn library_worker(
             }
         }
         if rescan {
-            let progress = |done: usize, total: usize| {
-                if done.is_multiple_of(64) || done == total {
-                    emit(LibraryEvent::Progress { done, total });
-                }
-            };
-            match Catalog::refresh(&mut cache, settings.scan_roots(), &progress) {
-                Ok((c, _)) => {
-                    catalog = c;
-                    index = catalog
-                        .photos
-                        .iter()
-                        .enumerate()
-                        .map(|(i, p)| (p.path.clone(), i))
-                        .collect();
-                    let roots: Vec<PathBuf> =
-                        settings.roots.iter().map(|r| r.path.clone()).collect();
-                    emit(LibraryEvent::Events(events::load(&roots)));
-                    publish(&catalog, &settings, true);
-                }
-                Err(e) => emit(LibraryEvent::Error(format!("scanning: {e}"))),
-            }
+            refresh_impl(&mut cache, &settings, &mut catalog, &mut index, &emit);
         }
     }
+    drop(watcher);
+
+    /// Rescan from disk (reusing the cache) and publish the result.
+    fn refresh_impl(
+        cache: &mut shoebox_core::cache::Cache,
+        settings: &Settings,
+        catalog: &mut Catalog,
+        index: &mut HashMap<PathBuf, usize>,
+        emit: &(dyn Fn(LibraryEvent) + Sync),
+    ) {
+        let progress = |done: usize, total: usize| {
+            if done.is_multiple_of(64) || done == total {
+                emit(LibraryEvent::Progress { done, total });
+            }
+        };
+        match Catalog::refresh(cache, settings.scan_roots(), &progress) {
+            Ok((c, _)) => {
+                *catalog = c;
+                *index = catalog
+                    .photos
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| (p.path.clone(), i))
+                    .collect();
+                let roots: Vec<PathBuf> = settings.roots.iter().map(|r| r.path.clone()).collect();
+                emit(LibraryEvent::Events(events::load(&roots)));
+                emit(LibraryEvent::Catalog {
+                    catalog: Arc::new(catalog.clone()),
+                    settings: settings.clone(),
+                    complete: true,
+                });
+            }
+            Err(e) => emit(LibraryEvent::Error(format!("scanning: {e}"))),
+        }
+    }
+}
+
+/// What the library worker acts on: the app's commands and watcher batches.
+enum Command {
+    App(LibraryCommand),
+    Changed(Vec<PathBuf>),
 }

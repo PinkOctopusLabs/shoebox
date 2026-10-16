@@ -5,14 +5,26 @@ use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::changes::Change;
 use crate::error::{CoreError, Result, io};
 use crate::exif::ExifInfo;
 use crate::hash::{ANALYZER_VERSION, Analysis, Digest, PHashes};
 use crate::marks::{Label, Marks, Pick};
 use crate::meta::{META_VERSION, Meta};
 
-/// A root's cached files: `rel → (size, mtime, metadata, marks)`.
-pub type KnownFiles = HashMap<String, (u64, i64, Meta, Option<CachedMarks>)>;
+/// A root's cached files by relative path.
+pub type KnownFiles = HashMap<String, Known>;
+
+/// One cached file: what was on disk when it was last read.
+#[derive(Debug, Clone)]
+pub struct Known {
+    pub size: u64,
+    pub mtime_ns: i64,
+    pub meta: Meta,
+    pub marks: Option<CachedMarks>,
+    /// A change not yet seen.
+    pub change: Option<Change>,
+}
 
 /// Marks as cached: the marks, the per-file sidecar, and a signature of the
 /// sidecars present when they were read.
@@ -301,18 +313,26 @@ impl Cache {
             "SELECT f.rel_path, f.size, f.mtime, f.width, f.height,
                     e.capture_time, e.subsec, e.offset, e.make, e.model, e.serial, e.lens,
                     e.focal, e.fnumber, e.exposure, e.iso, e.orientation,
-                    k.rating, k.pick, k.label, k.keywords, k.sidecar, k.sidecar_sig, k.event
+                    k.rating, k.pick, k.label, k.keywords, k.sidecar, k.sidecar_sig, k.event,
+                    f.changed_at, f.change_source
              FROM files f LEFT JOIN exif e ON e.file_id = f.id
                           LEFT JOIN marks k ON k.file_id = f.id
              WHERE f.root_id = ?1 AND f.meta_version = ?2",
         )?;
         let rows = stmt.query_map(params![root_id, META_VERSION], |r| {
+            let change = match (
+                r.get::<_, Option<i64>>(24)?,
+                r.get::<_, Option<String>>(25)?,
+            ) {
+                (Some(at), Some(src)) => Change::from_source(at, &src),
+                _ => None,
+            };
             Ok((
                 r.get::<_, String>(0)?,
-                (
-                    r.get::<_, i64>(1)? as u64,
-                    r.get::<_, i64>(2)?,
-                    Meta {
+                Known {
+                    size: r.get::<_, i64>(1)? as u64,
+                    mtime_ns: r.get::<_, i64>(2)?,
+                    meta: Meta {
                         width: r.get(3)?,
                         height: r.get(4)?,
                         exif: ExifInfo {
@@ -330,7 +350,7 @@ impl Cache {
                             orientation: r.get(16)?,
                         },
                     },
-                    match r.get::<_, Option<u8>>(17)? {
+                    marks: match r.get::<_, Option<u8>>(17)? {
                         Some(rating) => Some(CachedMarks {
                             marks: Marks {
                                 rating,
@@ -349,10 +369,38 @@ impl Cache {
                         }),
                         None => None,
                     },
-                ),
+                    change,
+                },
             ))
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Record a change to a file (merged into any unseen one).
+    pub fn record_change(&self, root_id: i64, rel: &str, c: &Change) -> Result<()> {
+        self.conn.execute(
+            "UPDATE files SET changed_at = ?3, change_source = ?4
+             WHERE root_id = ?1 AND rel_path = ?2",
+            params![root_id, rel, c.at_ms, c.source()],
+        )?;
+        Ok(())
+    }
+
+    /// Clear the unseen change of these files.
+    pub fn mark_seen(&mut self, files: &[(i64, &str)]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut st = tx.prepare_cached(
+                "UPDATE files SET changed_at = NULL, change_source = NULL, seen_at = ?3
+                 WHERE root_id = ?1 AND rel_path = ?2",
+            )?;
+            let now = crate::events::now_ms();
+            for (root, rel) in files {
+                st.execute(params![root, rel, now])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Drop cache rows for files of `root_id` that are no longer on disk.

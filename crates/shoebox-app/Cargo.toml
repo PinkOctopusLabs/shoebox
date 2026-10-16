@@ -27,6 +27,8 @@ tracing-subscriber.workspace = true
 shoebox-decode = { version = "0.1.0", path = "../shoebox-decode" }
 rfd = "0.17.2"
 crossbeam-channel = "0.5.17"
+notify = "8.2.0"
+jiff = "0.2.38"
 
 [dev-dependencies]
 egui_kittest = { version = "0.37.0", features = ["eframe", "snapshot", "wgpu"] }

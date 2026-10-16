@@ -145,6 +145,20 @@ fn filter_bar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         );
         ui.toggle_value(&mut app.filter.nef_missing, "NEF missing");
         ui.toggle_value(&mut app.filter.undated, "Undated");
+        let changed_name = |d: Option<u32>| match d {
+            None => "Any time".to_owned(),
+            Some(1) => "Changed today".to_owned(),
+            Some(d) => format!("Changed in {d} days"),
+        };
+        egui::ComboBox::from_id_salt("f-changed")
+            .selected_text(changed_name(app.filter.changed_within_days))
+            .show_ui(ui, |ui| {
+                for d in [None, Some(1), Some(7), Some(30)] {
+                    ui.selectable_value(&mut app.filter.changed_within_days, d, changed_name(d));
+                }
+            });
+        ui.toggle_value(&mut app.filter.unseen_changes, "Unseen changes")
+            .on_hover_text("Changed since you last viewed them");
         ui.separator();
         egui::ComboBox::from_id_salt("sort")
             .selected_text(
@@ -458,6 +472,19 @@ fn smart_filters(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             app.new_smart_filter = None;
         }
     }
+    // Built in: everything changed in the last week, newest first.
+    let recent = shoebox_core::query::recently_changed();
+    if ui
+        .selectable_label(app.filter == recent, "Recently changed")
+        .on_hover_text("Image or sidecar modified in the last 7 days")
+        .clicked()
+    {
+        app.filter = recent;
+        app.sort = shoebox_core::query::Sort::Modified;
+        app.sort_desc = false;
+        app.refilter();
+        app.scroll_to_current = true;
+    }
     let mut delete = None;
     for (i, sf) in app.settings.smart_filters.clone().iter().enumerate() {
         let r = ui.selectable_label(app.filter == sf.filter, &sf.name);
@@ -602,6 +629,11 @@ pub fn info(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 .map(|(w, h)| format!("{w} × {h}"))),
         ),
         ("File size", human_size(photo.size)),
+        ("Image modified", crate::app::local_time_ns(photo.mtime_ns)),
+        (
+            "Sidecar modified",
+            opt(photo.sidecar_mtime_ns().map(crate::app::local_time_ns)),
+        ),
         ("Shutter count", "—".into()),
     ];
     egui::Grid::new("info-grid")
@@ -614,6 +646,18 @@ pub fn info(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 ui.end_row();
             }
         });
+    if let Some(ch) = &photo.change {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let (dot, _) = ui.allocate_exact_size(vec2(10.0, 10.0), egui::Sense::hover());
+            ui.painter()
+                .circle_filled(dot.center(), 4.0, crate::views::change_colour(ch));
+            ui.add(egui::Label::new(crate::views::describe_change(ch)).wrap());
+        });
+        if ui.small_button("Mark as Seen").clicked() {
+            app.mark_selection_seen();
+        }
+    }
     ui.add_space(6.0);
     ui.label(RichText::new("Path").weak());
     ui.add(egui::Label::new(photo.path.display().to_string()).wrap());

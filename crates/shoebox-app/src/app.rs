@@ -264,6 +264,15 @@ impl ShoeboxApp {
             .map(|p| p.marks.clone())
     }
 
+    /// Unseen change of the photo with this file name (tests and diagnostics).
+    pub fn change_of(&self, file_name: &str) -> Option<shoebox_core::changes::Change> {
+        self.catalog
+            .photos
+            .iter()
+            .find(|p| p.path.file_name().is_some_and(|n| n == file_name))
+            .and_then(|p| p.change.clone())
+    }
+
     pub fn event_names(&self) -> Vec<String> {
         self.events.iter().map(|e| e.name.clone()).collect()
     }
@@ -331,6 +340,14 @@ impl ShoeboxApp {
                     self.recompute_events();
                     self.refilter();
                 }
+                LibraryEvent::Changes(changes) => {
+                    let catalog = Arc::make_mut(&mut self.catalog);
+                    for (path, change) in changes {
+                        if let Some(&i) = self.index_of.get(&photo_id(&path)) {
+                            catalog.photos[i].change = change;
+                        }
+                    }
+                }
                 LibraryEvent::History { can_undo, can_redo } => {
                     self.can_undo = can_undo;
                     self.can_redo = can_redo;
@@ -358,6 +375,23 @@ impl ShoeboxApp {
     }
 
     fn set_catalog(&mut self, catalog: Arc<Catalog>) {
+        // Images that changed on disk: drop their textures so they reload.
+        let before: HashMap<&Path, (u64, i64)> = self
+            .catalog
+            .photos
+            .iter()
+            .map(|p| (p.path.as_path(), (p.size, p.mtime_ns)))
+            .collect();
+        let stale: HashSet<PhotoId> = catalog
+            .photos
+            .iter()
+            .filter(|p| {
+                before
+                    .get(p.path.as_path())
+                    .is_some_and(|&b| b != (p.size, p.mtime_ns))
+            })
+            .map(|p| photo_id(&p.path))
+            .collect();
         self.ids = catalog.photos.iter().map(|p| photo_id(&p.path)).collect();
         self.index_of = self
             .ids
@@ -367,8 +401,14 @@ impl ShoeboxApp {
             .collect();
         self.tree = build_tree(&catalog);
         self.catalog = catalog;
-        let keep: HashSet<PhotoId> = self.ids.iter().copied().collect();
+        let keep: HashSet<PhotoId> = self
+            .ids
+            .iter()
+            .copied()
+            .filter(|id| !stale.contains(id))
+            .collect();
         self.textures.retain_photos(&keep);
+        self.histograms.retain(|id, _| keep.contains(id));
         self.textures.failed.clear();
         self.selection.retain(|id| keep.contains(id));
         if self.current.is_some_and(|c| !keep.contains(&c)) {
@@ -421,7 +461,7 @@ impl ShoeboxApp {
     }
 
     /// Stacks of the selected photos (or the current one).
-    fn selected_stacks(&self) -> Vec<usize> {
+    pub(crate) fn selected_stacks(&self) -> Vec<usize> {
         let mut v: Vec<usize> = self
             .selection
             .iter()
@@ -600,6 +640,61 @@ impl ShoeboxApp {
             self.expanded.insert(primary);
         }
         self.refilter();
+    }
+
+    // --- changes -----------------------------------------------------------
+
+    /// The unseen change shown on a cell: for a collapsed stack, any member's
+    /// (another app's change first, then the latest).
+    pub(crate) fn cell_change(&self, idx: usize) -> Option<&shoebox_core::changes::Change> {
+        let st = self.stack_of(idx);
+        let collapsed = st.primary == idx && !self.expanded.contains(&self.ids[idx]);
+        let photos = &self.catalog.photos;
+        let mine = || photos[idx].change.as_ref();
+        if !collapsed {
+            return mine();
+        }
+        st.all()
+            .filter_map(|i| photos[i].change.as_ref())
+            .max_by_key(|c| (c.by_other(), c.at_ms))
+    }
+
+    /// Clear unseen changes on these stacks (shown at once, saved in the
+    /// background).
+    pub(crate) fn mark_stacks_seen(&mut self, stacks: &[usize]) {
+        let members: Vec<usize> = stacks
+            .iter()
+            .flat_map(|&s| self.catalog.stacks[s].all())
+            .filter(|&i| self.catalog.photos[i].change.is_some())
+            .collect();
+        if members.is_empty() {
+            return;
+        }
+        let catalog = Arc::make_mut(&mut self.catalog);
+        let mut paths = Vec::new();
+        for i in members {
+            catalog.photos[i].change = None;
+            paths.push(catalog.photos[i].path.clone());
+        }
+        self.library.send(LibraryCommand::MarkSeen(paths));
+        if self.filter.unseen_changes {
+            self.refilter();
+        }
+    }
+
+    /// Mark as Seen on the selection (or the current photo).
+    pub(crate) fn mark_selection_seen(&mut self) {
+        let stacks = self.selected_stacks();
+        self.mark_stacks_seen(&stacks);
+    }
+
+    /// Does the selection (or current photo) have unseen changes?
+    pub(crate) fn selection_has_changes(&self) -> bool {
+        self.selected_stacks().iter().any(|&s| {
+            self.catalog.stacks[s]
+                .all()
+                .any(|i| self.catalog.photos[i].change.is_some())
+        })
     }
 
     // --- marks -------------------------------------------------------------
@@ -1002,6 +1097,14 @@ impl eframe::App for ShoeboxApp {
             .show_collapsible(ui, &mut right, |ui| panels::info(self, ui));
         self.right_open = right;
 
+        // Viewing a stack in the loupe clears its change badge.
+        if self.view == View::Loupe
+            && let Some(i) = self.current.and_then(|c| self.index(c))
+        {
+            let s = self.catalog.stack_of[i];
+            self.mark_stacks_seen(&[s]);
+        }
+
         egui::CentralPanel::default().show(ui, |ui| {
             if self.settings.roots.is_empty() && !self.scanning {
                 panels::empty_library(self, ui);
@@ -1156,4 +1259,20 @@ pub(crate) fn parse_event_time(s: &str, end_of_day: bool) -> Option<String> {
         "00"
     };
     Some(format!("{date} {}:{}:{secs}", t[0], t[1]))
+}
+
+/// Local date and time, `16 Oct 2026 14:02`.
+pub(crate) fn local_time_ms(ms: i64) -> String {
+    jiff::Timestamp::from_millisecond(ms)
+        .map(|t| {
+            t.to_zoned(jiff::tz::TimeZone::system())
+                .strftime("%-d %b %Y %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|_| "—".into())
+}
+
+/// Local date and time of a file modification time in nanoseconds.
+pub(crate) fn local_time_ns(ns: i64) -> String {
+    local_time_ms(ns / 1_000_000)
 }

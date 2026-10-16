@@ -410,3 +410,88 @@ fn events_from_selection_and_undo() {
     assert_eq!((m.event, m.keywords.len()), (None, 0));
     assert!(h.state().event_names().is_empty());
 }
+
+/// Step until `cond` holds (or fail after `timeout`).
+fn wait_for(
+    h: &mut Harness<'_, ShoeboxApp>,
+    timeout: Duration,
+    what: &str,
+    cond: impl Fn(&ShoeboxApp) -> bool,
+) {
+    let start = Instant::now();
+    while !cond(h.state()) {
+        assert!(start.elapsed() < timeout, "timed out waiting for {what}");
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Another app edits a sidecar while Shoebox is open: the watcher picks it
+/// up, the photo gets an "other app" badge, and viewing it clears the badge.
+/// Shoebox's own writes are badged as Shoebox's, and undo too.
+#[test]
+fn watcher_tracks_changes_by_other_apps() {
+    use shoebox_core::changes::By;
+    use shoebox_core::xmp::{Prop, Value};
+    let t = tempfile::tempdir().unwrap();
+    let lib = t.path().join("lib");
+    shoebox_fixtures::build_library(&lib).unwrap();
+    let lib = lib.canonicalize().unwrap();
+    let p = paths(t.path(), &[lib.join("ref"), lib.join("scan")]);
+    let cache_db = p.cache_db.clone();
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+    assert!(h.state().change_of("f0003.jpg").is_none());
+
+    // "DxO" writes a rating into a new sidecar.
+    let jpg = lib.join("scan/recovered/f0003.jpg");
+    let xmp =
+        shoebox_core::xmp::edit(None, &[(Prop::Rating, Some(Value::Text("3".into())))]).unwrap();
+    std::fs::write(shoebox_core::sidecar::per_file(&jpg), xmp).unwrap(); // fixture
+    wait_for(&mut h, Duration::from_secs(10), "the watcher", |a| {
+        a.marks_of("f0003.jpg").is_some_and(|m| m.rating == 3)
+    });
+    let ch = h.state().change_of("f0003.jpg").unwrap();
+    assert_eq!(ch.by, By::Other);
+    snapshot(&mut h, "9-changed-badge");
+
+    // Shoebox's own rating: badged as Shoebox's, and the watcher seeing the
+    // write doesn't turn it into "another app".
+    h.get_by_label("f0005.jpg").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::Num4);
+    wait_for(&mut h, Duration::from_secs(10), "own change", |a| {
+        a.change_of("f0005.jpg").is_some()
+    });
+    let settle_until = Instant::now() + Duration::from_millis(1500);
+    while Instant::now() < settle_until {
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let own = h.state().change_of("f0005.jpg").unwrap();
+    assert!(matches!(own.by, By::Shoebox { .. }), "{own:?}");
+
+    // Viewing f0003 in the loupe clears its badge, and that's remembered.
+    h.get_by_label("f0003.jpg").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::E);
+    h.run_steps(3);
+    assert!(h.state().change_of("f0003.jpg").is_none());
+    h.key_press(egui::Key::G);
+    h.run_steps(3);
+    let start = Instant::now();
+    loop {
+        let cache = shoebox_core::cache::Cache::open(&cache_db).unwrap();
+        let roots = vec![
+            shoebox_core::scan::Root::new(&lib.join("scan"), shoebox_core::scan::Role::Scan)
+                .unwrap(),
+        ];
+        let c = shoebox_core::catalog::Catalog::from_cache(&cache, roots).unwrap();
+        if c.photos.iter().any(|p| p.path == jpg && p.change.is_none()) {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(5), "seen not saved");
+        h.step();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}

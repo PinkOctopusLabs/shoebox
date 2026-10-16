@@ -3,6 +3,29 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-17 — Live sync and change badges (pulled forward before M4)
+- **Watcher**: `notify` (FSEvents on macOS, inotify on Linux) on every root,
+  debounced (quiet 250 ms, at most 2 s). Changed sidecars map to their
+  photos and only those are re-read; added/removed images or folders cause
+  an incremental rescan; `.shoebox/events.json` reloads the events.
+- **Who changed it**: Shoebox updates its catalog and cache as it writes, so
+  a later re-read finds nothing new for its own writes; anything a re-read
+  or rescan does find was made by another app. Undo/redo re-read the files
+  of the batch and record them as Shoebox's (with the undo batch's label).
+  "Another app" is as specific as we can be: macOS doesn't say which app.
+- **What counts as a change**: only files Shoebox already knew. A first
+  scan or a newly added folder isn't badged. Unseen changes live in the
+  cache (`files.changed_at`, `change_source`), so a cache rebuild forgets
+  them, which is acceptable for a "since you last looked" hint.
+- **Badges**: orange for another app, blue for Shoebox, top right of the
+  cell; a collapsed stack shows its members' changes. Hover and the Info
+  panel say what changed, by whom and when (Shoebox's batch number stands
+  in for the History link until M5).
+- **Sort "Modified"** now uses the newest image or sidecar modification
+  across the stack, newest first. "Recently changed" (last 7 days) is a
+  built-in smart filter; the filter bar adds "Changed in N days" and
+  "Unseen changes".
+
 ## 2026-10-16 — M3 stacks, organising and events
 - **Stacks**: same folder + base name, or identical capture time with
   sub-seconds + camera serial (exports elsewhere join; bursts don't).
