@@ -49,6 +49,39 @@ enum Cmd {
         #[arg(long)]
         yes: bool,
     },
+    /// Copy photos from a card or folder into a library root, named by a
+    /// template. Never moves or changes the source; every copy is verified.
+    Import {
+        /// The card or folder to import from.
+        source: PathBuf,
+        /// The library root to copy into.
+        #[arg(long, value_name = "DIR")]
+        into: PathBuf,
+        /// Naming template (see `template.rs` for tokens).
+        #[arg(long, default_value = shoebox_core::template::DEFAULT_IMPORT)]
+        template: String,
+        /// Show what would be copied without copying.
+        #[arg(long)]
+        dry_run: bool,
+        /// Don't ask for confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Rename every stack under a folder with a template (all files of a
+    /// frame and their sidecars together).
+    Rename {
+        /// The library folder (its own root for this command).
+        folder: PathBuf,
+        /// Template; without `/` files are renamed in place.
+        #[arg(long, default_value = shoebox_core::template::DEFAULT_RENAME)]
+        template: String,
+        /// Show what would be renamed without renaming.
+        #[arg(long)]
+        dry_run: bool,
+        /// Don't ask for confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
     /// List journaled batches.
     History,
     /// Reverse a batch (default: the most recent one not yet undone).
@@ -110,6 +143,19 @@ fn main() -> Result<()> {
             dry_run,
             yes,
         } => apply_cmd(&data_dir, &report, dry_run, yes),
+        Cmd::Import {
+            source,
+            into,
+            template,
+            dry_run,
+            yes,
+        } => import_cmd(&data_dir, &source, &into, &template, dry_run, yes),
+        Cmd::Rename {
+            folder,
+            template,
+            dry_run,
+            yes,
+        } => rename_cmd(&data_dir, &folder, &template, dry_run, yes),
         Cmd::History => history_cmd(&data_dir),
         Cmd::Undo { batch, yes } => undo_cmd(&data_dir, batch, yes),
     }
@@ -117,7 +163,11 @@ fn main() -> Result<()> {
 
 fn open_fileops(data_dir: &Path, protected: Vec<PathBuf>) -> Result<FileOps> {
     let journal = Journal::open(&paths::journal_db(data_dir)).context("opening journal")?;
-    let fo = FileOps::new(journal, protected);
+    let mut fo = FileOps::new(journal, protected);
+    // Tests send trashed files to a folder instead of the real Trash.
+    if let Some(dir) = std::env::var_os("SHOEBOX_TRASH_DIR") {
+        fo = fo.with_trash(fileops::TrashMode::Folder(dir.into()));
+    }
     for b in fo.journal().incomplete()? {
         eprintln!(
             "warning: batch {} ({}) was interrupted; review with `shoebox history` and `shoebox undo {}`",
@@ -160,6 +210,103 @@ fn print_moves(moves: &[PlannedMove]) {
     for (i, m) in moves.iter().enumerate() {
         println!("{:<4} {:<60} {}", i + 1, m.src.display(), m.dst.display());
     }
+}
+
+fn import_cmd(
+    data_dir: &Path,
+    source: &Path,
+    into: &Path,
+    template: &str,
+    dry_run: bool,
+    yes: bool,
+) -> Result<()> {
+    let tpl = shoebox_core::template::Template::parse(template)?;
+    let source = source
+        .canonicalize()
+        .with_context(|| format!("opening {}", source.display()))?;
+    let root = Root::new(into, Role::Scan)?;
+    if source.starts_with(&root.path) || root.path.starts_with(&source) {
+        bail!("the source and the library overlap");
+    }
+    let mut cache = Cache::open(&paths::cache_db(data_dir))?;
+    let (library, _) =
+        shoebox_core::catalog::Catalog::refresh(&mut cache, vec![root.clone()], &|_, _| {})?;
+    let plan = shoebox_core::import::plan(&source, &root.path, &tpl, &library, &|_, _| {})?;
+    println!("{:<4} {:<50} DESTINATION", "#", "SOURCE");
+    for (i, c) in plan.copies.iter().enumerate() {
+        println!(
+            "{:<4} {:<50} {}",
+            i + 1,
+            c.src.strip_prefix(&source).unwrap_or(&c.src).display(),
+            c.dst.strip_prefix(&root.path).unwrap_or(&c.dst).display()
+        );
+    }
+    for (s, e) in &plan.skipped {
+        println!(
+            "skip {} (already in the library as {})",
+            s.display(),
+            e.display()
+        );
+    }
+    for (s, e) in &plan.unreadable {
+        println!("unreadable {}: {e}", s.display());
+    }
+    println!(
+        "\n{} to copy, {} already in the library, {} without a capture date (to _undated/).",
+        plan.copies.len(),
+        plan.skipped.len(),
+        plan.undated
+    );
+    if dry_run || plan.copies.is_empty() {
+        println!("Nothing was copied.");
+        return Ok(());
+    }
+    if !confirm(&format!("Copy {} files?", plan.copies.len()), yes)? {
+        println!("Cancelled; nothing was copied.");
+        return Ok(());
+    }
+    let fo = open_fileops(data_dir, Vec::new())?;
+    let batch = fo.import(&format!("import {}", source.display()), &plan.copies)?;
+    println!(
+        "Copied and verified {} files as batch {batch}. Undo (moves the copies to the Trash) with: shoebox undo {batch}",
+        plan.copies.len()
+    );
+    Ok(())
+}
+
+fn rename_cmd(
+    data_dir: &Path,
+    folder: &Path,
+    template: &str,
+    dry_run: bool,
+    yes: bool,
+) -> Result<()> {
+    let tpl = shoebox_core::template::Template::parse(template)?;
+    let root = Root::new(folder, Role::Scan)?;
+    let mut cache = Cache::open(&paths::cache_db(data_dir))?;
+    let (catalog, _) =
+        shoebox_core::catalog::Catalog::refresh(&mut cache, vec![root.clone()], &|_, _| {})?;
+    let stacks: Vec<usize> = (0..catalog.stacks.len()).collect();
+    let r = shoebox_core::organise::plan_rename(&catalog, &stacks, &tpl)?;
+    print_moves(&r.plan.moves);
+    for u in &r.undated {
+        println!("skip {} (no capture date)", u.display());
+    }
+    println!("\n{} renames including sidecars.", r.plan.moves.len());
+    if dry_run || r.plan.moves.is_empty() {
+        println!("Nothing was renamed.");
+        return Ok(());
+    }
+    if !confirm(&format!("Rename {} files?", r.plan.moves.len()), yes)? {
+        println!("Cancelled; nothing was renamed.");
+        return Ok(());
+    }
+    let roots = vec![root.path.clone()];
+    let writes = shoebox_core::organise::reference_writes(&roots, &roots, &r.plan.moves)?;
+    let fo = open_fileops(data_dir, Vec::new())?;
+    let batch = fo.execute_with_writes(&format!("rename with {template}"), &r.plan, writes)?;
+    println!("Renamed as batch {batch}. Undo with: shoebox undo {batch}");
+    Ok(())
 }
 
 fn scan_cmd(data_dir: &Path, folders: &[PathBuf]) -> Result<()> {
@@ -610,6 +757,12 @@ fn undo_cmd(data_dir: &Path, batch: Option<i64>, yes: bool) -> Result<()> {
             }
             fileops::Planned::Sidecar { path, .. } => {
                 println!("{:<4} restore sidecar {}", i + 1, path.display())
+            }
+            fileops::Planned::Trash { path, .. } => {
+                println!("{:<4} move the copy {} to the Trash", i + 1, path.display())
+            }
+            fileops::Planned::Copy { src, dst, .. } => {
+                println!("{:<4} copy {} → {}", i + 1, src.display(), dst.display())
             }
         }
     }

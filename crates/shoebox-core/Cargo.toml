@@ -25,6 +25,7 @@ shoebox-decode.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 walkdir = "2.5.0"
+trash = { version = "5.2.9", default-features = false }
 
 [dev-dependencies]
 anyhow.workspace = true

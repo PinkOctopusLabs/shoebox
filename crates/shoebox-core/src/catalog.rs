@@ -625,6 +625,68 @@ impl Catalog {
         Ok(out)
     }
 
+    /// Carry catalog entries and cache rows across moves Shoebox made (after
+    /// the batch ran), so moved files aren't read again or reported as
+    /// changed. Files moved out of the library (`_rejected/`, the Trash) are
+    /// left for the next rescan to forget.
+    pub fn note_moved(
+        &mut self,
+        moves: &[crate::fileops::PlannedMove],
+        cache: &mut Cache,
+    ) -> Result<()> {
+        let index: std::collections::HashMap<PathBuf, usize> = self
+            .photos
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.path.clone(), i))
+            .collect();
+        for m in moves {
+            let Some(&i) = index.get(&m.src) else {
+                continue;
+            };
+            let Some(new_root) = self.roots.iter().position(|r| m.dst.starts_with(&r.path)) else {
+                continue;
+            };
+            let Some(rel) = m
+                .dst
+                .strip_prefix(&self.roots[new_root].path)
+                .ok()
+                .and_then(|r| r.to_str())
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            let hidden = rel.split('/').rev().skip(1).any(scan::skip_dir);
+            if hidden {
+                continue;
+            }
+            let old_id = self.root_id(i, cache)?;
+            let new = &self.roots[new_root];
+            let new_id = cache.root_id(&new.path, new.role == Role::Reference)?;
+            cache.move_file((old_id, &self.photos[i].rel), (new_id, &rel))?;
+            let found = sidecars_of(&m.dst);
+            let sig = signature(&m.dst, &found);
+            let (_, file) = sidecar::present(&m.dst, &|q| found.contains_key(q));
+            let p = &mut self.photos[i];
+            p.root = new_root;
+            p.rel = rel;
+            p.path = m.dst.clone();
+            p.sidecar = file;
+            p.sidecar_sig = sig;
+            cache.update_marks(
+                new_id,
+                &p.rel,
+                &CachedMarks {
+                    marks: p.marks.clone(),
+                    sidecar: p.sidecar.clone(),
+                    sig: p.sidecar_sig.clone(),
+                },
+            )?;
+        }
+        self.finish();
+        Ok(())
+    }
+
     /// Replace the hand-made stack links and rebuild stacks (indices change).
     pub fn set_links(&mut self, links: Vec<crate::stacks::Link>) {
         self.links = links;

@@ -14,7 +14,7 @@ const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS batches (
     id      INTEGER PRIMARY KEY,
     ts      INTEGER NOT NULL,
-    kind    TEXT NOT NULL,      -- move | undo
+    kind    TEXT NOT NULL,      -- move | sidecar | import | trash | undo
     label   TEXT NOT NULL,
     status  TEXT NOT NULL,      -- running | done | failed | undone
     undo_of INTEGER REFERENCES batches(id)
@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS journal (
     batch_id INTEGER NOT NULL REFERENCES batches(id),
     seq      INTEGER NOT NULL,
     ts       INTEGER NOT NULL,
-    op       TEXT NOT NULL,     -- move | mkdir | sidecar
+    op       TEXT NOT NULL,     -- move | mkdir | sidecar | copy | trash
     src      TEXT NOT NULL,
     dst      TEXT NOT NULL,
     size     INTEGER,
@@ -41,6 +41,12 @@ pub enum Op {
     Mkdir,
     /// Rewrite of an XMP sidecar (`src` = `dst` = the sidecar path).
     Sidecar,
+    /// Verified copy (import); `after_hash` is the BLAKE3 of the content.
+    Copy,
+    /// Move to the Trash; `after_hash` is the BLAKE3 of what was trashed,
+    /// `dst` where it went (= `src` for the system Trash, which can't be
+    /// undone from here: Finder's Put Back does that).
+    Trash,
 }
 
 impl Op {
@@ -49,6 +55,8 @@ impl Op {
             Op::Move => "move",
             Op::Mkdir => "mkdir",
             Op::Sidecar => "sidecar",
+            Op::Copy => "copy",
+            Op::Trash => "trash",
         }
     }
     fn parse(s: &str) -> Result<Self> {
@@ -56,6 +64,8 @@ impl Op {
             "move" => Ok(Op::Move),
             "mkdir" => Ok(Op::Mkdir),
             "sidecar" => Ok(Op::Sidecar),
+            "copy" => Ok(Op::Copy),
+            "trash" => Ok(Op::Trash),
             other => Err(CoreError::Invalid(format!("unknown journal op {other:?}"))),
         }
     }
@@ -187,6 +197,35 @@ impl Journal {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Record a pending copy or trash, with the BLAKE3 of the file's content.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_hashed(
+        &self,
+        batch: i64,
+        seq: usize,
+        op: Op,
+        src: &Path,
+        dst: &Path,
+        size: Option<u64>,
+        hash: &[u8; 32],
+    ) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO journal(batch_id, seq, ts, op, src, dst, size, status, after_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8)",
+            params![
+                batch,
+                seq as i64,
+                now_ms(),
+                op.as_str(),
+                path_str(src)?,
+                path_str(dst)?,
+                size.map(|s| s as i64),
+                &hash[..]
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
     /// Record a pending sidecar write, with the previous contents.
     pub fn record_sidecar(
         &self,
@@ -273,7 +312,7 @@ impl Journal {
     fn summaries(&self, filter: &str) -> Result<Vec<BatchSummary>> {
         let sql = format!(
             "SELECT b.id, b.ts, b.kind, b.label, b.status, b.undo_of,
-                    (SELECT COUNT(*) FROM journal j WHERE j.batch_id = b.id AND j.op IN ('move', 'sidecar'))
+                    (SELECT COUNT(*) FROM journal j WHERE j.batch_id = b.id AND j.op != 'mkdir')
              FROM batches b {filter} ORDER BY b.id"
         );
         let mut stmt = self.conn.prepare(&sql)?;

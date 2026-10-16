@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 4561197eb6ced11790da40c89274510eb979e79189ef13bc88824de04cc60fcf # shrinks to t = Some("1990:01:01 00:00:00"), ss = None, name = " .:", camera = None

@@ -257,3 +257,119 @@ fn refuses_destination_inside_reference() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("inside reference root"));
 }
+
+fn shoebox_env(data: &Path, trash: &Path, args: &[&str]) -> Output {
+    let out = Command::new(env!("CARGO_BIN_EXE_shoebox"))
+        .env("SHOEBOX_TRASH_DIR", trash)
+        .arg("--data-dir")
+        .arg(data)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "shoebox {args:?} failed:\n{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out
+}
+
+/// `import` copies with the default names, a second import copies nothing,
+/// `undo` puts the copies in the trash; `rename` renames a frame's files
+/// together and `undo` reverses it.
+#[test]
+fn import_rename_and_undo() {
+    let t = tempfile::tempdir().unwrap();
+    let base = t.path();
+    let lib = base.join("fixtures");
+    shoebox_fixtures::build_library(&lib).unwrap();
+    let card = lib.join("ref/2026"); // two NEFs and a JPG with EXIF
+    let into = base.join("library");
+    std::fs::create_dir_all(&into).unwrap();
+    let (data, trash) = (base.join("data"), base.join("trash"));
+    let card_before = snapshot(&card);
+
+    let dry = shoebox_env(
+        &data,
+        &trash,
+        &[
+            "import",
+            card.to_str().unwrap(),
+            "--into",
+            into.to_str().unwrap(),
+            "--dry-run",
+        ],
+    );
+    assert!(String::from_utf8_lossy(&dry.stdout).contains("Nothing was copied"));
+    assert!(snapshot(&into).is_empty());
+    shoebox_env(
+        &data,
+        &trash,
+        &[
+            "import",
+            card.to_str().unwrap(),
+            "--into",
+            into.to_str().unwrap(),
+            "--yes",
+        ],
+    );
+    let names: Vec<String> = snapshot(&into).into_keys().collect();
+    assert_eq!(
+        names,
+        vec![
+            "2026/2026-04-24/20260424-140311-42.jpg",
+            "2026/2026-04-24/20260424-140311-42.nef",
+            "2026/2026-04-24/20260424-140502-07.nef",
+        ]
+    );
+    assert_eq!(snapshot(&card), card_before, "the card is never changed");
+    let again = shoebox_env(
+        &data,
+        &trash,
+        &[
+            "import",
+            card.to_str().unwrap(),
+            "--into",
+            into.to_str().unwrap(),
+            "--yes",
+        ],
+    );
+    assert!(String::from_utf8_lossy(&again.stdout).contains("0 to copy, 3 already in the library"));
+
+    // Rename in place to another template, then undo it.
+    let before = snapshot(&into);
+    shoebox_env(
+        &data,
+        &trash,
+        &[
+            "rename",
+            into.to_str().unwrap(),
+            "--template",
+            "{YYYY}{MM}{DD}_{seq}.{ext}",
+            "--yes",
+        ],
+    );
+    let renamed: Vec<String> = snapshot(&into).into_keys().collect();
+    assert_eq!(
+        renamed,
+        vec![
+            "2026/2026-04-24/20260424_0001.jpg",
+            "2026/2026-04-24/20260424_0001.nef",
+            "2026/2026-04-24/20260424_0002.nef",
+        ]
+    );
+    shoebox_env(&data, &trash, &["undo", "--yes"]);
+    assert_eq!(snapshot(&into), before);
+
+    // Undo the import: the copies go to the trash folder; the library empties.
+    let hist = shoebox_env(&data, &trash, &["history"]);
+    let import_batch = String::from_utf8_lossy(&hist.stdout)
+        .lines()
+        .find(|l| l.contains("import "))
+        .and_then(|l| l.split_whitespace().next().map(str::to_owned))
+        .unwrap();
+    shoebox_env(&data, &trash, &["undo", &import_batch, "--yes"]);
+    assert!(snapshot(&into).is_empty());
+    assert_eq!(snapshot(&trash).len(), 3);
+}

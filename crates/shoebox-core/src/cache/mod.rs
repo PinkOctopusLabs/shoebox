@@ -376,6 +376,17 @@ impl Cache {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// A file Shoebox moved: carry its row (metadata, hashes, marks, unseen
+    /// change) to the new path instead of reading it again.
+    pub fn move_file(&self, from: (i64, &str), to: (i64, &str)) -> Result<()> {
+        self.conn.execute(
+            "UPDATE OR REPLACE files SET root_id = ?3, rel_path = ?4
+             WHERE root_id = ?1 AND rel_path = ?2",
+            params![from.0, from.1, to.0, to.1],
+        )?;
+        Ok(())
+    }
+
     /// Record a change to a file (merged into any unseen one).
     pub fn record_change(&self, root_id: i64, rel: &str, c: &Change) -> Result<()> {
         self.conn.execute(

@@ -3,14 +3,17 @@
 pub mod cache;
 pub mod catalog;
 pub mod changes;
+pub mod collections;
 pub mod dupes;
 pub mod error;
 pub mod events;
 pub mod exif;
 pub mod fileops;
 pub mod hash;
+pub mod import;
 pub mod marks;
 pub mod meta;
+pub mod organise;
 pub mod paths;
 pub mod pipeline;
 pub mod query;
@@ -19,6 +22,7 @@ pub mod scan;
 pub mod settings;
 pub mod sidecar;
 pub mod stacks;
+pub mod template;
 pub mod thumbs;
 pub mod xmp;
 
