@@ -12,7 +12,7 @@ use crate::error::{CoreError, Result, io};
 use crate::exif::{self, ExifInfo};
 
 /// Bump when hashing changes, so cached results are recomputed.
-pub const ANALYZER_VERSION: i64 = 1;
+pub const ANALYZER_VERSION: i64 = 2;
 
 /// Long edge of the grayscale decode that perceptual hashes come from.
 pub const HASH_DECODE_EDGE: u32 = 256;
@@ -30,6 +30,9 @@ pub struct Analysis {
     /// Hashes of the upright image rotated by 0°, 90°, 180° and 270°.
     /// Empty if the pixels could not be decoded.
     pub hashes: Vec<PHashes>,
+    /// Standard deviation of the 256 px luma thumbnail. Near-uniform images
+    /// (blank, blown-out, lens cap) have tiny values and meaningless hashes.
+    pub luma_stddev: Option<f32>,
     /// Why decoding or structure parsing failed, if it did.
     pub error: Option<String>,
 }
@@ -56,7 +59,7 @@ pub fn analyze_bytes(format: Format, data: &[u8]) -> Analysis {
         .map_err(|e| errors.push(format!("image data: {e}")))
         .ok();
     let exif = exif::read(data);
-    let (width, height, hashes) =
+    let (width, height, hashes, luma_stddev) =
         match shoebox_decode::luma_thumbnail(format, data, HASH_DECODE_EDGE) {
             Ok(g) => {
                 let upright = g.orient(exif.orientation.unwrap_or(1));
@@ -74,11 +77,11 @@ pub fn analyze_bytes(format: Format, data: &[u8]) -> Analysis {
                     PHashes::of(&upright.rotate180()),
                     PHashes::of(&r90.rotate180()),
                 ];
-                (w, h, hashes)
+                (w, h, hashes, Some(stddev(&upright.px)))
             }
             Err(e) => {
                 errors.push(format!("decode: {e}"));
-                (None, None, Vec::new())
+                (None, None, Vec::new(), None)
             }
         };
     Analysis {
@@ -88,8 +91,20 @@ pub fn analyze_bytes(format: Format, data: &[u8]) -> Analysis {
         height,
         exif,
         hashes,
+        luma_stddev,
         error: (!errors.is_empty()).then(|| errors.join("; ")),
     }
+}
+
+fn stddev(px: &[u8]) -> f32 {
+    let n = px.len().max(1) as f64;
+    let mean = px.iter().map(|&v| f64::from(v)).sum::<f64>() / n;
+    let var = px
+        .iter()
+        .map(|&v| (f64::from(v) - mean).powi(2))
+        .sum::<f64>()
+        / n;
+    var.sqrt() as f32
 }
 
 pub fn analyze_path(path: &Path) -> Result<Analysis> {

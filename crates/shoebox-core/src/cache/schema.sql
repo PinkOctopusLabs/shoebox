@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS files (
     height           INTEGER,
     analyzer_version INTEGER NOT NULL,
     analyze_error    TEXT,
+    luma_stddev      REAL,
     changed_at       INTEGER,
     change_source    TEXT,
     seen_at          INTEGER,

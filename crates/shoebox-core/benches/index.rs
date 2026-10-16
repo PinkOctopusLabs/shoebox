@@ -42,6 +42,9 @@ fn items(n: usize) -> Vec<Item> {
             image_data_hash: None,
             hashes: vec![h; 4],
             pixels: 24_000_000,
+            siblings: None,
+            luma_stddev: Some(40.0),
+            capture: None,
         });
     }
     out

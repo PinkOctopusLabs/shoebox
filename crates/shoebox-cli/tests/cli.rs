@@ -210,7 +210,7 @@ fn apply_refuses_unsafe_confirmations() {
 
     // A reference file.
     dupes(&report);
-    confirm_rows(&report, &["DSC_0001.JPG"]);
+    confirm_rows(&report, &["lightroom/DSC_0001.tif"]);
     let o = apply();
     assert!(!o.status.success());
     assert!(String::from_utf8_lossy(&o.stderr).contains("reference file"));

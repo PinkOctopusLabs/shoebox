@@ -374,6 +374,9 @@ fn write(root: &Path, rel: &str, bytes: &[u8]) -> Result<()> {
 /// scan/recovered/f0006.jpg           exact copy of f0005 (scan-only duplicate)
 /// scan/misc/f0007.png                A at 600 px
 /// scan/rotated/f0008.jpg             B on-sensor (unrotated), 1000 px, q75, no EXIF
+/// scan/recovered/f0009.jpg           blank white frame, 900 px
+/// scan/recovered/f0010.jpg           A with EXIF 1 s after DSC_0001 (a burst neighbour)
+/// ref/blank/DSC_0099.JPG             blank white frame, full size
 /// ```
 pub fn build_library(root: &Path) -> Result<Library> {
     let a = scene(1, 1800, 1200);
@@ -444,6 +447,22 @@ pub fn build_library(root: &Path) -> Result<Library> {
         root,
         "scan/rotated/f0008.jpg",
         &jpeg(&resize_long(&b_sensor, 1000), 75)?,
+    )?;
+    let white = RgbImage::from_pixel(1800, 1200, image::Rgb([255, 255, 255]));
+    write(root, "ref/blank/DSC_0099.JPG", &jpeg(&white, 90)?)?;
+    write(
+        root,
+        "scan/recovered/f0009.jpg",
+        &jpeg(&resize_long(&white, 900), 70)?,
+    )?;
+    let burst = Shot {
+        datetime: "2026:04:24 14:03:12",
+        ..shot1.clone()
+    };
+    write(
+        root,
+        "scan/recovered/f0010.jpg",
+        &with_exif(&jpeg(&a, 80)?, &burst),
     )?;
 
     Ok(Library {

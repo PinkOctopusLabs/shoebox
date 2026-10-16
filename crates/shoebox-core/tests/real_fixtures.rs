@@ -79,6 +79,9 @@ fn carved_real_previews_match_at_distance_zero() {
             image_data_hash: a.image_data_hash,
             hashes: a.hashes.clone(),
             pixels: 0,
+            siblings: None,
+            luma_stddev: a.luma_stddev,
+            capture: None,
         };
         let m =
             dupes::compare(&item(&nef, Format::Nef), &item(&carved, Format::Jpeg), &cfg).unwrap();

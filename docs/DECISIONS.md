@@ -3,6 +3,26 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-16 — Fewer, better duplicate candidates
+Measured on a copy of the real library (4,460 files) after the change above.
+- **Siblings aren't duplicates.** Files in the same folder with the same base
+  name (ignoring case, extension and `-N` suffixes, stripped only while the
+  shorter name exists) are renditions of one frame. They match each other
+  only exactly or by image data, never perceptually.
+- **Blank and low-detail frames.** Luma stddev of the 256 px thumbnail is
+  cached. ≤ 3 (blank, blown-out): no perceptual matching. ≤ 8 (mostly dark):
+  only near-identical perceptual matches. Real library: blank = 0.0,
+  p1 = 2.4, median = 45.
+- **Keeper-centred groups replace union-find.** Every member matches its
+  keeper directly; matches of matches no longer chain (largest group 991 → 52).
+- **Different exposures are never suggested as duplicates.** If both files
+  have a capture time and they differ, the row is `review` with a note and
+  `same_exposure = no`. On the real library this covers 1,759 of 1,759
+  remaining candidates (bursts and blank frames); filtering it out leaves 0.
+- Real carved previews (40 `JpgFromRaw` extracted with exiftool) against the
+  library as reference: 40/40 suggested `duplicate` at image-data level; 39
+  matched their own NEF, 1 a byte-identical blank frame.
+
 ## 2026-10-16 — Duplicates are flagged, never moved automatically
 A dry run on a copy of the real library showed that perceptual matches at the
 spec's thresholds (≤ 4 / ≤ 10) also catch burst frames seconds apart and blank

@@ -3,7 +3,6 @@
 
 pub mod bktree;
 pub mod report;
-pub mod unionfind;
 
 use std::collections::HashMap;
 
@@ -12,11 +11,19 @@ use shoebox_decode::Format;
 use crate::hash::{Digest, PHashes};
 use crate::scan::Role;
 use bktree::BkTree;
-use unionfind::UnionFind;
 
 /// Defaults from the spec; starting points to tune against real files.
 pub const DEFAULT_NEAR_IDENTICAL: u32 = 4;
 pub const DEFAULT_SIMILAR: u32 = 10;
+
+/// Luma standard deviation at or below which an image is treated as blank
+/// (blown-out, lens cap): its perceptual hashes are noise, so it only matches
+/// exactly or by image data. Measured on a real library: blank frames are 0.0,
+/// the 1st percentile is 2.4, the median 45.
+pub const FLAT_STDDEV: f32 = 3.0;
+/// Below this an image is low-detail (mostly dark night shots); perceptual
+/// matches are only accepted when near-identical.
+pub const LOW_DETAIL_STDDEV: f32 = 8.0;
 
 #[derive(Debug, Clone)]
 pub struct Item {
@@ -27,6 +34,13 @@ pub struct Item {
     /// Upright image at rotations 0/90/180/270; empty if undecodable.
     pub hashes: Vec<PHashes>,
     pub pixels: u64,
+    /// Files of the same frame (same folder and base name, ignoring `-N`
+    /// suffixes) share an id. Siblings are different renditions, not
+    /// duplicates, so they only match each other exactly or by image data.
+    pub siblings: Option<usize>,
+    pub luma_stddev: Option<f32>,
+    /// Capture time in seconds (see `exif::capture_seconds`), if known.
+    pub capture: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -73,6 +87,29 @@ impl Default for Config {
     }
 }
 
+pub fn same_frame(a: &Item, b: &Item) -> bool {
+    a.siblings.is_some() && a.siblings == b.siblings
+}
+
+/// Perceptual distance allowed between two files, or None if their hashes
+/// shouldn't be compared at all.
+fn perceptual_limit(a: &Item, b: &Item, cfg: &Config) -> Option<u32> {
+    if same_frame(a, b) {
+        return None;
+    }
+    let detail = match (a.luma_stddev, b.luma_stddev) {
+        (Some(x), Some(y)) => x.min(y),
+        _ => f32::INFINITY,
+    };
+    if detail <= FLAT_STDDEV {
+        None
+    } else if detail <= LOW_DETAIL_STDDEV {
+        Some(cfg.threshold.min(cfg.near_identical))
+    } else {
+        Some(cfg.threshold)
+    }
+}
+
 /// Best direct match between two files, if any.
 pub fn compare(a: &Item, b: &Item, cfg: &Config) -> Option<Match> {
     if a.blake3 == b.blake3 {
@@ -89,6 +126,7 @@ pub fn compare(a: &Item, b: &Item, cfg: &Config) -> Option<Match> {
             rotation: 0,
         });
     }
+    let limit = perceptual_limit(a, b, cfg)?;
     let upright = a.hashes.first()?;
     let (rot, distance) = b
         .hashes
@@ -96,7 +134,7 @@ pub fn compare(a: &Item, b: &Item, cfg: &Config) -> Option<Match> {
         .enumerate()
         .map(|(r, h)| (r, upright.distance(h)))
         .min_by_key(|&(r, d)| (d, r))?;
-    (distance <= cfg.threshold).then(|| Match {
+    (distance <= limit).then(|| Match {
         level: if distance <= cfg.near_identical {
             Level::NearIdentical
         } else {
@@ -107,29 +145,62 @@ pub fn compare(a: &Item, b: &Item, cfg: &Config) -> Option<Match> {
     })
 }
 
+/// Seconds between two capture times, if both are known and they differ.
+/// Different capture times mean different exposures (such as burst frames),
+/// which look alike but are not copies of each other.
+pub fn capture_gap(a: &Item, b: &Item) -> Option<f64> {
+    let gap = (a.capture? - b.capture?).abs();
+    (gap >= 0.005).then_some(gap)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Suggestion {
+    /// A scan file that directly matches a reference file taken at the same time.
+    Duplicate,
+    /// A scan file worth a look: no reference match, or a different exposure.
+    Review,
+    /// Reference files are never moved.
+    None,
+}
+
+impl Suggestion {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Suggestion::Duplicate => "duplicate",
+            Suggestion::Review => "review",
+            Suggestion::None => "none",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Member {
     pub item: usize,
-    /// Direct match to the group's keeper (None if only chained through others).
+    /// Direct match to the group's keeper. Always present: groups don't chain.
     pub to_keeper: Option<Match>,
-    /// For scan files: the closest direct match to a reference file in the group.
+    /// For scan files: the closest direct match to any reference file.
     pub matched_ref: Option<(usize, Match)>,
+}
+
+impl Member {
+    pub fn suggestion(&self, items: &[Item]) -> Suggestion {
+        let me = &items[self.item];
+        if me.role != Role::Scan {
+            return Suggestion::None;
+        }
+        match self.matched_ref {
+            Some((r, _)) if capture_gap(&items[r], me).is_none() => Suggestion::Duplicate,
+            _ => Suggestion::Review,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct Group {
     pub keeper: usize,
     pub has_reference: bool,
-    /// Every member except the keeper.
+    /// Every member except the keeper; each matches the keeper directly.
     pub members: Vec<Member>,
-}
-
-impl Member {
-    /// A scan file is proposed for moving only when it directly matches a
-    /// reference file. Files that only chain into a group are left alone.
-    pub fn movable(&self, items: &[Item]) -> bool {
-        items[self.item].role == Role::Scan && self.matched_ref.is_some()
-    }
 }
 
 fn format_rank(f: Format) -> u8 {
@@ -153,87 +224,113 @@ fn keeper_key(items: &[Item], i: usize) -> (bool, u8, std::cmp::Reverse<u64>, us
     )
 }
 
-fn link_equal(uf: &mut UnionFind, keys: impl Iterator<Item = (usize, Digest)>) {
-    let mut first: HashMap<Digest, usize> = HashMap::new();
-    for (i, k) in keys {
-        match first.get(&k) {
-            Some(&j) => uf.union(i, j),
-            None => {
-                first.insert(k, i);
+/// Candidate lookups: equal hashes, plus a BK-tree over every rotation of
+/// every file's pHash.
+struct Index {
+    exact: HashMap<Digest, Vec<usize>>,
+    data: HashMap<Digest, Vec<usize>>,
+    tree: BkTree,
+}
+
+impl Index {
+    fn new(items: &[Item]) -> Self {
+        let mut exact: HashMap<Digest, Vec<usize>> = HashMap::new();
+        let mut data: HashMap<Digest, Vec<usize>> = HashMap::new();
+        let mut tree = BkTree::new();
+        for (i, it) in items.iter().enumerate() {
+            exact.entry(it.blake3).or_default().push(i);
+            if let Some(h) = it.image_data_hash {
+                data.entry(h).or_default().push(i);
+            }
+            for h in &it.hashes {
+                tree.insert(h.phash, i);
             }
         }
+        Self { exact, data, tree }
+    }
+
+    /// Superset of the files `j` for which `compare(items[k], items[j])` or
+    /// `compare(items[j], items[k])` can succeed.
+    fn candidates(&self, items: &[Item], k: usize, cfg: &Config) -> Vec<usize> {
+        let it = &items[k];
+        let mut out: Vec<usize> = self.exact.get(&it.blake3).cloned().unwrap_or_default();
+        if let Some(h) = it.image_data_hash.and_then(|h| self.data.get(&h)) {
+            out.extend(h);
+        }
+        for h in &it.hashes {
+            out.extend(
+                self.tree
+                    .find(h.phash, cfg.threshold)
+                    .into_iter()
+                    .map(|(j, _)| j),
+            );
+        }
+        out.sort_unstable();
+        out.dedup();
+        out.retain(|&j| j != k);
+        out
     }
 }
 
+/// Groups built around keepers: files are taken in keeper-preference order,
+/// and each unassigned file collects the unassigned files that match it
+/// directly. Matches of matches never join a group.
 pub fn find_groups(items: &[Item], cfg: &Config) -> Vec<Group> {
-    let mut uf = UnionFind::new(items.len());
-    link_equal(
-        &mut uf,
-        items.iter().enumerate().map(|(i, it)| (i, it.blake3)),
-    );
-    link_equal(
-        &mut uf,
-        items
-            .iter()
-            .enumerate()
-            .filter_map(|(i, it)| it.image_data_hash.map(|h| (i, h))),
-    );
+    let index = Index::new(items);
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    order.sort_by_key(|&i| keeper_key(items, i));
 
-    let mut tree = BkTree::new();
-    for (i, it) in items.iter().enumerate() {
-        if let Some(h) = it.hashes.first() {
-            tree.insert(h.phash, i);
-        }
-    }
-    for (i, it) in items.iter().enumerate() {
-        for h in &it.hashes {
-            for (j, _) in tree.find(h.phash, cfg.threshold) {
-                if j != i && compare(&items[j], it, cfg).is_some() {
-                    uf.union(i, j);
-                }
-            }
-        }
-    }
+    let best_ref = |j: usize| -> Option<(usize, Match)> {
+        index
+            .candidates(items, j, cfg)
+            .into_iter()
+            .filter(|&r| items[r].role == Role::Reference)
+            .filter_map(|r| compare(&items[r], &items[j], cfg).map(|m| (r, m)))
+            .min_by_key(|(r, m)| (m.level, m.distance, keeper_key(items, *r)))
+    };
 
-    uf.groups()
-        .into_iter()
-        .map(|ids| {
-            let keeper = ids
-                .iter()
-                .copied()
-                .min_by_key(|&i| keeper_key(items, i))
-                .unwrap_or(ids[0]);
-            let refs: Vec<usize> = ids
-                .iter()
-                .copied()
-                .filter(|&i| items[i].role == Role::Reference)
-                .collect();
-            let members = ids
-                .iter()
-                .copied()
-                .filter(|&i| i != keeper)
-                .map(|i| {
-                    let matched_ref = if items[i].role == Role::Scan {
-                        refs.iter()
-                            .filter_map(|&r| compare(&items[r], &items[i], cfg).map(|m| (r, m)))
-                            .min_by_key(|(r, m)| (m.level, m.distance, keeper_key(items, *r)))
+    let mut assigned = vec![false; items.len()];
+    let mut groups = Vec::new();
+    for &k in &order {
+        if assigned[k] {
+            continue;
+        }
+        let mut members: Vec<(usize, Match)> = index
+            .candidates(items, k, cfg)
+            .into_iter()
+            .filter(|&j| !assigned[j])
+            .filter_map(|j| compare(&items[k], &items[j], cfg).map(|m| (j, m)))
+            .collect();
+        if members.is_empty() {
+            continue;
+        }
+        members.sort_by_key(|&(j, _)| j);
+        assigned[k] = true;
+        for &(j, _) in &members {
+            assigned[j] = true;
+        }
+        let has_reference = std::iter::once(k)
+            .chain(members.iter().map(|&(j, _)| j))
+            .any(|i| items[i].role == Role::Reference);
+        groups.push(Group {
+            keeper: k,
+            has_reference,
+            members: members
+                .into_iter()
+                .map(|(j, m)| Member {
+                    item: j,
+                    to_keeper: Some(m),
+                    matched_ref: if items[j].role == Role::Scan {
+                        best_ref(j)
                     } else {
                         None
-                    };
-                    Member {
-                        item: i,
-                        to_keeper: compare(&items[keeper], &items[i], cfg),
-                        matched_ref,
-                    }
+                    },
                 })
-                .collect();
-            Group {
-                keeper,
-                has_reference: !refs.is_empty(),
-                members,
-            }
-        })
-        .collect()
+                .collect(),
+        });
+    }
+    groups.sort_by_key(|g| g.keeper);
+    groups
 }
 
 #[cfg(test)]
@@ -250,7 +347,14 @@ mod tests {
                 .map(|p| vec![PHashes { dhash: p, phash: p }; 4])
                 .unwrap_or_default(),
             pixels: 100,
+            siblings: None,
+            luma_stddev: Some(40.0),
+            capture: None,
         }
+    }
+
+    fn suggestions(g: &Group, items: &[Item]) -> Vec<Suggestion> {
+        g.members.iter().map(|m| m.suggestion(items)).collect()
     }
 
     #[test]
@@ -259,9 +363,9 @@ mod tests {
             item(Role::Reference, 1, Some(1), Some(0)),     // 0
             item(Role::Scan, 1, Some(9), None),             // 1 exact of 0
             item(Role::Scan, 2, Some(1), None),             // 2 image data of 0
-            item(Role::Scan, 3, None, Some(0b111)),         // 3 similar to 0 (d=3)
-            item(Role::Scan, 4, None, Some(u64::MAX >> 1)), // 4 unrelated to 0
-            item(Role::Scan, 5, None, Some((u64::MAX >> 1) ^ 0xFF)), // 5 similar to 4 (d=8)
+            item(Role::Scan, 3, None, Some(0b111)),         // 3 near 0 (d=3)
+            item(Role::Scan, 4, None, Some(u64::MAX >> 1)), // 4 unrelated
+            item(Role::Scan, 5, None, Some((u64::MAX >> 1) ^ 0xFF)), // 5 similar to 4
         ];
         let g = find_groups(&items, &Config::default());
         assert_eq!(g.len(), 2);
@@ -279,25 +383,24 @@ mod tests {
                 Some(Level::NearIdentical)
             ]
         );
-        assert!(g[0].members.iter().all(|m| m.movable(&items)));
-        // Scan-only group: nothing movable.
+        assert_eq!(suggestions(&g[0], &items), vec![Suggestion::Duplicate; 3]);
         assert!(!g[1].has_reference);
-        assert!(g[1].members.iter().all(|m| !m.movable(&items)));
+        assert_eq!(suggestions(&g[1], &items), vec![Suggestion::Review]);
     }
 
     #[test]
-    fn reference_files_are_never_movable() {
+    fn reference_files_are_never_suggested() {
         let items = vec![
             item(Role::Reference, 1, None, None),
             item(Role::Reference, 1, None, None),
         ];
         let g = find_groups(&items, &Config::default());
-        assert!(g[0].members.iter().all(|m| !m.movable(&items)));
+        assert_eq!(suggestions(&g[0], &items), vec![Suggestion::None]);
     }
 
     #[test]
-    fn chained_members_are_not_moved() {
-        // 0 (ref) ~ 1 (d=8) ~ 2 (d=8 from 1, 16 from 0)
+    fn groups_do_not_chain() {
+        // 0 (ref) ~ 1 (d=8) ~ 2 (d=8 from 1, 16 from 0): 2 is not in 0's group.
         let items = vec![
             item(Role::Reference, 1, None, Some(0)),
             item(Role::Scan, 2, None, Some(0xFF)),
@@ -305,8 +408,61 @@ mod tests {
         ];
         let g = find_groups(&items, &Config::default());
         assert_eq!(g.len(), 1);
-        let m2 = g[0].members.iter().find(|m| m.item == 2).unwrap();
-        assert!(m2.to_keeper.is_none());
-        assert!(!m2.movable(&items));
+        assert_eq!(g[0].keeper, 0);
+        assert_eq!(g[0].members.len(), 1);
+        assert_eq!(g[0].members[0].item, 1);
+    }
+
+    #[test]
+    fn siblings_only_match_exactly() {
+        let mut a = item(Role::Scan, 1, Some(1), Some(0));
+        let mut b = item(Role::Scan, 2, Some(2), Some(0)); // looks identical
+        a.siblings = Some(7);
+        b.siblings = Some(7);
+        assert!(compare(&a, &b, &Config::default()).is_none());
+        b.blake3 = a.blake3; // a byte-identical -1 copy is still a duplicate
+        assert_eq!(
+            compare(&a, &b, &Config::default()).unwrap().level,
+            Level::Exact
+        );
+    }
+
+    #[test]
+    fn blank_and_low_detail_frames() {
+        let cfg = Config::default();
+        let mut a = item(Role::Reference, 1, None, Some(0));
+        let mut b = item(Role::Scan, 2, None, Some(0));
+        a.luma_stddev = Some(0.0);
+        assert!(
+            compare(&a, &b, &cfg).is_none(),
+            "blank: no perceptual match"
+        );
+        a.luma_stddev = Some(6.0);
+        assert!(compare(&a, &b, &cfg).is_some(), "low detail, identical");
+        b.hashes = vec![
+            PHashes {
+                dhash: 0xFF,
+                phash: 0xFF
+            };
+            4
+        ]; // d=8
+        assert!(compare(&a, &b, &cfg).is_none(), "low detail, only similar");
+        a.luma_stddev = Some(40.0);
+        assert!(compare(&a, &b, &cfg).is_some());
+    }
+
+    #[test]
+    fn different_exposures_are_review_not_duplicate() {
+        let mut items = vec![
+            item(Role::Reference, 1, None, Some(0)),
+            item(Role::Scan, 2, None, Some(0b11)),
+        ];
+        items[0].capture = Some(1000.0);
+        items[1].capture = Some(1002.5);
+        let g = find_groups(&items, &Config::default());
+        assert_eq!(suggestions(&g[0], &items), vec![Suggestion::Review]);
+        items[1].capture = None; // carved preview: no EXIF
+        let g = find_groups(&items, &Config::default());
+        assert_eq!(suggestions(&g[0], &items), vec![Suggestion::Duplicate]);
     }
 }

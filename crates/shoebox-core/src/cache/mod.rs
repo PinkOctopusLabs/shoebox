@@ -8,7 +8,11 @@ use crate::error::{CoreError, Result, io};
 use crate::exif::ExifInfo;
 use crate::hash::{ANALYZER_VERSION, Analysis, Digest, PHashes};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
+
+/// Rebuildable tables, dropped when the schema version changes.
+/// `dupe_ignores` holds user decisions and is never dropped.
+const REBUILDABLE: &[&str] = &["phash", "exif", "files", "roots"];
 
 pub struct Cache {
     conn: Connection,
@@ -50,6 +54,12 @@ impl Cache {
                 "cache schema {version} is newer than this build ({SCHEMA_VERSION})"
             )));
         }
+        if version != 0 && version < SCHEMA_VERSION {
+            tracing::info!("cache schema {version} is out of date; rebuilding");
+            for t in REBUILDABLE {
+                conn.execute_batch(&format!("DROP TABLE IF EXISTS {t}"))?;
+            }
+        }
         conn.execute_batch(include_str!("schema.sql"))?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(Self { conn })
@@ -81,6 +91,7 @@ impl Cache {
             .conn
             .query_row(
                 "SELECT f.id, f.blake3, f.image_data_hash, f.width, f.height, f.analyze_error,
+                        f.luma_stddev,
                         e.capture_time, e.subsec, e.offset, e.make, e.model, e.serial, e.lens,
                         e.focal, e.fnumber, e.exposure, e.iso, e.orientation
                  FROM files f LEFT JOIN exif e ON e.file_id = f.id
@@ -95,25 +106,26 @@ impl Cache {
                         r.get::<_, Option<u32>>(3)?,
                         r.get::<_, Option<u32>>(4)?,
                         r.get::<_, Option<String>>(5)?,
+                        r.get::<_, Option<f32>>(6)?,
                         ExifInfo {
-                            capture_time: r.get(6)?,
-                            subsec: r.get(7)?,
-                            offset: r.get(8)?,
-                            make: r.get(9)?,
-                            model: r.get(10)?,
-                            serial: r.get(11)?,
-                            lens: r.get(12)?,
-                            focal: r.get(13)?,
-                            fnumber: r.get(14)?,
-                            exposure: r.get(15)?,
-                            iso: r.get(16)?,
-                            orientation: r.get(17)?,
+                            capture_time: r.get(7)?,
+                            subsec: r.get(8)?,
+                            offset: r.get(9)?,
+                            make: r.get(10)?,
+                            model: r.get(11)?,
+                            serial: r.get(12)?,
+                            lens: r.get(13)?,
+                            focal: r.get(14)?,
+                            fnumber: r.get(15)?,
+                            exposure: r.get(16)?,
+                            iso: r.get(17)?,
+                            orientation: r.get(18)?,
                         },
                     ))
                 },
             )
             .optional()?;
-        let Some((id, b3, idh, width, height, error, exif)) = row else {
+        let Some((id, b3, idh, width, height, error, luma_stddev, exif)) = row else {
             return Ok(None);
         };
         let mut stmt = self.conn.prepare_cached(
@@ -134,6 +146,7 @@ impl Cache {
             height,
             exif,
             hashes,
+            luma_stddev,
             error,
         }))
     }
@@ -144,14 +157,15 @@ impl Cache {
         {
             let mut file = tx.prepare_cached(
                 "INSERT INTO files(root_id, rel_path, ext, size, mtime, blake3, image_data_hash,
-                                   width, height, analyzer_version, analyze_error)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                                   width, height, analyzer_version, analyze_error, luma_stddev)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                  ON CONFLICT(root_id, rel_path) DO UPDATE SET
                    ext = excluded.ext, size = excluded.size, mtime = excluded.mtime,
                    blake3 = excluded.blake3, image_data_hash = excluded.image_data_hash,
                    width = excluded.width, height = excluded.height,
                    analyzer_version = excluded.analyzer_version,
-                   analyze_error = excluded.analyze_error
+                   analyze_error = excluded.analyze_error,
+                   luma_stddev = excluded.luma_stddev
                  RETURNING id",
             )?;
             let mut exif = tx.prepare_cached(
@@ -178,6 +192,7 @@ impl Cache {
                         a.height,
                         ANALYZER_VERSION,
                         a.error,
+                        a.luma_stddev,
                     ],
                     |r| r.get(0),
                 )?;

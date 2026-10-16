@@ -106,13 +106,15 @@ fn groups_keepers_and_moves() {
         .collect();
     assert_eq!(
         by_keeper[NEF1],
+        // The camera JPG is the NEF's sibling (same folder and name), so it's
+        // a different rendition of the frame, not a duplicate.
         vec![
-            "ref/2026/2026-04-24/DSC_0001.JPG",
             "ref/lightroom/DSC_0001.tif",
             "scan/misc/f0007.png",
             "scan/recovered/f0001.jpg",
             "scan/recovered/f0003.jpg",
             "scan/recovered/f0004.jpg",
+            "scan/recovered/f0010.jpg",
         ]
     );
     assert_eq!(
@@ -136,7 +138,7 @@ fn groups_keepers_and_moves() {
     let mut movable: Vec<&str> = groups
         .iter()
         .flat_map(|g| g.members.iter())
-        .filter(|m| m.movable(&r.items))
+        .filter(|m| m.suggestion(&r.items) == dupes::Suggestion::Duplicate)
         .map(|m| r.names[m.item].as_str())
         .collect();
     movable.sort_unstable();

@@ -19,6 +19,10 @@ pub struct Row {
     /// `keep`, `duplicate` (directly matches a reference file), `review`
     /// (weaker or reference-less match) or `none` (reference files).
     pub suggestion: &'static str,
+    /// `yes`/`no` when both files have a capture time (relative to the matched
+    /// reference file, else the keeper); `no` means a different exposure such
+    /// as a burst neighbour. `unknown` when either has no EXIF time.
+    pub same_exposure: &'static str,
     pub path: String,
     /// The library root the file was scanned under.
     pub root: String,

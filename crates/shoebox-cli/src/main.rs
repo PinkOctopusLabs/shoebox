@@ -274,6 +274,7 @@ fn dupes_cmd(data_dir: &Path, a: DupesArgs) -> Result<()> {
             rotation: None,
             role: role(items[g.keeper].role),
             suggestion: "keep",
+            same_exposure: "",
             path: k.file.path.display().to_string(),
             root: roots[k.file.root].path.display().to_string(),
             width: k.analysis.width,
@@ -290,21 +291,36 @@ fn dupes_cmd(data_dir: &Path, a: DupesArgs) -> Result<()> {
         });
         for m in &g.members {
             let f = &analyzed[m.item];
-            let is_scan = items[m.item].role == Role::Scan;
-            let suggestion = match (is_scan, m.movable(&items)) {
-                (false, _) => "none",
-                (true, true) => "duplicate",
-                (true, false) => "review",
+            let sug = m.suggestion(&items);
+            let suggestion = sug.as_str();
+            suggested += usize::from(sug == dupes::Suggestion::Duplicate);
+            review += usize::from(sug == dupes::Suggestion::Review);
+            // Compare exposures against the matched reference file, else the keeper.
+            let other = m.matched_ref.map_or(g.keeper, |(r, _)| r);
+            let (a_t, b_t) = (items[other].capture, items[m.item].capture);
+            let gap = dupes::capture_gap(&items[other], &items[m.item]);
+            let same_exposure = match (a_t, b_t, gap) {
+                (Some(_), Some(_), None) => "yes",
+                (Some(_), Some(_), Some(_)) => "no",
+                _ => "unknown",
             };
-            suggested += usize::from(suggestion == "duplicate");
-            review += usize::from(suggestion == "review");
-            let note = if is_scan && !g.has_reference {
-                Some("no reference file in group".to_string())
-            } else if suggestion == "review" {
-                Some("only matches through another file".to_string())
-            } else {
-                f.analysis.error.clone()
-            };
+            let mut notes = Vec::new();
+            if let Some(g) = gap {
+                notes.push(format!(
+                    "different exposure: shot {} apart from {}",
+                    human_gap(g),
+                    analyzed[other].file.path.display()
+                ));
+            }
+            if sug == dupes::Suggestion::Review && m.matched_ref.is_none() {
+                notes.push(if g.has_reference {
+                    "matches another scan file, not a reference file".to_string()
+                } else {
+                    "no reference file in group".to_string()
+                });
+            }
+            notes.extend(f.analysis.error.clone());
+            let note = (!notes.is_empty()).then(|| notes.join("; "));
             rows.push(report::Row {
                 confirm: "",
                 group: gi + 1,
@@ -316,6 +332,7 @@ fn dupes_cmd(data_dir: &Path, a: DupesArgs) -> Result<()> {
                 rotation: m.to_keeper.map(|x| x.rotation),
                 role: role(items[m.item].role),
                 suggestion,
+                same_exposure,
                 path: f.file.path.display().to_string(),
                 root: roots[f.file.root].path.display().to_string(),
                 width: f.analysis.width,
@@ -446,6 +463,15 @@ fn apply_cmd(data_dir: &Path, report_path: &Path, dry_run: bool, yes: bool) -> R
         plan.moves.len()
     );
     Ok(())
+}
+
+fn human_gap(secs: f64) -> String {
+    match secs {
+        s if s < 60.0 => format!("{s:.1} s"),
+        s if s < 3600.0 => format!("{:.0} min", s / 60.0),
+        s if s < 172_800.0 => format!("{:.1} h", s / 3600.0),
+        s => format!("{:.0} days", s / 86_400.0),
+    }
 }
 
 /// `YYYY-MM-DD HH:MM:SS` UTC from Unix milliseconds.
