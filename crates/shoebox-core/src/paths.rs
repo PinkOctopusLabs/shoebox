@@ -11,9 +11,23 @@ fn home() -> Result<PathBuf> {
         .ok_or_else(|| CoreError::Invalid("HOME is not set".into()))
 }
 
-/// `~/Library/Application Support/<bundle id>`: cache database and journal.
+/// Where the cache database and journal live:
+/// `~/Library/Application Support/<bundle id>` on macOS, and
+/// `$XDG_DATA_HOME/shoebox` (default `~/.local/share/shoebox`) elsewhere.
 pub fn default_data_dir() -> Result<PathBuf> {
-    Ok(home()?.join("Library/Application Support").join(BUNDLE_ID))
+    #[cfg(target_os = "macos")]
+    {
+        Ok(home()?.join("Library/Application Support").join(BUNDLE_ID))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let base = match std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
+            Some(d) => PathBuf::from(d),
+            None => home()?.join(".local/share"),
+        };
+        let _ = BUNDLE_ID;
+        Ok(base.join("shoebox"))
+    }
 }
 
 /// The rebuildable cache database.

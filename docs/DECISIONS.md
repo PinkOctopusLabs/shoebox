@@ -3,6 +3,26 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-16 — One portable decoder; Linux kept buildable
+The owner also uses Linux. Linux stays a non-goal for v1 releases (as the spec
+says), but the code must stay portable, so ImageIO is **not** the main
+decoder. This supersedes the "ImageIO for display" part of the entry below.
+- One pure-Rust decode path per format on every OS, for hashing and display:
+  zune-jpeg, tiff, png, and our NEF `JpgFromRaw` extractor.
+- Display thumbnails (M2) come from embedded previews where present: Z f
+  JPGs carry MPF previews at 640×424 (163 KB) and full HD (606 KB); NEFs a
+  640×424 `PreviewImage`. Files without them (carved previews, TIFFs) are
+  decoded in full; TIFFs take ~6.5 ms.
+- Colour management (M2): `moxcms` (pure Rust) rather than `lcms2` (C).
+- HEIC (M2) is the only platform-specific decoder: ImageIO on macOS (wrapper
+  in `shoebox_decode::imageio`), libheif on Linux, behind one interface.
+- Platform code: no-overwrite rename uses `renamex_np(RENAME_EXCL)` on macOS
+  and `renameat2(RENAME_NOREPLACE)` on Linux (other platforms: error, never
+  an overwriting rename). Data dir: Application Support on macOS,
+  `$XDG_DATA_HOME/shoebox` elsewhere.
+- Verified once in a Linux container (rust:1.99-bookworm, aarch64): clippy
+  `-D warnings` clean, 48/48 tests pass. Routine testing stays on macOS.
+
 ## 2026-10-16 — ImageIO benchmark (for M2 thumbnails)
 `shoebox_decode::imageio` is a thin FFI wrapper (ImageIO + CoreGraphics),
 needed for HEIC in M2 anyway. RAW files need a UTI type hint, since a NEF

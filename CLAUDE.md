@@ -17,7 +17,10 @@ A Rust + egui photo library app for macOS. **`docs/SPEC.md` is the source of tru
 - No `unsafe` except in thin FFI wrappers (`shoebox-core/src/fileops/sys.rs`, `shoebox-decode/src/imageio.rs`).
 - `shoebox-core` must not depend on egui. Every file operation goes through `shoebox_core::fileops`.
 - Target `aarch64-apple-darwin`, toolchain pinned in `rust-toolchain.toml`, minimum macOS 27, release `lto = "thin"`.
-- Prefer pure-Rust crates.
+- Prefer pure-Rust crates. Keep code portable to Linux: platform-specific code
+  goes behind `cfg` with a macOS and a Linux branch (see `docs/DECISIONS.md`).
+  Ship and routinely test on macOS only; for an occasional Linux check:
+  `docker run --rm -v "$PWD":/src:ro -v shoebox-linux-target:/target -e CARGO_TARGET_DIR=/target -w /src rust:1.99-bookworm cargo test --workspace`
 
 ## Safety rules (hard requirements)
 1. Never delete files outside the app's own cache directories. "Remove" means move to `_rejected/`/`_duplicates/`, or the macOS Trash on explicit command.

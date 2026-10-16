@@ -16,7 +16,8 @@ use shoebox_decode::Format;
 #[derive(Parser)]
 #[command(name = "shoebox", version, about = "Shoebox photo library tools")]
 struct Cli {
-    /// Where the cache and journal live (default: ~/Library/Application Support/<bundle id>).
+    /// Where the cache and journal live (default: ~/Library/Application Support/<bundle id>
+    /// on macOS, ~/.local/share/shoebox on Linux).
     #[arg(long, global = true, env = "SHOEBOX_DATA_DIR", value_name = "DIR")]
     data_dir: Option<PathBuf>,
     /// More logging (-v info, -vv debug).

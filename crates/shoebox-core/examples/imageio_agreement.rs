@@ -1,9 +1,15 @@
 //! Compare perceptual hashes from our decode path and from ImageIO on the
 //! given files. `cargo run --release -p shoebox-core --example imageio_agreement -- <files>`
-use shoebox_core::hash::{HASH_DECODE_EDGE, PHashes};
-use shoebox_decode::{Format, imageio};
+#[cfg(not(target_os = "macos"))]
+fn main() {
+    eprintln!("imageio_agreement needs macOS (ImageIO)");
+}
 
+#[cfg(target_os = "macos")]
 fn main() -> anyhow::Result<()> {
+    use shoebox_core::hash::{HASH_DECODE_EDGE, PHashes};
+    use shoebox_decode::{Format, imageio};
+
     for p in std::env::args().skip(1) {
         let path = std::path::Path::new(&p);
         let Some(fmt) = Format::from_path(path) else {
