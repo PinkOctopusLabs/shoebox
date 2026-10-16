@@ -3055,6 +3055,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "clap",
+ "csv",
  "shoebox-core",
  "shoebox-decode",
  "shoebox-fixtures",

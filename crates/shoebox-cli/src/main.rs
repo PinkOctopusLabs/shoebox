@@ -28,8 +28,19 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Find duplicates of reference files among scanned files.
+    /// Find duplicates and write a report for review. Never moves files.
     Dupes(DupesArgs),
+    /// Move the files a person confirmed in a `dupes` report (`confirm` = y).
+    Apply {
+        /// The reviewed report CSV.
+        report: PathBuf,
+        /// Show what would be moved without moving anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Don't ask for confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
     /// List journaled batches.
     History,
     /// Reverse a batch (default: the most recent one not yet undone).
@@ -55,16 +66,13 @@ struct DupesArgs {
     /// Write a CSV report of every group.
     #[arg(long, value_name = "FILE")]
     report: Option<PathBuf>,
-    /// Move scan files that match a reference file into this folder, keeping
-    /// their relative paths. Sidecars move with them.
-    #[arg(long, value_name = "DIR")]
+    /// Folder that confirmed duplicates will be moved into (by `shoebox apply`),
+    /// keeping their relative paths. Fills the report's `dest` column.
+    #[arg(long, value_name = "DIR", requires = "report")]
     move_matched: Option<PathBuf>,
-    /// Show what would be moved without moving anything.
-    #[arg(long)]
+    /// Accepted for compatibility; `dupes` never moves files.
+    #[arg(long, hide = true)]
     dry_run: bool,
-    /// Don't ask for confirmation before moving.
-    #[arg(long)]
-    yes: bool,
 }
 
 fn main() -> Result<()> {
@@ -88,6 +96,11 @@ fn main() -> Result<()> {
     };
     match cli.cmd {
         Cmd::Dupes(args) => dupes_cmd(&data_dir, args),
+        Cmd::Apply {
+            report,
+            dry_run,
+            yes,
+        } => apply_cmd(&data_dir, &report, dry_run, yes),
         Cmd::History => history_cmd(&data_dir),
         Cmd::Undo { batch, yes } => undo_cmd(&data_dir, batch, yes),
     }
@@ -198,7 +211,8 @@ fn dupes_cmd(data_dir: &Path, a: DupesArgs) -> Result<()> {
         }
     }
 
-    let fo = open_fileops(data_dir, refs.clone())?;
+    // Report any interrupted batches; dupes itself never moves anything.
+    open_fileops(data_dir, refs.clone())?;
     let mut cache = Cache::open(&paths::cache_db(data_dir)).context("opening cache")?;
 
     eprintln!("Scanning {} folder(s)…", roots.len());
@@ -213,17 +227,23 @@ fn dupes_cmd(data_dir: &Path, a: DupesArgs) -> Result<()> {
     };
     let groups = dupes::find_groups(&items, &cfg);
 
-    // Plan moves for scan files that directly match a reference file.
+    // Proposed destinations for every scan file in a group. Nothing moves
+    // until a person confirms rows and runs `shoebox apply`.
     let mut wanted = Vec::new();
     if let Some(d) = &dest {
         let multi_scan = a.scans.len() > 1;
-        for g in groups.iter().filter(|g| g.has_reference) {
-            for m in g.members.iter().filter(|m| m.movable(&items)) {
-                let f = &analyzed[m.item].file;
-                let root = &roots[f.root].path;
+        for g in &groups {
+            let ids = std::iter::once(g.keeper).chain(g.members.iter().map(|m| m.item));
+            for i in ids.filter(|&i| items[i].role == Role::Scan) {
+                let f = &analyzed[i].file;
                 let mut to = d.clone();
                 if multi_scan {
-                    to.push(root.file_name().context("scan root has no name")?);
+                    to.push(
+                        roots[f.root]
+                            .path
+                            .file_name()
+                            .context("scan root has no name")?,
+                    );
                 }
                 to.push(&f.rel);
                 wanted.push((f.path.clone(), to));
@@ -243,17 +263,19 @@ fn dupes_cmd(data_dir: &Path, a: DupesArgs) -> Result<()> {
         Role::Scan => "scan",
     };
     let mut rows = Vec::new();
-    let mut movable = 0;
+    let (mut suggested, mut review) = (0, 0);
     for (gi, g) in groups.iter().enumerate() {
         let k = &analyzed[g.keeper];
         rows.push(report::Row {
+            confirm: "",
             group: gi + 1,
             level: "keep".into(),
             distance_to_keeper: Some(0),
             rotation: None,
             role: role(items[g.keeper].role),
-            action: "keep",
+            suggestion: "keep",
             path: k.file.path.display().to_string(),
+            root: roots[k.file.root].path.display().to_string(),
             width: k.analysis.width,
             height: k.analysis.height,
             size: k.file.size,
@@ -261,21 +283,30 @@ fn dupes_cmd(data_dir: &Path, a: DupesArgs) -> Result<()> {
             matched_ref: None,
             matched_ref_level: None,
             matched_ref_distance: None,
-            dest: None,
+            dest: dest_of
+                .get(k.file.path.as_path())
+                .map(|d| d.display().to_string()),
             note: k.analysis.error.clone(),
         });
         for m in &g.members {
             let f = &analyzed[m.item];
-            let is_movable = m.movable(&items);
-            movable += usize::from(is_movable);
-            let note = if !g.has_reference && items[m.item].role == Role::Scan {
+            let is_scan = items[m.item].role == Role::Scan;
+            let suggestion = match (is_scan, m.movable(&items)) {
+                (false, _) => "none",
+                (true, true) => "duplicate",
+                (true, false) => "review",
+            };
+            suggested += usize::from(suggestion == "duplicate");
+            review += usize::from(suggestion == "review");
+            let note = if is_scan && !g.has_reference {
                 Some("no reference file in group".to_string())
-            } else if items[m.item].role == Role::Scan && !is_movable {
-                Some("only matches through another file; not moved".to_string())
+            } else if suggestion == "review" {
+                Some("only matches through another file".to_string())
             } else {
                 f.analysis.error.clone()
             };
             rows.push(report::Row {
+                confirm: "",
                 group: gi + 1,
                 level: m
                     .to_keeper
@@ -284,12 +315,9 @@ fn dupes_cmd(data_dir: &Path, a: DupesArgs) -> Result<()> {
                 distance_to_keeper: m.to_keeper.map(|x| x.distance),
                 rotation: m.to_keeper.map(|x| x.rotation),
                 role: role(items[m.item].role),
-                action: if is_movable && dest.is_some() {
-                    "move"
-                } else {
-                    "none"
-                },
+                suggestion,
                 path: f.file.path.display().to_string(),
+                root: roots[f.file.root].path.display().to_string(),
                 width: f.analysis.width,
                 height: f.analysis.height,
                 size: f.file.size,
@@ -316,33 +344,103 @@ fn dupes_cmd(data_dir: &Path, a: DupesArgs) -> Result<()> {
         stats.files, stats.cached, stats.analyzed, stats.unreadable, stats.undecodable
     );
     println!(
-        "{} duplicate groups ({} with a reference file); {} scan files match a reference file",
+        "{} duplicate groups ({} with a reference file): {suggested} suggested duplicates, {review} to review",
         groups.len(),
         groups.iter().filter(|g| g.has_reference).count(),
-        movable
     );
+    println!("Nothing was moved.");
     if let Some(rp) = &a.report {
         println!("Report: {}", rp.display());
+        if dest.is_some() {
+            println!(
+                "To move files: put y in the `confirm` column of the rows you agree with, save as CSV, then run\n  shoebox apply {}",
+                rp.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn apply_cmd(data_dir: &Path, report_path: &Path, dry_run: bool, yes: bool) -> Result<()> {
+    let file = std::fs::File::open(report_path)
+        .with_context(|| format!("opening {}", report_path.display()))?;
+    let rows =
+        report::read_csv(file).context("reading report (is it the CSV from `shoebox dupes`?)")?;
+    let confirmed: Vec<&report::ReviewRow> = rows.iter().filter(|r| r.is_confirmed()).collect();
+    if confirmed.is_empty() {
+        println!("No rows are confirmed; put y in the `confirm` column to approve a move.");
+        return Ok(());
     }
 
-    if dest.is_none() || plan.moves.is_empty() {
-        return Ok(());
+    // Reference roots named in the report are read-only.
+    let mut protected: Vec<PathBuf> = rows
+        .iter()
+        .filter(|r| r.role == "ref")
+        .filter_map(|r| Path::new(&r.root).canonicalize().ok())
+        .collect();
+    protected.sort();
+    protected.dedup();
+
+    // Never empty a group: at least one file must stay.
+    let mut per_group: HashMap<usize, (usize, usize)> = HashMap::new();
+    for r in &rows {
+        let e = per_group.entry(r.group).or_default();
+        e.0 += 1;
+        e.1 += usize::from(r.is_confirmed());
     }
-    println!();
+    if let Some((g, _)) = per_group.iter().find(|(_, (total, conf))| conf == total) {
+        bail!("every file in group {g} is confirmed; leave at least one unconfirmed to keep");
+    }
+
+    let mut wanted = Vec::new();
+    for r in &confirmed {
+        if r.role != "scan" {
+            bail!("{} is a reference file and can't be moved", r.path);
+        }
+        let dest = r
+            .dest
+            .as_deref()
+            .filter(|d| !d.is_empty())
+            .with_context(|| {
+                format!(
+                    "{} has no destination; re-run `shoebox dupes` with --move-matched",
+                    r.path
+                )
+            })?;
+        let src = PathBuf::from(&r.path);
+        // The file being moved must be the file that was reviewed.
+        let data = std::fs::read(&src)
+            .with_context(|| format!("{} is no longer readable", src.display()))?;
+        let hex: String = shoebox_core::hash::blake3_of(&data)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        if hex != r.blake3 {
+            bail!(
+                "{} has changed since the report was written; re-run `shoebox dupes`",
+                src.display()
+            );
+        }
+        wanted.push((src, PathBuf::from(dest)));
+    }
+
+    let fo = open_fileops(data_dir, protected)?;
+    let plan = fileops::plan_moves(&wanted)?;
     print_moves(&plan.moves);
-    if a.dry_run {
-        println!("\nDry run: nothing was moved.");
+    println!(
+        "\n{} confirmed files ({} moves including sidecars).",
+        confirmed.len(),
+        plan.moves.len()
+    );
+    if dry_run {
+        println!("Dry run: nothing was moved.");
         return Ok(());
     }
-    if !confirm(&format!("Move {} files?", plan.moves.len()), a.yes)? {
+    if !confirm(&format!("Move {} files?", plan.moves.len()), yes)? {
         println!("Cancelled; nothing was moved.");
         return Ok(());
     }
-    let label = format!(
-        "dupes → {}",
-        dest.as_deref().unwrap_or(Path::new("")).display()
-    );
-    let batch = fo.execute(&label, &plan)?;
+    let batch = fo.execute(&format!("apply {}", report_path.display()), &plan)?;
     println!(
         "Moved {} files as batch {batch}. Undo with: shoebox undo {batch}",
         plan.moves.len()

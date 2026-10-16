@@ -6,7 +6,7 @@ A Rust + egui photo library app for macOS. **`docs/SPEC.md` is the source of tru
 - `crates/shoebox-core`: library model, scanning, hashing, duplicate index, SQLite cache, and `fileops` (the only module that moves, renames or copies files; it journals everything). No egui.
 - `crates/shoebox-decode`: JPEG/TIFF/PNG decoding, NEF embedded-preview extraction, grayscale thumbnails.
 - `crates/shoebox-app`: the eframe/egui app (`cargo run -p shoebox-app`).
-- `crates/shoebox-cli`: the `shoebox` binary (`dupes`, `history`, `undo`).
+- `crates/shoebox-cli`: the `shoebox` binary: `dupes` (report only, never moves), `apply` (moves rows a person confirmed in the report), `history`, `undo`.
 - `crates/shoebox-fixtures`: synthetic test library generator (dev-only).
 - `tests/fixtures/`: synthetic fixtures (built per test by `shoebox-fixtures`; `cargo run -p shoebox-fixtures -- <empty dir>` writes them to disk). Real camera files go in the gitignored `tests/fixtures/real/`; tests that need them skip when it's absent.
 
