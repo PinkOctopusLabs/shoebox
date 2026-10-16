@@ -251,43 +251,50 @@ impl Catalog {
         here.into_iter().filter(|&j| key(j) == mine).collect()
     }
 
-    /// Write new marks for photo `i` (via `fileops`, journaled), and update
-    /// the catalog and cache. Returns the journal batch, or None if nothing
-    /// changed.
+    /// Write new marks for several photos as one journaled batch (one undo
+    /// step), and update the catalog and cache. Returns the batch, or None if
+    /// nothing changed. Raw files also get `name.xmp` when `stem_for_raw`.
     pub fn set_marks(
         &mut self,
-        i: usize,
-        new: Marks,
+        updates: &[(usize, Marks)],
         fileops: &crate::fileops::FileOps,
         cache: &Cache,
-        also_stem: bool,
+        stem_for_raw: bool,
+        label: &str,
     ) -> Result<Option<i64>> {
-        let p = &self.photos[i];
-        let writes = sidecar::plan_write(&p.path, &p.marks, &new, also_stem)?;
+        let mut writes = Vec::new();
+        for (i, new) in updates {
+            let p = &self.photos[*i];
+            let also_stem = stem_for_raw && p.format == Format::Nef;
+            writes.extend(sidecar::plan_write(&p.path, &p.marks, new, also_stem)?);
+        }
         if writes.is_empty() {
             return Ok(None);
         }
-        let name = p
-            .path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let batch = fileops.write_sidecars(&format!("marks: {name}"), writes)?;
-        let root = &self.roots[p.root];
-        let root_id = cache.root_id(&root.path, root.role == Role::Reference)?;
-        // Re-derive the signature from disk so the next rescan sees it as current.
+        let batch = fileops.write_sidecars(label, writes)?;
+        for (i, new) in updates {
+            self.note_marks(*i, new.clone(), cache)?;
+        }
+        Ok(Some(batch))
+    }
+
+    /// Record marks now on disk for photo `i` in the catalog and cache.
+    fn note_marks(&mut self, i: usize, marks: Marks, cache: &Cache) -> Result<()> {
+        let path = self.photos[i].path.clone();
         let mut found = Sidecars::new();
-        for side in [sidecar::per_stem(&p.path), sidecar::per_file(&p.path)] {
+        for side in [sidecar::per_stem(&path), sidecar::per_file(&path)] {
             for cand in [side.clone(), side.with_extension("XMP")] {
                 if let Ok(m) = std::fs::metadata(&cand) {
                     found.insert(cand, scan::mtime_of(&m));
                 }
             }
         }
-        let sig = signature(&p.path, &found);
-        let (_, file) = sidecar::present(&p.path, &|q| found.contains_key(q));
+        let sig = signature(&path, &found);
+        let (_, file) = sidecar::present(&path, &|q| found.contains_key(q));
+        let root = &self.roots[self.photos[i].root];
+        let root_id = cache.root_id(&root.path, root.role == Role::Reference)?;
         let photo = &mut self.photos[i];
-        photo.marks = new;
+        photo.marks = marks;
         photo.sidecar = file;
         photo.sidecar_sig = sig;
         cache.update_marks(
@@ -298,8 +305,7 @@ impl Catalog {
                 sidecar: photo.sidecar.clone(),
                 sig: photo.sidecar_sig.clone(),
             },
-        )?;
-        Ok(Some(batch))
+        )
     }
 
     /// Sort photos and rebuild stacks (indices change).

@@ -111,7 +111,7 @@ fn marks_round_trip_through_sidecars_and_rescans() {
         keywords: vec!["Places|Italy|Rome".into()],
     };
     let batch = c
-        .set_marks(i, new.clone(), &fo, &cache, false)
+        .set_marks(&[(i, new.clone())], &fo, &cache, false, "test")
         .unwrap()
         .unwrap();
     let side = lib.join("scan/recovered/f0003.jpg.xmp");
@@ -162,6 +162,9 @@ fn marks_round_trip_through_sidecars_and_rescans() {
         rating: 5,
         ..Marks::default()
     };
-    assert!(c.set_marks(r, rated, &fo, &cache, false).is_err());
+    assert!(
+        c.set_marks(&[(r, rated)], &fo, &cache, false, "test")
+            .is_err()
+    );
     assert!(!lib.join("ref/2026/2026-04-24/DSC_0001.JPG.xmp").exists());
 }

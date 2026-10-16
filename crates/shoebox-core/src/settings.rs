@@ -21,6 +21,16 @@ pub struct RootSetting {
 pub struct Settings {
     #[serde(default)]
     pub roots: Vec<RootSetting>,
+    /// Marks set on a stack go to every member's sidecar, not just the
+    /// primary's (so tools looking at the JPEG or TIFF see them too).
+    #[serde(default)]
+    pub marks_to_all_stack_members: bool,
+    /// Also write Lightroom-style `name.xmp` for RAW files.
+    #[serde(default)]
+    pub write_stem_sidecar_for_raw: bool,
+    /// Saved filters, shown under Smart filters.
+    #[serde(default)]
+    pub smart_filters: Vec<crate::query::SmartFilter>,
 }
 
 impl Settings {
