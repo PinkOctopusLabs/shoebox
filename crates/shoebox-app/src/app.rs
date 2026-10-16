@@ -13,9 +13,11 @@ use shoebox_core::events::{self, Event};
 use shoebox_core::marks::{Label, Marks, Pick};
 use shoebox_core::query;
 
+use shoebox_core::review::{Decision, Review};
+
 use crate::jobs::{
-    Job, Key, Library, LibraryCommand, LibraryEvent, LibraryPaths, Loader, PhotoId, Priority, Size,
-    photo_id,
+    DupePreview, Job, Key, Library, LibraryCommand, LibraryEvent, LibraryPaths, Loader, PhotoId,
+    Priority, Size, photo_id,
 };
 use crate::textures::Textures;
 use crate::{panels, views};
@@ -28,6 +30,8 @@ pub enum View {
     Compare,
     Survey,
     Timeline,
+    /// Tasks → Duplicates: the list of duplicate groups.
+    Duplicates,
 }
 
 impl View {
@@ -42,6 +46,62 @@ impl View {
 
     pub fn has_filmstrip(self) -> bool {
         matches!(self, View::Loupe | View::Compare | View::Survey)
+    }
+}
+
+/// Compare: the "select" and a "candidate" side by side, with zoom and pan
+/// shared (as a zoom over fit and a centre in image fractions, so files of
+/// different resolutions show the same part of the picture).
+#[derive(Debug, Clone)]
+pub struct CompareState {
+    pub select: Option<PhotoId>,
+    pub candidate: Option<PhotoId>,
+    /// 1 = fit.
+    pub zoom: f32,
+    /// Image point at the centre of each pane (0..1).
+    pub center: egui::Pos2,
+    /// The select's fit scale as last drawn (for Space/Z → 100%).
+    pub select_fit: f32,
+}
+
+impl Default for CompareState {
+    fn default() -> Self {
+        Self {
+            select: None,
+            candidate: None,
+            zoom: 1.0,
+            center: egui::pos2(0.5, 0.5),
+            select_fit: 1.0,
+        }
+    }
+}
+
+/// Duplicate review state.
+#[derive(Default)]
+pub struct DupeState {
+    pub review: Option<Arc<Review>>,
+    pub running: bool,
+    pub progress: Option<(usize, usize)>,
+    pub config: shoebox_core::dupes::Config,
+    pub decisions: HashMap<PathBuf, Decision>,
+    /// The group open in Compare or Survey.
+    pub open: Option<usize>,
+    /// The dry-run table being shown (or why applying is refused).
+    pub preview: Option<Result<DupePreview, String>>,
+    pub message: Option<String>,
+    /// Also list groups of reference files only (nothing there can move).
+    pub show_reference_only: bool,
+}
+
+impl DupeState {
+    /// Groups the list shows, in order.
+    pub fn visible(&self) -> Vec<usize> {
+        let Some(r) = &self.review else {
+            return Vec::new();
+        };
+        (0..r.groups.len())
+            .filter(|&g| self.show_reference_only || !r.groups[g].reference_only(r))
+            .collect()
     }
 }
 
@@ -155,6 +215,10 @@ pub struct ShoeboxApp {
     display: Option<crate::display::DisplayTagger>,
     /// Colour space images are rendered in for this display.
     target: shoebox_decode::Target,
+    pub(crate) compare: CompareState,
+    /// Photos in Survey, in order.
+    pub(crate) survey: Vec<PhotoId>,
+    pub(crate) dupes: DupeState,
 }
 
 impl ShoeboxApp {
@@ -233,6 +297,9 @@ impl ShoeboxApp {
             all_keywords: Vec::new(),
             cameras: Vec::new(),
             lenses: Vec::new(),
+            compare: CompareState::default(),
+            survey: Vec::new(),
+            dupes: DupeState::default(),
         }
     }
 
@@ -273,6 +340,101 @@ impl ShoeboxApp {
             .and_then(|p| p.change.clone())
     }
 
+    /// Duplicate groups found so far (None before a search).
+    fn name_of(&self, id: PhotoId) -> Option<String> {
+        self.photo(id)
+            .and_then(|p| p.path.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+    }
+
+    /// Compare's (select, candidate) by file name.
+    pub fn compare_names(&self) -> (Option<String>, Option<String>) {
+        (
+            self.compare.select.and_then(|id| self.name_of(id)),
+            self.compare.candidate.and_then(|id| self.name_of(id)),
+        )
+    }
+
+    /// Survey's photos by file name, and the active one.
+    pub fn survey_names(&self) -> (Vec<String>, Option<String>) {
+        (
+            self.survey
+                .iter()
+                .filter_map(|&id| self.name_of(id))
+                .collect(),
+            self.current.and_then(|id| self.name_of(id)),
+        )
+    }
+
+    /// Every reviewed file in a visible group: (path, decision, how it
+    /// matches, the group's kept copy). For reports from test runs.
+    pub fn review_rows(&self) -> Vec<(PathBuf, Decision, String, PathBuf)> {
+        let Some(r) = &self.dupes.review else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for g in self.dupes.visible() {
+            let g = &r.groups[g];
+            let keeper = r.files[g.entries[0].file].path.clone();
+            for e in &g.entries {
+                let path = r.files[e.file].path.clone();
+                out.push((
+                    path.clone(),
+                    self.decision(&path),
+                    views::duplicates::match_text(r, g.entries[0].file, e),
+                    keeper.clone(),
+                ));
+            }
+        }
+        out
+    }
+
+    /// Groups the list shows (reference-only groups hidden).
+    pub fn dupe_groups(&self) -> Option<usize> {
+        self.dupes
+            .review
+            .as_ref()
+            .map(|_| self.dupes.visible().len())
+    }
+
+    /// The duplicate search is idle and its result is in.
+    pub fn dupes_idle(&self) -> bool {
+        !self.dupes.running && self.dupes.review.is_some()
+    }
+
+    pub fn dupe_message(&self) -> Option<&str> {
+        self.dupes.message.as_deref()
+    }
+
+    /// The dry-run table is showing (Some(Err) if applying was refused).
+    pub fn dupe_preview(&self) -> Option<Result<usize, String>> {
+        self.dupes
+            .preview
+            .as_ref()
+            .map(|p| p.as_ref().map(|p| p.moves.len()).map_err(Clone::clone))
+    }
+
+    /// Decide for the reviewed file with this name (tests).
+    pub fn decide(&mut self, file_name: &str, d: Decision) {
+        let path = self.dupes.review.as_ref().and_then(|r| {
+            r.files
+                .iter()
+                .find(|f| f.path.file_name().is_some_and(|n| n == file_name))
+                .map(|f| f.path.clone())
+        });
+        if let Some(p) = path {
+            self.set_decision(&p, d);
+        }
+    }
+
+    pub fn decision_of(&self, file_name: &str) -> Decision {
+        self.dupes
+            .decisions
+            .iter()
+            .find(|(p, _)| p.file_name().is_some_and(|n| n == file_name))
+            .map_or(Decision::Undecided, |(_, d)| *d)
+    }
+
     pub fn event_names(&self) -> Vec<String> {
         self.events.iter().map(|e| e.name.clone()).collect()
     }
@@ -294,6 +456,19 @@ impl ShoeboxApp {
     pub fn set_view(&mut self, v: View) {
         if v == View::Loupe && self.current.is_none() {
             self.current = self.shown.first().map(|&i| self.ids[i]);
+        }
+        // Compare and Survey outside a duplicate group start from the selection.
+        if self.dupes.open.is_none() {
+            match v {
+                View::Compare if self.view != View::Compare => self.start_compare(),
+                View::Survey if self.view != View::Survey => {
+                    self.survey = self.selected_in_order().into_iter().take(9).collect();
+                }
+                _ => {}
+            }
+        }
+        if !matches!(v, View::Compare | View::Survey | View::Duplicates) {
+            self.dupes.open = None;
         }
         self.view = v;
         self.loupe = LoupeState {
@@ -339,6 +514,34 @@ impl ShoeboxApp {
                     }
                     self.recompute_events();
                     self.refilter();
+                }
+                LibraryEvent::Duplicates(r) => {
+                    self.dupes.running = false;
+                    self.dupes.progress = None;
+                    // Groups are renumbered: go back to the list.
+                    if self.dupes.open.take().is_some()
+                        && matches!(self.view, View::Compare | View::Survey)
+                    {
+                        self.view = View::Duplicates;
+                    }
+                    self.dupes.review = Some(r);
+                }
+                LibraryEvent::DupeProgress { done, total } => {
+                    self.dupes.running = true;
+                    self.dupes.progress = Some((done, total));
+                }
+                LibraryEvent::DupePreview(p) => self.dupes.preview = Some(p),
+                LibraryEvent::DupesApplied { batch, moved } => {
+                    self.dupes.preview = None;
+                    // Done: keep only the "keep" decisions.
+                    self.dupes.decisions.retain(|_, d| *d == Decision::Keep);
+                    self.dupes.message = Some(match batch {
+                        Some(b) => {
+                            format!("Moved {moved} files to _duplicates (batch {b}). ⌘Z undoes it.")
+                        }
+                        None => "Applied.".to_owned(),
+                    });
+                    self.dupes.running = true; // the search re-runs
                 }
                 LibraryEvent::Changes(changes) => {
                     let catalog = Arc::make_mut(&mut self.catalog);
@@ -642,6 +845,201 @@ impl ShoeboxApp {
         self.refilter();
     }
 
+    // --- compare, survey and duplicate review --------------------------------
+
+    /// Selected photos in display order.
+    pub(crate) fn selected_in_order(&self) -> Vec<PhotoId> {
+        self.shown
+            .iter()
+            .map(|&i| self.ids[i])
+            .filter(|id| self.selection.contains(id))
+            .collect()
+    }
+
+    /// Compare the first two selected photos, or the current one and the next.
+    fn start_compare(&mut self) {
+        let sel = self.selected_in_order();
+        let (a, b) = if sel.len() >= 2 {
+            (Some(sel[0]), Some(sel[1]))
+        } else {
+            let a = self
+                .current
+                .or_else(|| self.shown.first().map(|&i| self.ids[i]));
+            let next = a
+                .and_then(|a| self.shown.iter().position(|&i| self.ids[i] == a))
+                .and_then(|p| self.shown.get(p + 1))
+                .map(|&i| self.ids[i]);
+            (a, next)
+        };
+        self.compare = CompareState {
+            select: a,
+            candidate: b,
+            ..CompareState::default()
+        };
+        if let Some(a) = a {
+            self.current = Some(a);
+        }
+    }
+
+    /// Photos Compare's arrows step through: the open group, else the grid.
+    pub(crate) fn compare_pool(&self) -> Vec<PhotoId> {
+        match self.open_group_ids() {
+            Some(ids) => ids,
+            None => self.shown.iter().map(|&i| self.ids[i]).collect(),
+        }
+    }
+
+    /// Step the candidate (never onto the select).
+    pub(crate) fn step_candidate(&mut self, delta: isize) {
+        let pool: Vec<PhotoId> = self
+            .compare_pool()
+            .into_iter()
+            .filter(|&id| Some(id) != self.compare.select)
+            .collect();
+        if pool.is_empty() {
+            return;
+        }
+        let pos = self
+            .compare
+            .candidate
+            .and_then(|c| pool.iter().position(|&x| x == c))
+            .map_or(0, |p| {
+                (p as isize + delta).clamp(0, pool.len() as isize - 1) as usize
+            });
+        self.compare.candidate = Some(pool[pos]);
+        self.activate(pool[pos]);
+    }
+
+    /// Make the candidate the select (Up arrow).
+    pub(crate) fn swap_compare(&mut self) {
+        let c = &mut self.compare;
+        std::mem::swap(&mut c.select, &mut c.candidate);
+    }
+
+    /// The photo marks apply to in Compare and Survey.
+    pub(crate) fn activate(&mut self, id: PhotoId) {
+        self.current = Some(id);
+        self.selection = BTreeSet::from([id]);
+        self.anchor = Some(id);
+    }
+
+    /// Remove a photo from Survey (its X).
+    pub(crate) fn survey_remove(&mut self, id: PhotoId) {
+        self.survey.retain(|&x| x != id);
+        if self.current == Some(id) {
+            self.current = self.survey.first().copied();
+        }
+        self.selection.remove(&id);
+    }
+
+    /// Catalog ids of the open group's files, keeper first.
+    pub(crate) fn open_group_ids(&self) -> Option<Vec<PhotoId>> {
+        let r = self.dupes.review.as_ref()?;
+        let g = r.groups.get(self.dupes.open?)?;
+        Some(
+            g.entries
+                .iter()
+                .map(|e| photo_id(&r.files[e.file].path))
+                .filter(|id| self.index_of.contains_key(id))
+                .collect(),
+        )
+    }
+
+    pub fn find_duplicates(&mut self) {
+        self.dupes.running = true;
+        self.dupes.message = None;
+        self.library
+            .send(LibraryCommand::FindDuplicates(self.dupes.config));
+    }
+
+    pub(crate) fn decision(&self, path: &Path) -> Decision {
+        self.dupes.decisions.get(path).copied().unwrap_or_default()
+    }
+
+    pub(crate) fn set_decision(&mut self, path: &Path, d: Decision) {
+        self.dupes.decisions.insert(path.to_path_buf(), d);
+    }
+
+    /// Apply the auto-select rules to one group (None = every group).
+    pub fn auto_select(&mut self, group: Option<usize>) {
+        let Some(r) = self.dupes.review.clone() else {
+            return;
+        };
+        for (gi, g) in r.groups.iter().enumerate() {
+            if group.is_some_and(|x| x != gi) {
+                continue;
+            }
+            for (e, d) in g
+                .entries
+                .iter()
+                .zip(shoebox_core::review::auto_select(&r, g))
+            {
+                self.dupes.decisions.insert(r.files[e.file].path.clone(), d);
+            }
+        }
+    }
+
+    /// Open a group: Compare for two files, Survey for more.
+    pub fn open_group(&mut self, g: usize) {
+        self.dupes.open = Some(g);
+        let ids = self.open_group_ids().unwrap_or_default();
+        if ids.len() == 2 {
+            self.compare = CompareState {
+                select: Some(ids[0]),
+                candidate: Some(ids[1]),
+                ..CompareState::default()
+            };
+            self.view = View::Compare;
+        } else {
+            self.survey = ids.iter().copied().take(9).collect();
+            self.view = View::Survey;
+        }
+        if let Some(&first) = ids.first() {
+            self.activate(first);
+        }
+    }
+
+    /// Next or previous group, staying in review.
+    pub(crate) fn step_group(&mut self, delta: isize) {
+        let Some(g) = self.dupes.open else { return };
+        let visible = self.dupes.visible();
+        let Some(pos) = visible.iter().position(|&x| x == g) else {
+            return;
+        };
+        let next = (pos as isize + delta).clamp(0, visible.len() as isize - 1) as usize;
+        self.open_group(visible[next]);
+    }
+
+    pub(crate) fn close_group(&mut self) {
+        self.dupes.open = None;
+        self.view = View::Duplicates;
+    }
+
+    /// Ask the library worker for the dry-run table.
+    pub fn request_apply(&mut self) {
+        self.dupes.message = None;
+        self.library.send(LibraryCommand::PreviewDuplicates(
+            self.dupes.decisions.clone(),
+        ));
+    }
+
+    /// The person confirmed the dry-run table.
+    pub fn confirm_apply(&mut self) {
+        self.dupes.preview = None;
+        self.library.send(LibraryCommand::ApplyDuplicates(
+            self.dupes.decisions.clone(),
+        ));
+    }
+
+    /// Files marked to move (for the Apply button).
+    pub(crate) fn marked_to_move(&self) -> usize {
+        self.dupes
+            .decisions
+            .values()
+            .filter(|d| **d == Decision::Move)
+            .count()
+    }
+
     // --- changes -----------------------------------------------------------
 
     /// The unseen change shown on a cell: for a collapsed stack, any member's
@@ -761,7 +1159,11 @@ impl ShoeboxApp {
             self.all_keywords = query::keywords(&self.catalog);
         }
         // Caps Lock only counts with a real window (never in headless tests).
-        if self.auto_advance || (self.display.is_some() && crate::platform::caps_lock()) {
+        // Compare and Survey mark in place.
+        let in_place = matches!(self.view, View::Compare | View::Survey);
+        if !in_place
+            && (self.auto_advance || (self.display.is_some() && crate::platform::caps_lock()))
+        {
             self.step(1);
         }
     }
@@ -1036,7 +1438,58 @@ impl ShoeboxApp {
         if pressed(egui::Key::Enter) && self.current.is_some() {
             self.set_view(View::Loupe);
         }
+        if pressed(egui::Key::Escape) && self.dupes.open.is_some() {
+            self.close_group();
+        }
+        if self.dupes.open.is_some() {
+            if pressed(egui::Key::CloseBracket) {
+                self.step_group(1);
+            }
+            if pressed(egui::Key::OpenBracket) {
+                self.step_group(-1);
+            }
+        }
         let cols = self.grid_cols as isize;
+        match self.view {
+            View::Compare => {
+                if pressed(egui::Key::ArrowRight) {
+                    self.step_candidate(1);
+                }
+                if pressed(egui::Key::ArrowLeft) {
+                    self.step_candidate(-1);
+                }
+                if pressed(egui::Key::ArrowUp) {
+                    self.swap_compare();
+                }
+                if pressed(egui::Key::Space) || pressed(egui::Key::Z) {
+                    let c = &mut self.compare;
+                    c.zoom = if c.zoom > 1.0 {
+                        1.0
+                    } else {
+                        let ppp = ctx.pixels_per_point();
+                        (1.0 / (c.select_fit * ppp)).max(1.0)
+                    };
+                    c.center = egui::pos2(0.5, 0.5);
+                }
+                return;
+            }
+            View::Survey => {
+                let delta = isize::from(pressed(egui::Key::ArrowRight))
+                    - isize::from(pressed(egui::Key::ArrowLeft));
+                if delta != 0 && !self.survey.is_empty() {
+                    let pos = self
+                        .current
+                        .and_then(|c| self.survey.iter().position(|&x| x == c))
+                        .map_or(0, |p| {
+                            (p as isize + delta).clamp(0, self.survey.len() as isize - 1) as usize
+                        });
+                    self.activate(self.survey[pos]);
+                }
+                return;
+            }
+            View::Duplicates => return,
+            _ => {}
+        }
         if pressed(egui::Key::ArrowRight) {
             self.step(1);
         }
@@ -1078,7 +1531,8 @@ impl eframe::App for ShoeboxApp {
             .show_collapsible(ui, &mut bars, |ui| panels::status(self, ui));
         self.bars_open = bars;
 
-        let mut film = self.view.has_filmstrip() && self.bars_open;
+        // Reviewing a duplicate group: its files are all on screen already.
+        let mut film = self.view.has_filmstrip() && self.bars_open && self.dupes.open.is_none();
         egui::Panel::bottom("filmstrip")
             .exact_size(92.0)
             .resizable(false)
@@ -1114,9 +1568,13 @@ impl eframe::App for ShoeboxApp {
                 View::Grid => views::grid::show(self, ui),
                 View::Masonry => views::masonry::show(self, ui),
                 View::Loupe => views::loupe::show(self, ui),
-                View::Compare | View::Survey | View::Timeline => panels::not_yet(self.view, ui),
+                View::Compare => views::compare::show(self, ui),
+                View::Survey => views::survey::show(self, ui),
+                View::Duplicates => views::duplicates::show(self, ui),
+                View::Timeline => panels::not_yet(self.view, ui),
             }
         });
+        views::duplicates::apply_dialog(self, &ctx);
         self.scroll_to_current = false;
 
         let wanted = std::mem::take(&mut self.wanted);

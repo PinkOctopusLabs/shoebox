@@ -495,3 +495,379 @@ fn watcher_tracks_changes_by_other_apps() {
         std::thread::sleep(Duration::from_millis(50));
     }
 }
+
+/// M4 acceptance: the `_undated` clean-up done entirely in the app. Carved
+/// previews and copies sit in `scan/_undated/…`; the reference library is
+/// the keeper. Find, auto-select, look at a group, decide a burst frame by
+/// hand, apply (after the dry-run table), then undo.
+#[test]
+fn undated_cleanup_in_the_app() {
+    use shoebox_core::review::Decision;
+    let t = tempfile::tempdir().unwrap();
+    let lib = t.path().join("lib");
+    shoebox_fixtures::build_library(&lib).unwrap();
+    let lib = lib.canonicalize().unwrap();
+    let undated = lib.join("scan/_undated/1800x1200");
+    std::fs::create_dir_all(undated.parent().unwrap()).unwrap();
+    std::fs::rename(lib.join("scan/recovered"), &undated).unwrap(); // fixture layout
+    let ref_before = std::fs::read_dir(lib.join("ref/lightroom"))
+        .unwrap()
+        .count();
+    let p = paths(t.path(), &[lib.join("ref"), lib.join("scan")]);
+    let mut s = Settings::load(&p.settings).unwrap();
+    s.set_reference(&lib.join("ref"), true);
+    s.save(&p.settings).unwrap();
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+
+    // Tasks → Duplicates → Find.
+    h.get_by_label("Duplicates").click();
+    h.run_steps(2);
+    assert_eq!(h.state().view_name(), View::Duplicates);
+    h.get_by_label("Find duplicates").click();
+    wait_for(&mut h, Duration::from_secs(60), "duplicates", |a| {
+        a.dupes_idle()
+    });
+    // Each file to decide on is shown with its closest copy: five groups.
+    // Matches inside the reference folder are shown only on request.
+    assert_eq!(h.state().dupe_groups(), Some(5));
+    settle(&mut h, Duration::from_secs(30));
+    snapshot(&mut h, "10-duplicates");
+
+    h.get_by_label("Auto-select all").click();
+    h.run_steps(2);
+    assert_eq!(h.state().decision_of("f0001.jpg"), Decision::Move);
+    assert_eq!(h.state().decision_of("DSC_0001.tif"), Decision::Keep);
+    assert_eq!(
+        h.state().decision_of("f0010.jpg"),
+        Decision::Undecided,
+        "a burst frame 1 s later is left for a person"
+    );
+    assert_eq!(
+        h.state().decision_of("f0003.jpg"),
+        Decision::Undecided,
+        "a resized copy with no capture time is left for a person"
+    );
+
+    // Open the two-file group (f0005/f0006) in Compare, and the big one in
+    // Survey; decide the burst frame there.
+    h.get_all_by_label("Open in Compare")
+        .next()
+        .unwrap()
+        .click();
+    h.run_steps(3);
+    assert_eq!(h.state().view_name(), View::Compare);
+    settle(&mut h, Duration::from_secs(30));
+    snapshot(&mut h, "11-compare-group");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert_eq!(h.state().view_name(), View::Duplicates);
+    h.get_by_label("f0001.jpg").click(); // opens its group (the burst frame is in it)
+    h.run_steps(3);
+    assert_eq!(h.state().view_name(), View::Survey);
+    settle(&mut h, Duration::from_secs(30));
+    snapshot(&mut h, "12-survey-group");
+    // Looking at them, a person confirms the resized copies (clicking Move
+    // under f0003's tile) and keeps the burst frame as a variant.
+    let moves = h.get_all_by_label("Move").count();
+    assert!(moves >= 3, "a Move button under each tile");
+    h.state_mut().decide("f0010.jpg", Decision::Variant);
+    h.state_mut().decide("f0003.jpg", Decision::Move);
+    h.state_mut().decide("f0007.png", Decision::Move);
+    h.key_press(egui::Key::CloseBracket); // next group: the rotated copy
+    h.run_steps(3);
+    h.state_mut().decide("f0008.jpg", Decision::Move);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+
+    // Apply: the dry-run table first, then one batch.
+    h.get_by_label("Apply… (7 to move)").click();
+    wait_for(&mut h, Duration::from_secs(10), "dry run", |a| {
+        a.dupe_preview().is_some()
+    });
+    assert_eq!(h.state().dupe_preview(), Some(Ok(8)), "7 files + 1 sidecar");
+    h.run_steps(2);
+    snapshot(&mut h, "13-apply-dry-run");
+    assert!(
+        undated.join("f0001.jpg").exists(),
+        "nothing moved before confirming"
+    );
+    h.get_by_label("Move 7 files").click();
+    wait_for(&mut h, Duration::from_secs(60), "apply", |a| {
+        a.dupe_message().is_some() && a.dupes_idle()
+    });
+
+    let left: Vec<String> = {
+        let mut v: Vec<String> = std::fs::read_dir(&undated)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    // Unique pictures stay: f0005 (its copy f0006 went), the blank frame,
+    // and the burst frame, now a variant in its NEF's stack.
+    assert_eq!(left, vec!["f0005.jpg", "f0009.jpg", "f0010.jpg"]);
+    let moved = lib.join("scan/_duplicates/_undated/1800x1200");
+    for f in [
+        "f0001.jpg",
+        "f0001.jpg.xmp",
+        "f0003.jpg",
+        "f0004.jpg",
+        "f0006.jpg",
+    ] {
+        assert!(moved.join(f).exists(), "{f} moved");
+    }
+    assert!(lib.join("scan/_duplicates/rotated/f0008.jpg").exists());
+    assert_eq!(
+        std::fs::read_dir(lib.join("ref/lightroom"))
+            .unwrap()
+            .count(),
+        ref_before,
+        "reference untouched"
+    );
+    // Nothing left to review: the remaining matches are reference-only and
+    // the burst frame is settled as a variant.
+    assert_eq!(h.state().dupe_groups(), Some(0));
+    settle(&mut h, Duration::from_secs(30));
+    snapshot(&mut h, "14-after-apply");
+
+    // One undo puts it all back.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    wait_for(&mut h, Duration::from_secs(60), "undo", |_| {
+        undated.join("f0001.jpg").exists()
+    });
+    assert!(undated.join("f0001.jpg.xmp").exists());
+    assert!(lib.join("scan/rotated/f0008.jpg").exists());
+}
+
+/// Compare and Survey from a grid selection: arrows step the candidate (or
+/// the active tile), marks land on the active photo, the X removes a tile.
+#[test]
+fn compare_and_survey_from_the_grid() {
+    let t = tempfile::tempdir().unwrap();
+    let lib = t.path().join("lib");
+    shoebox_fixtures::build_library(&lib).unwrap();
+    let p = paths(t.path(), &[lib.join("scan")]);
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+
+    h.get_by_label("f0003.jpg").click();
+    h.get_by_label("f0005.jpg")
+        .click_modifiers(egui::Modifiers::COMMAND);
+    h.run_steps(2);
+    h.key_press(egui::Key::C);
+    h.run_steps(2);
+    assert_eq!(h.state().view_name(), View::Compare);
+    let (a, b) = h.state().compare_names();
+    assert_eq!(
+        (a.as_deref(), b.as_deref()),
+        (Some("f0003.jpg"), Some("f0005.jpg"))
+    );
+    h.key_press(egui::Key::ArrowRight);
+    h.run_steps(2);
+    let (a2, b2) = h.state().compare_names();
+    assert_eq!(a2, a, "the select stays");
+    assert_ne!(b2, b, "the candidate moved on");
+    // Marks go to the active side (the candidate, after stepping).
+    h.key_press(egui::Key::Num2);
+    h.run_steps(2);
+    let cand = b2.unwrap();
+    assert_eq!(h.state().marks_of(&cand).unwrap().rating, 2);
+    assert_eq!(h.state().marks_of("f0003.jpg").unwrap().rating, 0);
+    settle(&mut h, Duration::from_secs(30));
+    snapshot(&mut h, "15-compare");
+
+    // Survey three photos.
+    h.key_press(egui::Key::G);
+    h.run_steps(2);
+    h.get_by_label("f0003.jpg").click();
+    for n in ["f0004.jpg", "f0005.jpg"] {
+        h.get_by_label(n).click_modifiers(egui::Modifiers::COMMAND);
+    }
+    h.run_steps(2);
+    h.key_press(egui::Key::N);
+    h.run_steps(2);
+    assert_eq!(h.state().view_name(), View::Survey);
+    let (names, active) = h.state().survey_names();
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(sorted, vec!["f0003.jpg", "f0004.jpg", "f0005.jpg"]);
+    // Step the active tile left (or right from the first) and flag it.
+    let pos = names
+        .iter()
+        .position(|n| Some(n) == active.as_ref())
+        .unwrap();
+    let (key, want) = if pos > 0 {
+        (egui::Key::ArrowLeft, &names[pos - 1])
+    } else {
+        (egui::Key::ArrowRight, &names[1])
+    };
+    h.key_press(key);
+    h.key_press(egui::Key::P);
+    h.run_steps(2);
+    let (_, active) = h.state().survey_names();
+    assert_eq!(active.as_ref(), Some(want));
+    assert_eq!(
+        h.state().marks_of(want).unwrap().pick,
+        Some(shoebox_core::marks::Pick::Pick)
+    );
+    assert_eq!(
+        h.state().survey_names().0.len(),
+        3,
+        "marking keeps the survey"
+    );
+    settle(&mut h, Duration::from_secs(30));
+    snapshot(&mut h, "16-survey");
+    h.get_all_by_label("Remove from survey")
+        .next()
+        .unwrap()
+        .click();
+    h.run_steps(2);
+    assert_eq!(h.state().survey_names().0.len(), 2);
+}
+
+/// `name → (size, mtime)` for every file under `dir` (no reading: cheap on
+/// a large library, and enough to prove nothing was touched).
+fn listing(dir: &Path) -> std::collections::BTreeMap<PathBuf, (u64, std::time::SystemTime)> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut dirs = vec![dir.to_path_buf()];
+    while let Some(d) = dirs.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let p = e.path();
+            let md = e.metadata().unwrap();
+            if md.is_dir() {
+                dirs.push(p);
+            } else if e.file_name() != ".DS_Store" {
+                out.insert(
+                    p.strip_prefix(dir).unwrap().to_path_buf(),
+                    (md.len(), md.modified().unwrap()),
+                );
+            }
+        }
+    }
+    out
+}
+
+/// The `_undated` clean-up against real files, in the app. Opt-in:
+/// `SHOEBOX_UI_REF=<APFS clone of the library>` (reference, read-only) and
+/// `SHOEBOX_UI_UNDATED=<folder holding _undated/>`. Run with `--release
+/// --ignored`. Applies the auto-selected moves, checks the reference
+/// listing is unchanged, then undoes everything.
+#[test]
+#[ignore = "needs SHOEBOX_UI_REF and SHOEBOX_UI_UNDATED"]
+fn real_undated_cleanup() {
+    use shoebox_core::review::Decision;
+    let (Some(lib), Some(scan)) = (
+        std::env::var_os("SHOEBOX_UI_REF").map(PathBuf::from),
+        std::env::var_os("SHOEBOX_UI_UNDATED").map(PathBuf::from),
+    ) else {
+        eprintln!("skipping: set SHOEBOX_UI_REF and SHOEBOX_UI_UNDATED");
+        return;
+    };
+    let (lib, scan) = (lib.canonicalize().unwrap(), scan.canonicalize().unwrap());
+    let lib_before = listing(&lib);
+    let scan_before = listing(&scan);
+    let t = tempfile::tempdir().unwrap();
+    let p = paths(t.path(), &[lib.clone(), scan.clone()]);
+    let mut s = Settings::load(&p.settings).unwrap();
+    s.set_reference(&lib, true);
+    s.save(&p.settings).unwrap();
+    let mut h = harness(p, egui::vec2(1600.0, 1000.0));
+    settle(&mut h, Duration::from_secs(600));
+
+    h.get_by_label("Duplicates").click();
+    h.run_steps(2);
+    let start = Instant::now();
+    h.get_by_label("Find duplicates").click();
+    wait_for(&mut h, Duration::from_secs(1800), "duplicates", |a| {
+        a.dupes_idle()
+    });
+    eprintln!("find: {:.1} s", start.elapsed().as_secs_f64());
+    h.get_by_label("Auto-select all").click();
+    h.run_steps(2);
+    settle(&mut h, Duration::from_secs(120));
+    snapshot(&mut h, "real-1-duplicates");
+
+    let rows = h.state().review_rows();
+    let scan_rows: Vec<_> = rows.iter().filter(|r| r.0.starts_with(&scan)).collect();
+    let mut by_decision: std::collections::BTreeMap<String, usize> = Default::default();
+    for (path, d, how, keeper) in &scan_rows {
+        *by_decision.entry(format!("{d:?}")).or_default() += 1;
+        eprintln!(
+            "{:?}\t{}\t{how}\t{}",
+            d,
+            path.strip_prefix(&scan).unwrap().display(),
+            keeper
+                .strip_prefix(&lib)
+                .or_else(|_| keeper.strip_prefix(&scan))
+                .unwrap()
+                .display()
+        );
+    }
+    eprintln!(
+        "groups shown: {:?}; scan files: {by_decision:?}",
+        h.state().dupe_groups()
+    );
+    let n = scan_rows.iter().filter(|r| r.1 == Decision::Move).count();
+    assert!(n > 0, "something to move");
+
+    h.get_by_label(&format!("Apply… ({n} to move)")).click();
+    wait_for(&mut h, Duration::from_secs(60), "dry run", |a| {
+        a.dupe_preview().is_some()
+    });
+    assert!(matches!(h.state().dupe_preview(), Some(Ok(_))));
+    h.run_steps(2);
+    snapshot(&mut h, "real-2-dry-run");
+    assert_eq!(
+        listing(&scan),
+        scan_before,
+        "nothing moved before confirming"
+    );
+    let label = if n == 1 {
+        "Move 1 file".to_owned()
+    } else {
+        format!("Move {n} files")
+    };
+    h.get_by_label(&label).click();
+    wait_for(&mut h, Duration::from_secs(600), "apply", |a| {
+        a.dupe_message().is_some() && a.dupes_idle()
+    });
+    let after = listing(&scan);
+    let moved = after
+        .keys()
+        .filter(|k| k.starts_with("_duplicates"))
+        .count();
+    let left: Vec<_> = after.keys().filter(|k| k.starts_with("_undated")).collect();
+    eprintln!("moved {moved}; left in _undated: {left:?}");
+    assert_eq!(moved, n);
+    assert_eq!(listing(&lib), lib_before, "reference library untouched");
+    settle(&mut h, Duration::from_secs(120));
+    snapshot(&mut h, "real-3-after");
+
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    wait_for(&mut h, Duration::from_secs(600), "undo", |_| {
+        listing(&scan)
+            .keys()
+            .filter(|k| k.starts_with("_undated"))
+            .count()
+            == scan_before.len()
+    });
+    let restored: Vec<_> = listing(&scan)
+        .into_iter()
+        .filter(|(k, _)| k.starts_with("_undated"))
+        .collect();
+    let original: Vec<_> = scan_before.into_iter().collect();
+    assert_eq!(
+        restored
+            .iter()
+            .map(|(k, (s, _))| (k, s))
+            .collect::<Vec<_>>(),
+        original
+            .iter()
+            .map(|(k, (s, _))| (k, s))
+            .collect::<Vec<_>>(),
+        "undo restores every file"
+    );
+    assert_eq!(listing(&lib), lib_before, "reference library untouched");
+}

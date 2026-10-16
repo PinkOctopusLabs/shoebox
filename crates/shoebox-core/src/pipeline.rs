@@ -32,6 +32,17 @@ pub fn analyze_all(
     roots: &[Root],
     files: Vec<ScannedFile>,
 ) -> Result<(Vec<Analyzed>, Stats)> {
+    analyze_all_progress(cache, roots, files, &|_, _| {})
+}
+
+/// [`analyze_all`], calling `progress(done, total)` as uncached files are
+/// analysed.
+pub fn analyze_all_progress(
+    cache: &mut Cache,
+    roots: &[Root],
+    files: Vec<ScannedFile>,
+    progress: &(dyn Fn(usize, usize) + Sync),
+) -> Result<(Vec<Analyzed>, Stats)> {
     let root_ids = roots
         .iter()
         .map(|r| cache.root_id(&r.path, r.role == Role::Reference))
@@ -55,19 +66,26 @@ pub fn analyze_all(
         }
     }
     tracing::info!("{} cached, {} to analyse", stats.cached, todo.len());
+    let total = todo.len();
+    let done_n = std::sync::atomic::AtomicUsize::new(0);
 
     for chunk in todo.chunks(STORE_CHUNK) {
         let results: Vec<_> = chunk
             .par_iter()
-            .filter_map(|f| match hash::analyze_path(&f.path) {
-                Ok(a) => Some(Analyzed {
-                    file: f.clone(),
-                    analysis: a,
-                }),
-                Err(e) => {
-                    tracing::warn!("skipping {e}");
-                    None
-                }
+            .filter_map(|f| {
+                let r = match hash::analyze_path(&f.path) {
+                    Ok(a) => Some(Analyzed {
+                        file: f.clone(),
+                        analysis: a,
+                    }),
+                    Err(e) => {
+                        tracing::warn!("skipping {e}");
+                        None
+                    }
+                };
+                let n = done_n.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                progress(n, total);
+                r
             })
             .collect();
         stats.unreadable += chunk.len() - results.len();

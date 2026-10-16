@@ -1,9 +1,12 @@
 //! Centre views.
 
+pub mod compare;
+pub mod duplicates;
 pub mod filmstrip;
 pub mod grid;
 pub mod loupe;
 pub mod masonry;
+pub mod survey;
 
 use eframe::egui::{self, Color32, Rect, Stroke, StrokeKind, pos2, vec2};
 
@@ -34,6 +37,112 @@ pub fn fit(rect: Rect, aspect: f32) -> Rect {
         (rect.width(), rect.width() / a)
     };
     Rect::from_center_size(rect.center(), vec2(w, h))
+}
+
+/// Full-resolution size of photo `idx` in image pixels (metadata, else the
+/// best texture, else 3:2).
+pub fn full_size(app: &mut ShoeboxApp, idx: usize) -> egui::Vec2 {
+    let p = &app.catalog.photos[idx];
+    if let (Some(w), Some(h)) = (p.meta.width, p.meta.height) {
+        return vec2(w as f32, h as f32);
+    }
+    let id = app.ids[idx];
+    match app.textures.best(id, Size::Full) {
+        Some(t) => vec2(t.size()[0] as f32, t.size()[1] as f32),
+        None => vec2(3.0, 2.0),
+    }
+}
+
+/// Draw photo `idx` into `rect`: `zoom` over fit (1 = fit), with image point
+/// `center` (fractions) at the middle of `rect`. Loads what it needs
+/// (the 1024 px thumbnail, and the full image once zoomed or large).
+/// Returns where the image went and the fit scale (points per image pixel).
+pub fn draw_zoomed(
+    app: &mut ShoeboxApp,
+    painter: &egui::Painter,
+    rect: Rect,
+    idx: usize,
+    zoom: f32,
+    center: egui::Pos2,
+) -> (Rect, f32) {
+    let id = app.ids[idx];
+    app.want(idx, Size::Large, Priority::Visible);
+    let ppp = painter.ctx().pixels_per_point();
+    let full = full_size(app, idx);
+    let fit = (rect.width() / full.x).min(rect.height() / full.y);
+    if zoom > 1.01 || rect.width().max(rect.height()) * ppp > 1100.0 {
+        app.want(idx, Size::Full, Priority::Visible);
+    }
+    let size = full * fit * zoom;
+    let target = Rect::from_min_size(
+        rect.center() - vec2(center.x * size.x, center.y * size.y),
+        size,
+    );
+    match app.textures.best(id, Size::Full) {
+        Some(t) => {
+            painter.image(
+                t.id(),
+                target,
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+        None => {
+            let msg = app
+                .textures
+                .failed
+                .iter()
+                .find(|(k, _)| k.photo == id)
+                .map_or("Loading…".to_owned(), |(_, e)| {
+                    format!("Can't display: {e}")
+                });
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                msg,
+                egui::FontId::proportional(13.0),
+                Color32::GRAY,
+            );
+        }
+    }
+    (target, fit)
+}
+
+/// Zoom and pan shared by Compare's panes: update `zoom` and `center` from
+/// scroll/pinch about the cursor and from dragging over `resp`.
+pub fn zoom_pan(
+    ui: &egui::Ui,
+    resp: &egui::Response,
+    target: Rect,
+    zoom: &mut f32,
+    center: &mut egui::Pos2,
+) {
+    if let Some(cursor) = resp.hover_pos() {
+        let (pinch, scroll) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta.y));
+        let factor = pinch * (scroll * 0.0025).exp();
+        if (factor - 1.0).abs() > 1e-4 {
+            let new = (*zoom * factor).clamp(1.0, 40.0);
+            // Keep the image point under the cursor where it is.
+            let p = (cursor - target.min) / target.size();
+            let size = target.size() * (new / *zoom);
+            let min = cursor - p * size;
+            let rect_center = resp.rect.center();
+            *center = pos2(
+                (rect_center.x - min.x) / size.x,
+                (rect_center.y - min.y) / size.y,
+            );
+            *zoom = new;
+        }
+    }
+    if resp.dragged() && *zoom > 1.0 {
+        let d = resp.drag_delta() / target.size();
+        *center -= d;
+    }
+    if *zoom <= 1.0 {
+        *zoom = 1.0;
+        *center = pos2(0.5, 0.5);
+    }
+    *center = pos2(center.x.clamp(0.0, 1.0), center.y.clamp(0.0, 1.0));
 }
 
 /// Draw one photo cell: image (or placeholder), file-type badge, selection.
@@ -237,6 +346,37 @@ pub fn handle_click(app: &mut ShoeboxApp, ui: &egui::Ui, resp: &egui::Response, 
         app.click(pos, ui.input(|i| i.modifiers));
     }
     photo_menu(app, resp, pos);
+}
+
+/// Flag, rating and colour label in a strip at the bottom left of `rect`
+/// (Compare and Survey, where photos are large).
+pub fn mark_badges(marks: &shoebox_core::marks::Marks, painter: &egui::Painter, rect: Rect) {
+    use shoebox_core::marks::Pick;
+    let mut parts: Vec<(String, Color32)> = Vec::new();
+    match marks.pick {
+        Some(Pick::Pick) => parts.push(("✔".into(), Color32::from_rgb(80, 200, 120))),
+        Some(Pick::Reject) => parts.push(("✖".into(), Color32::from_rgb(235, 80, 80))),
+        None => {}
+    }
+    if marks.rating > 0 {
+        parts.push((
+            "★".repeat(usize::from(marks.rating)),
+            Color32::from_rgb(250, 210, 80),
+        ));
+    }
+    let mut x = rect.left() + 8.0;
+    let y = rect.bottom() - 26.0;
+    for (text, colour) in parts {
+        let g = painter.layout_no_wrap(text, egui::FontId::proportional(13.0), colour);
+        let r = Rect::from_min_size(pos2(x, y), g.size() + vec2(10.0, 4.0));
+        painter.rect_filled(r, 3.0, Color32::from_black_alpha(160));
+        painter.galley(r.min + vec2(5.0, 2.0), g, colour);
+        x = r.right() + 4.0;
+    }
+    if let Some(l) = marks.label {
+        let r = Rect::from_min_size(pos2(x, y + 2.0), vec2(16.0, 16.0));
+        painter.rect_filled(r, 3.0, label_colour(l));
+    }
 }
 
 /// Display colour of a colour label.

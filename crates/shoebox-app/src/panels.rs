@@ -283,7 +283,19 @@ pub fn library(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     smart_filters(app, ui);
     ui.separator();
     ui.label(RichText::new("Tasks").strong());
-    ui.weak("Duplicates review (M4), Import and History (M5)");
+    let groups = app.dupes.review.as_ref().map(|_| app.dupes.visible().len());
+    let label = match groups {
+        Some(n) => format!("Duplicates  {n}"),
+        None => "Duplicates".to_owned(),
+    };
+    if ui
+        .selectable_label(app.view == View::Duplicates, label)
+        .on_hover_text("Find and review duplicate files")
+        .clicked()
+    {
+        app.set_view(View::Duplicates);
+    }
+    ui.weak("Import and History arrive in M5");
 }
 
 fn events_panel(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
@@ -878,11 +890,6 @@ pub fn empty_library(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     });
 }
 
-pub fn not_yet(view: View, ui: &mut egui::Ui) {
-    let (name, when) = match view {
-        View::Compare => ("Compare", "M4"),
-        View::Survey => ("Survey", "M4"),
-        _ => ("Timeline", "M6"),
-    };
-    ui.centered_and_justified(|ui| ui.weak(format!("{name} view arrives in {when}")));
+pub fn not_yet(_view: View, ui: &mut egui::Ui) {
+    ui.centered_and_justified(|ui| ui.weak("Timeline view arrives in M6"));
 }

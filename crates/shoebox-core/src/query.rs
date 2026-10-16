@@ -301,12 +301,13 @@ mod tests {
     }
 
     fn catalog(photos: Vec<Photo>) -> Catalog {
-        let (stacks, stack_of) = crate::stacks::build(&photos);
+        let (stacks, stack_of) = crate::stacks::build(&photos, &[]);
         Catalog {
             roots: Vec::new(),
             photos,
             stacks,
             stack_of,
+            links: Vec::new(),
         }
     }
 

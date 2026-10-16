@@ -403,6 +403,38 @@ impl Cache {
         Ok(())
     }
 
+    /// Remember that two files (by content) are not duplicates.
+    pub fn ignore_pairs(&mut self, pairs: &[(Digest, Digest)]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut st = tx.prepare_cached(
+                "INSERT OR IGNORE INTO dupe_ignores(hash_a, hash_b) VALUES (?1, ?2)",
+            )?;
+            for (a, b) in pairs {
+                let (a, b) = if a <= b { (a, b) } else { (b, a) };
+                st.execute(params![&a[..], &b[..]])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Every dismissed pair, smaller hash first.
+    pub fn ignored_pairs(&self) -> Result<std::collections::HashSet<(Digest, Digest)>> {
+        let mut st = self
+            .conn
+            .prepare_cached("SELECT hash_a, hash_b FROM dupe_ignores")?;
+        let rows = st.query_map([], |r| {
+            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })?;
+        let mut out = std::collections::HashSet::new();
+        for row in rows {
+            let (a, b) = row?;
+            out.insert((digest(a)?, digest(b)?));
+        }
+        Ok(out)
+    }
+
     /// Drop cache rows for files of `root_id` that are no longer on disk.
     /// (Cache rows only; nothing in the library is touched.)
     pub fn forget_missing(

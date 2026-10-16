@@ -3,6 +3,35 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-17 — M4 Compare, Survey and duplicate review
+- **Compare** syncs zoom as a factor over each pane's fit and pan as a
+  centre in image fractions, so a 6048 px original and a 2560 px export
+  show the same part of the picture. Space/Z goes to 100% of the select.
+  Arrows step the candidate, Up swaps; the filmstrip picks the candidate.
+- **Survey** takes the selection (2–9, display order); its X removes a tile.
+  In Compare and Survey marks go to the active photo and auto-advance is
+  off (you're choosing between photos on screen).
+- **Review decisions are applied together**: per-file Keep / Move /
+  Variant / Not a duplicate, then Apply shows the dry-run table (every
+  move, sidecars included) and runs one journaled batch, so Cmd+Z undoes
+  it all. Moves go to `<the file's own root>/_duplicates/<relative path>`.
+- **Auto-select** follows the spec's keeper rule but only proposes moving
+  copies taken at the same moment as the keeper (or with no capture time,
+  like carved previews). Other exposures (bursts) stay undecided, as in the
+  M1 decision. Reference files never move; a group always keeps one file.
+  Every file to move is re-hashed (BLAKE3) right before the batch.
+- **"Add to stack as a variant"** is stored in `<root>/.shoebox/stacks.json`
+  in every writable root (a new app file beside `events.json`), written in
+  the same batch as the moves. A settled variant leaves duplicate review.
+- **Ignored pairs** go in the cache's `dupe_ignores` (by BLAKE3, so they
+  survive renames). Schema rebuilds keep that table; deleting the cache
+  file forgets them.
+- **Groups of reference files only** (a NEF and its Lightroom export, both
+  in the library) are hidden by default: nothing in them can move.
+- Duplicates is a task view (Tasks → Duplicates), not one of the G/M/E/C/N/T
+  views. `[` and `]` step groups; Esc returns to the list.
+- The glyph test now scans every source file (it missed new views before).
+
 ## 2026-10-17 — Live sync and change badges (pulled forward before M4)
 - **Watcher**: `notify` (FSEvents on macOS, inotify on Linux) on every root,
   debounced (quiet 250 ms, at most 2 s). Changed sidecars map to their

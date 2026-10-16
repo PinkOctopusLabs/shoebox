@@ -14,6 +14,7 @@ pub mod meta;
 pub mod paths;
 pub mod pipeline;
 pub mod query;
+pub mod review;
 pub mod scan;
 pub mod settings;
 pub mod sidecar;

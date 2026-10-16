@@ -191,9 +191,9 @@ fn scan_cmd(data_dir: &Path, folders: &[PathBuf]) -> Result<()> {
         t.elapsed().as_secs_f64(),
         dated
     );
-    let (stacks, _) = shoebox_core::stacks::build(&catalog.photos);
+    let stacks = &catalog.stacks;
     let mut badges: HashMap<String, usize> = HashMap::new();
-    for st in &stacks {
+    for st in stacks {
         let mut b = st.badge(&catalog.photos);
         if !st.variants.is_empty() {
             b.push_str(&format!(" +{} variant", st.variants.len()));

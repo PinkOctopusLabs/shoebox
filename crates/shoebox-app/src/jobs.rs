@@ -16,8 +16,9 @@ use crossbeam_channel::{Receiver, Sender};
 use shoebox_core::catalog::Catalog;
 use shoebox_core::changes::By;
 use shoebox_core::events::{self, Event};
-use shoebox_core::fileops::{FileOps, Journal};
+use shoebox_core::fileops::{FileOps, Journal, PlannedMove};
 use shoebox_core::marks::Marks;
+use shoebox_core::review::{self, Decision, Review};
 use shoebox_core::settings::Settings;
 use shoebox_core::thumbs::{self, Source, ThumbCache};
 use shoebox_decode::{Format, Rgb8};
@@ -250,6 +251,22 @@ pub enum LibraryCommand {
     SaveSettings(Box<Settings>),
     /// Clear the unseen changes of these photos.
     MarkSeen(Vec<PathBuf>),
+    /// Find duplicate groups across the library (hashing what isn't cached).
+    FindDuplicates(shoebox_core::dupes::Config),
+    /// Work out what applying these decisions would do (the dry-run table).
+    PreviewDuplicates(HashMap<PathBuf, Decision>),
+    /// Apply them: moves to `_duplicates/` and stack links as one undoable
+    /// batch, and remember dismissed pairs.
+    ApplyDuplicates(HashMap<PathBuf, Decision>),
+}
+
+/// The dry-run table for applying duplicate decisions.
+#[derive(Debug, Clone, Default)]
+pub struct DupePreview {
+    /// Every move, sidecars included, with final (suffixed) destinations.
+    pub moves: Vec<PlannedMove>,
+    pub variants: usize,
+    pub ignores: usize,
 }
 
 pub enum LibraryEvent {
@@ -268,6 +285,19 @@ pub enum LibraryEvent {
     /// Unseen changes after Shoebox wrote these photos' sidecars (lighter
     /// than republishing the catalog on every keystroke).
     Changes(Vec<(PathBuf, Option<shoebox_core::changes::Change>)>),
+    /// Duplicate groups found (also after applying decisions, or undo).
+    Duplicates(Arc<Review>),
+    DupeProgress {
+        done: usize,
+        total: usize,
+    },
+    /// The dry-run table, or why the decisions can't be applied.
+    DupePreview(Result<DupePreview, String>),
+    /// Decisions applied as this batch (None if nothing moved).
+    DupesApplied {
+        batch: Option<i64>,
+        moved: usize,
+    },
     /// Undo/redo availability changed.
     History {
         can_undo: bool,
@@ -346,6 +376,8 @@ fn library_worker(
         }
     };
     let mut catalog = Catalog::default();
+    // The last duplicate search, kept so decisions can be applied to it.
+    let mut dupes: Option<Review> = None;
     let mut index: HashMap<PathBuf, usize> = HashMap::new();
     // Batches made in this session, for Cmd+Z / Cmd+Shift+Z.
     let (mut undo, mut redo): (Vec<i64>, Vec<i64>) = (Vec::new(), Vec::new());
@@ -563,7 +595,52 @@ fn library_worker(
                     ))),
                 }
                 history(&undo, &redo);
-                (false, true)
+                if let Some(config) = dupes.as_ref().map(|r| r.config) {
+                    refresh_impl(&mut cache, &settings, &mut catalog, &mut index, &emit);
+                    find_dupes(&mut cache, &settings, &catalog, config, &mut dupes, &emit);
+                    (false, false)
+                } else {
+                    (false, true)
+                }
+            }
+            LibraryCommand::FindDuplicates(config) => {
+                find_dupes(&mut cache, &settings, &catalog, config, &mut dupes, &emit);
+                (false, false)
+            }
+            LibraryCommand::PreviewDuplicates(decisions) => {
+                let preview = dupes
+                    .as_ref()
+                    .ok_or_else(|| "find duplicates first".to_owned())
+                    .and_then(|r| review::plan(r, &decisions).map_err(|e| e.to_string()))
+                    .and_then(|plan| {
+                        let moves = shoebox_core::fileops::plan_moves(&plan.moves)
+                            .map_err(|e| e.to_string())?;
+                        Ok(DupePreview {
+                            moves: moves.moves,
+                            variants: plan.links.len(),
+                            ignores: plan.ignores.len(),
+                        })
+                    });
+                emit(LibraryEvent::DupePreview(preview));
+                (false, false)
+            }
+            LibraryCommand::ApplyDuplicates(decisions) => {
+                let Some(r) = dupes.as_ref() else { continue };
+                match apply_dupes(r, &decisions, &settings, &catalog, &fileops, &mut cache) {
+                    Ok((batch, moved)) => {
+                        if let Some(b) = batch {
+                            undo.push(b);
+                            redo.clear();
+                            history(&undo, &redo);
+                        }
+                        emit(LibraryEvent::DupesApplied { batch, moved });
+                        let config = r.config;
+                        refresh_impl(&mut cache, &settings, &mut catalog, &mut index, &emit);
+                        find_dupes(&mut cache, &settings, &catalog, config, &mut dupes, &emit);
+                    }
+                    Err(e) => emit(LibraryEvent::DupePreview(Err(e))),
+                }
+                (false, false)
             }
             LibraryCommand::MarkSeen(paths) => {
                 let idx: Vec<usize> = paths.iter().filter_map(|p| index.get(p).copied()).collect();
@@ -623,6 +700,86 @@ fn library_worker(
             Err(e) => emit(LibraryEvent::Error(format!("scanning: {e}"))),
         }
     }
+}
+
+/// Run duplicate detection and publish the groups.
+fn find_dupes(
+    cache: &mut shoebox_core::cache::Cache,
+    settings: &Settings,
+    catalog: &Catalog,
+    config: shoebox_core::dupes::Config,
+    dupes: &mut Option<Review>,
+    emit: &(dyn Fn(LibraryEvent) + Sync),
+) {
+    let progress = |done: usize, total: usize| {
+        if done.is_multiple_of(16) || done == total {
+            emit(LibraryEvent::DupeProgress { done, total });
+        }
+    };
+    let settled: std::collections::HashSet<PathBuf> =
+        catalog.links.iter().map(|l| l.file.clone()).collect();
+    match review::find(cache, settings.scan_roots(), config, &settled, &progress) {
+        Ok(r) => {
+            tracing::info!(
+                "{} duplicate groups ({} files analysed, {} cached)",
+                r.groups.len(),
+                r.stats.analyzed,
+                r.stats.cached
+            );
+            emit(LibraryEvent::Duplicates(Arc::new(r.clone())));
+            *dupes = Some(r);
+        }
+        Err(e) => emit(LibraryEvent::Error(format!("finding duplicates: {e}"))),
+    }
+}
+
+/// Apply duplicate decisions: check each file to move is unchanged, then
+/// move them and save stack links as one batch; remember dismissed pairs.
+fn apply_dupes(
+    r: &Review,
+    decisions: &HashMap<PathBuf, Decision>,
+    settings: &Settings,
+    catalog: &Catalog,
+    fileops: &FileOps,
+    cache: &mut shoebox_core::cache::Cache,
+) -> Result<(Option<i64>, usize), String> {
+    let plan = review::plan(r, decisions).map_err(|e| e.to_string())?;
+    for (src, _) in &plan.moves {
+        review::check_unchanged(r, src).map_err(|e| e.to_string())?;
+    }
+    let moves = shoebox_core::fileops::plan_moves(&plan.moves).map_err(|e| e.to_string())?;
+    let writes = if plan.links.is_empty() {
+        Vec::new()
+    } else {
+        let writable: Vec<PathBuf> = settings
+            .roots
+            .iter()
+            .filter(|r| !r.reference)
+            .map(|r| r.path.clone())
+            .collect();
+        let mut links = catalog.links.clone();
+        links.retain(|l| !plan.links.iter().any(|n| n.file == l.file));
+        links.extend(plan.links.iter().cloned());
+        shoebox_core::stacks::plan_save_links(&writable, &links).map_err(|e| e.to_string())?
+    };
+    let batch = if moves.moves.is_empty() && writes.is_empty() {
+        None
+    } else {
+        let label = format!(
+            "duplicates: move {}, {} variants",
+            plan.moves.len(),
+            plan.links.len()
+        );
+        Some(
+            fileops
+                .execute_with_writes(&label, &moves, writes)
+                .map_err(|e| e.to_string())?,
+        )
+    };
+    cache
+        .ignore_pairs(&plan.ignores)
+        .map_err(|e| e.to_string())?;
+    Ok((batch, plan.moves.len()))
 }
 
 /// What the library worker acts on: the app's commands and watcher batches.

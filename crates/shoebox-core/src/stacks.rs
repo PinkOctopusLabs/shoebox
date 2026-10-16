@@ -8,8 +8,15 @@
 //! member carrying a `-N` suffix whose format another member already has
 //! (Lightroom's `-1`/`-2` virtual-copy exports): different pixels, shown
 //! only when the stack is expanded.
+//!
+//! A person can also add a file to another stack as a variant by hand (from
+//! duplicate review): such links live in `<root>/.shoebox/stacks.json` in
+//! every writable root, like events.
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
 
 use shoebox_decode::Format;
 
@@ -93,11 +100,86 @@ fn suffix_of(stem: &str, base: &str) -> bool {
         .is_some_and(|n| !n.is_empty() && n.len() <= 2 && n.chars().all(|c| c.is_ascii_digit()))
 }
 
+/// `file` joins the stack of `of` as a variant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Link {
+    pub file: PathBuf,
+    pub of: PathBuf,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct LinksFile {
+    #[serde(default)]
+    version: u32,
+    #[serde(default)]
+    variants: Vec<Link>,
+}
+
+/// `<root>/.shoebox/stacks.json`.
+pub fn links_file(root: &Path) -> PathBuf {
+    root.join(".shoebox").join("stacks.json")
+}
+
+/// Every root's links, merged (one link per file; later roots win).
+pub fn load_links(roots: &[PathBuf]) -> Vec<Link> {
+    let mut by_file: HashMap<PathBuf, Link> = HashMap::new();
+    for root in roots {
+        let Ok(bytes) = std::fs::read(links_file(root)) else {
+            continue;
+        };
+        match serde_json::from_slice::<LinksFile>(&bytes) {
+            Ok(f) => {
+                for l in f.variants {
+                    by_file.insert(l.file.clone(), l);
+                }
+            }
+            Err(e) => tracing::warn!("ignoring unreadable {}: {e}", links_file(root).display()),
+        }
+    }
+    let mut v: Vec<Link> = by_file.into_values().collect();
+    v.sort_by(|a, b| a.file.cmp(&b.file));
+    v
+}
+
+/// The bytes of `stacks.json` for every writable root.
+pub fn plan_save_links(
+    writable_roots: &[PathBuf],
+    links: &[Link],
+) -> crate::error::Result<Vec<(PathBuf, Vec<u8>)>> {
+    let body = serde_json::to_vec_pretty(&LinksFile {
+        version: 1,
+        variants: links.to_vec(),
+    })
+    .map_err(|e| crate::error::CoreError::Invalid(format!("stacks: {e}")))?;
+    writable_roots
+        .iter()
+        .map(|r| {
+            let dir = r.join(".shoebox");
+            std::fs::create_dir_all(&dir).map_err(crate::error::io(&dir))?;
+            Ok((links_file(r), body.clone()))
+        })
+        .collect()
+}
+
 /// Group photos into stacks. Returns the stacks and, for each photo, the
-/// index of its stack.
-pub fn build(photos: &[Photo]) -> (Vec<Stack>, Vec<usize>) {
+/// index of its stack. `links` add files to other stacks as variants.
+pub fn build(photos: &[Photo], links: &[Link]) -> (Vec<Stack>, Vec<usize>) {
     let n = photos.len();
     let mut uf = UnionFind::new(n);
+    let at: HashMap<&Path, usize> = photos
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.path.as_path(), i))
+        .collect();
+    let mut linked: HashSet<usize> = HashSet::new();
+    for l in links {
+        if let (Some(&a), Some(&b)) = (at.get(l.file.as_path()), at.get(l.of.as_path()))
+            && a != b
+        {
+            uf.union(a, b);
+            linked.insert(a);
+        }
+    }
 
     // Same folder, same base name (the rule duplicate detection uses).
     let stems: HashSet<crate::pipeline::FolderStem> = photos
@@ -160,9 +242,12 @@ pub fn build(photos: &[Photo]) -> (Vec<Stack>, Vec<usize>) {
             // under the unsuffixed name.
             let (mut members, mut variants) = (Vec::new(), Vec::new());
             for &i in &ids {
-                let is_variant = ids.iter().any(|&j| {
-                    j != i && photos[j].format == photos[i].format && suffix_of(&stem(i), &stem(j))
-                });
+                let is_variant = linked.contains(&i)
+                    || ids.iter().any(|&j| {
+                        j != i
+                            && photos[j].format == photos[i].format
+                            && suffix_of(&stem(i), &stem(j))
+                    });
                 if is_variant {
                     variants.push(i)
                 } else {
@@ -232,7 +317,7 @@ mod tests {
                 Some(("2026:05:01 09:15:02", "80")),
             ), // burst neighbour
         ];
-        let (stacks, of) = build(&photos);
+        let (stacks, of) = build(&photos, &[]);
         assert_eq!(stacks.len(), 2);
         let s = &stacks[of[0]];
         assert_eq!(photos[s.primary].format, Format::Nef);
@@ -243,12 +328,25 @@ mod tests {
             "export in another folder joins by capture time"
         );
         assert_ne!(of[5], of[0], "a burst frame 0.15 s later is its own stack");
+
+        // A carved preview elsewhere, linked by hand, joins as a variant.
+        let mut photos = photos;
+        photos.push(photo("/_undated/6048x4032/f0001.jpg", None));
+        let link = Link {
+            file: "/_undated/6048x4032/f0001.jpg".into(),
+            of: "/a/20260501-091502-65.nef".into(),
+        };
+        let (stacks, of) = build(&photos, &[link]);
+        let s = &stacks[of[6]];
+        assert_eq!(of[6], of[1]);
+        assert!(s.variants.contains(&6));
+        assert_eq!(photos[s.primary].format, Format::Nef);
     }
 
     #[test]
     fn copies_without_a_base_are_plain_members() {
         let photos = vec![photo("/b/x-1.jpg", None), photo("/b/y.jpg", None)];
-        let (stacks, _) = build(&photos);
+        let (stacks, _) = build(&photos, &[]);
         assert_eq!(stacks.len(), 2);
         assert!(stacks.iter().all(|s| s.variants.is_empty()));
     }

@@ -271,6 +271,32 @@ impl FileOps {
         self.run("move", label, None, &ops, |_| Ok(()))
     }
 
+    /// Moves plus writes of the app's own `.shoebox/*.json` files (or
+    /// sidecars) as one journaled batch, so one undo reverses both.
+    pub fn execute_with_writes(
+        &self,
+        label: &str,
+        plan: &Plan,
+        writes: Vec<(PathBuf, Vec<u8>)>,
+    ) -> Result<i64> {
+        self.preflight(&plan.moves)?;
+        for (path, _) in &writes {
+            self.check_sidecar_target(path)?;
+        }
+        let ops: Vec<Planned> = plan
+            .moves
+            .iter()
+            .cloned()
+            .map(Planned::Move)
+            .chain(
+                writes
+                    .into_iter()
+                    .map(|(path, bytes)| Planned::Sidecar { path, bytes }),
+            )
+            .collect();
+        self.run("move", label, None, &ops, |_| Ok(()))
+    }
+
     /// Rewrite XMP sidecars as one journaled batch: each write is recorded
     /// (with the previous contents) before it happens, and lands atomically
     /// (temporary file, then rename). Only `.xmp` files outside reference

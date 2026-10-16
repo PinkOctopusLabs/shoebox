@@ -295,6 +295,16 @@ impl Index {
 /// and each unassigned file collects the unassigned files that match it
 /// directly. Matches of matches never join a group.
 pub fn find_groups(items: &[Item], cfg: &Config) -> Vec<Group> {
+    find_groups_ignoring(items, cfg, &|_, _| false)
+}
+
+/// [`find_groups`], skipping matches between pairs a person dismissed
+/// (`ignored(a, b)` is checked both ways round by the caller's set).
+pub fn find_groups_ignoring(
+    items: &[Item],
+    cfg: &Config,
+    ignored: &(dyn Fn(usize, usize) -> bool + Sync),
+) -> Vec<Group> {
     use rayon::prelude::*;
 
     let index = Index::new(items);
@@ -309,6 +319,7 @@ pub fn find_groups(items: &[Item], cfg: &Config) -> Vec<Group> {
             index
                 .matches_of(items, k, cfg)
                 .into_iter()
+                .filter(|&j| !ignored(k, j))
                 .filter_map(|j| compare(&items[k], &items[j], cfg).map(|m| (j, m)))
                 .collect()
         })
@@ -339,7 +350,7 @@ pub fn find_groups(items: &[Item], cfg: &Config) -> Vec<Group> {
         index
             .matched_by(items, j, cfg)
             .into_iter()
-            .filter(|&r| items[r].role == Role::Reference)
+            .filter(|&r| items[r].role == Role::Reference && !ignored(r, j))
             .filter_map(|r| compare(&items[r], &items[j], cfg).map(|m| (r, m)))
             .min_by_key(|(r, m)| (m.level, m.distance, keeper_key(items, *r)))
     };

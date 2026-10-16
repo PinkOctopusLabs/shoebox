@@ -4,18 +4,25 @@
 
 use eframe::egui;
 
-const SOURCES: &[(&str, &str)] = &[
-    ("app.rs", include_str!("../src/app.rs")),
-    ("panels.rs", include_str!("../src/panels.rs")),
-    ("views/mod.rs", include_str!("../src/views/mod.rs")),
-    ("views/grid.rs", include_str!("../src/views/grid.rs")),
-    ("views/masonry.rs", include_str!("../src/views/masonry.rs")),
-    ("views/loupe.rs", include_str!("../src/views/loupe.rs")),
-    (
-        "views/filmstrip.rs",
-        include_str!("../src/views/filmstrip.rs"),
-    ),
-];
+/// Every `.rs` file under `src/`, so new views are covered automatically.
+fn sources() -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut dirs = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+    while let Some(d) = dirs.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                dirs.push(p);
+            } else if p.extension().is_some_and(|x| x == "rs")
+                && let Ok(src) = std::fs::read_to_string(&p)
+            {
+                out.push((p.display().to_string(), src));
+            }
+        }
+    }
+    assert!(out.len() > 5, "found the sources");
+    out
+}
 
 /// Non-ASCII characters inside "…" on non-comment lines.
 fn literal_chars(src: &str) -> Vec<char> {
@@ -41,8 +48,8 @@ fn every_ui_glyph_is_in_the_fonts() {
     let mut out = ctx.run_ui(Default::default(), |_| {}); // load fonts
     out.textures_delta.clear();
     let mut missing = Vec::new();
-    for (file, src) in SOURCES {
-        for ch in literal_chars(src) {
+    for (file, src) in sources() {
+        for ch in literal_chars(&src) {
             for font in [
                 egui::FontId::proportional(12.0),
                 egui::FontId::monospace(12.0),

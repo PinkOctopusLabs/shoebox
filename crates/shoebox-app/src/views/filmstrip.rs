@@ -27,7 +27,14 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             let r = Rect::from_min_size(pos2(pos as f32 * step, 2.0), vec2(h, h)).translate(origin);
             let resp = cell(app, ui, r, pos, false);
             if resp.clicked() {
-                app.click(pos, egui::Modifiers::NONE);
+                if app.view == crate::app::View::Compare {
+                    // In Compare the filmstrip picks the candidate.
+                    let id = app.ids[app.shown[pos]];
+                    app.compare.candidate = Some(id);
+                    app.activate(id);
+                } else {
+                    app.click(pos, egui::Modifiers::NONE);
+                }
             }
             super::photo_menu(app, &resp, pos);
         }

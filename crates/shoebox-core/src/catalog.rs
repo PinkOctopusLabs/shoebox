@@ -78,6 +78,8 @@ pub struct Catalog {
     pub stacks: Vec<crate::stacks::Stack>,
     /// `stack_of[i]` is the stack index of `photos[i]`.
     pub stack_of: Vec<usize>,
+    /// Files added to other stacks by hand (from `.shoebox/stacks.json`).
+    pub links: Vec<crate::stacks::Link>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -136,9 +138,12 @@ impl Catalog {
                 });
             }
         }
+        let links =
+            crate::stacks::load_links(&roots.iter().map(|r| r.path.clone()).collect::<Vec<_>>());
         let mut c = Self {
             roots,
             photos,
+            links,
             ..Default::default()
         };
         c.finish();
@@ -315,9 +320,12 @@ impl Catalog {
                 .collect();
             stats.forgotten += cache.forget_missing(id, &present)?;
         }
+        let links =
+            crate::stacks::load_links(&roots.iter().map(|r| r.path.clone()).collect::<Vec<_>>());
         let mut c = Self {
             roots,
             photos,
+            links,
             ..Default::default()
         };
         c.finish();
@@ -617,10 +625,16 @@ impl Catalog {
         Ok(out)
     }
 
+    /// Replace the hand-made stack links and rebuild stacks (indices change).
+    pub fn set_links(&mut self, links: Vec<crate::stacks::Link>) {
+        self.links = links;
+        self.finish();
+    }
+
     /// Sort photos and rebuild stacks (indices change).
     fn finish(&mut self) {
         self.sort();
-        let (stacks, of) = crate::stacks::build(&self.photos);
+        let (stacks, of) = crate::stacks::build(&self.photos, &self.links);
         self.stacks = stacks;
         self.stack_of = of;
     }
