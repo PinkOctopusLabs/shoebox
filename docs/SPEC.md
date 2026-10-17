@@ -322,7 +322,7 @@ Export this doc as Markdown to `docs/SPEC.md` in the repo, and add a short `CLAU
 ## Open questions
 
 - [x] **Name.** Shoebox (decided).
-- [x] **Sidecar naming.** `name.ext.xmp` per file is the default, both conventions are read, and name.xmp for RAWs is optional. Check which one DxO PhotoLab 9 writes before M3, to pick that setting's default.
+- [x] **Sidecar naming.** `name.ext.xmp` per file is the default, both conventions are read, and name.xmp for RAWs is optional. Checking which one DxO PhotoLab 9 writes is deferred (2026-10-18); the default stays `name.ext.xmp`.
 - [x] **Rejects.** Store only in `digiKam:PickLabel`, or also as an XMP rating of −1 (Adobe Bridge's reject)? Decided: PickLabel only for now; may become a per-library setting later.
 - [x] **Embedded XMP.** Sidecars only, or also write marks into JPEG and TIFF files later? Decided: sidecars only, so image files are never modified.
 - [x] **Cache location.** One cache per user in Application Support, or one per root, so a library on an external disk carries its own? Decided: follow Apple's layout, keyed by the app's bundle ID: the database in Application Support, thumbnails in Caches (which macOS may purge, as they rebuild). Only collections and events live in each root.

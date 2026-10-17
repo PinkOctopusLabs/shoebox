@@ -3,6 +3,12 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-18 — DxO sidecar check deferred
+- The check of which sidecar name DxO PhotoLab 9 writes, and the golden
+  test on a real DxO sidecar, are off the list for now. The default stays
+  `name.ext.xmp` (`name.xmp` for RAWs is a setting); both are read, and the
+  synthetic golden test still proves unknown properties survive.
+
 ## 2026-10-18 — MP4
 - `.mp4` and `.m4v` are movies too (`Format::Mp4`, badge **▶ MP4**, its own
   file-type filter). MPEG-4 is QuickTime's box structure, so the same header
