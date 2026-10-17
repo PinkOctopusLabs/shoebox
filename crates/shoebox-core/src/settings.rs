@@ -43,6 +43,9 @@ pub struct Settings {
     /// GPU memory for images, in MB (0 = the default).
     #[serde(default)]
     pub image_memory_mb: u32,
+    /// Search photos by what's in them (downloads a model once).
+    #[serde(default)]
+    pub semantic_search: bool,
 }
 
 /// Default for [`Settings::image_memory_mb`].

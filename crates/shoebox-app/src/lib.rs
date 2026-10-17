@@ -6,6 +6,7 @@ pub mod jobs;
 pub mod menu;
 mod panels;
 mod platform;
+pub mod semantic;
 pub mod textures;
 pub mod updater;
 mod views;

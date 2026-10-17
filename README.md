@@ -30,6 +30,10 @@ deletes anything, and keeps a journal of every file operation it makes.
   dry-run table first and can be undone from History.
 - **Live sync:** changes made by other apps to your folders show up at once,
   marked so you can see what changed.
+- **Semantic search** (optional): describe a photo, in any language, and
+  find it; or find photos similar to one. Runs Google's SigLIP 2 model on
+  your Mac (downloaded once, 1.5 GB, when you turn it on); your photos
+  never leave it.
 - **CLI:** `shoebox scan | dupes | apply | import | rename | history | undo |
   resume` for scripting the same operations.
 
@@ -84,3 +88,8 @@ Dual-licensed under either of [MIT](LICENSE-MIT) or
 Map tiles © [OpenStreetMap](https://www.openstreetmap.org/copyright)
 contributors. Updates use [Sparkle](https://github.com/sparkle-project/Sparkle)
 (MIT; its licence ships in the app).
+Semantic search uses Google's
+[SigLIP 2](https://huggingface.co/google/siglip2-base-patch16-224) model
+(Apache-2.0; downloaded, not distributed) with
+[candle](https://github.com/huggingface/candle) (MIT or Apache-2.0; one crate
+vendored with a fix, see `vendor/README.md`).

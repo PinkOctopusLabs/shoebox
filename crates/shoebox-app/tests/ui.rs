@@ -32,6 +32,13 @@ fn paths(tmp: &Path, roots: &[PathBuf]) -> AppPaths {
         thumbs: tmp.join("cache/thumbs"),
         trash_dir: Some(tmp.join("trash")),
         tile_cache: None, // no network in tests
+        embeddings_db: tmp.join("data/embeddings.sqlite"),
+        // Never downloaded: semantic search is off unless a test turns it
+        // on, and then it uses a test model.
+        model: shoebox_app::semantic::ModelSource::Download {
+            dir: tmp.join("data/models"),
+            staging: tmp.join("cache/model-download"),
+        },
     }
 }
 
@@ -1588,4 +1595,208 @@ fn settings_window() {
     h.key_press(egui::Key::Escape);
     h.run_steps(2);
     assert!(!h.state().settings_open());
+}
+
+/// A stand-in for SigLIP: an image's embedding is its average colour (minus
+/// grey), and "red", "green" and "blue" embed as those colours.
+struct ColourModel;
+
+static EMBEDDED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn unit(v: [f32; 3]) -> Vec<f32> {
+    let n = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
+    v.iter().map(|x| x / n).collect()
+}
+
+impl shoebox_app::semantic::Model for ColourModel {
+    fn embed_images(&mut self, images: &[shoebox_decode::Rgb8]) -> Result<Vec<Vec<f32>>, String> {
+        EMBEDDED.fetch_add(images.len(), std::sync::atomic::Ordering::Relaxed);
+        Ok(images
+            .iter()
+            .map(|img| {
+                let mut sum = [0f32; 3];
+                for px in img.px.as_chunks::<3>().0 {
+                    for c in 0..3 {
+                        sum[c] += f32::from(px[c]);
+                    }
+                }
+                let m = (sum[0] + sum[1] + sum[2]) / 3.0;
+                unit([sum[0] - m, sum[1] - m, sum[2] - m])
+            })
+            .collect())
+    }
+
+    fn embed_text(&mut self, text: &str) -> Result<Vec<f32>, String> {
+        match text {
+            "red" => Ok(unit([1.0, -0.5, -0.5])),
+            "green" => Ok(unit([-0.5, 1.0, -0.5])),
+            "blue" => Ok(unit([-0.5, -0.5, 1.0])),
+            _ => Err(format!("the test model doesn't know \"{text}\"")),
+        }
+    }
+}
+
+/// Semantic search end to end with a test model: indexing, a text query
+/// (best match first, non-matches hidden), Find Similar, and embeddings
+/// reused (not recomputed) after a restart.
+#[test]
+fn semantic_search_in_the_app() {
+    let t = tempfile::tempdir().unwrap();
+    let lib = t.path().join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    for (name, rgb) in [
+        ("red.jpg", [210, 30, 30]),
+        ("reddish.jpg", [180, 90, 70]),
+        ("green.jpg", [30, 200, 40]),
+        ("greenish.jpg", [70, 170, 90]),
+        ("blue.jpg", [30, 40, 210]),
+    ] {
+        let img = image::RgbImage::from_pixel(64, 48, image::Rgb(rgb));
+        std::fs::write(lib.join(name), shoebox_fixtures::jpeg(&img, 90).unwrap()).unwrap();
+    }
+    let mut p = paths(t.path(), std::slice::from_ref(&lib));
+    p.model = shoebox_app::semantic::ModelSource::Fixed(|| Box::new(ColourModel));
+    let mut s = Settings::load(&p.settings).unwrap();
+    s.semantic_search = true;
+    s.save(&p.settings).unwrap();
+
+    let mut h = harness(p.clone(), egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+    wait_for(&mut h, Duration::from_secs(30), "indexing", |a| {
+        let s = a.semantic_status();
+        s.ready() && s.indexed == 5
+    });
+    assert_eq!(EMBEDDED.load(std::sync::atomic::Ordering::Relaxed), 5);
+
+    // Search by content.
+    h.get_by_label("Content").click();
+    h.run_steps(2);
+    h.get_all_by_role(egui::accesskit::Role::TextInput)
+        .next()
+        .unwrap()
+        .click();
+    h.run_steps(1);
+    h.event(egui::Event::Text("red".into()));
+    wait_for(&mut h, Duration::from_secs(10), "red results", |a| {
+        a.shown_count() == 2
+    });
+    assert_eq!(h.state().shown_names(), ["red.jpg", "reddish.jpg"]);
+    assert!(h.query_by_label("Best match first").is_some());
+    snapshot(&mut h, "semantic-1-red");
+
+    // A query the model can't embed shows why, and no photos.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.event(egui::Event::Text("teal".into()));
+    wait_for(&mut h, Duration::from_secs(10), "error", |a| {
+        a.shown_count() == 0
+    });
+    assert!(h.query_by_label_contains("doesn't know").is_some());
+
+    // Back to names: everything again.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.key_press(egui::Key::Backspace);
+    h.get_by_label("Content").click();
+    wait_for(&mut h, Duration::from_secs(10), "all photos", |a| {
+        a.shown_count() == 5
+    });
+
+    // Find Similar from the context menu.
+    h.get_by_label("green.jpg").click_secondary();
+    h.run_steps(3);
+    h.get_by_label("Find Similar Photos").click();
+    wait_for(&mut h, Duration::from_secs(10), "similar photos", |a| {
+        a.shown_count() == 2
+    });
+    assert_eq!(h.state().shown_names(), ["green.jpg", "greenish.jpg"]);
+    assert!(h.query_by_label("Photos like green.jpg").is_some());
+    snapshot(&mut h, "semantic-2-similar");
+    h.get_by_label("✖").click();
+    wait_for(&mut h, Duration::from_secs(10), "all photos", |a| {
+        a.shown_count() == 5
+    });
+    drop(h);
+
+    // A restart reuses the stored embeddings.
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+    wait_for(&mut h, Duration::from_secs(30), "index loaded", |a| {
+        let s = a.semantic_status();
+        s.ready() && s.indexed == 5
+    });
+    assert_eq!(
+        EMBEDDED.load(std::sync::atomic::Ordering::Relaxed),
+        5,
+        "nothing recomputed"
+    );
+}
+
+/// Semantic search with the real model, on a folder of your own test photos
+/// (copied; the originals are only read). Needs a downloaded model folder:
+/// `cargo run --release -p shoebox-ml --example fetch -- <dir> <staging>`, then
+/// `SHOEBOX_ML_MODEL=<dir> SHOEBOX_UI_PHOTOS=<folder> SHOEBOX_UI_QUERIES='a cat=cat.jpg;…'
+/// cargo test --release -p shoebox-app --test ui -- --ignored real_model`
+/// (each query lists the file it should put first).
+#[test]
+#[ignore]
+fn semantic_search_real_model() {
+    let (Some(model), Some(photos)) = (
+        std::env::var_os("SHOEBOX_ML_MODEL"),
+        std::env::var_os("SHOEBOX_UI_PHOTOS"),
+    ) else {
+        eprintln!("set SHOEBOX_ML_MODEL and SHOEBOX_UI_PHOTOS");
+        return;
+    };
+    let queries = std::env::var("SHOEBOX_UI_QUERIES").unwrap_or_default();
+    let t = tempfile::tempdir().unwrap();
+    let lib = t.path().join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    for e in std::fs::read_dir(&photos).unwrap() {
+        let p = e.unwrap().path();
+        if p.is_file() {
+            std::fs::copy(&p, lib.join(p.file_name().unwrap())).unwrap();
+        }
+    }
+    let mut p = paths(t.path(), std::slice::from_ref(&lib));
+    p.model = shoebox_app::semantic::ModelSource::Download {
+        dir: PathBuf::from(model),
+        staging: t.path().join("staging"),
+    };
+    let mut s = Settings::load(&p.settings).unwrap();
+    s.semantic_search = true;
+    s.save(&p.settings).unwrap();
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+    let start = Instant::now();
+    wait_for(&mut h, Duration::from_secs(300), "indexing", |a| {
+        let s = a.semantic_status();
+        s.ready() && !s.indexing() && s.total > 0
+    });
+    let s = h.state().semantic_status().clone();
+    eprintln!(
+        "indexed {} photos ({} skipped) in {:.1} s",
+        s.indexed,
+        s.skipped,
+        start.elapsed().as_secs_f32()
+    );
+    h.get_by_label("Content").click();
+    h.run_steps(2);
+    h.get_all_by_role(egui::accesskit::Role::TextInput)
+        .next()
+        .unwrap()
+        .click();
+    for (i, q) in queries.split(';').filter(|q| !q.is_empty()).enumerate() {
+        let (text, best) = q.split_once('=').unwrap();
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.event(egui::Event::Text(text.into()));
+        let start = Instant::now();
+        wait_for(&mut h, Duration::from_secs(30), text, |a| {
+            a.shown_names().first().is_some_and(|n| n == best)
+        });
+        eprintln!(
+            "\"{text}\": {:?} ({:.0} ms incl. typing pause)",
+            h.state().shown_names(),
+            start.elapsed().as_secs_f64() * 1e3
+        );
+        snapshot(&mut h, &format!("semantic-real-{i}"));
+    }
 }

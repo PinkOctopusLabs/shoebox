@@ -166,6 +166,10 @@ pub struct AppPaths {
     pub trash_dir: Option<PathBuf>,
     /// Map tile cache; None turns map tiles (and the network) off.
     pub tile_cache: Option<PathBuf>,
+    /// Stored image embeddings (semantic search).
+    pub embeddings_db: PathBuf,
+    /// The semantic search model: downloaded on first use, or a test model.
+    pub model: crate::semantic::ModelSource,
 }
 
 impl AppPaths {
@@ -191,6 +195,11 @@ impl AppPaths {
             thumbs: cache.join("thumbs"),
             trash_dir: None,
             tile_cache: Some(cache.join("tiles")),
+            embeddings_db: shoebox_core::paths::embeddings_db(&data),
+            model: crate::semantic::ModelSource::Download {
+                dir: shoebox_core::paths::models_dir(&data).join("siglip2-base-patch16-224"),
+                staging: cache.join("model-download"),
+            },
         })
     }
 }
@@ -317,6 +326,8 @@ pub struct ShoeboxApp {
     pub(crate) notice: Option<String>,
     pub(crate) timeline: views::timeline::State,
     pub(crate) map: views::map::State,
+    semantic: crate::semantic::Semantic,
+    pub(crate) sem: crate::semantic::SearchState,
 }
 
 impl ShoeboxApp {
@@ -328,7 +339,7 @@ impl ShoeboxApp {
         tracing::info!("rendering images in {target:?}");
         let threads =
             std::thread::available_parallelism().map_or(4, |n| n.get().saturating_sub(1).max(2));
-        let (c1, c2) = (ctx.clone(), ctx.clone());
+        let (c1, c2, c3) = (ctx.clone(), ctx.clone(), ctx.clone());
         let loader = Loader::new(threads, ThumbCache::new(paths.thumbs), move || {
             c1.request_repaint()
         });
@@ -342,6 +353,10 @@ impl ShoeboxApp {
             move || c2.request_repaint(),
         );
         library.send(LibraryCommand::Open);
+        let semantic =
+            crate::semantic::Semantic::new(paths.model, paths.embeddings_db, move || {
+                c3.request_repaint()
+            });
         Self {
             loader,
             library,
@@ -412,6 +427,8 @@ impl ShoeboxApp {
             notice: None,
             timeline: views::timeline::State::default(),
             map: views::map::State::new(tile_cache),
+            semantic,
+            sem: Default::default(),
         }
     }
 
@@ -570,6 +587,15 @@ impl ShoeboxApp {
         self.shown.len()
     }
 
+    /// File names of the shown photos, in order (tests).
+    pub fn shown_names(&self) -> Vec<String> {
+        self.shown
+            .iter()
+            .filter_map(|&i| self.catalog.photos[i].path.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .collect()
+    }
+
     pub fn set_view(&mut self, v: View) {
         if v == View::Loupe && self.current.is_none() {
             self.current = self.shown.first().map(|&i| self.ids[i]);
@@ -612,6 +638,10 @@ impl ShoeboxApp {
                     self.settings = settings;
                     self.apply_settings();
                     self.set_catalog(*published);
+                    self.semantic.send(crate::semantic::Command::Catalog(
+                        self.catalog.clone(),
+                        complete,
+                    ));
                     if complete {
                         self.scanning = false;
                         self.scan_progress = None;
@@ -808,6 +838,108 @@ impl ShoeboxApp {
         if self.map.tile_cache != tiles {
             self.map = views::map::State::new(tiles);
         }
+        self.sem
+            .set_enabled(&self.semantic, self.settings.semantic_search);
+    }
+
+    // --- semantic search -----------------------------------------------------
+
+    /// The semantic query the UI is asking for, if any.
+    pub(crate) fn semantic_query(&self) -> Option<crate::semantic::Query> {
+        use crate::semantic::Query;
+        if !self.settings.semantic_search {
+            return None;
+        }
+        if let Some((_, p)) = &self.sem.similar {
+            return Some(Query::Similar(p.clone()));
+        }
+        let t = self.filter.search.trim();
+        (self.sem.by_content && !t.is_empty()).then(|| Query::Text(t.to_owned()))
+    }
+
+    /// Show photos that look like this one (from the next frame: this is
+    /// called from inside the grid, which `shown` must not change under).
+    pub(crate) fn find_similar(&mut self, id: PhotoId) {
+        self.sem.similar_request = Some(id);
+    }
+
+    fn start_similar(&mut self, id: PhotoId) {
+        let Some(i) = self.index(id) else { return };
+        let primary = self.catalog.stacks[self.catalog.stack_of[i]].primary;
+        self.sem.similar = Some((self.ids[primary], self.catalog.photos[primary].path.clone()));
+        self.filter.search.clear();
+        self.sem.results = None;
+        if !matches!(self.view, View::Grid | View::Masonry) {
+            self.set_view(View::Grid);
+        }
+        self.refilter();
+    }
+
+    /// Stop showing similar photos.
+    pub(crate) fn clear_similar(&mut self) {
+        self.sem.similar = None;
+        self.sem.results = None;
+        self.refilter();
+    }
+
+    /// Semantic search status (tests and the settings window).
+    pub fn semantic_status(&self) -> &crate::semantic::Status {
+        &self.sem.status
+    }
+
+    pub(crate) fn retry_semantic(&mut self) {
+        self.sem.retry(&self.semantic);
+    }
+
+    pub(crate) fn cancel_model_download(&mut self) {
+        self.semantic.send(crate::semantic::Command::CancelDownload);
+        let mut s = self.settings.clone();
+        s.semantic_search = false;
+        self.save_settings(s);
+    }
+
+    fn tick_semantic(&mut self, ctx: &egui::Context) {
+        use crate::semantic::Event as E;
+        if let Some(id) = self.sem.similar_request.take() {
+            self.start_similar(id);
+        }
+        let mut changed = false;
+        while let Ok(ev) = self.semantic.events.try_recv() {
+            match ev {
+                E::Status(s) => self.sem.status = s,
+                E::Results { id, hits } => {
+                    if let Some(q) = self.sem.answered(id) {
+                        let scores = hits
+                            .into_iter()
+                            .map(|(p, s)| (crate::jobs::photo_id(&p), s))
+                            .collect();
+                        self.sem.results = Some((q, scores));
+                        self.sem.error = None;
+                        changed = true;
+                    }
+                }
+                E::Failed { id, error } => {
+                    if let Some(q) = self.sem.answered(id) {
+                        self.sem.results = Some((q, HashMap::new()));
+                        self.sem.error = Some(error);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        self.sem.typed(&self.filter.search);
+        let want = self.semantic_query();
+        if want.is_none() && self.sem.results.is_some() {
+            self.sem.results = None;
+            changed = true;
+        }
+        if let Some(wait) = self.sem.request(&self.semantic, want) {
+            ctx.request_repaint_after(wait);
+        }
+        if changed {
+            self.refilter();
+            self.scroll_to_current = true;
+        }
     }
 
     /// Stop showing a library folder (nothing on disk changes).
@@ -830,6 +962,10 @@ impl ShoeboxApp {
     pub(crate) fn refilter(&mut self) {
         let mut f = self.filter.clone();
         f.folder = self.folder.clone();
+        let semantic = self.semantic_query().is_some();
+        if semantic {
+            f.search.clear(); // the text is a description, not a name
+        }
         let mut stacks = query::run(&self.catalog, &f, self.sort, self.sort_desc);
         if let Some(members) = self
             .selected_event
@@ -844,6 +980,18 @@ impl ShoeboxApp {
             .and_then(|id| self.collection_members.get(id))
         {
             stacks.retain(|s| members.contains(s));
+        }
+        if semantic {
+            // Best match first; nothing until the first results are in.
+            let empty = HashMap::new();
+            let scores = self.sem.results.as_ref().map_or(&empty, |(_, s)| s);
+            let score = |s: usize| {
+                scores
+                    .get(&self.ids[self.catalog.stacks[s].primary])
+                    .copied()
+            };
+            stacks.retain(|&s| score(s).is_some());
+            stacks.sort_by(|&a, &b| score(b).unwrap_or(0.0).total_cmp(&score(a).unwrap_or(0.0)));
         }
         self.shown.clear();
         for s in stacks {
@@ -2054,6 +2202,7 @@ impl eframe::App for ShoeboxApp {
         }
         self.textures.begin_frame();
         self.apply_events(&ctx);
+        self.tick_semantic(&ctx);
         crate::updater::tick(&ctx, crate::jobs::working());
         self.handle_keys(&ctx);
         self.wanted.clear();

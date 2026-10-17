@@ -63,6 +63,17 @@ pub fn journal_db(data_dir: &Path) -> PathBuf {
     data_dir.join("journal.sqlite")
 }
 
+/// Stored image embeddings for semantic search (rebuildable, but slow to
+/// rebuild, so not in the cache).
+pub fn embeddings_db(data_dir: &Path) -> PathBuf {
+    data_dir.join("embeddings.sqlite")
+}
+
+/// Downloaded ML models.
+pub fn models_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("models")
+}
+
 /// True if `path` is `root` or inside it. Both must already be canonical.
 pub fn is_within(path: &Path, root: &Path) -> bool {
     path.starts_with(root)

@@ -3,6 +3,56 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-17 — M6 semantic search
+The spec says CLIP embeddings through ONNX Runtime (`ort`), stored in
+sqlite-vec. What's built instead, and why:
+
+- **candle, not ONNX Runtime.** Hugging Face's pure-Rust ML library, with
+  Metal on Apple silicon and the CPU elsewhere (Accelerate on macOS). No
+  C++ runtime to bundle and sign; follows "prefer pure-Rust crates". It's in
+  its own crate, `shoebox-ml`, so the core and CLI don't build it.
+- **SigLIP 2 base (patch 16, 224 px; Apache 2.0), not CLIP.** Better
+  text-to-image retrieval, and multilingual. On sample photos every query
+  put the right photo first, including "un chat" and "Hund".
+- **Downloaded, not shipped.** It's off by default; turning it on (Settings →
+  Search) downloads a pinned revision from Hugging Face (1.5 GB, once),
+  checked against SHA-256 digests, resumable. It's converted to half
+  precision and split into image and text halves (785 MB on disk, in
+  Application Support). The download and conversion happen in the Caches
+  folder; the float32 checkpoint is deleted there once converted (the
+  safety rules allow deletes only in the app's cache directories). This is
+  the only network use besides map tiles and update checks.
+- **No sqlite-vec.** Embeddings are stored as 8-bit integers with a scale
+  per vector, in their own `embeddings.sqlite` (not the cache: indexing
+  takes minutes to hours, and a cache rebuild shouldn't lose it), and
+  searched exhaustively in memory: 1.9 ms for 200,000 photos. sqlite-vec is
+  an alpha C extension whose default table also compares every row.
+- **Moves and renames don't recompute.** Rows are keyed by path and checked
+  against size and mtime; a row whose file left the library is given to a
+  new file with the same size and mtime (a move keeps both).
+- **One embedding per photo:** the stack primary's image, decoded like a
+  thumbnail (a NEF's embedded preview), newest photos first.
+- **Thresholds, measured** on sample photos: a text query matches at cosine
+  ≥ 0.07, where SigLIP's own match probability reaches about 1 in 10,000
+  (true matches scored 0.08–0.13, unrelated photos below 0.06; "landscape"
+  finds the mountain only, "portrait of a person" finds nothing in a set
+  without people). Find Similar matches at ≥ 0.75 (unrelated photos
+  0.46–0.73, the JPG and TIFF of one frame 0.99). Tune on a real library.
+- **Speed** (M2 Max): indexing 13.5 ms a photo on the GPU in batches of 16
+  (a 10k library in about 2½ minutes; CPU 38 ms), plus decoding on 4
+  threads. A query: about 10 ms, plus 0.6 s to load the text model the
+  first time. Memory: the image model (190 MB) only while indexing; the
+  text model (565 MB, mostly its 256k-word vocabulary) from the first search
+  until 10 minutes without one.
+- **candle's Metal kernels are patched** (vendored in `vendor/`, one line):
+  they don't compile as Metal 4, macOS 27's default, so the patch compiles
+  them as Metal 3.2. Without it every GPU matrix multiply fails. See
+  `vendor/README.md`; drop it when candle fixes this.
+- UI: a **Content** switch by the search box (the box then takes a
+  description; results are best match first, other filters still apply),
+  **Find Similar Photos** in the photo menu, progress in the toolbar and the
+  Search tab. Not done yet from M6's AI list: faces and objects.
+
 ## 2026-10-17 — Settings window; counts are photos
 - **Settings** (⌘, from the app menu or the keyboard, or Tasks → Settings…)
   is an in-app window with tabs, applied and saved as you change them:

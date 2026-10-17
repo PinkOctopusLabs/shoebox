@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -20,6 +21,7 @@ expect_used = "deny"
 [workspace.dependencies]
 shoebox-core = { path = "crates/shoebox-core" }
 shoebox-decode = { path = "crates/shoebox-decode" }
+shoebox-ml = { path = "crates/shoebox-ml" }
 
 anyhow = "1.0.104"
 thiserror = "2.0.21"
@@ -29,6 +31,10 @@ eframe = { version = "0.37.0", default-features = false, features = ["wgpu", "de
 # Monochrome emoji fonts cover the symbols the UI draws (★ ✔ ✖ ⚠ …);
 # tests/glyphs.rs fails if a label uses a glyph no bundled font has.
 egui = { version = "0.37.0", features = ["monochrome_emoji_fonts"] }
+
+# candle's Metal kernels with one fix (see vendor/README.md).
+[patch.crates-io]
+candle-metal-kernels = { path = "vendor/candle-metal-kernels" }
 
 [profile.release]
 lto = "thin"

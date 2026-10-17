@@ -1,0 +1,294 @@
+//! Fetch the model once, from a pinned Hugging Face revision, checking each
+//! file's SHA-256 before it's used. An interrupted download resumes. The
+//! float32 checkpoint is converted ([`crate::convert`]) and then removed:
+//! it's our own temporary file in the model folder.
+
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use sha2::{Digest, Sha256};
+
+use crate::convert::{TEXT_FILE, VISION_FILE};
+use crate::{MODEL_ID, MlError, Result, io};
+
+const REPO: &str = "google/siglip2-base-patch16-224";
+const REVISION: &str = "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2";
+
+pub const TOKENIZER_FILE: &str = "tokenizer.json";
+const CHECKPOINT: &str = "model.safetensors";
+/// Written last: its presence (holding [`MODEL_ID`]) means the folder is complete.
+const READY_FILE: &str = "READY";
+
+struct Remote {
+    name: &'static str,
+    size: u64,
+    sha256: &'static str,
+}
+
+const FILES: [Remote; 2] = [
+    Remote {
+        name: TOKENIZER_FILE,
+        size: 34_363_039,
+        sha256: "cb9140fae3ac5122c972d37adf83e1248471a38147ad76f8215c8872c6fd8322",
+    },
+    Remote {
+        name: CHECKPOINT,
+        size: 1_500_800_904,
+        sha256: "612923381c76ec5a9bed335d1c48827e3f2e506ac31b044b63b2031fadee6a0b",
+    },
+];
+
+/// Bytes to download.
+pub const DOWNLOAD_BYTES: u64 = FILES[0].size + FILES[1].size;
+
+/// Where the model came from, for the settings window.
+pub fn source() -> String {
+    format!("huggingface.co/{REPO}")
+}
+
+/// Is a complete model in `dir`?
+pub fn is_ready(dir: &Path) -> bool {
+    std::fs::read_to_string(dir.join(READY_FILE)).is_ok_and(|s| s.trim() == MODEL_ID)
+        && [VISION_FILE, TEXT_FILE, TOKENIZER_FILE]
+            .iter()
+            .all(|f| dir.join(f).is_file())
+}
+
+/// What [`fetch`] is doing, for a progress bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    /// Bytes downloaded of [`DOWNLOAD_BYTES`] (including earlier attempts).
+    Downloading {
+        done: u64,
+    },
+    Verifying,
+    Converting,
+}
+
+/// Download, verify and convert the model into `dir`. Returns at once if
+/// it's already there. The download and conversion happen in `staging` (a
+/// folder in the app's cache directory: the float32 checkpoint is deleted
+/// there once converted); only the finished files move into `dir`.
+/// `cancel` stops it (a later call resumes).
+pub fn fetch(
+    dir: &Path,
+    staging: &Path,
+    progress: &dyn Fn(Stage),
+    cancel: &AtomicBool,
+) -> Result<()> {
+    if is_ready(dir) {
+        return Ok(());
+    }
+    for d in [dir, staging] {
+        std::fs::create_dir_all(d).map_err(io(d))?;
+    }
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_recv_response(Some(Duration::from_secs(60)))
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let converted = |d: &Path| d.join(VISION_FILE).is_file() && d.join(TEXT_FILE).is_file();
+    let mut before = 0;
+    for f in &FILES {
+        let dst = staging.join(f.name);
+        let done = if f.name == CHECKPOINT {
+            converted(staging) || converted(dir)
+        } else {
+            dir.join(f.name).is_file()
+        };
+        if !done && !dst.is_file() {
+            let part = part_path(&dst);
+            get(
+                &agent,
+                f,
+                &part,
+                &|n| progress(Stage::Downloading { done: before + n }),
+                cancel,
+            )?;
+            progress(Stage::Verifying);
+            if sha256(&part)? != f.sha256 {
+                // A damaged download, in the cache: start again next time.
+                let _ = std::fs::remove_file(&part);
+                return Err(MlError::Checksum {
+                    file: f.name.into(),
+                });
+            }
+            std::fs::rename(&part, &dst).map_err(io(&dst))?;
+        }
+        before += f.size;
+    }
+    if cancel.load(Ordering::Relaxed) {
+        return Err(MlError::Cancelled);
+    }
+    progress(Stage::Converting);
+    let checkpoint = staging.join(CHECKPOINT);
+    if checkpoint.is_file() {
+        crate::convert::split_f16(&checkpoint, staging)?;
+        std::fs::remove_file(&checkpoint).map_err(io(&checkpoint))?;
+    }
+    for name in [VISION_FILE, TEXT_FILE, TOKENIZER_FILE] {
+        let from = staging.join(name);
+        if from.is_file() {
+            let to = dir.join(name);
+            std::fs::rename(&from, &to).map_err(io(&to))?;
+        }
+    }
+    let ready = dir.join(READY_FILE);
+    std::fs::write(&ready, MODEL_ID).map_err(io(&ready))?;
+    Ok(())
+}
+
+fn part_path(dst: &Path) -> PathBuf {
+    let mut s = dst.as_os_str().to_owned();
+    s.push(".part");
+    PathBuf::from(s)
+}
+
+/// Download `f` into `part`, resuming what's already there.
+fn get(
+    agent: &ureq::Agent,
+    f: &Remote,
+    part: &Path,
+    progress: &dyn Fn(u64),
+    cancel: &AtomicBool,
+) -> Result<()> {
+    let mut have = std::fs::metadata(part).map(|m| m.len()).unwrap_or(0);
+    if have > f.size {
+        have = 0;
+    }
+    if have == f.size {
+        return Ok(());
+    }
+    let url = format!(
+        "https://huggingface.co/{REPO}/resolve/{REVISION}/{}",
+        f.name
+    );
+    let mut req = agent.get(&url);
+    if have > 0 {
+        req = req.header("Range", format!("bytes={have}-"));
+    }
+    let resp = req.call().map_err(|e| MlError::Http(e.to_string()))?;
+    let status = resp.status().as_u16();
+    let mut out = match status {
+        206 => OpenOptions::new()
+            .append(true)
+            .open(part)
+            .map_err(io(part))?,
+        200 => {
+            have = 0;
+            File::create(part).map_err(io(part))?
+        }
+        _ => return Err(MlError::Http(format!("{url}: HTTP {status}"))),
+    };
+    let mut body = resp.into_body().into_reader();
+    let mut buf = vec![0u8; 1 << 20];
+    let mut last = 0;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(MlError::Cancelled);
+        }
+        let n = body
+            .read(&mut buf)
+            .map_err(|e| MlError::Http(e.to_string()))?;
+        if n == 0 {
+            break;
+        }
+        out.write_all(&buf[..n]).map_err(io(part))?;
+        have += n as u64;
+        if have - last >= 4 << 20 {
+            last = have;
+            progress(have);
+        }
+    }
+    out.sync_all().map_err(io(part))?;
+    progress(have);
+    if have != f.size {
+        return Err(MlError::Http(format!(
+            "{}: got {have} of {} bytes",
+            f.name, f.size
+        )));
+    }
+    Ok(())
+}
+
+fn sha256(path: &Path) -> Result<String> {
+    let mut f = File::open(path).map_err(io(path))?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 4 << 20];
+    loop {
+        let n = f.read(&mut buf).map_err(io(path))?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ready_needs_marker_and_files() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        assert!(!is_ready(dir.path()));
+        for f in [VISION_FILE, TEXT_FILE, TOKENIZER_FILE] {
+            std::fs::write(dir.path().join(f), b"x")?;
+        }
+        assert!(!is_ready(dir.path()), "no marker yet");
+        std::fs::write(dir.path().join(READY_FILE), "some-other-model")?;
+        assert!(!is_ready(dir.path()), "marker for another model");
+        std::fs::write(dir.path().join(READY_FILE), MODEL_ID)?;
+        assert!(is_ready(dir.path()));
+        Ok(())
+    }
+
+    #[test]
+    fn sha256_known_value() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let p = dir.path().join("f");
+        std::fs::write(&p, b"abc")?;
+        assert_eq!(
+            sha256(&p)?,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        Ok(())
+    }
+
+    /// Network: resume a partial tokenizer download from Hugging Face.
+    /// `cargo test -p shoebox-ml -- --ignored resumes`
+    #[test]
+    #[ignore]
+    fn resumes_partial_download() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let f = &FILES[0];
+        let part = dir.path().join("t.part");
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build()
+            .into();
+        // First 1000 bytes, then resume.
+        let url = format!(
+            "https://huggingface.co/{REPO}/resolve/{REVISION}/{}",
+            f.name
+        );
+        let mut first = agent
+            .get(&url)
+            .header("Range", "bytes=0-999")
+            .call()?
+            .into_body()
+            .into_reader();
+        let mut head = Vec::new();
+        first.read_to_end(&mut head)?;
+        assert_eq!(head.len(), 1000, "server honours Range");
+        std::fs::write(&part, &head)?;
+        get(&agent, f, &part, &|_| {}, &AtomicBool::new(false))?;
+        assert_eq!(sha256(&part)?, f.sha256);
+        Ok(())
+    }
+}

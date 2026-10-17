@@ -5,6 +5,7 @@ pub mod catalog;
 pub mod changes;
 pub mod collections;
 pub mod dupes;
+pub mod embeddings;
 pub mod error;
 pub mod events;
 pub mod exif;

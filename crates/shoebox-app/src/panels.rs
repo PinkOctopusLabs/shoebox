@@ -57,6 +57,10 @@ pub fn toolbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             } else if busy > 0 {
                 ui.add(egui::Spinner::new());
                 ui.label(format!("{busy} thumbnails"));
+            } else if let Some(task) = semantic_task(&app.sem.status) {
+                ui.add(egui::Spinner::new());
+                ui.label(task)
+                    .on_hover_text("Semantic search (see Search in Settings)");
             }
         });
     });
@@ -64,17 +68,14 @@ pub fn toolbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
 }
 
 fn filter_bar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
-    let before = (app.filter.clone(), app.sort, app.sort_desc);
+    let before = (
+        app.filter.clone(),
+        app.sort,
+        app.sort_desc,
+        app.sem.by_content,
+    );
     ui.horizontal_wrapped(|ui| {
-        let search = ui.add(
-            egui::TextEdit::singleline(&mut app.filter.search)
-                .hint_text("Search names and keywords (/)")
-                .desired_width(200.0),
-        );
-        if app.focus_search {
-            search.request_focus();
-            app.focus_search = false;
-        }
+        search_box(app, ui);
         egui::ComboBox::from_id_salt("f-rating")
             .selected_text(if app.filter.min_rating == 0 {
                 "Any rating".to_owned()
@@ -167,6 +168,88 @@ fn filter_bar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         ui.toggle_value(&mut app.filter.unseen_changes, "Unseen changes")
             .on_hover_text("Changed since you last viewed them");
         ui.separator();
+        if app.semantic_query().is_some() {
+            ui.label("Best match first");
+        } else {
+            sort_controls(app, ui);
+        }
+        if !app.filter.is_empty() && ui.small_button("Clear").clicked() {
+            app.filter = shoebox_core::query::Filter::default();
+        }
+    });
+    if before
+        != (
+            app.filter.clone(),
+            app.sort,
+            app.sort_desc,
+            app.sem.by_content,
+        )
+    {
+        app.refilter();
+        app.scroll_to_current = true;
+    }
+}
+
+/// The search box, the "Content" switch for semantic search, or what
+/// "Find Similar" is showing.
+fn search_box(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    if let Some((id, path)) = app.sem.similar.clone() {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if ui
+            .link(format!("Photos like {name}"))
+            .on_hover_text("Show that photo")
+            .clicked()
+        {
+            app.activate(id);
+            app.scroll_to_current = true;
+        }
+        if ui
+            .small_button("✖")
+            .on_hover_text("Show all photos")
+            .clicked()
+        {
+            app.clear_similar();
+        }
+        return;
+    }
+    if app.settings.semantic_search {
+        let ready = app.sem.status.ready();
+        ui.add_enabled_ui(ready, |ui| {
+            ui.toggle_value(&mut app.sem.by_content, "Content")
+                .on_hover_text("Search by what's in the photos: describe it, in any language")
+                .on_disabled_hover_text(
+                    "Semantic search is getting ready (see Search in Settings)",
+                );
+        });
+    }
+    let hint = if app.sem.by_content {
+        "Describe the photo, e.g. dog on a beach (/)"
+    } else {
+        "Search names and keywords (/)"
+    };
+    let search = ui.add(
+        egui::TextEdit::singleline(&mut app.filter.search)
+            .hint_text(hint)
+            .desired_width(if app.sem.by_content { 260.0 } else { 200.0 }),
+    );
+    if app.focus_search {
+        search.request_focus();
+        app.focus_search = false;
+    }
+    if app.semantic_query().is_some() {
+        if app.sem.searching {
+            ui.add(egui::Spinner::new());
+        } else if let Some(e) = &app.sem.error {
+            ui.colored_label(ui.visuals().warn_fg_color, e);
+        }
+    }
+}
+
+fn sort_controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    {
         egui::ComboBox::from_id_salt("sort")
             .selected_text(
                 shoebox_core::query::Sort::ALL
@@ -186,13 +269,6 @@ fn filter_bar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         {
             app.sort_desc = !app.sort_desc;
         }
-        if !app.filter.is_empty() && ui.small_button("Clear").clicked() {
-            app.filter = shoebox_core::query::Filter::default();
-        }
-    });
-    if before != (app.filter.clone(), app.sort, app.sort_desc) {
-        app.refilter();
-        app.scroll_to_current = true;
     }
 }
 
@@ -1058,4 +1134,22 @@ pub fn empty_library(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             app.command(LibraryCommand::AddRoot(p));
         }
     });
+}
+
+/// What semantic search is doing in the background, for the toolbar.
+fn semantic_task(s: &crate::semantic::Status) -> Option<String> {
+    use crate::semantic::ModelState as M;
+    match &s.model {
+        M::Downloading { done, total } => Some(format!(
+            "Downloading search model {}%",
+            done * 100 / (*total).max(1)
+        )),
+        M::Verifying | M::Converting => Some("Preparing search model".to_owned()),
+        M::Ready if s.indexing() => Some(format!(
+            "Indexing for search {}/{}",
+            s.indexed + s.skipped,
+            s.total
+        )),
+        _ => None,
+    }
 }

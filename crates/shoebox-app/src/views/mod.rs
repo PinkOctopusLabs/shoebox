@@ -350,6 +350,20 @@ pub fn photo_menu(app: &mut ShoeboxApp, resp: &egui::Response, pos: usize) {
             app.reveal_selection();
             ui.close();
         }
+        if app.settings.semantic_search
+            && ui
+                .add_enabled(
+                    app.sem.status.ready(),
+                    egui::Button::new("Find Similar Photos"),
+                )
+                .on_disabled_hover_text("Semantic search is getting ready (see Search in Settings)")
+                .clicked()
+        {
+            if let Some(&i) = app.shown.get(pos) {
+                app.find_similar(app.ids[i]);
+            }
+            ui.close();
+        }
         ui.separator();
         if ui.button("Move to Folder…").clicked() {
             let start = app

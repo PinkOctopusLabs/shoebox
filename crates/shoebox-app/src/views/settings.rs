@@ -14,16 +14,18 @@ pub enum Tab {
     Library,
     Sidecars,
     Naming,
+    Search,
     Map,
     Memory,
     Updates,
 }
 
 impl Tab {
-    const ALL: [Tab; 6] = [
+    const ALL: [Tab; 7] = [
         Tab::Library,
         Tab::Sidecars,
         Tab::Naming,
+        Tab::Search,
         Tab::Map,
         Tab::Memory,
         Tab::Updates,
@@ -34,6 +36,7 @@ impl Tab {
             Tab::Library => "Library",
             Tab::Sidecars => "Sidecars",
             Tab::Naming => "Naming",
+            Tab::Search => "Search",
             Tab::Map => "Map",
             Tab::Memory => "Memory",
             Tab::Updates => "Updates",
@@ -85,6 +88,7 @@ pub fn show(app: &mut ShoeboxApp, ctx: &egui::Context) {
                 Tab::Library => library(app, ui),
                 Tab::Sidecars => sidecars(ui, &mut s),
                 Tab::Naming => naming(app, ui, &mut s),
+                Tab::Search => search(app, ui, &mut s),
                 Tab::Map => map(ui, &mut s),
                 Tab::Memory => memory(app, ui, &mut s),
                 Tab::Updates => updates(ui),
@@ -233,6 +237,88 @@ fn naming(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &mut Settings) {
          {subsec} {name} {camera} {width} {height} {seq} {ext} {EXT}. Files without \
          a capture date go to _undated/.",
     );
+}
+
+fn search(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &mut Settings) {
+    use crate::semantic::ModelState as M;
+    ui.checkbox(&mut s.semantic_search, "Search photos by what's in them");
+    note(
+        ui,
+        "Describe a photo, like \"dog on a beach\" or \"Sonnenuntergang\", and Shoebox \
+         finds the photos that match, best first, in any language. Right-click a photo \
+         for Find Similar Photos. It uses Google's SigLIP 2 model, which runs on this \
+         Mac: your photos never leave it.",
+    );
+    ui.add_space(8.0);
+    let gb = crate::semantic::download_bytes() as f64 / 1e9;
+    if !s.semantic_search {
+        note(
+            ui,
+            &format!(
+                "Turning this on downloads the model ({gb:.1} GB) once, from {}.",
+                crate::semantic::model_source()
+            ),
+        );
+        return;
+    }
+    let status = app.sem.status.clone();
+    match &status.model {
+        M::Off => {
+            ui.add(egui::Spinner::new());
+        }
+        M::Downloading { done, total } => {
+            ui.label(format!(
+                "Downloading the model ({gb:.1} GB, once) from {}",
+                crate::semantic::model_source()
+            ));
+            ui.add(egui::ProgressBar::new(*done as f32 / (*total).max(1) as f32).show_percentage());
+            if ui.button("Cancel").clicked() {
+                app.cancel_model_download();
+                s.semantic_search = false;
+            }
+        }
+        M::Verifying => {
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::new());
+                ui.label("Checking the download…");
+            });
+        }
+        M::Converting => {
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::new());
+                ui.label("Preparing the model…");
+            });
+        }
+        M::Failed(e) => {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!("Couldn't get the model: {e}"),
+            );
+            if ui.button("Try Again").clicked() {
+                app.retry_semantic();
+            }
+        }
+        M::Ready => {
+            let done = status.indexed + status.skipped;
+            if status.indexing() {
+                ui.label(format!("Indexing: {} of {} photos", done, status.total));
+                ui.add(
+                    egui::ProgressBar::new(done as f32 / status.total.max(1) as f32)
+                        .show_percentage(),
+                );
+                note(
+                    ui,
+                    "Search works meanwhile, over the photos indexed so far. Newest \
+                     photos go first.",
+                );
+            } else {
+                ui.label(format!("Ready: {} photos indexed.", status.indexed));
+            }
+            if status.skipped > 0 {
+                ui.weak(format!("{} couldn't be read", status.skipped));
+            }
+        }
+    }
 }
 
 fn map(ui: &mut egui::Ui, s: &mut Settings) {
