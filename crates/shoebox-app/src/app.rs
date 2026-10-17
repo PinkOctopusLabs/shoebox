@@ -1990,6 +1990,7 @@ impl eframe::App for ShoeboxApp {
         }
         self.textures.begin_frame();
         self.apply_events(&ctx);
+        crate::updater::tick(&ctx, crate::jobs::working());
         self.handle_keys(&ctx);
         self.wanted.clear();
 

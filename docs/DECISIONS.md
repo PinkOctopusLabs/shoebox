@@ -3,15 +3,39 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-17 — Updates with Sparkle
+- Not in the spec. Installed copies update themselves with
+  [Sparkle](https://sparkle-project.org) 2 (the person's choice over a
+  home-made updater): a background check daily, the update downloads quietly
+  and installs when Shoebox quits; Shoebox > Check for Updates… asks now.
+- The feed is `releases/latest/download/appcast.xml` on the public GitHub
+  repo, so every release replaces it; no server of our own. Each update is
+  EdDSA-signed (private key in the release Mac's Keychain, public key in
+  `assets/sparkle-public-key.txt` → Info.plist) as well as Developer ID
+  signed and notarized. Tested locally on throwaway builds: 0.0.1 found,
+  downloaded and installed 0.0.2 on quit; an update signed with another key
+  was downloaded and refused.
+- `scripts/fetch-sparkle.sh` downloads a pinned Sparkle release and checks
+  its SHA-256 (nothing vendored in the repo). The app loads the framework at
+  runtime (`updater.rs`), so `cargo run` and tests have no updater and
+  nothing links against Sparkle; Linux has none.
+- A relaunch to finish an update waits while the library worker is handling
+  a command (`jobs::working()`), so it never cuts a file operation short.
+- `scripts/release-macos.sh <version>` bumps the version, tests, builds,
+  notarizes, writes and signs the appcast, then tags, pushes and publishes
+  the GitHub release. Run by hand; nothing releases on push.
+- Ad-hoc builds are now signed *without* the hardened runtime: its library
+  validation refuses an ad-hoc signed Sparkle.framework. Developer ID builds
+  keep it (notarization needs it).
+
 ## 2026-10-17 — Mac app bundle
 - `scripts/bundle-macos.sh` builds `Shoebox.app` (release, Info.plist with
   the bundle id, minimum macOS 27, folder-access usage strings; icon from
   `assets/icon-1024.png`, drawn by `examples/make_icon.rs`) and a zip. The
   `shoebox` CLI ships in `Contents/Helpers/` (in `MacOS/` it would replace
   `Shoebox` on the case-insensitive file system).
-- Signed with the hardened runtime: ad-hoc by default (runs on this Mac),
-  or `SIGN_IDENTITY` (a Developer ID) plus `NOTARY_PROFILE` to notarize and
-  staple for other Macs. Not sandboxed: Shoebox moves files anywhere inside
+- Signed ad-hoc by default (runs on this Mac), or `SIGN_IDENTITY` (a Developer ID, with the hardened runtime) plus
+  `NOTARY_PROFILE` to notarize and staple for other Macs. Not sandboxed: Shoebox moves files anywhere inside
   the folders you add, which a sandbox would only allow with security-scoped
   bookmarks for every root; worth revisiting for the Mac App Store only.
 - Launched from Finder there's no terminal, so logs (and panics) go to

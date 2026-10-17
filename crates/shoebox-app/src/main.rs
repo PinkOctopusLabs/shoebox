@@ -91,7 +91,11 @@ fn main() -> anyhow::Result<()> {
     eframe::run_native(
         "Shoebox",
         options,
-        Box::new(|cc| Ok(Box::new(ShoeboxApp::new(cc, paths)))),
+        Box::new(|cc| {
+            let app = ShoeboxApp::new(cc, paths);
+            shoebox_app::updater::start(&cc.egui_ctx);
+            Ok(Box::new(app))
+        }),
     )
     .map_err(|e| anyhow::anyhow!("eframe failed: {e}"))
 }

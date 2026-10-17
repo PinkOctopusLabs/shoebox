@@ -6,6 +6,7 @@ pub mod jobs;
 mod panels;
 mod platform;
 pub mod textures;
+pub mod updater;
 mod views;
 mod watch;
 

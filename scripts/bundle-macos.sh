@@ -11,17 +11,24 @@
 #   NOTARY_PROFILE  a `xcrun notarytool store-credentials` profile name; when
 #                   set (with a Developer ID), the app is notarized and stapled.
 #   OUT_DIR         where Shoebox.app goes (default target/release/bundle).
+#   SPARKLE_PUBLIC_KEY  the EdDSA public key updates are checked against
+#                   (default: assets/sparkle-public-key.txt). Without one the
+#                   app is built with no updater.
+#   VERSION, BUILD, BUNDLE_ID  override the version, build number and bundle
+#                   id (for test builds).
 #
 # The app is not sandboxed: it reads and moves files anywhere in the library
-# folders you add. Hardened runtime is on.
+# folders you add. Developer ID builds use the hardened runtime.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 IDENTITY="${SIGN_IDENTITY:--}"
 OUT_DIR="${OUT_DIR:-target/release/bundle}"
-BUNDLE_ID="com.crankyunicorn.shoebox"
-VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
-BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
+BUNDLE_ID="${BUNDLE_ID:-com.crankyunicorn.shoebox}"
+VERSION="${VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)}"
+FEED_URL="https://github.com/PinkOctopusLabs/shoebox/releases/latest/download/appcast.xml"
+PUBLIC_KEY="${SPARKLE_PUBLIC_KEY:-$(cat assets/sparkle-public-key.txt 2>/dev/null || true)}"
+BUILD="${BUILD:-$(git rev-list --count HEAD 2>/dev/null || echo 1)}"
 APP="$OUT_DIR/Shoebox.app"
 
 echo "Building Shoebox $VERSION ($BUILD)…"
@@ -29,12 +36,28 @@ cargo build --release -p shoebox-app -p shoebox-cli
 
 # Assemble a fresh bundle. Only our own build output is replaced here.
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers" "$APP/Contents/Resources"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers" "$APP/Contents/Resources" \
+  "$APP/Contents/Frameworks"
 cp target/release/shoebox-app "$APP/Contents/MacOS/Shoebox"
 # The command-line tool travels with the app, in Helpers (not MacOS: the
 # file system is case-insensitive, so `shoebox` would replace `Shoebox`):
 #   ln -s /Applications/Shoebox.app/Contents/Helpers/shoebox ~/bin/shoebox
 cp target/release/shoebox "$APP/Contents/Helpers/shoebox"
+
+# Sparkle, the updater (loaded at runtime by src/updater.rs).
+if [ -n "$PUBLIC_KEY" ]; then
+  SPARKLE="$(scripts/fetch-sparkle.sh)"
+  ditto "$SPARKLE/Sparkle.framework" "$APP/Contents/Frameworks/Sparkle.framework"
+  cp "$SPARKLE/LICENSE" "$APP/Contents/Resources/Sparkle-LICENSE.txt"
+  UPDATER_KEYS="  <key>SUFeedURL</key><string>$FEED_URL</string>
+  <key>SUPublicEDKey</key><string>$PUBLIC_KEY</string>
+  <key>SUEnableAutomaticChecks</key><true/>
+  <key>SUAutomaticallyUpdate</key><true/>
+  <key>SUScheduledCheckInterval</key><integer>86400</integer>"
+else
+  echo "No Sparkle public key (assets/sparkle-public-key.txt): building without the updater." >&2
+  UPDATER_KEYS=""
+fi
 
 # Icon: every size macOS asks for, from the 1024 px master.
 ICONSET="$(mktemp -d)/Shoebox.iconset"
@@ -70,20 +93,33 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSDownloadsFolderUsageDescription</key><string>Shoebox shows and organises the photos in library folders you add.</string>
   <key>NSRemovableVolumesUsageDescription</key><string>Shoebox imports photos from memory cards and shows library folders on external drives.</string>
   <key>NSNetworkVolumesUsageDescription</key><string>Shoebox shows library folders you add.</string>
+$UPDATER_KEYS
 </dict>
 </plist>
 PLIST
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
 
-# Sign: nested executables first, then the app, with the hardened runtime.
-# A secure timestamp needs a real identity (and the network).
-SIGN_ARGS=(--force --options runtime --sign "$IDENTITY")
+# Sign: nested code first, then the app. A Developer ID build gets the
+# hardened runtime (notarization needs it) and a secure timestamp (needs the
+# network). Ad-hoc builds go without the hardened runtime: its library
+# validation won't load an ad-hoc signed Sparkle.framework.
+SIGN_ARGS=(--force --sign "$IDENTITY")
 if [ "$IDENTITY" != "-" ]; then
-  SIGN_ARGS+=(--timestamp)
+  SIGN_ARGS+=(--options runtime --timestamp)
 fi
 codesign "${SIGN_ARGS[@]}" "$APP/Contents/Helpers/shoebox"
+SPARKLE_FW="$APP/Contents/Frameworks/Sparkle.framework"
+if [ -d "$SPARKLE_FW" ]; then
+  # Inside out, as Sparkle's documentation sets out.
+  codesign "${SIGN_ARGS[@]}" "$SPARKLE_FW/Versions/B/XPCServices/Installer.xpc"
+  codesign "${SIGN_ARGS[@]}" --preserve-metadata=entitlements \
+    "$SPARKLE_FW/Versions/B/XPCServices/Downloader.xpc"
+  codesign "${SIGN_ARGS[@]}" "$SPARKLE_FW/Versions/B/Autoupdate"
+  codesign "${SIGN_ARGS[@]}" "$SPARKLE_FW/Versions/B/Updater.app"
+  codesign "${SIGN_ARGS[@]}" "$SPARKLE_FW"
+fi
 codesign "${SIGN_ARGS[@]}" "$APP"
-codesign --verify --strict --verbose=1 "$APP"
+codesign --verify --deep --strict --verbose=1 "$APP"
 
 if [ -n "${NOTARY_PROFILE:-}" ]; then
   if [ "$IDENTITY" = "-" ]; then

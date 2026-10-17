@@ -467,6 +467,30 @@ fn reference_roots(settings: &Settings) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Set while the library worker handles a command from the app (any of which
+/// may move or write files), so an app update never relaunches mid-way.
+static WORKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the library worker is handling a command right now.
+pub fn working() -> bool {
+    WORKING.load(std::sync::atomic::Ordering::Acquire)
+}
+
+struct Working;
+
+impl Working {
+    fn start() -> Self {
+        WORKING.store(true, std::sync::atomic::Ordering::Release);
+        Self
+    }
+}
+
+impl Drop for Working {
+    fn drop(&mut self) {
+        WORKING.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 fn library_worker(
     paths: &LibraryPaths,
     commands: &Receiver<LibraryCommand>,
@@ -588,6 +612,7 @@ fn library_worker(
                 continue;
             }
         };
+        let _working = Working::start();
         let (settings_changed, rescan) = match cmd {
             LibraryCommand::Open => {
                 if let Ok(c) = Catalog::from_cache(&cache, settings.scan_roots()) {

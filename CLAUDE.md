@@ -11,7 +11,8 @@ A Rust + egui photo library app for macOS. **`docs/SPEC.md` is the source of tru
 - `crates/shoebox-decode`: JPEG/TIFF/PNG decoding, NEF embedded-preview extraction, grayscale thumbnails.
 - `crates/shoebox-app`: the eframe/egui app (`cargo run --release -p shoebox-app`).
   `jobs.rs` (background loader + library worker; the UI thread never reads
-  files), `watch.rs` (file watcher feeding the library worker), `textures.rs` (LRU budget), `views/` (grid, masonry, loupe,
+  files), `watch.rs` (file watcher feeding the library worker), `updater.rs`
+  (Sparkle, loaded at runtime from bundled builds only), `textures.rs` (LRU budget), `views/` (grid, masonry, loupe,
   filmstrip, compare, survey, duplicates, timeline, map, files = import/history/dialogs), `panels.rs`. Headless UI tests in `tests/ui.rs` render PNGs
   (`SHOEBOX_UI_SNAPSHOTS=<dir>`); `--ignored` runs the 10k scroll test and,
   with `SHOEBOX_UI_LIBRARY=<APFS clone>`, a read-only real-library run; with `SHOEBOX_UI_REF`/`SHOEBOX_UI_UNDATED`
@@ -26,12 +27,18 @@ A Rust + egui photo library app for macOS. **`docs/SPEC.md` is the source of tru
   signed by default; `SIGN_IDENTITY="Developer ID Application: …"` and
   `NOTARY_PROFILE=<notarytool profile>` for a notarized build.
 - To try a build without touching real settings: `SHOEBOX_DATA_DIR=<scratch dir>`.
+- Updates: `scripts/fetch-sparkle.sh` (pinned, checksummed Sparkle) is embedded
+  when `assets/sparkle-public-key.txt` exists. `scripts/release-macos.sh <version>`
+  publishes a signed, notarized release + appcast to GitHub Releases.
+  `SHOEBOX_UPDATE_FEED=<url>` points a build at a test feed and checks at once;
+  test with throwaway builds (`BUNDLE_ID=…updatetest`, a test key via
+  `SPARKLE_PUBLIC_KEY`), never the real app.
 
 ## Working rules
 - One milestone at a time, in order, each as a reviewable chunk.
 - Before finishing any task: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
 - `thiserror` in library crates, `anyhow` in binaries. No `unwrap()`/`expect()` outside tests (enforced by workspace clippy lints).
-- No `unsafe` except in thin FFI wrappers (`shoebox-core/src/fileops/sys.rs`, `shoebox-decode/src/imageio.rs`).
+- No `unsafe` except in thin FFI wrappers (`shoebox-core/src/fileops/sys.rs`, `shoebox-decode/src/imageio.rs`, and the app's `display.rs`, `platform.rs`, `updater.rs`).
 - `shoebox-core` must not depend on egui. Every file operation goes through `shoebox_core::fileops`.
 - Target `aarch64-apple-darwin`, toolchain pinned in `rust-toolchain.toml`, minimum macOS 27, release `lto = "thin"`.
 - Prefer pure-Rust crates. Keep code portable to Linux: platform-specific code

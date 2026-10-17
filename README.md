@@ -60,6 +60,10 @@ cargo run --release -p shoebox-cli -- --help
 scripts/bundle-macos.sh                   # Shoebox.app in target/release/bundle
 ```
 
+Released builds (from `scripts/release-macos.sh`, on the GitHub Releases
+page) are signed, notarized and update themselves with
+[Sparkle](https://sparkle-project.org).
+
 `cargo test` runs everything, including headless UI tests that render the
 real app (they need a GPU, so CI skips them). Optional real-file tests use
 files you put in the gitignored `tests/fixtures/real/`.
@@ -78,4 +82,5 @@ Dual-licensed under either of [MIT](LICENSE-MIT) or
 [Apache-2.0](LICENSE-APACHE), at your option.
 
 Map tiles © [OpenStreetMap](https://www.openstreetmap.org/copyright)
-contributors.
+contributors. Updates use [Sparkle](https://github.com/sparkle-project/Sparkle)
+(MIT; its licence ships in the app).
