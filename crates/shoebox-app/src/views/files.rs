@@ -275,7 +275,7 @@ pub fn history(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     if app.history.interrupted() > 0 {
         ui.colored_label(
             ui.visuals().warn_fg_color,
-            "An operation was interrupted (the app quit while it ran). Roll it back below; its finished steps are reversed.",
+            "An operation was interrupted (the app quit while it ran). Resume it below to finish it, or Roll back to reverse the steps that happened.",
         );
     }
     ui.separator();
@@ -301,14 +301,26 @@ pub fn history(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                         "undone" => ("undone", Color32::from_gray(130)),
                         _ => ("done", Color32::from_rgb(80, 200, 120)),
                     };
+                    if b.status == "running"
+                        && b.kind != "undo"
+                        && ui
+                            .button(RichText::new("Resume").strong())
+                            .on_hover_text(
+                                "Finish it: steps that already happened are kept, the rest run now",
+                            )
+                            .clicked()
+                    {
+                        app.resume_batch(b.id);
+                    }
                     let undoable = b.status != "undone" && b.kind != "mkdir";
-                    let text = if b.status == "running" {
-                        "Roll back"
+                    let (text, hint) = if b.status == "running" {
+                        ("Roll back", "Reverse the steps that happened")
                     } else {
-                        "Undo"
+                        ("Undo", "Reverse this operation")
                     };
                     if ui
                         .add_enabled(undoable, egui::Button::new(text).small())
+                        .on_hover_text(hint)
                         .clicked()
                     {
                         app.undo_batch(b.id);

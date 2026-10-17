@@ -34,9 +34,16 @@ deliberately differ and why.
   root (like events), not in the cache.
 - **History** lists every batch and can undo any still consistent with the
   disk. An interrupted batch (the app quit mid-way) is flagged in the status
-  bar and History offers **Roll back** (its finished steps reversed). Resume
-  isn't offered: only steps about to run are journaled, so the rest of an
-  interrupted plan isn't known.
+  bar and History offers **Resume** or **Roll back**. The whole plan is
+  journaled (every step `pending`, sidecar contents included) in one
+  transaction before the first step runs, so an interrupted batch's
+  remaining steps are known. Resume first checks which pending steps
+  already happened (died between doing and recording), clears its own
+  partial copy, and runs the rest with the same checks (never replace; a
+  sidecar only if unchanged since planning; trash only the planned
+  content). An interrupted undo can only be rolled back. `shoebox resume`
+  does the same from the command line. After a step fails, the rest are
+  marked "not run".
 - New folders are journaled (undo leaves them: nothing is deleted). The
   folder tree now shows empty folders, so they can be drop targets.
 - Not in M5: creating an event during import, and the optional event

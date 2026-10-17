@@ -277,6 +277,8 @@ pub enum LibraryCommand {
     LoadBatch(i64),
     /// Undo any batch still consistent with the disk (History panel).
     UndoBatch(i64),
+    /// Finish an interrupted batch.
+    ResumeBatch(i64),
     /// Find duplicate groups across the library (hashing what isn't cached).
     FindDuplicates(shoebox_core::dupes::Config),
     /// Work out what applying these decisions would do (the dry-run table).
@@ -399,6 +401,8 @@ pub enum LibraryEvent {
     BatchOps(i64, Vec<(String, PathBuf, PathBuf, bool)>),
     /// A History undo finished (Ok: the undo batch).
     BatchUndone(Result<i64, String>),
+    /// A resume finished (Ok: steps run).
+    BatchResumed(Result<usize, String>),
     /// Duplicate groups found (also after applying decisions, or undo).
     Duplicates(Arc<Review>),
     DupeProgress {
@@ -721,6 +725,17 @@ fn library_worker(
                     history(&undo, &redo);
                 }
                 emit(LibraryEvent::BatchUndone(r));
+                batches(&fileops);
+                (false, true)
+            }
+            LibraryCommand::ResumeBatch(batch) => {
+                let r = fileops.resume(batch).map_err(|e| e.to_string());
+                if r.is_ok() {
+                    undo.push(batch);
+                    redo.clear();
+                    history(&undo, &redo);
+                }
+                emit(LibraryEvent::BatchResumed(r));
                 batches(&fileops);
                 (false, true)
             }

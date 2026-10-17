@@ -1037,3 +1037,43 @@ fn organise_files_in_the_app() {
     });
     assert!(!renamed.exists());
 }
+
+/// An operation interrupted in an earlier session is flagged at startup,
+/// and History's Resume finishes it.
+#[test]
+fn interrupted_operation_resumes_from_history() {
+    use shoebox_core::fileops::{Journal, Op};
+    let t = tempfile::tempdir().unwrap();
+    let base = t.path().canonicalize().unwrap();
+    let fx = base.join("fixtures");
+    shoebox_fixtures::build_library(&fx).unwrap();
+    let lib = fx.join("scan");
+    let p = paths(&base, std::slice::from_ref(&lib));
+    // A move journaled but never run: the app "crashed" before it started.
+    let (src, dst) = (lib.join("recovered/f0005.jpg"), lib.join("keep/f0005.jpg"));
+    {
+        let j = Journal::open(&p.journal).unwrap();
+        let b = j.begin_batch("move", "move to keep", None).unwrap();
+        j.record(b, 0, Op::Mkdir, &lib.join("keep"), &lib.join("keep"), None)
+            .unwrap();
+        j.record(b, 1, Op::Move, &src, &dst, None).unwrap();
+    }
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+    assert!(
+        h.query_by_label("An operation was interrupted: review in History")
+            .is_some(),
+        "flagged in the status bar"
+    );
+    h.get_by_label("An operation was interrupted: review in History")
+        .click();
+    h.run_steps(3);
+    assert_eq!(h.state().view_name(), View::History);
+    snapshot(&mut h, "22-interrupted");
+    h.get_by_label("Resume").click();
+    wait_for(&mut h, Duration::from_secs(30), "resume", |_| dst.exists());
+    assert!(!src.exists());
+    wait_for(&mut h, Duration::from_secs(10), "status", |a| {
+        a.batches().iter().all(|b| b.2 == "done")
+    });
+}

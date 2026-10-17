@@ -103,6 +103,8 @@ pub struct OpRecord {
     /// exist) and the BLAKE3 of what was written.
     pub before: Option<Vec<u8>>,
     pub after_hash: Option<Vec<u8>>,
+    /// Sidecar ops: the bytes to write (so an interrupted batch can resume).
+    pub payload: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -147,7 +149,11 @@ impl Journal {
             .prepare("SELECT name FROM pragma_table_info('journal')")?
             .query_map([], |r| r.get(0))?
             .collect::<Result<_, _>>()?;
-        for (col, ty) in [("before", "BLOB"), ("after_hash", "BLOB")] {
+        for (col, ty) in [
+            ("before", "BLOB"),
+            ("after_hash", "BLOB"),
+            ("payload", "BLOB"),
+        ] {
             if !cols.iter().any(|c| c == col) {
                 conn.execute_batch(&format!("ALTER TABLE journal ADD COLUMN {col} {ty}"))?;
             }
@@ -226,19 +232,21 @@ impl Journal {
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// Record a pending sidecar write, with the previous contents.
+    /// Record a pending sidecar write: the previous contents, and the bytes
+    /// to write.
     pub fn record_sidecar(
         &self,
         batch: i64,
         seq: usize,
         path: &Path,
         before: Option<&[u8]>,
-        after_hash: &[u8; 32],
+        payload: &[u8],
     ) -> Result<i64> {
         let p = path_str(path)?;
+        let after_hash = blake3::hash(payload);
         self.conn.execute(
-            "INSERT INTO journal(batch_id, seq, ts, op, src, dst, size, status, before, after_hash)
-             VALUES (?1, ?2, ?3, 'sidecar', ?4, ?4, ?5, 'pending', ?6, ?7)",
+            "INSERT INTO journal(batch_id, seq, ts, op, src, dst, size, status, before, after_hash, payload)
+             VALUES (?1, ?2, ?3, 'sidecar', ?4, ?4, ?5, 'pending', ?6, ?7, ?8)",
             params![
                 batch,
                 seq as i64,
@@ -246,10 +254,35 @@ impl Journal {
                 p,
                 before.map(|b| b.len() as i64),
                 before,
-                &after_hash[..]
+                &after_hash.as_bytes()[..],
+                payload
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Run `f` in one transaction (journaling a whole plan at once).
+    pub fn transaction<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        match f() {
+            Ok(v) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(v)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    /// After a step fails, the rest of the plan didn't run.
+    pub fn fail_pending(&self, batch: i64, reason: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE journal SET status = 'failed', error = ?2 WHERE batch_id = ?1 AND status = 'pending'",
+            params![batch, reason],
+        )?;
+        Ok(())
     }
 
     pub fn complete(&self, op_id: i64) -> Result<()> {
@@ -274,7 +307,7 @@ impl Journal {
 
     pub fn ops(&self, batch: i64) -> Result<Vec<OpRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, seq, op, src, dst, size, status, undone, before, after_hash FROM journal
+            "SELECT id, seq, op, src, dst, size, status, undone, before, after_hash, payload FROM journal
              WHERE batch_id = ?1 ORDER BY seq",
         )?;
         let rows = stmt.query_map([batch], |r| {
@@ -289,10 +322,11 @@ impl Journal {
                 r.get::<_, bool>(7)?,
                 r.get::<_, Option<Vec<u8>>>(8)?,
                 r.get::<_, Option<Vec<u8>>>(9)?,
+                r.get::<_, Option<Vec<u8>>>(10)?,
             ))
         })?;
         rows.map(|row| {
-            let (id, seq, op, src, dst, size, status, undone, before, after_hash) = row?;
+            let (id, seq, op, src, dst, size, status, undone, before, after_hash, payload) = row?;
             Ok(OpRecord {
                 id,
                 seq,
@@ -304,6 +338,7 @@ impl Journal {
                 undone,
                 before,
                 after_hash,
+                payload,
             })
         })
         .collect()

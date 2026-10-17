@@ -387,6 +387,16 @@ pub fn plan_group_moves(groups: &[Vec<(PathBuf, PathBuf)>]) -> Result<Plan> {
     Ok(plan)
 }
 
+fn op_name(op: Op) -> &'static str {
+    match op {
+        Op::Move => "moving",
+        Op::Mkdir => "creating",
+        Op::Sidecar => "writing",
+        Op::Copy => "copying",
+        Op::Trash => "trashing",
+    }
+}
+
 /// Deepest existing ancestor of `p`, and the missing folders below it (top first).
 fn missing_dirs(p: &Path) -> (PathBuf, Vec<PathBuf>) {
     let mut missing = Vec::new();
@@ -646,6 +656,10 @@ impl FileOps {
         Ok(())
     }
 
+    /// Run a plan as one batch. The whole plan is journaled first, in one
+    /// transaction (every step `pending`), then each step runs and is marked
+    /// done. If the process dies part-way, the journal holds the rest of the
+    /// plan: the batch can be resumed ([`FileOps::resume`]) or rolled back.
     fn run(
         &self,
         kind: &str,
@@ -656,121 +670,237 @@ impl FileOps {
     ) -> Result<i64> {
         let j = &self.journal;
         let batch = j.begin_batch(kind, label, undo_of)?;
-        let mut seq = 0usize;
-        let fail = |done: usize, reason: String| -> Result<i64> {
-            j.set_batch_status(batch, "failed")?;
-            Err(CoreError::BatchFailed {
-                batch,
-                done,
-                total: ops.len(),
-                reason,
-            })
+        let owners = match j.transaction(|| self.record_plan(batch, ops)) {
+            Ok(o) => o,
+            Err(e) => {
+                j.set_batch_status(batch, "failed")?;
+                return Err(e);
+            }
         };
+        let steps = j.ops(batch)?;
+        let mut done = 0;
+        for (op, owner) in steps.iter().zip(&owners) {
+            if let Err(e) = self.perform(op) {
+                j.fail(op.id, &e)?;
+                j.fail_pending(batch, "not run: the batch stopped at an earlier error")?;
+                j.set_batch_status(batch, "failed")?;
+                return Err(CoreError::BatchFailed {
+                    batch,
+                    done,
+                    total: ops.len(),
+                    reason: format!("{} {}: {e}", op_name(op.op), op.src.display()),
+                });
+            }
+            j.complete(op.id)?;
+            if let Some(i) = owner {
+                done += 1;
+                after_each(*i)?;
+            }
+        }
+        j.set_batch_status(batch, "done")?;
+        Ok(batch)
+    }
+
+    /// Journal every step of a plan as pending, folders to create included.
+    /// Returns, per journal row, the plan step it belongs to (None for a
+    /// folder created on the way).
+    fn record_plan(&self, batch: i64, ops: &[Planned]) -> Result<Vec<Option<usize>>> {
+        let j = &self.journal;
+        let mut owners = Vec::new();
+        let mut seq = 0usize;
+        let mut dirs: HashSet<PathBuf> = HashSet::new();
+        let mut trash_taken: HashSet<PathBuf> = HashSet::new();
+        let mut mkdirs =
+            |dst: &Path, seq: &mut usize, owners: &mut Vec<Option<usize>>| -> Result<()> {
+                let parent = dst.parent().unwrap_or(Path::new("/"));
+                for dir in missing_dirs(parent).1 {
+                    if dirs.insert(dir.clone()) {
+                        j.record(batch, *seq, Op::Mkdir, &dir, &dir, None)?;
+                        *seq += 1;
+                        owners.push(None);
+                    }
+                }
+                Ok(())
+            };
         for (i, planned) in ops.iter().enumerate() {
             match planned {
                 Planned::Move(m) => {
-                    let parent = m.dst.parent().unwrap_or(Path::new("/"));
-                    for dir in missing_dirs(parent).1 {
-                        let op = j.record(batch, seq, Op::Mkdir, &dir, &dir, None)?;
-                        seq += 1;
-                        match std::fs::create_dir(&dir) {
-                            Ok(()) => j.complete(op)?,
-                            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                                j.complete(op)?
-                            }
-                            Err(e) => {
-                                j.fail(op, &e.to_string())?;
-                                return fail(i, format!("creating {}: {e}", dir.display()));
-                            }
-                        }
-                    }
+                    mkdirs(&m.dst, &mut seq, &mut owners)?;
                     let size = std::fs::symlink_metadata(&m.src).ok().map(|md| md.len());
-                    let op = j.record(batch, seq, Op::Move, &m.src, &m.dst, size)?;
-                    seq += 1;
-                    if let Err(e) = sys::rename_excl(&m.src, &m.dst) {
-                        j.fail(op, &e.to_string())?;
-                        return fail(i, format!("{} → {}: {e}", m.src.display(), m.dst.display()));
-                    }
-                    j.complete(op)?;
+                    j.record(batch, seq, Op::Move, &m.src, &m.dst, size)?;
                 }
                 Planned::Copy { src, dst, hash } => {
-                    let parent = dst.parent().unwrap_or(Path::new("/"));
-                    for dir in missing_dirs(parent).1 {
-                        let op = j.record(batch, seq, Op::Mkdir, &dir, &dir, None)?;
-                        seq += 1;
-                        match std::fs::create_dir(&dir) {
-                            Ok(()) => j.complete(op)?,
-                            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                                j.complete(op)?
-                            }
-                            Err(e) => {
-                                j.fail(op, &e.to_string())?;
-                                return fail(i, format!("creating {}: {e}", dir.display()));
-                            }
-                        }
-                    }
+                    mkdirs(dst, &mut seq, &mut owners)?;
                     let size = std::fs::metadata(src).ok().map(|m| m.len());
-                    let op = j.record_hashed(batch, seq, Op::Copy, src, dst, size, hash)?;
-                    seq += 1;
-                    if let Err(e) = copy_verified(src, dst, hash) {
-                        j.fail(op, &e)?;
-                        return fail(i, format!("{} → {}: {e}", src.display(), dst.display()));
-                    }
-                    j.complete(op)?;
+                    j.record_hashed(batch, seq, Op::Copy, src, dst, size, hash)?;
                 }
                 Planned::Trash { path, hash } => {
+                    // System Trash: dst = src. A trash folder: a free name in it.
                     let dst = match &self.trash {
                         TrashMode::System => path.clone(),
                         TrashMode::Folder(dir) => {
                             let name = path.file_name().unwrap_or_default();
                             let mut d = dir.join(name);
                             let mut n = 0;
-                            while exists(&d) {
+                            while exists(&d) || trash_taken.contains(&d) {
                                 n += 1;
                                 d = suffixed(&dir.join(name), n);
                             }
+                            trash_taken.insert(d.clone());
                             d
                         }
                     };
                     let size = std::fs::metadata(path).ok().map(|m| m.len());
-                    let op = j.record_hashed(batch, seq, Op::Trash, path, &dst, size, hash)?;
-                    seq += 1;
-                    let result = match hash_file(path) {
-                        Ok(h) if h == *hash => match &self.trash {
-                            TrashMode::System => system_trash(path),
-                            TrashMode::Folder(dir) => std::fs::create_dir_all(dir)
-                                .and_then(|()| sys::rename_excl(path, &dst))
-                                .map_err(|e| e.to_string()),
-                        },
-                        Ok(_) => Err("changed since it was planned; left in place".into()),
-                        Err(e) => Err(e.to_string()),
-                    };
-                    if let Err(e) = result {
-                        j.fail(op, &e)?;
-                        return fail(i, format!("trashing {}: {e}", path.display()));
-                    }
-                    j.complete(op)?;
+                    j.record_hashed(batch, seq, Op::Trash, path, &dst, size, hash)?;
                 }
                 Planned::Sidecar { path, bytes } => {
                     let before = match std::fs::read(path) {
                         Ok(b) => Some(b),
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-                        Err(e) => return fail(i, format!("reading {}: {e}", path.display())),
+                        Err(e) => {
+                            return Err(CoreError::Io {
+                                path: path.clone(),
+                                source: e,
+                            });
+                        }
                     };
-                    let hash = *blake3::hash(bytes).as_bytes();
-                    let op = j.record_sidecar(batch, seq, path, before.as_deref(), &hash)?;
-                    seq += 1;
-                    if let Err(e) = write_atomic(path, bytes) {
-                        j.fail(op, &e.to_string())?;
-                        return fail(i, format!("writing {}: {e}", path.display()));
-                    }
-                    j.complete(op)?;
+                    j.record_sidecar(batch, seq, path, before.as_deref(), bytes)?;
                 }
             }
-            after_each(i)?;
+            seq += 1;
+            owners.push(Some(i));
+        }
+        Ok(owners)
+    }
+
+    /// Carry out one journaled step. Never replaces an existing file.
+    fn perform(&self, op: &OpRecord) -> std::result::Result<(), String> {
+        let hash = || {
+            op.after_hash
+                .as_deref()
+                .and_then(|h| <[u8; 32]>::try_from(h).ok())
+                .ok_or_else(|| "journal row has no hash".to_owned())
+        };
+        match op.op {
+            Op::Mkdir => match std::fs::create_dir(&op.dst) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+                Err(e) => Err(e.to_string()),
+            },
+            Op::Move => sys::rename_excl(&op.src, &op.dst).map_err(|e| e.to_string()),
+            Op::Copy => copy_verified(&op.src, &op.dst, &hash()?),
+            Op::Trash => match hash_file(&op.src) {
+                Ok(h) if h == hash()? => {
+                    if op.dst == op.src {
+                        system_trash(&op.src)
+                    } else {
+                        op.dst
+                            .parent()
+                            .map_or(Ok(()), std::fs::create_dir_all)
+                            .and_then(|()| sys::rename_excl(&op.src, &op.dst))
+                            .map_err(|e| e.to_string())
+                    }
+                }
+                Ok(_) => Err("changed since it was planned; left in place".into()),
+                Err(e) => Err(e.to_string()),
+            },
+            Op::Sidecar => {
+                let bytes = op.payload.as_deref().ok_or("journal row has no contents")?;
+                write_atomic(&op.dst, bytes).map_err(|e| e.to_string())
+            }
+        }
+    }
+
+    /// Did this pending step already happen (the process died between doing
+    /// it and marking it done)?
+    fn already_done(op: &OpRecord) -> bool {
+        let hash_is = |p: &Path| {
+            op.after_hash
+                .as_deref()
+                .is_some_and(|h| hash_file(p).is_ok_and(|x| x[..] == h[..]))
+        };
+        match op.op {
+            Op::Mkdir => op.dst.is_dir(),
+            Op::Move => !exists(&op.src) && exists(&op.dst),
+            Op::Copy => hash_is(&op.dst),
+            Op::Trash => !exists(&op.src) && (op.dst == op.src || exists(&op.dst)),
+            Op::Sidecar => hash_is(&op.dst),
+        }
+    }
+
+    /// Finish an interrupted batch: steps that already happened are marked
+    /// done, the rest run now with the same checks (a move or copy never
+    /// replaces a file; a sidecar is only written if no other app changed it
+    /// since the plan; a trashed file must still have the planned content).
+    pub fn resume(&self, batch: i64) -> Result<usize> {
+        let j = &self.journal;
+        let b = j
+            .batch(batch)?
+            .ok_or_else(|| CoreError::Invalid(format!("no batch {batch}")))?;
+        if b.status != "running" {
+            return Err(CoreError::Refused(format!(
+                "batch {batch} wasn't interrupted (it's {})",
+                b.status
+            )));
+        }
+        if b.kind == "undo" {
+            return Err(CoreError::Refused(
+                "an interrupted undo can't be resumed; roll it back instead".into(),
+            ));
+        }
+        let mut ran = 0;
+        for op in j.ops(batch)? {
+            if op.status != OpStatus::Pending {
+                continue;
+            }
+            if Self::already_done(&op) {
+                j.complete(op.id)?;
+                continue;
+            }
+            let check = match op.op {
+                Op::Move | Op::Copy | Op::Trash => self
+                    .check_unprotected(&op.src)
+                    .and_then(|()| self.check_unprotected(&op.dst)),
+                Op::Mkdir => self.check_unprotected(&op.dst),
+                Op::Sidecar => {
+                    let now = std::fs::read(&op.dst).ok();
+                    if now != op.before {
+                        Err(CoreError::Refused(format!(
+                            "{} changed since the batch was planned",
+                            op.dst.display()
+                        )))
+                    } else {
+                        self.check_sidecar_target(&op.dst)
+                    }
+                }
+            };
+            let result = check.map_err(|e| e.to_string()).and_then(|()| {
+                if op.op == Op::Copy {
+                    // A partial copy from the interrupted run (ours) goes first.
+                    let name = op.dst.file_name().unwrap_or_default().to_string_lossy();
+                    let tmp = op.dst.with_file_name(format!(".{name}.shoebox-tmp"));
+                    if exists(&tmp) {
+                        std::fs::remove_file(&tmp).map_err(|e| e.to_string())?;
+                    }
+                }
+                self.perform(&op)
+            });
+            if let Err(e) = result {
+                j.fail(op.id, &e)?;
+                j.fail_pending(batch, "not run: resuming stopped at an earlier error")?;
+                j.set_batch_status(batch, "failed")?;
+                return Err(CoreError::BatchFailed {
+                    batch,
+                    done: ran,
+                    total: ran + 1,
+                    reason: format!("{} {}: {e}", op_name(op.op), op.src.display()),
+                });
+            }
+            j.complete(op.id)?;
+            ran += 1;
         }
         j.set_batch_status(batch, "done")?;
-        Ok(batch)
+        Ok(ran)
     }
 
     /// Operations of `batch` that actually happened and are not yet undone,
@@ -1356,6 +1486,127 @@ mod tests {
         assert_eq!(ops[0].op, Op::Move);
         assert!(ops[0].before.is_none());
         assert_eq!(j.batches().unwrap()[0].label, "old");
+    }
+
+    #[test]
+    fn interrupted_batch_resumes_then_undoes() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        for f in ["in/a.jpg", "in/b.jpg", "in/c.jpg", "card/x.nef"] {
+            touch(&root.join(f), f);
+        }
+        let fo = ops(&root, vec![]);
+        let src = root.join("card/x.nef");
+        let plan = vec![
+            Planned::Move(PlannedMove {
+                src: root.join("in/a.jpg"),
+                dst: root.join("out/a.jpg"),
+            }),
+            Planned::Move(PlannedMove {
+                src: root.join("in/b.jpg"),
+                dst: root.join("out/b.jpg"),
+            }),
+            Planned::Move(PlannedMove {
+                src: root.join("in/c.jpg"),
+                dst: root.join("out/c.jpg"),
+            }),
+            Planned::Copy {
+                src: src.clone(),
+                dst: root.join("lib/x.nef"),
+                hash: h(&src),
+            },
+            Planned::Sidecar {
+                path: root.join("in/a.jpg.xmp"),
+                bytes: crate::xmp::edit(
+                    None,
+                    &[(
+                        crate::xmp::Prop::Rating,
+                        Some(crate::xmp::Value::Text("3".into())),
+                    )],
+                )
+                .unwrap(),
+            },
+        ];
+        // Journal the plan, run the first two steps (mkdir out, move a),
+        // then "crash" after moving b but before marking it done.
+        let j = fo.journal();
+        let batch = j.begin_batch("move", "crash", None).unwrap();
+        j.transaction(|| fo.record_plan(batch, &plan)).unwrap();
+        let steps = j.ops(batch).unwrap();
+        assert_eq!(
+            steps.len(),
+            7,
+            "mkdir out, 3 moves, mkdir lib, copy, sidecar"
+        );
+        for op in &steps[..2] {
+            fo.perform(op).unwrap();
+            j.complete(op.id).unwrap();
+        }
+        fo.perform(&steps[2]).unwrap();
+        // A partial copy left behind by the crash.
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(root.join("lib/.x.nef.shoebox-tmp"), "par").unwrap();
+        assert_eq!(j.incomplete().unwrap().len(), 1);
+
+        let ran = fo.resume(batch).unwrap();
+        // b had moved (and lib/ exists, made above): marked done, not redone.
+        assert_eq!(ran, 3, "c, the copy and the sidecar ran");
+        for f in [
+            "out/a.jpg",
+            "out/b.jpg",
+            "out/c.jpg",
+            "lib/x.nef",
+            "in/a.jpg.xmp",
+        ] {
+            assert!(root.join(f).exists(), "{f}");
+        }
+        assert!(!root.join("lib/.x.nef.shoebox-tmp").exists());
+        assert!(j.incomplete().unwrap().is_empty());
+        assert!(fo.resume(batch).is_err(), "only interrupted batches resume");
+
+        // The resumed batch undoes like any other.
+        let fo = fo.with_trash(TrashMode::Folder(root.join("trash")));
+        fo.undo(batch).unwrap();
+        for f in ["in/a.jpg", "in/b.jpg", "in/c.jpg"] {
+            assert!(root.join(f).exists(), "{f}");
+        }
+        assert!(!root.join("lib/x.nef").exists());
+    }
+
+    #[test]
+    fn a_failed_step_marks_the_rest_not_run() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        touch(&root.join("a.jpg"), "a");
+        touch(&root.join("b.jpg"), "b");
+        let fo = ops(&root, vec![]);
+        let plan = Plan {
+            moves: vec![
+                PlannedMove {
+                    src: root.join("a.jpg"),
+                    dst: root.join("x/a.jpg"),
+                },
+                PlannedMove {
+                    src: root.join("b.jpg"),
+                    dst: root.join("x/b.jpg"),
+                },
+            ],
+        };
+        // b disappears after planning: the batch stops there.
+        let ops_: Vec<Planned> = plan.moves.iter().cloned().map(Planned::Move).collect();
+        std::fs::rename(root.join("b.jpg"), root.join("gone.jpg")).unwrap();
+        let err = fo
+            .run("move", "partial", None, &ops_, |_| Ok(()))
+            .unwrap_err();
+        assert!(
+            matches!(err, CoreError::BatchFailed { done: 1, .. }),
+            "{err}"
+        );
+        let b = fo.journal().batches().unwrap().pop().unwrap();
+        assert_eq!(b.status, "failed");
+        assert!(root.join("x/a.jpg").exists());
+        fo.undo(b.id).unwrap();
+        assert!(root.join("a.jpg").exists());
     }
 
     #[test]

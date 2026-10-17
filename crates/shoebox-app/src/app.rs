@@ -627,6 +627,11 @@ impl ShoeboxApp {
                 LibraryEvent::BatchOps(id, ops) => {
                     self.history.open.insert(id, ops);
                 }
+                LibraryEvent::BatchResumed(r) => {
+                    self.history.message = Some(r.map(|n| {
+                        format!("Finished the interrupted operation ({n} steps left to run).")
+                    }));
+                }
                 LibraryEvent::BatchUndone(r) => {
                     self.history.message = Some(r.map(|u| format!("Undone (as batch {u}).")));
                 }
@@ -1292,6 +1297,11 @@ impl ShoeboxApp {
             self.history.open.insert(batch, Vec::new());
             self.library.send(LibraryCommand::LoadBatch(batch));
         }
+    }
+
+    pub fn resume_batch(&mut self, batch: i64) {
+        self.history.message = None;
+        self.library.send(LibraryCommand::ResumeBatch(batch));
     }
 
     pub fn undo_batch(&mut self, batch: i64) {

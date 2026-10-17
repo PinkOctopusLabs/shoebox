@@ -84,6 +84,14 @@ enum Cmd {
     },
     /// List journaled batches.
     History,
+    /// Finish a batch that was interrupted (the app or this tool quit while
+    /// it ran). Steps that already happened are kept; the rest run now.
+    Resume {
+        batch: i64,
+        /// Don't ask for confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Reverse a batch (default: the most recent one not yet undone).
     Undo {
         batch: Option<i64>,
@@ -157,6 +165,16 @@ fn main() -> Result<()> {
             yes,
         } => rename_cmd(&data_dir, &folder, &template, dry_run, yes),
         Cmd::History => history_cmd(&data_dir),
+        Cmd::Resume { batch, yes } => {
+            let fo = open_fileops(&data_dir, Vec::new())?;
+            if !confirm(&format!("Finish interrupted batch {batch}?"), yes)? {
+                println!("Cancelled.");
+                return Ok(());
+            }
+            let n = fo.resume(batch)?;
+            println!("Batch {batch} finished ({n} steps run). Undo it with: shoebox undo {batch}");
+            Ok(())
+        }
         Cmd::Undo { batch, yes } => undo_cmd(&data_dir, batch, yes),
     }
 }
@@ -170,8 +188,8 @@ fn open_fileops(data_dir: &Path, protected: Vec<PathBuf>) -> Result<FileOps> {
     }
     for b in fo.journal().incomplete()? {
         eprintln!(
-            "warning: batch {} ({}) was interrupted; review with `shoebox history` and `shoebox undo {}`",
-            b.id, b.label, b.id
+            "warning: batch {} ({}) was interrupted; finish it with `shoebox resume {}` or roll it back with `shoebox undo {}`",
+            b.id, b.label, b.id, b.id
         );
     }
     Ok(fo)
