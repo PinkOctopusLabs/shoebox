@@ -3,6 +3,19 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-17 — M6 Timeline
+- Follows the grid: the same filters, folder, event, collection and sort
+  (descending sort gives newest first), one entry per stack.
+- Heat strip shows one year at a time (◀ year ▶; defaults to the current
+  photo's year), weeks across and weekdays down, shaded by quartile of the
+  shooting days' counts, with the busiest day always darkest. Click a day →
+  Grid at that day's first stack (as the spec says); hover shows the count.
+- Days list as month headers and day rows: date, count, chips for events
+  covering the day, and a strip of thumbnails that fit the width, with a
+  "+N" tile that also jumps to Grid. Undated stacks come last.
+- Dates are the EXIF capture date (camera local time) with plain calendar
+  arithmetic in core (`timeline.rs`): no time-zone conversion.
+
 ## 2026-10-17 — M5 file operations and import
 - **Templates** add `{YY} {MM} {DD} {HH} {mm} {ss} {name} {camera} {width}
   {height} {seq} {EXT}` to the spec's tokens. `{ext}` is lower case (as the

@@ -282,6 +282,7 @@ pub struct ShoeboxApp {
     pub(crate) collection_edit: Option<(Option<String>, String)>,
     /// A short note for the status bar (what the last operation did).
     pub(crate) notice: Option<String>,
+    pub(crate) timeline: views::timeline::State,
 }
 
 impl ShoeboxApp {
@@ -372,6 +373,7 @@ impl ShoeboxApp {
             selected_collection: None,
             collection_edit: None,
             notice: None,
+            timeline: views::timeline::State::default(),
         }
     }
 
@@ -1455,6 +1457,24 @@ impl ShoeboxApp {
         self.current = self.selection.iter().next().copied();
     }
 
+    /// Timeline days as (title, stacks), then undated stacks (tests).
+    pub fn timeline_days(&self) -> Option<(Vec<(String, usize)>, usize)> {
+        let l = self.timeline.layout.as_ref()?;
+        Some((
+            l.timeline
+                .days
+                .iter()
+                .map(|d| (d.date.long(), d.stacks.len()))
+                .collect(),
+            l.timeline.undated.len(),
+        ))
+    }
+
+    /// File name of the current photo (tests).
+    pub fn current_name(&self) -> Option<String> {
+        self.current.and_then(|c| self.name_of(c))
+    }
+
     /// Collection names (tests).
     pub fn collection_names(&self) -> Vec<String> {
         self.collections.iter().map(|c| c.name.clone()).collect()
@@ -1996,7 +2016,7 @@ impl eframe::App for ShoeboxApp {
                 View::Duplicates => views::duplicates::show(self, ui),
                 View::Import => views::files::import(self, ui),
                 View::History => views::files::history(self, ui),
-                View::Timeline => panels::not_yet(self.view, ui),
+                View::Timeline => views::timeline::show(self, ui),
             }
         });
         views::duplicates::apply_dialog(self, &ctx);

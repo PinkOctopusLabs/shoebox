@@ -260,6 +260,29 @@ fn real_library() {
         t0.elapsed().as_secs_f64()
     );
     snapshot(&mut h, "real-3-loupe-nef");
+    // Timeline: build time and frame times.
+    h.key_press(egui::Key::T);
+    let t0 = Instant::now();
+    h.step();
+    eprintln!(
+        "timeline first frame: {:.1} ms",
+        t0.elapsed().as_secs_f64() * 1e3
+    );
+    settle(&mut h, Duration::from_secs(120));
+    let mut frames = Vec::new();
+    for _ in 0..30 {
+        let t = Instant::now();
+        h.step();
+        frames.push(t.elapsed().as_secs_f64() * 1e3);
+    }
+    frames.sort_by(f64::total_cmp);
+    eprintln!(
+        "timeline days: {:?}; frame p50 {:.2} ms, max {:.2} ms",
+        h.state().timeline_days().map(|d| d.0.len()),
+        frames[15],
+        frames[29]
+    );
+    snapshot(&mut h, "real-4-timeline");
 }
 
 /// Marking through the keyboard writes sidecars, undo restores them, and
@@ -1076,4 +1099,37 @@ fn interrupted_operation_resumes_from_history() {
     wait_for(&mut h, Duration::from_secs(10), "status", |a| {
         a.batches().iter().all(|b| b.2 == "done")
     });
+}
+
+/// M6 Timeline: days with their stacks under a heat strip; clicking a day
+/// jumps to it in Grid.
+#[test]
+fn timeline_groups_days_and_jumps_to_grid() {
+    let t = tempfile::tempdir().unwrap();
+    let lib = t.path().join("lib");
+    shoebox_fixtures::build_library(&lib).unwrap();
+    let p = paths(t.path(), &[lib.join("ref"), lib.join("scan")]);
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+    h.key_press(egui::Key::T);
+    h.run_steps(3);
+    assert_eq!(h.state().view_name(), View::Timeline);
+    let (days, undated) = h.state().timeline_days().unwrap();
+    // The fixture shoots on one day (two frames, a camera JPG copy and a
+    // burst neighbour, stacked); everything else has no date.
+    assert_eq!(days.len(), 1);
+    assert_eq!(days[0].0, "Fri 24 Apr 2026");
+    assert!(undated > 0);
+    settle(&mut h, Duration::from_secs(30));
+    snapshot(&mut h, "23-timeline");
+
+    h.get_by_label("Fri 24 Apr 2026").click();
+    h.run_steps(3);
+    assert_eq!(h.state().view_name(), View::Grid);
+    let current = h.state().current_name().unwrap();
+    assert!(
+        current.starts_with("DSC_0001") || current.starts_with("f00"),
+        "{current}"
+    );
+    assert_eq!(h.state().selected_count(), 1);
 }

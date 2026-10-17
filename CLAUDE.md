@@ -7,11 +7,12 @@ A Rust + egui photo library app for macOS. **`docs/SPEC.md` is the source of tru
   M3: `xmp` (read any form, edit by splicing original bytes), `marks`, `sidecar` (precedence + write planning), `stacks`, `query` (filters, sort, smart filters), `events`, `changes` (unseen-change tracking).
   M4: `review` (duplicate groups for the app, auto-select, decisions → one batch).
   M5: `template` (naming), `import` (plan verified copies), `organise` (stack moves, renames, reject, reference rewrites), `collections`.
+  M6: `timeline` (days, calendar maths, heat levels).
 - `crates/shoebox-decode`: JPEG/TIFF/PNG decoding, NEF embedded-preview extraction, grayscale thumbnails.
 - `crates/shoebox-app`: the eframe/egui app (`cargo run --release -p shoebox-app`).
   `jobs.rs` (background loader + library worker; the UI thread never reads
   files), `watch.rs` (file watcher feeding the library worker), `textures.rs` (LRU budget), `views/` (grid, masonry, loupe,
-  filmstrip, compare, survey, duplicates, files = import/history/dialogs), `panels.rs`. Headless UI tests in `tests/ui.rs` render PNGs
+  filmstrip, compare, survey, duplicates, timeline, files = import/history/dialogs), `panels.rs`. Headless UI tests in `tests/ui.rs` render PNGs
   (`SHOEBOX_UI_SNAPSHOTS=<dir>`); `--ignored` runs the 10k scroll test and,
   with `SHOEBOX_UI_LIBRARY=<APFS clone>`, a read-only real-library run; with `SHOEBOX_UI_REF`/`SHOEBOX_UI_UNDATED`
   (APFS clones), the `_undated` clean-up on real files.

@@ -1031,7 +1031,3 @@ pub fn empty_library(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         }
     });
 }
-
-pub fn not_yet(_view: View, ui: &mut egui::Ui) {
-    ui.centered_and_justified(|ui| ui.weak("Timeline view arrives in M6"));
-}

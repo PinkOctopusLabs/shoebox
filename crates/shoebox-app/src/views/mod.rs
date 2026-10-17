@@ -8,6 +8,7 @@ pub mod grid;
 pub mod loupe;
 pub mod masonry;
 pub mod survey;
+pub mod timeline;
 
 use eframe::egui::{self, Color32, Rect, Stroke, StrokeKind, pos2, vec2};
 

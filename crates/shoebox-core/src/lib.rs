@@ -24,6 +24,7 @@ pub mod sidecar;
 pub mod stacks;
 pub mod template;
 pub mod thumbs;
+pub mod timeline;
 pub mod xmp;
 
 pub use error::{CoreError, Result};
