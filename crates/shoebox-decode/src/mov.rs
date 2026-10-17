@@ -47,8 +47,10 @@ fn boxes(b: &[u8]) -> impl Iterator<Item = (&[u8], &[u8])> {
         if size < header {
             return None;
         }
-        let body = b.get(at + header..at + size)?;
-        at += size;
+        // Sizes come from the file: never trust them to stay in bounds.
+        let end = at.checked_add(size)?;
+        let body = b.get(at + header..end)?;
+        at = end;
         Some((kind, body))
     })
 }
@@ -79,8 +81,8 @@ pub fn info<R: Read + Seek>(r: &mut R) -> Result<MovInfo, DecodeError> {
         } else if size == 0 {
             size = len - at;
         }
-        if size < header {
-            break;
+        if size < header || size > len - at {
+            break; // malformed or truncated: stop rather than trust it
         }
         if &h[4..8] == b"moov" {
             let body = size - header;
@@ -92,7 +94,7 @@ pub fn info<R: Read + Seek>(r: &mut R) -> Result<MovInfo, DecodeError> {
                 .map_err(|_| DecodeError::Truncated)?;
             return Ok(parse_moov(&moov));
         }
-        at += size;
+        at += size; // size ≤ len - at, so this can't overflow or go back
     }
     Err(DecodeError::Format("no movie header (moov)".into()))
 }
@@ -164,12 +166,12 @@ fn apple_creation_date(moov: &[u8]) -> Option<String> {
     let mut index = None;
     for i in 1..=count {
         let size = be32(keys, at)? as usize;
-        let name = keys.get(at + 8..at + size)?;
+        let name = keys.get(at.checked_add(8)?..at.checked_add(size)?)?;
         if name == b"com.apple.quicktime.creationdate" {
             index = Some(i as u32);
             break;
         }
-        at += size.max(8);
+        at = at.checked_add(size.max(8))?;
     }
     let index = index?;
     // ilst entries are boxes whose type is the key's 1-based index.
@@ -243,5 +245,21 @@ mod tests {
         let r = info(&mut std::io::Cursor::new(movie(true))).unwrap();
         assert_eq!((r.width, r.height), (Some(1080), Some(1920)), "portrait");
         assert!(info(&mut std::io::Cursor::new(b"not a movie".to_vec())).is_err());
+    }
+
+    /// Hostile box sizes (huge, or past the end) end the scan; no overflow,
+    /// no loop.
+    #[test]
+    fn hostile_sizes_stop_the_scan() {
+        let mut huge = 1u32.to_be_bytes().to_vec(); // 64-bit size follows
+        huge.extend_from_slice(b"free");
+        huge.extend_from_slice(&u64::MAX.to_be_bytes());
+        assert!(info(&mut std::io::Cursor::new(huge.clone())).is_err());
+        let mut past = 1000u32.to_be_bytes().to_vec();
+        past.extend_from_slice(b"free");
+        assert!(info(&mut std::io::Cursor::new(past)).is_err());
+        // In memory, too.
+        assert_eq!(boxes(&huge).count(), 0);
+        assert!(parse_moov(&huge).width.is_none());
     }
 }
