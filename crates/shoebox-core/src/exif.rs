@@ -162,8 +162,17 @@ mod tests {
     fn real_gps_matches_exiftool() {
         let dir =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/real");
-        for name in ["20260501-091502-65.nef", "20260501-091502-65.jpg"] {
-            let p = dir.join(name);
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return;
+        };
+        for p in entries.filter_map(|e| e.ok().map(|e| e.path())) {
+            let is_raw_or_jpg = p
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("nef") || e.eq_ignore_ascii_case("jpg"));
+            if !is_raw_or_jpg {
+                continue;
+            }
+            let name = p.file_name().unwrap().to_string_lossy().into_owned();
             let Ok(data) = std::fs::read(&p) else {
                 continue;
             };

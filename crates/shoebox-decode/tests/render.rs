@@ -14,11 +14,17 @@ fn mean_abs_diff(a: &Rgb8, b: &Rgb8) -> f64 {
         / a.px.len() as f64
 }
 
-fn real(name: &str) -> Option<Vec<u8>> {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/real")
-        .join(name);
-    std::fs::read(p).ok()
+/// The first real camera file with this extension in the gitignored
+/// `tests/fixtures/real/` (any name), if there is one.
+fn real(ext: &str) -> Option<Vec<u8>> {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/real");
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext)))
+        .collect();
+    files.sort();
+    std::fs::read(files.first()?).ok()
 }
 
 #[test]
@@ -62,7 +68,7 @@ fn adobe_rgb_tiff_matches_imageio() {
 
 #[test]
 fn real_jpg_uses_mpf_previews_for_thumbnails() {
-    let Some(j) = real("20260501-091502-65.jpg") else {
+    let Some(j) = real("jpg") else {
         return;
     };
     let previews = jpeg::mpf_images(&j);
@@ -92,7 +98,7 @@ fn real_jpg_uses_mpf_previews_for_thumbnails() {
 
 #[test]
 fn real_nef_renders_from_embedded_jpeg() {
-    let Some(n) = real("20260501-091502-65.nef") else {
+    let Some(n) = real("nef") else {
         return;
     };
     let r = render_srgb(Format::Nef, &n, Some(256), 1).unwrap();
