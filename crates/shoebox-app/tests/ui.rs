@@ -2189,3 +2189,50 @@ fn analysis_real_library() {
         h.run_steps(4);
     }
 }
+
+/// A Live Photo (JPG + MOV, one base name) stacks as one photo; a lone clip
+/// shows its poster frame, and the loupe offers to open it. Needs ffmpeg to
+/// make the movies (skipped without it).
+#[test]
+fn live_photos_and_movies() {
+    let t = tempfile::tempdir().unwrap();
+    let lib = t.path().join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    let ffmpeg = |out: &Path, colour: &str| {
+        std::process::Command::new("ffmpeg")
+            .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i"])
+            .arg(format!("color=c={colour}:s=320x240:d=2"))
+            .args(["-c:v", "h264", "-pix_fmt", "yuv420p"])
+            .arg(out)
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    if !ffmpeg(&lib.join("IMG_0001.mov"), "red") || !ffmpeg(&lib.join("clip.mov"), "blue") {
+        eprintln!("ffmpeg not available: skipped");
+        return;
+    }
+    let img = image::RgbImage::from_pixel(64, 48, image::Rgb([210, 40, 40]));
+    std::fs::write(
+        lib.join("IMG_0001.jpg"),
+        shoebox_fixtures::jpeg(&img, 90).unwrap(),
+    )
+    .unwrap();
+    let p = paths(t.path(), std::slice::from_ref(&lib));
+    let mut h = harness(p, egui::vec2(1200.0, 800.0));
+    settle(&mut h, Duration::from_secs(60));
+    assert_eq!(h.state().photo_count(), 3);
+    assert_eq!(h.state().shown_count(), 2, "the Live Photo is one photo");
+    assert_eq!(h.state().failed_count(), 0, "the clip's poster frame loads");
+    snapshot(&mut h, "movies-1-grid");
+    h.get_by_label("clip.mov").click();
+    h.run_steps(2);
+    h.state_mut().set_view(View::Loupe);
+    settle(&mut h, Duration::from_secs(30));
+    assert!(h.query_by_label("▶ Open in QuickTime Player").is_some());
+    assert_eq!(
+        h.state().failed_count(),
+        0,
+        "the full-size poster loads too"
+    );
+    snapshot(&mut h, "movies-2-loupe");
+}

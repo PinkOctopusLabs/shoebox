@@ -119,6 +119,29 @@ fn stddev(px: &[u8]) -> f32 {
 pub fn analyze_path(path: &Path) -> Result<Analysis> {
     let format = Format::from_path(path)
         .ok_or_else(|| CoreError::Invalid(format!("unsupported file type: {}", path.display())))?;
+    if format == Format::Mov {
+        return analyze_movie(path);
+    }
     let data = std::fs::read(path).map_err(io(path))?;
     Ok(analyze_bytes(format, &data))
+}
+
+/// A movie: exact copies only (BLAKE3, streamed, so a big clip isn't read
+/// into memory), with its size from the header. No perceptual hashes.
+fn analyze_movie(path: &Path) -> Result<Analysis> {
+    let mut f = std::fs::File::open(path).map_err(io(path))?;
+    let info = shoebox_decode::mov::info(&mut f).ok();
+    let mut f = std::fs::File::open(path).map_err(io(path))?;
+    let mut h = blake3::Hasher::new();
+    h.update_reader(&mut f).map_err(io(path))?;
+    Ok(Analysis {
+        blake3: *h.finalize().as_bytes(),
+        image_data_hash: None,
+        width: info.as_ref().and_then(|i| i.width),
+        height: info.as_ref().and_then(|i| i.height),
+        exif: crate::exif::ExifInfo::default(),
+        hashes: Vec::new(),
+        luma_stddev: None,
+        error: None,
+    })
 }

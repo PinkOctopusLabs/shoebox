@@ -2,7 +2,7 @@
 //! then the full decode. Space/Z toggles fit and 100%; scroll or pinch zooms
 //! about the cursor; drag pans; arrows move (handled in app).
 
-use eframe::egui::{self, Color32, Rect, pos2, vec2};
+use eframe::egui::{self, Color32, Rect, RichText, pos2, vec2};
 
 use crate::app::{ShoeboxApp, Zoom};
 use crate::jobs::{Priority, Size};
@@ -116,4 +116,21 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         egui::FontId::proportional(12.0),
         Color32::from_gray(170),
     );
+    // A movie shows its poster frame; playing it is QuickTime's job.
+    let photo = &app.catalog.photos[idx];
+    if photo.format == shoebox_decode::Format::Mov {
+        let path = photo.path.clone();
+        let at = rect.center_bottom() + vec2(0.0, -40.0);
+        let area = egui::Area::new(ui.scope_id().with("movie"))
+            .fixed_pos(at - vec2(120.0, 14.0))
+            .order(egui::Order::Foreground);
+        area.show(ui.ctx(), |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Video (poster frame)").color(Color32::from_gray(200)));
+                if ui.button("▶ Open in QuickTime Player").clicked() {
+                    crate::app::open_file(&path);
+                }
+            });
+        });
+    }
 }

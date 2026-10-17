@@ -1,11 +1,15 @@
-//! Shoebox decoding: JPEG, TIFF, PNG and NEF embedded previews.
+//! Shoebox decoding: JPEG, TIFF, PNG and NEF embedded previews, and movie
+//! poster frames.
 //!
-//! Everything here is read-only and works on in-memory bytes.
+//! Everything here is read-only. Images decode from in-memory bytes; movies
+//! from their path ([`render_path`]), since a poster frame shouldn't need the
+//! whole file.
 
 pub mod gray;
 #[cfg(target_os = "macos")]
 pub mod imageio;
 pub mod jpeg;
+pub mod mov;
 pub mod nef;
 pub mod png;
 pub mod rgb;
@@ -51,6 +55,9 @@ pub enum Format {
     /// HEIC/HEIF: decoded by the platform (ImageIO on macOS); unsupported
     /// elsewhere until a libheif backend exists.
     Heic,
+    /// QuickTime movie (a Live Photo's video, or a clip): a poster frame
+    /// through AVFoundation on macOS; see [`render_path`].
+    Mov,
 }
 
 impl Format {
@@ -62,6 +69,7 @@ impl Format {
             "tif" | "tiff" => Format::Tiff,
             "png" => Format::Png,
             "heic" | "heif" | "hif" => Format::Heic,
+            "mov" => Format::Mov,
             _ => return None,
         })
     }
@@ -73,6 +81,7 @@ impl Format {
             Format::Tiff => "TIF",
             Format::Png => "PNG",
             Format::Heic => "HEIC",
+            Format::Mov => "MOV",
         }
     }
 }
@@ -105,7 +114,12 @@ pub fn decode_luma(format: Format, data: &[u8]) -> Result<Gray, DecodeError> {
         Format::Tiff => tiff::decode_luma(data),
         Format::Png => png::decode_luma(data),
         Format::Heic => heic_luma(data, 1 << 14),
+        Format::Mov => Err(video_from_bytes()),
     }
+}
+
+fn video_from_bytes() -> DecodeError {
+    DecodeError::Unsupported("a movie's picture comes from its path (render_path)".into())
 }
 
 #[cfg(target_os = "macos")]
@@ -146,7 +160,7 @@ pub fn image_data_ranges(
         }
         Format::Tiff => tiff::image_data_ranges(data)?,
         Format::Png => png::idat_ranges(data)?,
-        Format::Heic => return Ok(None),
+        Format::Heic | Format::Mov => return Ok(None),
     }))
 }
 
@@ -167,6 +181,12 @@ pub fn dimensions(format: Format, data: &[u8]) -> Result<(u32, u32), DecodeError
         Format::Heic => {
             let g = heic_luma(data, 1 << 14)?;
             Ok((g.width, g.height))
+        }
+        Format::Mov => {
+            let i = mov::info(&mut std::io::Cursor::new(data))?;
+            i.width
+                .zip(i.height)
+                .ok_or_else(|| DecodeError::Format("movie has no video size".into()))
         }
     }
 }
@@ -237,12 +257,49 @@ pub fn render(
         Format::Tiff => tiff::decode_rgb(data)?,
         Format::Png => png::decode_rgb(data)?,
         Format::Heic => return heic_render(data, long_edge.unwrap_or(1 << 14), target),
+        Format::Mov => return Err(video_from_bytes()),
     };
     if let Some(l) = long_edge {
         img = img.fit_long_edge(l);
     }
     rgb::convert(&mut img, icc.as_deref(), target);
     Ok(img.orient(orientation))
+}
+
+/// [`render`] from a file. A movie gives its poster frame (macOS; through
+/// AVFoundation, reading only what it needs), already upright.
+pub fn render_path(
+    format: Format,
+    path: &std::path::Path,
+    long_edge: Option<u32>,
+    orientation: u16,
+    target: Target,
+) -> Result<Rgb8, DecodeError> {
+    if format == Format::Mov {
+        return video_poster(path, long_edge.unwrap_or(4096), target);
+    }
+    let data =
+        std::fs::read(path).map_err(|e| DecodeError::Format(format!("{}: {e}", path.display())))?;
+    render(format, &data, long_edge, orientation, target)
+}
+
+#[cfg(target_os = "macos")]
+fn video_poster(path: &std::path::Path, max: u32, target: Target) -> Result<Rgb8, DecodeError> {
+    // Not the first frame (often black): a second in, or the middle of a
+    // shorter clip.
+    let at = std::fs::File::open(path)
+        .ok()
+        .and_then(|mut f| mov::info(&mut f).ok())
+        .and_then(|i| i.duration_secs)
+        .map_or(0.0, |d| (d / 2.0).min(1.0));
+    imageio::video_poster(path, max, at, target)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn video_poster(_path: &std::path::Path, _max: u32, _target: Target) -> Result<Rgb8, DecodeError> {
+    Err(DecodeError::Unsupported(
+        "movie poster frames need macOS AVFoundation".into(),
+    ))
 }
 
 fn jpeg_icc(data: &[u8]) -> Option<Vec<u8>> {
@@ -286,6 +343,6 @@ pub fn embedded_xmp(format: Format, data: &[u8]) -> Option<std::ops::Range<usize
             Some(start..start + raw.len())
         }
         Format::Png => png::itxt_xmp(data),
-        Format::Heic => None,
+        Format::Heic | Format::Mov => None,
     }
 }

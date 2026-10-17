@@ -3,6 +3,27 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-17 — Live Photos and movies (MOV)
+- `.mov` files are part of the library. A Live Photo (HEIC or JPG + MOV
+  with one base name) stacks as one photo with a **LIVE** badge; the video
+  is never the primary. A lone clip shows **▶ MOV**.
+- **Poster frames** come from AVFoundation (`AVAssetImageGenerator`, in
+  `imageio.rs`, the decoder's FFI file), a second in (or the middle of a
+  shorter clip; the first frame is often black), exact rather than the
+  nearest keyframe, upright (track transform applied), colour-managed like
+  other thumbnails. Movies decode from their path (`render_path`), so a
+  poster never reads the whole file. Linux: no poster (a placeholder).
+- **Metadata** from a small, portable reader of the movie's boxes: display
+  size (rotation applied), duration, and the creation time: Apple's
+  `com.apple.quicktime.creationdate` (local time with offset) when present,
+  else the `mvhd` UTC time in this Mac's time zone. Only the `moov` box is
+  read, wherever it is in the file.
+- **Duplicates:** exact copies only (BLAKE3, streamed); no perceptual
+  hashes for video. **Import** names a Live Photo's video from its photo's
+  capture time, so the pair keeps one name.
+- Playback is a non-goal (spec): the loupe shows the poster frame and an
+  "Open in QuickTime Player" button. `.mp4` isn't included yet.
+
 ## 2026-10-17 — Shutter count, GPS from sidecars
 - **Shutter count:** ShutterCount (tag 0xA7) from a Nikon type-3
   MakerNote ("Nikon\0", version, then a TIFF header its offsets count

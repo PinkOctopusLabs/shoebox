@@ -19,6 +19,18 @@ pub fn toolbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
 /// thumbnail size at the right.
 pub fn viewbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     let before = (app.sort, app.sort_desc);
+    let right = |app: &mut ShoeboxApp, ui: &mut egui::Ui| {
+        ui.add(egui::Slider::new(&mut app.thumb_size, 96.0..=512.0).show_value(false))
+            .on_hover_text("Thumbnail size");
+        ui.weak("Size");
+        ui.separator();
+        if app.semantic_query().is_some() {
+            ui.weak("Best match first");
+        } else {
+            sort_controls(app, ui);
+        }
+    };
+    let mut wrap = false;
     ui.horizontal(|ui| {
         for (v, name, key) in View::ALL {
             let hint = format!("{name} ({})", key.name());
@@ -38,18 +50,20 @@ pub fn viewbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             app.set_view(View::Map);
         }
         layout_toggle(app, ui);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.add(egui::Slider::new(&mut app.thumb_size, 96.0..=512.0).show_value(false))
-                .on_hover_text("Thumbnail size");
-            ui.weak("Size");
-            ui.separator();
-            if app.semantic_query().is_some() {
-                ui.weak("Best match first");
-            } else {
-                sort_controls(app, ui);
-            }
-        });
+        // Sort and size at the right when there's room, else on a second line.
+        if ui.available_width() >= 340.0 {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                right(app, ui)
+            });
+        } else {
+            wrap = true;
+        }
     });
+    if wrap {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            right(app, ui)
+        });
+    }
     if before != (app.sort, app.sort_desc) {
         app.refilter();
         app.scroll_to_current = true;

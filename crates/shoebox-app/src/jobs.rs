@@ -203,12 +203,14 @@ fn worker(q: &Queue, tx: &Sender<Loaded>, thumbs: &ThumbCache, repaint: &(dyn Fn
         let result = match key.size {
             Size::Small => thumbs.get(&src, thumbs::SMALL).map_err(|e| e.to_string()),
             Size::Large => thumbs.get(&src, thumbs::LARGE).map_err(|e| e.to_string()),
-            Size::Full => std::fs::read(&job.path)
-                .map_err(|e| format!("{}: {e}", job.path.display()))
-                .and_then(|data| {
-                    shoebox_decode::render(job.format, &data, None, job.orientation, job.target)
-                        .map_err(|e| format!("{}: {e}", job.path.display()))
-                }),
+            Size::Full => shoebox_decode::render_path(
+                job.format,
+                &job.path,
+                None,
+                job.orientation,
+                job.target,
+            )
+            .map_err(|e| format!("{}: {e}", job.path.display())),
         };
         let histogram = match (&result, key.size) {
             (Ok(img), Size::Small) => Some(Box::new(img.histogram())),

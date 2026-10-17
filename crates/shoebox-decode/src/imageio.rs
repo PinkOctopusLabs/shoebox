@@ -144,6 +144,7 @@ pub fn type_hint(format: crate::Format) -> &'static str {
         crate::Format::Tiff => "public.tiff",
         crate::Format::Png => "public.png",
         crate::Format::Heic => "public.heic",
+        crate::Format::Mov => "com.apple.quicktime-movie",
     }
 }
 
@@ -291,6 +292,15 @@ fn render(
             CGImageSourceCreateThumbnailAtIndex(src.0, 0, opts.0),
             "thumbnail decode",
         )?;
+        draw(&img, out)
+    }
+}
+
+/// Draw a CGImage into an 8-bit buffer: gray, or RGBX in a target space.
+fn draw(img: &Cf, out: Out) -> Result<(u32, u32, Vec<u8>), DecodeError> {
+    // SAFETY: `img` is a live CGImage; the bitmap context writes only inside
+    // `px`, sized for w × h × bpp, and is released before `px` is returned.
+    unsafe {
         let (w, h) = (CGImageGetWidth(img.0), CGImageGetHeight(img.0));
         let (w32, h32) = (
             u32::try_from(w).map_err(|_| DecodeError::Truncated)?,
@@ -326,4 +336,120 @@ fn render(
         drop(ctx); // finish drawing before `px` is read
         Ok((w32, h32, px))
     }
+}
+
+// --- Movies (AVFoundation) ---------------------------------------------------
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CMTime {
+    value: i64,
+    timescale: i32,
+    flags: u32,
+    epoch: i64,
+}
+
+// SAFETY: matches CoreMedia's CMTime layout and its ObjC encoding.
+unsafe impl objc2::Encode for CMTime {
+    const ENCODING: objc2::Encoding = objc2::Encoding::Struct(
+        "?",
+        &[
+            objc2::Encoding::LongLong,
+            objc2::Encoding::Int,
+            objc2::Encoding::UInt,
+            objc2::Encoding::LongLong,
+        ],
+    );
+}
+
+// SAFETY: as above, behind a pointer.
+unsafe impl objc2::RefEncode for CMTime {
+    const ENCODING_REF: objc2::Encoding =
+        objc2::Encoding::Pointer(&<CMTime as objc2::Encode>::ENCODING);
+}
+
+// SAFETY: CoreGraphics' CGSize is two CGFloats (f64 on 64-bit).
+unsafe impl objc2::Encode for CGSize {
+    const ENCODING: objc2::Encoding = objc2::Encoding::Struct(
+        "CGSize",
+        &[objc2::Encoding::Double, objc2::Encoding::Double],
+    );
+}
+
+/// Opaque CGImage, for the method's return type.
+#[repr(C)]
+struct CGImageOpaque {
+    _private: [u8; 0],
+}
+
+// SAFETY: an opaque CoreGraphics struct, only used behind a pointer.
+unsafe impl objc2::RefEncode for CGImageOpaque {
+    const ENCODING_REF: objc2::Encoding =
+        objc2::Encoding::Pointer(&objc2::Encoding::Struct("CGImage", &[]));
+}
+
+#[link(name = "AVFoundation", kind = "framework")]
+unsafe extern "C" {}
+
+#[link(name = "CoreMedia", kind = "framework")]
+unsafe extern "C" {
+    fn CMTimeMakeWithSeconds(seconds: f64, preferred_timescale: i32) -> CMTime;
+}
+
+/// A movie's frame at `at` seconds, upright (its track transform applied),
+/// long edge at most `max_px`, in `target`'s colour space.
+pub fn video_poster(
+    path: &std::path::Path,
+    max_px: u32,
+    at: f64,
+    target: crate::Target,
+) -> Result<crate::Rgb8, DecodeError> {
+    use objc2::msg_send;
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyClass, AnyObject, Bool};
+    use objc2_foundation::{NSString, NSURL};
+
+    let fail = |what: &str| DecodeError::Format(format!("AVFoundation: {what} failed"));
+    let path = path
+        .to_str()
+        .ok_or_else(|| DecodeError::Format("non-UTF-8 path".into()))?;
+    let asset_class = AnyClass::get(c"AVURLAsset").ok_or_else(|| fail("AVURLAsset"))?;
+    let generator_class =
+        AnyClass::get(c"AVAssetImageGenerator").ok_or_else(|| fail("AVAssetImageGenerator"))?;
+    let url = NSURL::fileURLWithPath(&NSString::from_str(path));
+    // SAFETY: standard AVFoundation calls with valid objects; nil results are
+    // checked. copyCGImageAtTime returns a +1 CGImage, released by `Cf`.
+    let img = unsafe {
+        let none: Option<&AnyObject> = None;
+        let asset: Option<Retained<AnyObject>> =
+            msg_send![asset_class, URLAssetWithURL: &*url, options: none];
+        let asset = asset.ok_or_else(|| fail("opening the movie"))?;
+        let generator: Option<Retained<AnyObject>> =
+            msg_send![generator_class, assetImageGeneratorWithAsset: &*asset];
+        let generator = generator.ok_or_else(|| fail("image generator"))?;
+        let _: () = msg_send![&*generator, setAppliesPreferredTrackTransform: Bool::YES];
+        let max = CGSize {
+            width: f64::from(max_px),
+            height: f64::from(max_px),
+        };
+        let _: () = msg_send![&*generator, setMaximumSize: max];
+        // The frame asked for, not the nearest keyframe.
+        let zero = CMTimeMakeWithSeconds(0.0, 600);
+        let _: () = msg_send![&*generator, setRequestedTimeToleranceBefore: zero];
+        let _: () = msg_send![&*generator, setRequestedTimeToleranceAfter: zero];
+        let time = CMTimeMakeWithSeconds(at, 600);
+        let actual: *mut CMTime = std::ptr::null_mut();
+        let error: *mut *mut AnyObject = std::ptr::null_mut();
+        let cg: *const CGImageOpaque =
+            msg_send![&*generator, copyCGImageAtTime: time, actualTime: actual, error: error];
+        Cf::new(cg.cast(), "poster frame")?
+    };
+    let (w, h, rgbx) = draw(&img, Out::Rgb(target))?;
+    let rgb = rgbx
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|p| [p[0], p[1], p[2]])
+        .collect();
+    crate::Rgb8::new(w, h, rgb)
 }

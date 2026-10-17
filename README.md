@@ -18,7 +18,8 @@ deletes anything, and keeps a journal of every file operation it makes.
 - **Browse:** grid, masonry, loupe (with the NEF's embedded full-size
   JPEG), compare, survey, timeline and a map of photos with GPS. Colour
   managed (Display P3), virtualised for libraries of 100,000+ photos.
-- **Stacks:** a frame's NEF, JPG and TIFF exports show as one photo.
+- **Stacks:** a frame's NEF, JPG and TIFF exports show as one photo, and a
+  Live Photo's picture and video as one (movies show a poster frame).
 - **Organise:** ratings, pick/reject flags, colour labels, hierarchical
   keywords, events and collections, all written to `name.ext.xmp` sidecars
   (edited in place, so other tools' data in them survives byte for byte).

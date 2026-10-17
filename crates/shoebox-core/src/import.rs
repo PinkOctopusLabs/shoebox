@@ -191,14 +191,25 @@ pub fn plan(
             .cloned()
     };
     for frame in &frames {
+        // A Live Photo's video is named from its photo's capture time, so
+        // the pair keeps one name (the video's own clock can differ).
+        let is_movie = |s: &Source| Format::from_path(&s.path) == Some(Format::Mov);
+        let lead = frame
+            .iter()
+            .find(|s| !is_movie(s) && s.fields.capture_time.is_some());
         let wants: Vec<PathBuf> = frame
             .iter()
             .map(|s| {
                 seq += 1;
-                let f = Fields {
+                let mut f = Fields {
                     seq,
                     ..s.fields.clone()
                 };
+                if let Some(lead) = lead.filter(|_| is_movie(s)) {
+                    f.capture_time = lead.fields.capture_time.clone();
+                    f.subsec = lead.fields.subsec.clone();
+                    f.camera = lead.fields.camera.clone();
+                }
                 root.join(template.render(&f))
             })
             .collect();

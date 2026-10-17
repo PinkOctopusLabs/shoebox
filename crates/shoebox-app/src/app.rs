@@ -640,6 +640,11 @@ impl ShoeboxApp {
         t.get(..10).map(str::to_owned)
     }
 
+    /// Images that couldn't be displayed (tests).
+    pub fn failed_count(&self) -> usize {
+        self.textures.failed.len()
+    }
+
     /// Whether any filter is set (tests).
     pub fn filtered(&self) -> bool {
         !self.filter.is_empty() || self.folder.is_some()
@@ -2657,6 +2662,17 @@ pub(crate) fn build_tree(catalog: &Catalog) -> Vec<FolderNode> {
 pub(crate) const REVEAL_LABEL: &str = "Reveal in Finder";
 #[cfg(not(target_os = "macos"))]
 pub(crate) const REVEAL_LABEL: &str = "Show in File Manager";
+
+/// Open a file in its default app (a movie in QuickTime Player).
+pub(crate) fn open_file(path: &Path) {
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(path).spawn();
+    #[cfg(not(target_os = "macos"))]
+    let result = std::process::Command::new("xdg-open").arg(path).spawn();
+    if let Err(e) = result {
+        tracing::warn!("open {}: {e}", path.display());
+    }
+}
 
 /// Show a file in Finder (macOS) or its folder in the file manager (Linux).
 pub(crate) fn reveal(path: &Path) {

@@ -62,7 +62,7 @@ fn dims_from(format: Format, data: &[u8]) -> Option<(u32, u32)> {
         Format::Tiff => shoebox_decode::nef::ifd0_dimensions(data).ok().flatten(),
         // The largest image described in any IFD (the raw or JpgFromRaw).
         Format::Nef => shoebox_decode::nef::max_dimensions(data).ok().flatten(),
-        Format::Heic => None,
+        Format::Heic | Format::Mov => None,
     }
 }
 
@@ -82,8 +82,50 @@ fn from_bytes(format: Format, data: &[u8]) -> (Meta, bool) {
     )
 }
 
+/// A movie's metadata from its header: display size and creation time
+/// (Apple's local creation date, else the UTC header time in local time).
+fn movie(path: &Path) -> Result<Meta> {
+    let mut f = std::fs::File::open(path).map_err(io(path))?;
+    let info = shoebox_decode::mov::info(&mut f).map_err(|e| crate::error::CoreError::Decode {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    let mut exif = ExifInfo::default();
+    let local = movie_time(&info);
+    if let Some(z) = local {
+        exif.capture_time = Some(z.strftime("%Y:%m:%d %H:%M:%S").to_string());
+        exif.offset = Some(z.strftime("%:z").to_string());
+    }
+    Ok(Meta {
+        width: info.width,
+        height: info.height,
+        exif,
+    })
+}
+
+/// When a movie was made, in local time: Apple's creation date (which keeps
+/// its offset), else the header's UTC time in this Mac's time zone.
+fn movie_time(info: &shoebox_decode::mov::MovInfo) -> Option<jiff::Zoned> {
+    let apple = info.created_local.as_deref().and_then(|s| {
+        let t = jiff::fmt::strtime::parse("%Y-%m-%dT%H:%M:%S%z", s).ok()?;
+        let offset = t.offset()?;
+        Some(
+            t.to_timestamp()
+                .ok()?
+                .to_zoned(jiff::tz::TimeZone::fixed(offset)),
+        )
+    });
+    apple.or_else(|| {
+        let t = jiff::Timestamp::from_second(info.created_utc?).ok()?;
+        Some(t.to_zoned(jiff::tz::TimeZone::system()))
+    })
+}
+
 /// Read metadata, trying the first 256 KB before falling back to the whole file.
 pub fn read(path: &Path, format: Format) -> Result<Meta> {
+    if format == Format::Mov {
+        return movie(path);
+    }
     let mut f = std::fs::File::open(path).map_err(io(path))?;
     let mut prefix = Vec::with_capacity(PREFIX as usize);
     (&mut f)
@@ -113,5 +155,28 @@ mod tests {
             (Some(6000), Some(4000))
         );
         assert_eq!(upright(Some((6000, 4000)), None), (Some(6000), Some(4000)));
+    }
+
+    #[test]
+    fn movie_times() {
+        let info = shoebox_decode::mov::MovInfo {
+            created_local: Some("2026-04-24T13:36:30+0700".into()),
+            created_utc: Some(0),
+            ..Default::default()
+        };
+        let z = movie_time(&info).unwrap();
+        assert_eq!(
+            z.strftime("%Y:%m:%d %H:%M:%S %:z").to_string(),
+            "2026:04:24 13:36:30 +07:00"
+        );
+        let utc_only = shoebox_decode::mov::MovInfo {
+            created_utc: Some(1_777_000_000),
+            ..Default::default()
+        };
+        assert_eq!(
+            movie_time(&utc_only).unwrap().timestamp().as_second(),
+            1_777_000_000
+        );
+        assert!(movie_time(&Default::default()).is_none());
     }
 }

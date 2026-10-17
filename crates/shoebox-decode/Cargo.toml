@@ -20,6 +20,10 @@ turbojpeg = { version = "1.5.1", optional = true, default-features = false }
 zune-core = "0.5.3"
 zune-jpeg = "0.5.15"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSURL"] }
+
 [features]
 # Benchmark-only: links Homebrew's libjpeg-turbo. See benches/jpeg_thumb.rs.
 bench-turbojpeg = ["dep:turbojpeg"]

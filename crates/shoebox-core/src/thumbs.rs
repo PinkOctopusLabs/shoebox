@@ -69,13 +69,17 @@ impl ThumbCache {
         if let Some(img) = self.cached(src, edge) {
             return Ok(img);
         }
-        let data = std::fs::read(src.path).map_err(io(src.path))?;
-        let img =
-            shoebox_decode::render(src.format, &data, Some(edge), src.orientation, src.target)
-                .map_err(|e| CoreError::Decode {
-                    path: src.path.to_path_buf(),
-                    source: e,
-                })?;
+        let img = shoebox_decode::render_path(
+            src.format,
+            src.path,
+            Some(edge),
+            src.orientation,
+            src.target,
+        )
+        .map_err(|e| CoreError::Decode {
+            path: src.path.to_path_buf(),
+            source: e,
+        })?;
         if let Err(e) = self.store(src, edge, &img) {
             tracing::warn!("thumbnail cache write failed: {e}");
         }

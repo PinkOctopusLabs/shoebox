@@ -233,10 +233,9 @@ pub(crate) struct Item {
 impl Item {
     /// The photo, upright, long edge at most `long` (a NEF's preview).
     pub fn decode(&self, long: u32) -> Option<Rgb8> {
-        let data = std::fs::read(&self.key.path).ok()?;
-        shoebox_decode::render(
+        shoebox_decode::render_path(
             self.format,
-            &data,
+            &self.key.path,
             Some(long),
             self.orientation,
             Target::Srgb,

@@ -239,10 +239,17 @@ pub fn cell(
     // Badges. Bottom left: file type, or the stack's formats and size.
     let st = app.stack_of(idx);
     let expanded = app.expanded.contains(&app.ids[st.primary]);
-    let label = if st.len() > 1 && st.primary == idx && !expanded {
+    let is_movie = |i: usize| app.catalog.photos[i].format == shoebox_decode::Format::Mov;
+    let live = st.primary == idx && !is_movie(idx) && st.all().any(is_movie);
+    let label = if live && st.len() == 2 {
+        // A Live Photo: the picture and its short video.
+        "LIVE".to_owned()
+    } else if st.len() > 1 && st.primary == idx && !expanded {
         format!("{} · {}", st.badge(&app.catalog.photos), st.len())
     } else if st.variants.contains(&idx) {
         format!("{} copy", photo.format.label())
+    } else if is_movie(idx) {
+        "▶ MOV".to_owned()
     } else {
         photo.format.label().to_owned()
     };

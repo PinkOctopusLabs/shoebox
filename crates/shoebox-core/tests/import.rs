@@ -196,3 +196,51 @@ fn import_names_skips_and_undo() {
     assert_eq!(tree(&lib), before);
     assert_eq!(tree(&base.join("trash")).len(), plan.copies.len());
 }
+
+/// A minimal QuickTime movie: just a `moov` with an `mvhd` creation time.
+fn movie(created_unix: i64) -> Vec<u8> {
+    let bx = |kind: &[u8], body: &[u8]| {
+        let mut v = ((body.len() + 8) as u32).to_be_bytes().to_vec();
+        v.extend_from_slice(kind);
+        v.extend_from_slice(body);
+        v
+    };
+    let mut mvhd = vec![0u8; 100];
+    let qt = (created_unix + 2_082_844_800) as u32;
+    mvhd[4..8].copy_from_slice(&qt.to_be_bytes());
+    [bx(b"ftyp", b"qt  "), bx(b"moov", &bx(b"mvhd", &mvhd))].concat()
+}
+
+/// A Live Photo's video keeps its photo's name, even when the video's own
+/// clock says a different second.
+#[test]
+fn live_photo_pair_keeps_one_name() {
+    let t = tempfile::tempdir().unwrap();
+    let base = t.path().canonicalize().unwrap();
+    let (src, lib) = (base.join("card"), base.join("lib"));
+    std::fs::create_dir_all(&lib).unwrap();
+    let shot = Shot {
+        datetime: "2026:04:24 14:03:11",
+        subsec: "",
+        orientation: 1,
+        serial: "1",
+    };
+    put(
+        &src.join("IMG_0007.JPG"),
+        &with_exif(&jpeg(&scene(9, 400, 300), 85).unwrap(), &shot),
+    );
+    // 3 s later by its own clock (UTC; the zone doesn't matter here).
+    put(&src.join("IMG_0007.MOV"), &movie(1_777_039_394));
+    let roots = vec![Root::new(&lib, Role::Scan).unwrap()];
+    let mut cache = Cache::open_in_memory().unwrap();
+    let (catalog, _) = Catalog::refresh(&mut cache, roots, &|_, _| {}).unwrap();
+    let tpl = Template::parse(DEFAULT_IMPORT).unwrap();
+    let plan = shoebox_core::import::plan(&src, &lib, &tpl, &catalog, &|_, _| {}).unwrap();
+    let stems: std::collections::HashSet<String> = plan
+        .copies
+        .iter()
+        .map(|c| c.dst.file_stem().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(plan.copies.len(), 2);
+    assert_eq!(stems.len(), 1, "one name for the pair: {stems:?}");
+}
