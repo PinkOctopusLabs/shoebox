@@ -364,6 +364,17 @@ pub fn photo_menu(app: &mut ShoeboxApp, resp: &egui::Response, pos: usize) {
             }
             ui.close();
         }
+        if let Some(name) = app.ppl.shown_group().and_then(|g| g.name.clone())
+            && ui
+                .button(format!("Not {name}"))
+                .on_hover_text("This photo's face isn't them")
+                .clicked()
+        {
+            if let Some(&i) = app.shown.get(pos) {
+                app.not_person(app.ids[i]);
+            }
+            ui.close();
+        }
         ui.separator();
         if ui.button("Move to Folder…").clicked() {
             let start = app

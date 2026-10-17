@@ -69,6 +69,11 @@ pub fn embeddings_db(data_dir: &Path) -> PathBuf {
     data_dir.join("embeddings.sqlite")
 }
 
+/// Names you gave people (user state, like settings).
+pub fn people_file(data_dir: &Path) -> PathBuf {
+    data_dir.join("people.json")
+}
+
 /// Downloaded ML models.
 pub fn models_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("models")

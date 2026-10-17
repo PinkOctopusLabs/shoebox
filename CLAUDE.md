@@ -7,14 +7,15 @@ A Rust + egui photo library app for macOS. **`docs/SPEC.md` is the source of tru
   M3: `xmp` (read any form, edit by splicing original bytes), `marks`, `sidecar` (precedence + write planning), `stacks`, `query` (filters, sort, smart filters), `events`, `changes` (unseen-change tracking).
   M4: `review` (duplicate groups for the app, auto-select, decisions → one batch).
   M5: `template` (naming), `import` (plan verified copies), `organise` (stack moves, renames, reject, reference rewrites), `collections`.
-  M6: `timeline` (days, calendar maths, heat levels), `embeddings` (semantic search store + 8-bit exhaustive search + tag rule; own `embeddings.sqlite`).
+  M6: `timeline` (days, calendar maths, heat levels), `embeddings` (semantic search store + 8-bit exhaustive search + tag rule; own `embeddings.sqlite`, rows by kind), `people` (face rows, grouping, `people.json`).
 - `crates/shoebox-decode`: JPEG/TIFF/PNG decoding, NEF embedded-preview extraction, grayscale thumbnails.
-- `crates/shoebox-ml`: semantic search model (SigLIP 2 on candle; Metal on macOS): pinned, checksummed download (`download`), f16 split (`convert`), image/text encoders, `labels.txt` (tag list). Never touches the library. `examples/probe.rs` times and ranks a folder; `examples/fetch.rs` downloads. `vendor/candle-metal-kernels` is candle's with one fix (Metal 3.2 shaders; see `vendor/README.md`).
+- `crates/shoebox-ml`: semantic search model (SigLIP 2 on candle; Metal on macOS): pinned, checksummed download (`download`), f16 split (`convert`), image/text encoders, `labels.txt` (tag list), `faces` (YuNet/SFace: detect, align, embed) on `onnx` (a small ONNX interpreter, no protoc). Never touches the library. `examples/faces_probe.rs` checks faces on a folder. `examples/probe.rs` times and ranks a folder; `examples/fetch.rs` downloads. `vendor/candle-metal-kernels` is candle's with one fix (Metal 3.2 shaders; see `vendor/README.md`).
 - `crates/shoebox-app`: the eframe/egui app (`cargo run --release -p shoebox-app`).
   `jobs.rs` (background loader + library worker; the UI thread never reads
   files), `watch.rs` (file watcher feeding the library worker), `semantic.rs`
-  (semantic search thread: model download, indexing, queries; the `Model`
-  trait lets tests use a fake model), `updater.rs`
+  (semantic search thread: model download, indexing, queries, tags; the `Model`
+  trait lets tests use a fake model), `people.rs` (faces thread: grouping, names in
+  `people.json`; `FaceModel` trait for tests), `updater.rs`
   (Sparkle, loaded at runtime from bundled builds only), `textures.rs` (LRU budget), `views/` (grid, masonry, loupe,
   filmstrip, compare, survey, duplicates, timeline, map, settings, files = import/history/dialogs), `menu.rs` (Settings… in the macOS app menu), `panels.rs`. Headless UI tests in `tests/ui.rs` render PNGs
   (`SHOEBOX_UI_SNAPSHOTS=<dir>`); `--ignored` runs the 10k scroll test,
@@ -24,7 +25,8 @@ A Rust + egui photo library app for macOS. **`docs/SPEC.md` is the source of tru
   with `SHOEBOX_UI_LIBRARY=<APFS clone>`, a read-only real-library run; with `SHOEBOX_UI_REF`/`SHOEBOX_UI_UNDATED`
   (APFS clones), the `_undated` clean-up on real files. Tests never fetch map
   tiles (`AppPaths.tile_cache: None`); `SHOEBOX_UI_TILES=<dir>` opts in. Semantic search tests use a fake model;
-  `SHOEBOX_ML_MODEL=<model dir> SHOEBOX_UI_PHOTOS=<folder>` runs the ignored real-model test.
+  `SHOEBOX_ML_MODEL=<model dir> SHOEBOX_UI_PHOTOS=<folder>` runs the ignored real-model test;
+  `SHOEBOX_FACES_MODEL=<dir>` the People one.
 - `crates/shoebox-cli`: the `shoebox` binary: `scan` (metadata), `dupes` (report only, never moves), `apply` (moves rows a person confirmed in the report), `import`, `rename`, `history`, `undo`. `SHOEBOX_TRASH_DIR` sends trashed files to a folder (tests).
 - `crates/shoebox-fixtures`: synthetic test library generator (dev-only).
 - `tests/fixtures/`: synthetic fixtures (built per test by `shoebox-fixtures`; `cargo run -p shoebox-fixtures -- <empty dir>` writes them to disk). Real camera files go in the gitignored `tests/fixtures/real/`; tests that need them skip when it's absent.

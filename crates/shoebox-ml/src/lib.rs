@@ -12,6 +12,8 @@
 pub mod convert;
 pub mod download;
 mod encoder;
+pub mod faces;
+pub mod onnx;
 
 use std::path::PathBuf;
 

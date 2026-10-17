@@ -3,6 +3,47 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-17 — M6 faces: People
+The spec says faces with InsightFace. InsightFace's models are licensed
+"for non-commercial research purposes only", so Shoebox uses OpenCV Zoo's
+**YuNet** detector (MIT) and **SFace** recognizer (Apache 2.0) instead:
+39 MB, downloaded (pinned Hugging Face revisions, SHA-256 checked) when
+Settings → People is turned on. Separate from semantic search, since faces
+are more personal; both are off by default.
+
+- **Running them:** a small ONNX interpreter on candle (`shoebox-ml::onnx`:
+  the dozen operators these two models use; protobuf messages declared by
+  hand, so no `protoc` at build time). Checked against OpenCV 5's own
+  `FaceDetectorYN` / `FaceRecognizerSF` on the same pixels: identical
+  detections and scores, and the same face similarities to 3 decimals.
+- **Speed (M2 Max, CPU):** 32 ms to find faces in a photo (at 640 px),
+  24 ms per face to describe it. candle runs grouped convolutions one
+  group at a time, so depthwise ones are done directly (8× faster for
+  SFace). These small models are 2–18× *slower* on Metal, so they stay on
+  the CPU. Faces are aligned from a 1600 px decode (the detector sees 640).
+- **Grouping:** each face joins the group whose average face it resembles
+  most, if cosine ≥ 0.45 (SFace's own same-person threshold, 0.363, would
+  merge sisters, who scored 0.40), then a second pass. Faces scored < 0.85
+  or smaller than 2.5% of the image aren't grouped. Unnamed groups need 3
+  faces to be listed. On 11 public portraits: Biden (4 photos), Michelle
+  Obama (3, including a family photo) and Barack Obama (3, including the
+  same family photo) grouped exactly; same-person pairs 0.68–0.84,
+  different people ≤ 0.40.
+- **Names are user state:** `people.json` in the data folder (not the
+  cache, not the library), each person with up to 24 example faces and the
+  faces you said aren't them. After any regrouping or rebuild, a group is
+  the named person its faces resemble (average ≥ 0.45). Faces themselves
+  are rebuildable rows in `embeddings.sqlite` (kind "faces"), following
+  moved files like image embeddings.
+- **UI:** People in the left panel (named, then unnamed groups, with photo
+  counts); showing one puts a name field in the search bar, and for a named
+  person "Add keyword to N photos" (`People|Name`, through the usual
+  undoable marks path to sidecars) and Forget; "Not Name" in the photo
+  menu; people in the current photo in the info panel.
+- Not done: face rectangles drawn on photos, face thumbnails in the list,
+  and writing face regions (MWG) to sidecars. Faces and image embeddings
+  each read the file, so with both on a photo is read twice.
+
 ## 2026-10-17 — M6 objects: suggested tags from SigLIP
 The spec says objects with YOLO. Ultralytics' YOLO is AGPL-3.0, which
 doesn't fit an MIT/Apache app, and a detector's ~80 classes cover less of

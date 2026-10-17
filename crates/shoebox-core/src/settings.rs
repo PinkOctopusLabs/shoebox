@@ -46,6 +46,9 @@ pub struct Settings {
     /// Search photos by what's in them (downloads a model once).
     #[serde(default)]
     pub semantic_search: bool,
+    /// Find and group the faces in photos (downloads models once).
+    #[serde(default)]
+    pub people: bool,
 }
 
 /// Default for [`Settings::image_memory_mb`].

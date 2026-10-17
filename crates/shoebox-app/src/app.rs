@@ -170,6 +170,10 @@ pub struct AppPaths {
     pub embeddings_db: PathBuf,
     /// The semantic search model: downloaded on first use, or a test model.
     pub model: crate::semantic::ModelSource,
+    /// The face models: downloaded on first use, or a test model.
+    pub faces: crate::people::FaceSource,
+    /// Names given to people.
+    pub people: PathBuf,
 }
 
 impl AppPaths {
@@ -200,6 +204,11 @@ impl AppPaths {
                 dir: shoebox_core::paths::models_dir(&data).join("siglip2-base-patch16-224"),
                 staging: cache.join("model-download"),
             },
+            faces: crate::people::FaceSource::Download {
+                dir: shoebox_core::paths::models_dir(&data).join("faces-yunet-sface"),
+                staging: cache.join("model-download"),
+            },
+            people: shoebox_core::paths::people_file(&data),
         })
     }
 }
@@ -328,6 +337,8 @@ pub struct ShoeboxApp {
     pub(crate) map: views::map::State,
     semantic: crate::semantic::Semantic,
     pub(crate) sem: crate::semantic::SearchState,
+    people: crate::people::PeopleWorker,
+    pub(crate) ppl: crate::people::PeopleState,
 }
 
 impl ShoeboxApp {
@@ -339,7 +350,7 @@ impl ShoeboxApp {
         tracing::info!("rendering images in {target:?}");
         let threads =
             std::thread::available_parallelism().map_or(4, |n| n.get().saturating_sub(1).max(2));
-        let (c1, c2, c3) = (ctx.clone(), ctx.clone(), ctx.clone());
+        let (c1, c2, c3, c4) = (ctx.clone(), ctx.clone(), ctx.clone(), ctx.clone());
         let loader = Loader::new(threads, ThumbCache::new(paths.thumbs), move || {
             c1.request_repaint()
         });
@@ -353,6 +364,12 @@ impl ShoeboxApp {
             move || c2.request_repaint(),
         );
         library.send(LibraryCommand::Open);
+        let people = crate::people::PeopleWorker::new(
+            paths.faces,
+            paths.embeddings_db.clone(),
+            paths.people,
+            move || c4.request_repaint(),
+        );
         let semantic =
             crate::semantic::Semantic::new(paths.model, paths.embeddings_db, move || {
                 c3.request_repaint()
@@ -429,6 +446,8 @@ impl ShoeboxApp {
             map: views::map::State::new(tile_cache),
             semantic,
             sem: Default::default(),
+            people,
+            ppl: Default::default(),
         }
     }
 
@@ -642,6 +661,10 @@ impl ShoeboxApp {
                         self.catalog.clone(),
                         complete,
                     ));
+                    self.people.send(crate::people::Command::Catalog(
+                        self.catalog.clone(),
+                        complete,
+                    ));
                     if complete {
                         self.scanning = false;
                         self.scan_progress = None;
@@ -840,6 +863,153 @@ impl ShoeboxApp {
         }
         self.sem
             .set_enabled(&self.semantic, self.settings.semantic_search);
+        self.ppl.set_enabled(&self.people, self.settings.people);
+    }
+
+    // --- people --------------------------------------------------------------
+
+    fn tick_people(&mut self) {
+        use crate::people::Event as E;
+        let mut changed = false;
+        while let Ok(ev) = self.people.events.try_recv() {
+            match ev {
+                E::Status(s) => self.ppl.status = s,
+                E::People(v) => {
+                    // An unnamed group shown may have been named or regrouped:
+                    // follow its face.
+                    if let Some(key) = self.ppl.showing.clone()
+                        && let crate::people::GroupKey::Unnamed(face) = &key
+                        && v.find(&key).is_none()
+                    {
+                        self.ppl.showing = v
+                            .groups
+                            .iter()
+                            .find(|g| g.faces.contains(face))
+                            .map(|g| g.key.clone());
+                    }
+                    self.ppl.view = Some(v);
+                    if self.ppl.showing.is_some() {
+                        if self.ppl.shown_group().is_none() {
+                            self.ppl.showing = None;
+                        }
+                        changed = true;
+                    }
+                }
+                E::Error(e) => self.error = Some(e),
+            }
+        }
+        if changed {
+            self.refilter();
+        }
+    }
+
+    /// Show the photos of this person (or unnamed group).
+    pub(crate) fn show_person(&mut self, key: crate::people::GroupKey) {
+        self.ppl.showing = Some(key);
+        self.ppl.name_input.clear();
+        self.sem.similar = None;
+        self.sem.tag = None;
+        if !matches!(self.view, View::Grid | View::Masonry) {
+            self.set_view(View::Grid);
+        }
+        self.refilter();
+        self.scroll_to_current = true;
+    }
+
+    pub(crate) fn clear_person(&mut self) {
+        self.ppl.showing = None;
+        self.refilter();
+    }
+
+    pub(crate) fn name_person(&mut self, key: crate::people::GroupKey, name: String) {
+        self.people
+            .send(crate::people::Command::Name { group: key, name });
+    }
+
+    /// The faces of `photo` in the group shown aren't that person.
+    pub(crate) fn not_person(&mut self, photo: PhotoId) {
+        let Some(g) = self.ppl.shown_group() else {
+            return;
+        };
+        let crate::people::GroupKey::Person(person) = &g.key else {
+            return;
+        };
+        let Some(path) = self.photo(photo).map(|p| p.path.clone()) else {
+            return;
+        };
+        let faces: Vec<_> = g.faces.iter().filter(|f| f.path == path).cloned().collect();
+        self.people.send(crate::people::Command::NotPerson {
+            person: person.clone(),
+            faces,
+        });
+    }
+
+    pub(crate) fn forget_person(&mut self, person: String) {
+        self.people.send(crate::people::Command::Forget { person });
+        self.ppl.showing = None;
+        self.refilter();
+    }
+
+    /// Add `keyword` to every photo shown (the photos of a person).
+    pub(crate) fn keyword_shown(&mut self, keyword: &str) {
+        let primaries: Vec<PhotoId> = self
+            .shown
+            .iter()
+            .filter(|&&i| self.catalog.stacks[self.catalog.stack_of[i]].primary == i)
+            .map(|&i| self.ids[i])
+            .collect();
+        self.selection = primaries.iter().copied().collect();
+        if self.current.is_none_or(|c| !self.selection.contains(&c)) {
+            self.current = primaries.first().copied();
+        }
+        self.add_keyword(keyword);
+    }
+
+    /// People in a photo (its stack's primary): group index and label.
+    pub(crate) fn people_in(&self, id: PhotoId) -> Vec<(crate::people::GroupKey, String)> {
+        let (Some(view), Some(i)) = (&self.ppl.view, self.index(id)) else {
+            return Vec::new();
+        };
+        let primary = self.catalog.stacks[self.catalog.stack_of[i]].primary;
+        view.by_photo
+            .get(&self.ids[primary])
+            .into_iter()
+            .flatten()
+            .map(|&g| {
+                let g = &view.groups[g];
+                (g.key.clone(), self.ppl.label(g))
+            })
+            .collect()
+    }
+
+    /// People status (tests and the settings window).
+    pub fn people_status(&self) -> &crate::semantic::Status {
+        &self.ppl.status
+    }
+
+    /// Groups as (label, photo count), in the order listed (tests).
+    pub fn people_groups(&self) -> Vec<(String, usize)> {
+        self.ppl
+            .view
+            .as_ref()
+            .map(|v| {
+                v.groups
+                    .iter()
+                    .map(|g| (self.ppl.label(g), g.photos.len()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn retry_people(&mut self) {
+        self.ppl.retry(&self.people);
+    }
+
+    pub(crate) fn cancel_people_download(&mut self) {
+        self.people.send(crate::people::Command::CancelDownload);
+        let mut s = self.settings.clone();
+        s.people = false;
+        self.save_settings(s);
     }
 
     // --- semantic search -----------------------------------------------------
@@ -871,6 +1041,7 @@ impl ShoeboxApp {
         let primary = self.catalog.stacks[self.catalog.stack_of[i]].primary;
         self.sem.similar = Some((self.ids[primary], self.catalog.photos[primary].path.clone()));
         self.sem.tag = None;
+        self.ppl.showing = None;
         self.filter.search.clear();
         self.sem.results = None;
         if !matches!(self.view, View::Grid | View::Masonry) {
@@ -883,6 +1054,7 @@ impl ShoeboxApp {
     pub(crate) fn show_tag(&mut self, label: u16) {
         self.sem.tag = Some(label);
         self.sem.similar = None;
+        self.ppl.showing = None;
         self.sem.results = None;
         if !matches!(self.view, View::Grid | View::Masonry) {
             self.set_view(View::Grid);
@@ -1054,6 +1226,10 @@ impl ShoeboxApp {
             .and_then(|id| self.collection_members.get(id))
         {
             stacks.retain(|s| members.contains(s));
+        }
+        if let Some(g) = self.ppl.shown_group() {
+            let photos: HashSet<PhotoId> = g.photos.iter().copied().collect();
+            stacks.retain(|&s| photos.contains(&self.ids[self.catalog.stacks[s].primary]));
         }
         if semantic {
             // Best match first; nothing until the first results are in.
@@ -2277,6 +2453,7 @@ impl eframe::App for ShoeboxApp {
         self.textures.begin_frame();
         self.apply_events(&ctx);
         self.tick_semantic(&ctx);
+        self.tick_people();
         crate::updater::tick(&ctx, crate::jobs::working());
         self.handle_keys(&ctx);
         self.wanted.clear();

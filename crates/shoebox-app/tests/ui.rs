@@ -39,6 +39,11 @@ fn paths(tmp: &Path, roots: &[PathBuf]) -> AppPaths {
             dir: tmp.join("data/models"),
             staging: tmp.join("cache/model-download"),
         },
+        faces: shoebox_app::people::FaceSource::Download {
+            dir: tmp.join("data/models/faces"),
+            staging: tmp.join("cache/model-download"),
+        },
+        people: tmp.join("data/people.json"),
     }
 }
 
@@ -1842,5 +1847,193 @@ fn semantic_search_real_model() {
             start.elapsed().as_secs_f64() * 1e3
         );
         snapshot(&mut h, &format!("semantic-real-{i}"));
+    }
+}
+
+/// A stand-in for the face models: each half of the image that isn't grey
+/// is a "face", described by its colour.
+struct HalvesModel;
+
+static FACE_RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+impl shoebox_app::people::FaceModel for HalvesModel {
+    fn faces(
+        &mut self,
+        img: &shoebox_decode::Rgb8,
+    ) -> Result<Vec<shoebox_app::people::FoundFace>, String> {
+        FACE_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let w = img.width as usize;
+        let mut out = Vec::new();
+        for half in 0..2 {
+            let mut sum = [0f32; 3];
+            let mut n = 0f32;
+            for (i, px) in img.px.as_chunks::<3>().0.iter().enumerate() {
+                if (i % w) / (w / 2) == half {
+                    for c in 0..3 {
+                        sum[c] += f32::from(px[c]);
+                    }
+                    n += 1.0;
+                }
+            }
+            let m = (sum[0] + sum[1] + sum[2]) / 3.0;
+            let v = [sum[0] - m, sum[1] - m, sum[2] - m];
+            if v.iter().map(|x| x.abs()).fold(0.0, f32::max) / n > 30.0 {
+                out.push(([half as f32 * 0.5, 0.0, 0.5, 1.0], 0.95, unit(v)));
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// People end to end with a test model: groups, naming, the People
+/// keyword, "Not …", and names kept (faces not recomputed) after a restart.
+#[test]
+fn people_in_the_app() {
+    let t = tempfile::tempdir().unwrap();
+    let lib = t.path().join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    let (grey, red, blue, green) = ([128, 128, 128], [210, 40, 40], [40, 40, 210], [40, 200, 40]);
+    for (name, left, right) in [
+        ("a1.jpg", red, grey),
+        ("a2.jpg", red, grey),
+        ("a3.jpg", grey, red),
+        ("b1.jpg", blue, grey),
+        ("b2.jpg", blue, red),
+        ("b3.jpg", grey, blue),
+        ("c1.jpg", green, grey),
+        ("none.jpg", grey, grey),
+    ] {
+        let img =
+            image::RgbImage::from_fn(64, 48, |x, _| image::Rgb(if x < 32 { left } else { right }));
+        std::fs::write(lib.join(name), shoebox_fixtures::jpeg(&img, 95).unwrap()).unwrap();
+    }
+    let mut p = paths(t.path(), std::slice::from_ref(&lib));
+    p.faces = shoebox_app::people::FaceSource::Fixed(|| Box::new(HalvesModel));
+    let mut s = Settings::load(&p.settings).unwrap();
+    s.people = true;
+    s.save(&p.settings).unwrap();
+
+    let mut h = harness(p.clone(), egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+    wait_for(&mut h, Duration::from_secs(30), "faces", |a| {
+        a.people_groups().len() == 2
+    });
+    assert_eq!(FACE_RUNS.load(std::sync::atomic::Ordering::Relaxed), 8);
+    // Red is in four photos, blue in three; green's single face isn't listed.
+    assert_eq!(
+        h.state().people_groups(),
+        [("Unnamed 1".to_owned(), 4), ("Unnamed 2".to_owned(), 3)]
+    );
+    h.run_steps(3);
+
+    // Show the first group and name it.
+    h.get_by_label("Unnamed 1  4").click();
+    wait_for(&mut h, Duration::from_secs(10), "red photos", |a| {
+        a.shown_count() == 4
+    });
+    h.run_steps(3); // the toolbar now has the name field
+    h.get_all_by_role(egui::accesskit::Role::TextInput)
+        .next()
+        .unwrap()
+        .click();
+    h.run_steps(1);
+    h.event(egui::Event::Text("Ann".into()));
+    h.run_steps(1);
+    h.key_press(egui::Key::Enter);
+    wait_for(&mut h, Duration::from_secs(10), "named", |a| {
+        a.people_groups().first().is_some_and(|g| g.0 == "Ann")
+    });
+    assert!(t.path().join("data/people.json").exists());
+    assert_eq!(h.state().shown_count(), 4, "still showing Ann");
+    snapshot(&mut h, "people-1-ann");
+
+    // Her keyword, on all four (sidecars).
+    h.get_by_label("Add keyword to 4 photos").click();
+    wait_for(&mut h, Duration::from_secs(10), "keywords", |a| {
+        ["a1.jpg", "a2.jpg", "a3.jpg", "b2.jpg"]
+            .iter()
+            .all(|f| a.marks_of(f).is_some_and(|m| m.keywords == ["People|Ann"]))
+    });
+    assert!(lib.join("a3.jpg.xmp").exists());
+    assert!(
+        h.state()
+            .marks_of("b1.jpg")
+            .is_some_and(|m| m.keywords.is_empty())
+    );
+
+    // a3 isn't Ann.
+    h.get_by_label("a3.jpg").click_secondary();
+    h.run_steps(3);
+    h.get_by_label("Not Ann").click();
+    wait_for(&mut h, Duration::from_secs(10), "not Ann", |a| {
+        a.shown_count() == 3
+    });
+    assert_eq!(h.state().people_groups()[0], ("Ann".to_owned(), 3));
+    h.get_by_label("✖").click();
+    h.run_steps(2);
+    drop(h);
+
+    // A restart keeps the name and the correction, without finding faces again.
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+    wait_for(&mut h, Duration::from_secs(30), "people again", |a| {
+        a.people_groups().len() == 2
+    });
+    assert_eq!(h.state().people_groups()[0], ("Ann".to_owned(), 3));
+    assert_eq!(FACE_RUNS.load(std::sync::atomic::Ordering::Relaxed), 8);
+}
+
+/// People with the real face models on a folder of your test photos
+/// (copied). `cargo run --release -p shoebox-ml --example fetch -- <dir> <staging> faces`,
+/// then `SHOEBOX_FACES_MODEL=<dir> SHOEBOX_UI_PHOTOS=<folder>
+/// cargo test --release -p shoebox-app --test ui -- --ignored people_real`
+#[test]
+#[ignore]
+fn people_real_model() {
+    let (Some(model), Some(photos)) = (
+        std::env::var_os("SHOEBOX_FACES_MODEL"),
+        std::env::var_os("SHOEBOX_UI_PHOTOS"),
+    ) else {
+        eprintln!("set SHOEBOX_FACES_MODEL and SHOEBOX_UI_PHOTOS");
+        return;
+    };
+    let t = tempfile::tempdir().unwrap();
+    let lib = t.path().join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    for e in std::fs::read_dir(&photos).unwrap() {
+        let p = e.unwrap().path();
+        if p.is_file() {
+            std::fs::copy(&p, lib.join(p.file_name().unwrap())).unwrap();
+        }
+    }
+    let mut p = paths(t.path(), std::slice::from_ref(&lib));
+    p.faces = shoebox_app::people::FaceSource::Download {
+        dir: PathBuf::from(model),
+        staging: t.path().join("staging"),
+    };
+    let mut s = Settings::load(&p.settings).unwrap();
+    s.people = true;
+    s.save(&p.settings).unwrap();
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+    let start = Instant::now();
+    wait_for(&mut h, Duration::from_secs(300), "faces", |a| {
+        let s = a.people_status();
+        s.ready() && !s.indexing() && s.total > 0 && !a.people_groups().is_empty()
+    });
+    eprintln!(
+        "looked at {} photos in {:.1} s",
+        h.state().people_status().indexed,
+        start.elapsed().as_secs_f32()
+    );
+    for (label, n) in h.state().people_groups() {
+        eprintln!("{label}: {n} photos");
+    }
+    h.run_steps(3);
+    for (i, (label, n)) in h.state().people_groups().into_iter().enumerate() {
+        h.get_by_label(&format!("{label}  {n}")).click();
+        h.run_steps(4);
+        eprintln!("  {label}: {:?}", h.state().shown_names());
+        snapshot(&mut h, &format!("people-real-{i}"));
     }
 }

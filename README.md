@@ -34,6 +34,10 @@ deletes anything, and keeps a journal of every file operation it makes.
   find it; find photos similar to one; browse suggested tags (Things). Runs Google's SigLIP 2 model on
   your Mac (downloaded once, 1.5 GB, when you turn it on); your photos
   never leave it.
+- **People** (optional): faces found and grouped by likeness; name a group
+  to see all their photos and add a `People|Name` keyword. Runs OpenCV's
+  YuNet and SFace models on your Mac (39 MB, downloaded when you turn it
+  on).
 - **CLI:** `shoebox scan | dupes | apply | import | rename | history | undo |
   resume` for scripting the same operations.
 
@@ -90,6 +94,9 @@ contributors. Updates use [Sparkle](https://github.com/sparkle-project/Sparkle)
 (MIT; its licence ships in the app).
 Semantic search uses Google's
 [SigLIP 2](https://huggingface.co/google/siglip2-base-patch16-224) model
-(Apache-2.0; downloaded, not distributed) with
+(Apache-2.0; downloaded, not distributed), and faces OpenCV Zoo's
+[YuNet](https://huggingface.co/opencv/face_detection_yunet) (MIT) and
+[SFace](https://huggingface.co/opencv/face_recognition_sface) (Apache-2.0),
+both with
 [candle](https://github.com/huggingface/candle) (MIT or Apache-2.0; one crate
 vendored with a fix, see `vendor/README.md`).

@@ -61,6 +61,10 @@ pub fn toolbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 ui.add(egui::Spinner::new());
                 ui.label(task)
                     .on_hover_text("Semantic search (see Search in Settings)");
+            } else if let Some(task) = people_task(&app.ppl.status) {
+                ui.add(egui::Spinner::new());
+                ui.label(task)
+                    .on_hover_text("People (see People in Settings)");
             }
         });
     });
@@ -213,6 +217,10 @@ fn search_box(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         {
             app.clear_similar();
         }
+        return;
+    }
+    if let Some(g) = app.ppl.shown_group().cloned() {
+        person_bar(app, ui, &g);
         return;
     }
     if let Some(l) = app.sem.tag {
@@ -397,6 +405,7 @@ pub fn library(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     events_panel(app, ui);
     collections_panel(app, ui);
     smart_filters(app, ui);
+    people_panel(app, ui);
     things_panel(app, ui);
     ui.separator();
     ui.label(RichText::new("Tasks").strong());
@@ -668,6 +677,103 @@ fn event_node(
             }
         }
     });
+}
+
+/// The search bar while a person's photos are shown: their name (or a field
+/// to name them), the keyword button, and ✖.
+fn person_bar(app: &mut ShoeboxApp, ui: &mut egui::Ui, g: &crate::people::Group) {
+    use crate::people::GroupKey;
+    let label = app.ppl.label(g);
+    ui.label(format!("Person: {label}"));
+    let hint = if g.name.is_some() {
+        "Rename"
+    } else {
+        "Name this person"
+    };
+    let edit = ui.add(
+        egui::TextEdit::singleline(&mut app.ppl.name_input)
+            .hint_text(hint)
+            .desired_width(150.0),
+    );
+    if edit.lost_focus()
+        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+        && !app.ppl.name_input.trim().is_empty()
+    {
+        let name = std::mem::take(&mut app.ppl.name_input);
+        app.name_person(g.key.clone(), name);
+    }
+    if let (Some(name), GroupKey::Person(id)) = (&g.name, &g.key) {
+        let keyword = format!("People|{name}");
+        if ui
+            .button(format!("Add keyword to {} photos", g.photos.len()))
+            .on_hover_text(format!(
+                "Adds {} to these photos' sidecars (undoable)",
+                keyword.replace('|', " › ")
+            ))
+            .clicked()
+        {
+            app.keyword_shown(&keyword);
+        }
+        if ui
+            .small_button("Forget")
+            .on_hover_text("Forget this name (the faces stay, unnamed)")
+            .clicked()
+        {
+            app.forget_person(id.clone());
+        }
+    }
+    if ui
+        .small_button("✖")
+        .on_hover_text("Show all photos")
+        .clicked()
+    {
+        app.clear_person();
+    }
+}
+
+/// People found in the library (named first), with photo counts.
+fn people_panel(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    if !app.settings.people {
+        return;
+    }
+    let Some(view) = app.ppl.view.clone() else {
+        return;
+    };
+    if view.groups.is_empty() {
+        return;
+    }
+    ui.label(RichText::new("People").strong())
+        .on_hover_text("Faces grouped by likeness; click to see their photos and name them");
+    let all = app.ppl.all;
+    let mut chosen = None;
+    for g in view.groups.iter().take(if all { usize::MAX } else { 12 }) {
+        let sel = app.ppl.showing.as_ref() == Some(&g.key);
+        let text = format!("{}  {}", app.ppl.label(g), g.photos.len());
+        let text = if g.name.is_some() {
+            RichText::new(text)
+        } else {
+            RichText::new(text).italics()
+        };
+        if ui.selectable_label(sel, text).clicked() {
+            chosen = Some(if sel { None } else { Some(g.key.clone()) });
+        }
+    }
+    if view.groups.len() > 12
+        && ui
+            .link(if all {
+                "Show fewer".to_owned()
+            } else {
+                format!("Show all {}", view.groups.len())
+            })
+            .clicked()
+    {
+        app.ppl.all = !all;
+    }
+    match chosen {
+        Some(Some(k)) => app.show_person(k),
+        Some(None) => app.clear_person(),
+        None => {}
+    }
 }
 
 /// Suggested tags across the library (semantic search), with counts.
@@ -1095,6 +1201,25 @@ fn organise(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             }
         }
     });
+    if app.settings.people
+        && let Some(cur) = app.current
+    {
+        let people = app.people_in(cur);
+        if !people.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("People").weak());
+                for (key, label) in people {
+                    if ui
+                        .small_button(label)
+                        .on_hover_text("Show their photos")
+                        .clicked()
+                    {
+                        app.show_person(key);
+                    }
+                }
+            });
+        }
+    }
     if app.settings.semantic_search
         && let Some(cur) = app.current
     {
@@ -1221,6 +1346,24 @@ fn semantic_task(s: &crate::semantic::Status) -> Option<String> {
         M::Verifying | M::Converting => Some("Preparing search model".to_owned()),
         M::Ready if s.indexing() => Some(format!(
             "Indexing for search {}/{}",
+            s.indexed + s.skipped,
+            s.total
+        )),
+        _ => None,
+    }
+}
+
+/// What People is doing in the background, for the toolbar.
+fn people_task(s: &crate::semantic::Status) -> Option<String> {
+    use crate::semantic::ModelState as M;
+    match &s.model {
+        M::Downloading { done, total } => Some(format!(
+            "Downloading face models {}%",
+            done * 100 / (*total).max(1)
+        )),
+        M::Verifying | M::Converting => Some("Preparing face models".to_owned()),
+        M::Ready if s.indexing() => Some(format!(
+            "Finding faces {}/{}",
             s.indexed + s.skipped,
             s.total
         )),

@@ -1,7 +1,6 @@
-//! Fetch the model once, from a pinned Hugging Face revision, checking each
-//! file's SHA-256 before it's used. An interrupted download resumes. The
-//! float32 checkpoint is converted ([`crate::convert`]) and then removed:
-//! it's our own temporary file in the model folder.
+//! Fetch a model once, from pinned Hugging Face revisions, checking each
+//! file's SHA-256 before it's used. An interrupted download resumes. SigLIP's
+//! float32 checkpoint is converted ([`crate::convert`]) and then removed.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -12,55 +11,115 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 
 use crate::convert::{TEXT_FILE, VISION_FILE};
-use crate::{MODEL_ID, MlError, Result, io};
-
-const REPO: &str = "google/siglip2-base-patch16-224";
-const REVISION: &str = "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2";
+use crate::{MlError, Result, io};
 
 pub const TOKENIZER_FILE: &str = "tokenizer.json";
 const CHECKPOINT: &str = "model.safetensors";
-/// Written last: its presence (holding [`MODEL_ID`]) means the folder is complete.
+pub const YUNET_FILE: &str = "face_detection_yunet_2023mar.onnx";
+pub const SFACE_FILE: &str = "face_recognition_sface_2021dec.onnx";
+/// Written last: its presence (holding the model's id) means the folder is
+/// complete.
 const READY_FILE: &str = "READY";
 
-struct Remote {
+/// One file to fetch.
+pub struct Remote {
+    repo: &'static str,
+    revision: &'static str,
     name: &'static str,
     size: u64,
     sha256: &'static str,
 }
 
-const FILES: [Remote; 2] = [
-    Remote {
-        name: TOKENIZER_FILE,
-        size: 34_363_039,
-        sha256: "cb9140fae3ac5122c972d37adf83e1248471a38147ad76f8215c8872c6fd8322",
-    },
-    Remote {
-        name: CHECKPOINT,
-        size: 1_500_800_904,
-        sha256: "612923381c76ec5a9bed335d1c48827e3f2e506ac31b044b63b2031fadee6a0b",
-    },
-];
-
-/// Bytes to download.
-pub const DOWNLOAD_BYTES: u64 = FILES[0].size + FILES[1].size;
-
-/// Where the model came from, for the settings window.
-pub fn source() -> String {
-    format!("huggingface.co/{REPO}")
+impl Remote {
+    fn url(&self) -> String {
+        format!(
+            "https://huggingface.co/{}/resolve/{}/{}",
+            self.repo, self.revision, self.name
+        )
+    }
 }
 
-/// Is a complete model in `dir`?
-pub fn is_ready(dir: &Path) -> bool {
-    std::fs::read_to_string(dir.join(READY_FILE)).is_ok_and(|s| s.trim() == MODEL_ID)
-        && [VISION_FILE, TEXT_FILE, TOKENIZER_FILE]
-            .iter()
-            .all(|f| dir.join(f).is_file())
+/// A model: what to fetch, and what a complete folder holds.
+pub struct Spec {
+    /// Written to the READY file; a different id means "fetch again".
+    pub id: &'static str,
+    files: &'static [Remote],
+    /// Files a complete folder holds.
+    ready: &'static [&'static str],
+    /// Split SigLIP's checkpoint into half-precision halves.
+    convert: bool,
+}
+
+/// SigLIP 2 base (Google, Apache 2.0): semantic search and tags.
+pub const SIGLIP: Spec = Spec {
+    id: crate::MODEL_ID,
+    files: &[
+        Remote {
+            repo: "google/siglip2-base-patch16-224",
+            revision: "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2",
+            name: TOKENIZER_FILE,
+            size: 34_363_039,
+            sha256: "cb9140fae3ac5122c972d37adf83e1248471a38147ad76f8215c8872c6fd8322",
+        },
+        Remote {
+            repo: "google/siglip2-base-patch16-224",
+            revision: "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2",
+            name: CHECKPOINT,
+            size: 1_500_800_904,
+            sha256: "612923381c76ec5a9bed335d1c48827e3f2e506ac31b044b63b2031fadee6a0b",
+        },
+    ],
+    ready: &[VISION_FILE, TEXT_FILE, TOKENIZER_FILE],
+    convert: true,
+};
+
+/// OpenCV Zoo's YuNet (MIT) and SFace (Apache 2.0): people.
+pub const FACES: Spec = Spec {
+    id: crate::faces::MODEL_ID,
+    files: &[
+        Remote {
+            repo: "opencv/face_detection_yunet",
+            revision: "3cc26e7f1014a5ee5d74a42acee58bafc9d0a310",
+            name: YUNET_FILE,
+            size: 232_589,
+            sha256: "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4",
+        },
+        Remote {
+            repo: "opencv/face_recognition_sface",
+            revision: "3d7082438a6e4551e840c9b2bb60b71e8da4b524",
+            name: SFACE_FILE,
+            size: 38_696_353,
+            sha256: "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79",
+        },
+    ],
+    ready: &[YUNET_FILE, SFACE_FILE],
+    convert: false,
+};
+
+impl Spec {
+    /// Bytes to download.
+    pub fn bytes(&self) -> u64 {
+        self.files.iter().map(|f| f.size).sum()
+    }
+
+    /// Where it comes from, for the settings window.
+    pub fn source(&self) -> String {
+        let mut repos: Vec<&str> = self.files.iter().map(|f| f.repo).collect();
+        repos.dedup();
+        format!("huggingface.co/{}", repos.join(" and huggingface.co/"))
+    }
+
+    /// Is a complete copy in `dir`?
+    pub fn is_ready(&self, dir: &Path) -> bool {
+        std::fs::read_to_string(dir.join(READY_FILE)).is_ok_and(|s| s.trim() == self.id)
+            && self.ready.iter().all(|f| dir.join(f).is_file())
+    }
 }
 
 /// What [`fetch`] is doing, for a progress bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
-    /// Bytes downloaded of [`DOWNLOAD_BYTES`] (including earlier attempts).
+    /// Bytes downloaded of [`Spec::bytes`] (including earlier attempts).
     Downloading {
         done: u64,
     },
@@ -68,18 +127,19 @@ pub enum Stage {
     Converting,
 }
 
-/// Download, verify and convert the model into `dir`. Returns at once if
-/// it's already there. The download and conversion happen in `staging` (a
-/// folder in the app's cache directory: the float32 checkpoint is deleted
-/// there once converted); only the finished files move into `dir`.
-/// `cancel` stops it (a later call resumes).
+/// Download, verify (and for SigLIP convert) `spec` into `dir`. Returns at
+/// once if it's already there. The download and conversion happen in
+/// `staging` (a folder in the app's cache directory: SigLIP's float32
+/// checkpoint is deleted there once converted); only the finished files
+/// move into `dir`. `cancel` stops it (a later call resumes).
 pub fn fetch(
+    spec: &Spec,
     dir: &Path,
     staging: &Path,
     progress: &dyn Fn(Stage),
     cancel: &AtomicBool,
 ) -> Result<()> {
-    if is_ready(dir) {
+    if spec.is_ready(dir) {
         return Ok(());
     }
     for d in [dir, staging] {
@@ -93,9 +153,9 @@ pub fn fetch(
         .into();
     let converted = |d: &Path| d.join(VISION_FILE).is_file() && d.join(TEXT_FILE).is_file();
     let mut before = 0;
-    for f in &FILES {
+    for f in spec.files {
         let dst = staging.join(f.name);
-        let done = if f.name == CHECKPOINT {
+        let done = if spec.convert && f.name == CHECKPOINT {
             converted(staging) || converted(dir)
         } else {
             dir.join(f.name).is_file()
@@ -124,13 +184,15 @@ pub fn fetch(
     if cancel.load(Ordering::Relaxed) {
         return Err(MlError::Cancelled);
     }
-    progress(Stage::Converting);
-    let checkpoint = staging.join(CHECKPOINT);
-    if checkpoint.is_file() {
-        crate::convert::split_f16(&checkpoint, staging)?;
-        std::fs::remove_file(&checkpoint).map_err(io(&checkpoint))?;
+    if spec.convert {
+        progress(Stage::Converting);
+        let checkpoint = staging.join(CHECKPOINT);
+        if checkpoint.is_file() {
+            crate::convert::split_f16(&checkpoint, staging)?;
+            std::fs::remove_file(&checkpoint).map_err(io(&checkpoint))?;
+        }
     }
-    for name in [VISION_FILE, TEXT_FILE, TOKENIZER_FILE] {
+    for name in spec.ready {
         let from = staging.join(name);
         if from.is_file() {
             let to = dir.join(name);
@@ -138,7 +200,7 @@ pub fn fetch(
         }
     }
     let ready = dir.join(READY_FILE);
-    std::fs::write(&ready, MODEL_ID).map_err(io(&ready))?;
+    std::fs::write(&ready, spec.id).map_err(io(&ready))?;
     Ok(())
 }
 
@@ -163,10 +225,7 @@ fn get(
     if have == f.size {
         return Ok(());
     }
-    let url = format!(
-        "https://huggingface.co/{REPO}/resolve/{REVISION}/{}",
-        f.name
-    );
+    let url = f.url();
     let mut req = agent.get(&url);
     if have > 0 {
         req = req.header("Range", format!("bytes={have}-"));
@@ -236,15 +295,16 @@ mod tests {
     #[test]
     fn ready_needs_marker_and_files() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
-        assert!(!is_ready(dir.path()));
+        assert!(!SIGLIP.is_ready(dir.path()));
         for f in [VISION_FILE, TEXT_FILE, TOKENIZER_FILE] {
             std::fs::write(dir.path().join(f), b"x")?;
         }
-        assert!(!is_ready(dir.path()), "no marker yet");
+        assert!(!SIGLIP.is_ready(dir.path()), "no marker yet");
         std::fs::write(dir.path().join(READY_FILE), "some-other-model")?;
-        assert!(!is_ready(dir.path()), "marker for another model");
-        std::fs::write(dir.path().join(READY_FILE), MODEL_ID)?;
-        assert!(is_ready(dir.path()));
+        assert!(!SIGLIP.is_ready(dir.path()), "marker for another model");
+        std::fs::write(dir.path().join(READY_FILE), SIGLIP.id)?;
+        assert!(SIGLIP.is_ready(dir.path()));
+        assert!(!FACES.is_ready(dir.path()));
         Ok(())
     }
 
@@ -266,19 +326,15 @@ mod tests {
     #[ignore]
     fn resumes_partial_download() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
-        let f = &FILES[0];
+        let f = &SIGLIP.files[0];
         let part = dir.path().join("t.part");
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .build()
             .into();
         // First 1000 bytes, then resume.
-        let url = format!(
-            "https://huggingface.co/{REPO}/resolve/{REVISION}/{}",
-            f.name
-        );
         let mut first = agent
-            .get(&url)
+            .get(&f.url())
             .header("Range", "bytes=0-999")
             .call()?
             .into_body()

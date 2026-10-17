@@ -223,17 +223,69 @@ impl Semantic {
     }
 }
 
-/// One photo to embed.
-struct Item {
-    key: FileKey,
-    format: Format,
-    orientation: u16,
+/// One photo to analyse.
+pub(crate) struct Item {
+    pub key: FileKey,
+    pub format: Format,
+    pub orientation: u16,
 }
 
-struct Download {
-    progress: Receiver<shoebox_ml::download::Stage>,
-    done: Receiver<Result<(), String>>,
-    cancel: Arc<AtomicBool>,
+impl Item {
+    /// The photo, upright, long edge at most `long` (a NEF's preview).
+    pub fn decode(&self, long: u32) -> Option<Rgb8> {
+        let data = std::fs::read(&self.key.path).ok()?;
+        shoebox_decode::render(
+            self.format,
+            &data,
+            Some(long),
+            self.orientation,
+            Target::Srgb,
+        )
+        .ok()
+    }
+}
+
+/// Each stack's primary: what's analysed. Also its format and orientation.
+pub(crate) fn primaries(
+    catalog: &Catalog,
+) -> (
+    Vec<FileKey>,
+    std::collections::HashMap<PathBuf, (Format, u16)>,
+) {
+    let mut keys = Vec::with_capacity(catalog.stacks.len());
+    let mut formats = std::collections::HashMap::with_capacity(catalog.stacks.len());
+    for st in &catalog.stacks {
+        let p = &catalog.photos[st.primary];
+        keys.push(FileKey {
+            path: p.path.clone(),
+            size: p.size,
+            mtime_ns: p.mtime_ns,
+        });
+        formats.insert(p.path.clone(), (p.format, p.meta.orientation()));
+    }
+    (keys, formats)
+}
+
+/// A model download running on its own thread.
+pub(crate) struct Download {
+    pub progress: Receiver<shoebox_ml::download::Stage>,
+    pub done: Receiver<Result<(), String>>,
+    pub cancel: Arc<AtomicBool>,
+}
+
+impl Download {
+    /// The model state a progress message means.
+    pub fn state(spec: &shoebox_ml::download::Spec, s: shoebox_ml::download::Stage) -> ModelState {
+        use shoebox_ml::download::Stage;
+        match s {
+            Stage::Downloading { done } => ModelState::Downloading {
+                done,
+                total: spec.bytes(),
+            },
+            Stage::Verifying => ModelState::Verifying,
+            Stage::Converting => ModelState::Converting,
+        }
+    }
 }
 
 struct Worker<F: Fn(Event)> {
@@ -311,14 +363,7 @@ impl<F: Fn(Event)> Worker<F> {
                     Err(_) => return, // the app is gone
                 },
                 recv(progress) -> s => if let Ok(s) = s {
-                    self.status.model = match s {
-                        shoebox_ml::download::Stage::Downloading { done } => ModelState::Downloading {
-                            done,
-                            total: shoebox_ml::download::DOWNLOAD_BYTES,
-                        },
-                        shoebox_ml::download::Stage::Verifying => ModelState::Verifying,
-                        shoebox_ml::download::Stage::Converting => ModelState::Converting,
-                    };
+                    self.status.model = Download::state(&shoebox_ml::download::SIGLIP, s);
                     self.publish();
                 },
                 recv(done) -> r => {
@@ -419,7 +464,7 @@ impl<F: Fn(Event)> Worker<F> {
     /// Turned on: open the store, then get the model ready.
     fn start(&mut self) {
         if self.store.is_none() {
-            match Store::open(&self.db_path, shoebox_ml::MODEL_ID) {
+            match Store::open(&self.db_path, "image", shoebox_ml::MODEL_ID) {
                 Ok(s) => self.store = Some(s),
                 Err(e) => {
                     self.status.model = ModelState::Failed(e.to_string());
@@ -434,16 +479,17 @@ impl<F: Fn(Event)> Worker<F> {
                 self.model_ready();
             }
             ModelSource::Download { dir, staging } => {
-                if shoebox_ml::download::is_ready(&dir) {
+                if shoebox_ml::download::SIGLIP.is_ready(&dir) {
                     self.model = Some(siglip(dir));
                     self.model_ready();
                 } else if self.download.is_none() {
                     self.status.model = ModelState::Downloading {
                         done: 0,
-                        total: shoebox_ml::download::DOWNLOAD_BYTES,
+                        total: shoebox_ml::download::SIGLIP.bytes(),
                     };
                     self.publish();
-                    self.download = Some(start_download(dir, staging));
+                    self.download =
+                        Some(start_download(&shoebox_ml::download::SIGLIP, dir, staging));
                 }
             }
         }
@@ -469,17 +515,7 @@ impl<F: Fn(Event)> Worker<F> {
         let Some((catalog, complete)) = self.catalog.clone() else {
             return;
         };
-        let mut keys = Vec::with_capacity(catalog.stacks.len());
-        let mut formats = std::collections::HashMap::with_capacity(catalog.stacks.len());
-        for st in &catalog.stacks {
-            let p = &catalog.photos[st.primary];
-            keys.push(FileKey {
-                path: p.path.clone(),
-                size: p.size,
-                mtime_ns: p.mtime_ns,
-            });
-            formats.insert(p.path.clone(), (p.format, p.meta.orientation()));
-        }
+        let (keys, formats) = primaries(&catalog);
         self.status.total = keys.len();
         // Marks and other changes republish the catalog; only the files matter.
         if keys == self.keys {
@@ -493,13 +529,13 @@ impl<F: Fn(Event)> Worker<F> {
             Ok(r) => {
                 tracing::info!(
                     "embeddings: {} current, {} to compute, {} followed, {} removed ({:?})",
-                    r.index.len(),
+                    r.found.len(),
                     r.missing.len(),
                     r.followed,
                     r.removed,
                     t.elapsed()
                 );
-                self.index = r.index;
+                self.index = Index::from_rows(&r.found);
                 self.pending = r
                     .missing
                     .into_iter()
@@ -608,11 +644,8 @@ impl<F: Fn(Event)> Worker<F> {
     fn index_batch(&mut self) {
         let n = self.pending.len().min(BATCH);
         let batch: Vec<Item> = self.pending.drain(..n).collect();
-        let decode = |it: &Item| -> Option<Rgb8> {
-            let data = std::fs::read(&it.key.path).ok()?;
-            // Big enough that the square input isn't upsampled.
-            shoebox_decode::render(it.format, &data, Some(448), it.orientation, Target::Srgb).ok()
-        };
+        // Big enough that the square input isn't upsampled.
+        let decode = |it: &Item| it.decode(448);
         let decoded: Vec<Option<Rgb8>> = match &self.pool {
             Some(pool) => pool.install(|| batch.par_iter().map(decode).collect()),
             None => batch.iter().map(decode).collect(),
@@ -633,8 +666,9 @@ impl<F: Fn(Event)> Worker<F> {
                     .zip(vecs)
                     .map(|(it, v)| (it.key.clone(), Vector::quantise(&v)))
                     .collect();
+                let stored: Vec<_> = rows.iter().map(|(k, v)| (k.clone(), v.payload())).collect();
                 if let Some(store) = &mut self.store
-                    && let Err(e) = store.put(&rows)
+                    && let Err(e) = store.put(&stored)
                 {
                     tracing::warn!("embeddings: {e}");
                 }
@@ -662,7 +696,11 @@ fn siglip(dir: PathBuf) -> Box<dyn Model> {
     })
 }
 
-fn start_download(dir: PathBuf, staging: PathBuf) -> Download {
+pub(crate) fn start_download(
+    spec: &'static shoebox_ml::download::Spec,
+    dir: PathBuf,
+    staging: PathBuf,
+) -> Download {
     let (ptx, progress) = crossbeam_channel::unbounded();
     let (dtx, done) = crossbeam_channel::bounded(1);
     let cancel = Arc::new(AtomicBool::new(false));
@@ -671,6 +709,7 @@ fn start_download(dir: PathBuf, staging: PathBuf) -> Download {
         .name("model-download".into())
         .spawn(move || {
             let r = shoebox_ml::download::fetch(
+                spec,
                 &dir,
                 &staging,
                 &|s| {
@@ -698,12 +737,12 @@ fn start_download(dir: PathBuf, staging: PathBuf) -> Download {
 
 /// Where the model was downloaded from (for the settings window).
 pub fn model_source() -> String {
-    shoebox_ml::download::source()
+    shoebox_ml::download::SIGLIP.source()
 }
 
 /// Download size, for the settings window.
 pub fn download_bytes() -> u64 {
-    shoebox_ml::download::DOWNLOAD_BYTES
+    shoebox_ml::download::SIGLIP.bytes()
 }
 
 /// A semantic query.

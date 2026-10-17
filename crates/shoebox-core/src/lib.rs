@@ -16,6 +16,7 @@ pub mod marks;
 pub mod meta;
 pub mod organise;
 pub mod paths;
+pub mod people;
 pub mod pipeline;
 pub mod query;
 pub mod review;

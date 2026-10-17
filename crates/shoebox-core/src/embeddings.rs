@@ -23,7 +23,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::{CoreError, Result, io};
 
-const SCHEMA_VERSION: i64 = 1;
+/// 2: rows keyed by (kind, path), so image embeddings and faces share it.
+const SCHEMA_VERSION: i64 = 2;
 
 /// One embedding, quantised.
 #[derive(Debug, Clone, PartialEq)]
@@ -71,6 +72,25 @@ impl Vector {
             q: b.iter().map(|&x| x as i8).collect(),
         }
     }
+
+    /// As a stored row.
+    pub fn payload(&self) -> Payload {
+        Payload {
+            scale: self.scale,
+            data: self.to_blob(),
+        }
+    }
+
+    pub fn from_payload(p: &Payload) -> Self {
+        Self::from_blob(p.scale, &p.data)
+    }
+}
+
+/// What a row holds: a vector's scale and bytes, or (faces) anything.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Payload {
+    pub scale: f32,
+    pub data: Vec<u8>,
 }
 
 /// A file as the library sees it now.
@@ -90,6 +110,15 @@ pub struct Index {
 }
 
 impl Index {
+    /// An index of stored vectors (rows of [`Store::sync`]).
+    pub fn from_rows(rows: &[(PathBuf, Payload)]) -> Self {
+        let mut ix = Index::default();
+        for (p, r) in rows {
+            ix.insert(p.clone(), Vector::from_payload(r));
+        }
+        ix
+    }
+
     pub fn len(&self) -> usize {
         self.paths.len()
     }
@@ -265,17 +294,19 @@ impl Store {
     }
 }
 
-/// The embeddings database.
+/// The embeddings database: one row per file and *kind* of analysis
+/// ("image" embeddings, "faces"), each from a *model*.
 pub struct Store {
     conn: Connection,
+    kind: String,
     model: String,
 }
 
 /// What [`Store::sync`] found.
 #[derive(Debug, Default)]
 pub struct Sync {
-    /// Files with an up-to-date embedding.
-    pub index: Index,
+    /// Files with an up-to-date row, and the row.
+    pub found: Vec<(PathBuf, Payload)>,
     /// Files that need one, in the order given.
     pub missing: Vec<FileKey>,
     /// Rows given to a file's new path.
@@ -290,37 +321,45 @@ fn path_str(p: &Path) -> Result<&str> {
 }
 
 impl Store {
-    /// Open (or create) the database for embeddings from `model`. Rows from
-    /// other models are ignored, and removed by the next complete sync.
-    pub fn open(path: &Path, model: &str) -> Result<Self> {
+    /// Open (or create) the database for rows of `kind` from `model`. Rows
+    /// from other models of the kind are ignored, and replaced or removed
+    /// by later syncs.
+    pub fn open(path: &Path, kind: &str, model: &str) -> Result<Self> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(io(dir))?;
         }
-        Self::init(Connection::open(path)?, model)
+        Self::init(Connection::open(path)?, kind, model)
     }
 
-    pub fn open_in_memory(model: &str) -> Result<Self> {
-        Self::init(Connection::open_in_memory()?, model)
+    pub fn open_in_memory(kind: &str, model: &str) -> Result<Self> {
+        Self::init(Connection::open_in_memory()?, kind, model)
     }
 
-    fn init(conn: Connection, model: &str) -> Result<Self> {
+    fn init(conn: Connection, kind: &str, model: &str) -> Result<Self> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.busy_timeout(std::time::Duration::from_secs(10))?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version > SCHEMA_VERSION {
             return Err(CoreError::Invalid(format!(
                 "embeddings schema {version} is newer than this build ({SCHEMA_VERSION})"
             )));
         }
+        if version != 0 && version < SCHEMA_VERSION {
+            // Rebuildable: an older layout is recomputed, not converted.
+            conn.execute_batch("DROP TABLE IF EXISTS embeddings")?;
+        }
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS embeddings (
-                 path  TEXT PRIMARY KEY,
+                 kind  TEXT NOT NULL,
+                 path  TEXT NOT NULL,
                  size  INTEGER NOT NULL,
                  mtime INTEGER NOT NULL,
                  model TEXT NOT NULL,
                  scale REAL NOT NULL,
-                 vec   BLOB NOT NULL
+                 vec   BLOB NOT NULL,
+                 PRIMARY KEY (kind, path)
              );
-             CREATE INDEX IF NOT EXISTS embeddings_file ON embeddings(size, mtime);
+             CREATE INDEX IF NOT EXISTS embeddings_file ON embeddings(kind, size, mtime);
              CREATE TABLE IF NOT EXISTS labels (
                  model  TEXT NOT NULL,
                  prompt TEXT NOT NULL,
@@ -332,6 +371,7 @@ impl Store {
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(Self {
             conn,
+            kind: kind.to_owned(),
             model: model.to_owned(),
         })
     }
@@ -348,10 +388,10 @@ impl Store {
             vec: Vec<u8>,
         }
         let rows: Vec<Row> = {
-            let mut st = self
-                .conn
-                .prepare("SELECT path, size, mtime, model, scale, vec FROM embeddings")?;
-            st.query_map([], |r| {
+            let mut st = self.conn.prepare(
+                "SELECT path, size, mtime, model, scale, vec FROM embeddings WHERE kind = ?1",
+            )?;
+            st.query_map([&self.kind], |r| {
                 Ok(Row {
                     path: r.get(0)?,
                     size: r.get::<_, i64>(1)? as u64,
@@ -383,8 +423,13 @@ impl Store {
                 && r.mtime == f.mtime_ns
             {
                 used.insert(p);
-                out.index
-                    .insert(f.path.clone(), Vector::from_blob(r.scale, &r.vec));
+                out.found.push((
+                    f.path.clone(),
+                    Payload {
+                        scale: r.scale,
+                        data: r.vec.clone(),
+                    },
+                ));
                 continue;
             }
             let moved = orphans
@@ -395,24 +440,31 @@ impl Store {
                 Some(r) => {
                     used.insert(r.path.as_str());
                     moves.push((r.path.as_str(), &f.path));
-                    out.index
-                        .insert(f.path.clone(), Vector::from_blob(r.scale, &r.vec));
+                    out.found.push((
+                        f.path.clone(),
+                        Payload {
+                            scale: r.scale,
+                            data: r.vec.clone(),
+                        },
+                    ));
                 }
                 None => out.missing.push(f.clone()),
             }
         }
         let tx = self.conn.transaction()?;
         {
-            let mut mv = tx.prepare_cached("UPDATE embeddings SET path = ?2 WHERE path = ?1")?;
+            let mut mv =
+                tx.prepare_cached("UPDATE embeddings SET path = ?3 WHERE kind = ?1 AND path = ?2")?;
             for (from, to) in &moves {
-                mv.execute(params![from, path_str(to)?])?;
+                mv.execute(params![self.kind, from, path_str(to)?])?;
             }
             out.followed = moves.len();
             if complete {
-                let mut del = tx.prepare_cached("DELETE FROM embeddings WHERE path = ?1")?;
+                let mut del =
+                    tx.prepare_cached("DELETE FROM embeddings WHERE kind = ?1 AND path = ?2")?;
                 for r in &rows {
                     if !used.contains(r.path.as_str()) && !wanted.contains(Path::new(&r.path)) {
-                        del.execute([&r.path])?;
+                        del.execute(params![self.kind, r.path])?;
                         out.removed += 1;
                     }
                 }
@@ -422,22 +474,23 @@ impl Store {
         Ok(out)
     }
 
-    /// Store new embeddings (replacing any row for the same path).
-    pub fn put(&mut self, entries: &[(FileKey, Vector)]) -> Result<()> {
+    /// Store new rows (replacing any for the same path).
+    pub fn put(&mut self, entries: &[(FileKey, Payload)]) -> Result<()> {
         let tx = self.conn.transaction()?;
         {
             let mut st = tx.prepare_cached(
-                "INSERT OR REPLACE INTO embeddings(path, size, mtime, model, scale, vec)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT OR REPLACE INTO embeddings(kind, path, size, mtime, model, scale, vec)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?;
             for (f, v) in entries {
                 st.execute(params![
+                    self.kind,
                     path_str(&f.path)?,
                     f.size as i64,
                     f.mtime_ns,
                     self.model,
                     f64::from(v.scale),
-                    v.to_blob(),
+                    v.data,
                 ])?;
             }
         }
@@ -543,7 +596,7 @@ mod tests {
 
     #[test]
     fn label_vectors_are_stored() -> anyhow::Result<()> {
-        let mut s = Store::open_in_memory("m")?;
+        let mut s = Store::open_in_memory("image", "m")?;
         let prompts = vec!["a dog".to_owned(), "a cat".to_owned()];
         assert!(s.labels(&prompts)?.is_none());
         let v = Vector::quantise(&[0.6, 0.8]);
@@ -551,18 +604,22 @@ mod tests {
         assert!(s.labels(&prompts)?.is_none(), "one missing");
         s.put_labels(&[(prompts[1].clone(), v.clone())])?;
         assert_eq!(s.labels(&prompts)?, Some(vec![v.clone(), v]));
-        assert!(Store::open_in_memory("other")?.labels(&prompts)?.is_none());
+        assert!(
+            Store::open_in_memory("image", "other")?
+                .labels(&prompts)?
+                .is_none()
+        );
         Ok(())
     }
 
     #[test]
     fn sync_keeps_follows_and_prunes() -> anyhow::Result<()> {
-        let mut s = Store::open_in_memory("m1")?;
+        let mut s = Store::open_in_memory("image", "m1")?;
         let v = |x: f32| Vector::quantise(&unit(&[x, 1.0]));
         s.put(&[
-            (key("/lib/a.jpg", 10, 100), v(0.1)),
-            (key("/lib/b.jpg", 20, 200), v(0.2)),
-            (key("/lib/c.jpg", 30, 300), v(0.3)),
+            (key("/lib/a.jpg", 10, 100), v(0.1).payload()),
+            (key("/lib/b.jpg", 20, 200), v(0.2).payload()),
+            (key("/lib/c.jpg", 30, 300), v(0.3).payload()),
         ])?;
 
         // a unchanged, b renamed (same size and mtime), c edited, d new.
@@ -574,11 +631,9 @@ mod tests {
         ];
         let r = s.sync(&files, true)?;
         assert_eq!(r.followed, 1);
-        assert!(r.index.contains(Path::new("/lib/a.jpg")));
-        assert_eq!(
-            r.index.get(Path::new("/lib/2024/b-renamed.jpg")),
-            Some(&v(0.2))
-        );
+        let ix = Index::from_rows(&r.found);
+        assert!(ix.contains(Path::new("/lib/a.jpg")));
+        assert_eq!(ix.get(Path::new("/lib/2024/b-renamed.jpg")), Some(&v(0.2)));
         let missing: Vec<_> = r.missing.iter().map(|f| f.path.to_str().unwrap()).collect();
         assert_eq!(missing, ["/lib/c.jpg", "/lib/d.jpg"]);
         assert_eq!(
@@ -589,14 +644,14 @@ mod tests {
         // The rename stuck; a later sync finds b at its new path directly.
         let r = s.sync(&files, true)?;
         assert_eq!(r.followed, 0);
-        assert_eq!(r.index.len(), 2);
+        assert_eq!(r.found.len(), 2);
 
         // a leaves the library: an incomplete sync keeps its row, a complete one drops it.
         let rest = &files[1..];
         assert_eq!(s.sync(rest, false)?.removed, 0);
-        assert_eq!(s.sync(&files, true)?.index.len(), 2, "a is back");
+        assert_eq!(s.sync(&files, true)?.found.len(), 2, "a is back");
         assert_eq!(s.sync(rest, true)?.removed, 1);
-        assert_eq!(s.sync(&files, true)?.index.len(), 1, "a must be recomputed");
+        assert_eq!(s.sync(&files, true)?.found.len(), 1, "a must be recomputed");
         Ok(())
     }
 
@@ -605,13 +660,21 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let db = dir.path().join("embeddings.sqlite");
         let f = key("/lib/a.jpg", 10, 100);
-        Store::open(&db, "old")?.put(&[(f.clone(), Vector::quantise(&[1.0]))])?;
-        let mut s = Store::open(&db, "new")?;
+        let one = Vector::quantise(&[1.0]).payload();
+        Store::open(&db, "image", "old")?.put(&[(f.clone(), one.clone())])?;
+        let mut s = Store::open(&db, "image", "new")?;
         let r = s.sync(std::slice::from_ref(&f), true)?;
-        assert!(r.index.is_empty());
+        assert!(r.found.is_empty());
         assert_eq!(r.missing, std::slice::from_ref(&f));
-        s.put(&[(f.clone(), Vector::quantise(&[1.0]))])?;
-        assert_eq!(s.sync(&[f], true)?.index.len(), 1);
+        s.put(&[(f.clone(), one.clone())])?;
+        assert_eq!(s.sync(std::slice::from_ref(&f), true)?.found.len(), 1);
+
+        // Another kind of row for the same file is separate.
+        let mut faces = Store::open(&db, "faces", "f1")?;
+        assert_eq!(faces.sync(std::slice::from_ref(&f), true)?.missing.len(), 1);
+        faces.put(&[(f.clone(), one)])?;
+        assert_eq!(faces.sync(std::slice::from_ref(&f), true)?.found.len(), 1);
+        assert_eq!(s.sync(&[f], true)?.found.len(), 1, "image row kept");
         Ok(())
     }
 

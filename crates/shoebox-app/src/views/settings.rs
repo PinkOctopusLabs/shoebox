@@ -15,17 +15,19 @@ pub enum Tab {
     Sidecars,
     Naming,
     Search,
+    People,
     Map,
     Memory,
     Updates,
 }
 
 impl Tab {
-    const ALL: [Tab; 7] = [
+    const ALL: [Tab; 8] = [
         Tab::Library,
         Tab::Sidecars,
         Tab::Naming,
         Tab::Search,
+        Tab::People,
         Tab::Map,
         Tab::Memory,
         Tab::Updates,
@@ -37,6 +39,7 @@ impl Tab {
             Tab::Sidecars => "Sidecars",
             Tab::Naming => "Naming",
             Tab::Search => "Search",
+            Tab::People => "People",
             Tab::Map => "Map",
             Tab::Memory => "Memory",
             Tab::Updates => "Updates",
@@ -89,6 +92,7 @@ pub fn show(app: &mut ShoeboxApp, ctx: &egui::Context) {
                 Tab::Sidecars => sidecars(ui, &mut s),
                 Tab::Naming => naming(app, ui, &mut s),
                 Tab::Search => search(app, ui, &mut s),
+                Tab::People => people(app, ui, &mut s),
                 Tab::Map => map(ui, &mut s),
                 Tab::Memory => memory(app, ui, &mut s),
                 Tab::Updates => updates(ui),
@@ -316,6 +320,84 @@ fn search(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &mut Settings) {
             }
             if status.skipped > 0 {
                 ui.weak(format!("{} couldn't be read", status.skipped));
+            }
+        }
+    }
+}
+
+fn people(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &mut Settings) {
+    use crate::semantic::ModelState as M;
+    ui.checkbox(&mut s.people, "Find people in photos");
+    note(
+        ui,
+        "Shoebox finds the faces in your photos and groups them by likeness, so you \
+         can see all the photos of someone and give them a name. Names are kept in \
+         Shoebox's own folder, and added to photos as People keywords only when you \
+         ask. It uses OpenCV's YuNet and SFace models, which run on this Mac: your \
+         photos and faces never leave it.",
+    );
+    ui.add_space(8.0);
+    let mb = crate::people::download_bytes() as f64 / 1e6;
+    if !s.people {
+        note(
+            ui,
+            &format!(
+                "Turning this on downloads the face models ({mb:.0} MB) once, from {}.",
+                crate::people::model_source()
+            ),
+        );
+        return;
+    }
+    let status = app.ppl.status.clone();
+    match &status.model {
+        M::Off => {
+            ui.add(egui::Spinner::new());
+        }
+        M::Downloading { done, total } => {
+            ui.label(format!("Downloading the face models ({mb:.0} MB, once)"));
+            ui.add(egui::ProgressBar::new(*done as f32 / (*total).max(1) as f32).show_percentage());
+            if ui.button("Cancel").clicked() {
+                app.cancel_people_download();
+                s.people = false;
+            }
+        }
+        M::Verifying | M::Converting => {
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::new());
+                ui.label("Checking the download…");
+            });
+        }
+        M::Failed(e) => {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!("Couldn't get the face models: {e}"),
+            );
+            if ui.button("Try Again").clicked() {
+                app.retry_people();
+            }
+        }
+        M::Ready => {
+            let done = status.indexed + status.skipped;
+            if status.indexing() {
+                ui.label(format!(
+                    "Finding faces: {} of {} photos",
+                    done, status.total
+                ));
+                ui.add(
+                    egui::ProgressBar::new(done as f32 / status.total.max(1) as f32)
+                        .show_percentage(),
+                );
+            } else {
+                ui.label(format!("Ready: {} photos looked at.", status.indexed));
+            }
+            if let Some(v) = &app.ppl.view {
+                let named = v.groups.iter().filter(|g| g.name.is_some()).count();
+                ui.weak(format!(
+                    "{} faces; {} named, {} unnamed groups",
+                    v.faces,
+                    named,
+                    v.groups.len() - named
+                ));
             }
         }
     }
