@@ -3,6 +3,26 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-17 — M6 Map
+- **Tiles**: OpenStreetMap through the `walkers` egui map widget (the
+  person chose online, cached tiles). Tiles cache under the app's Caches
+  folder (`…/Caches/<bundle id>/tiles`), honouring HTTP expiry as OSM's tile
+  policy asks; the User-Agent names Shoebox and nothing else. The tile
+  server sees which map areas are viewed, never photos or file data. The map
+  shows the "© OpenStreetMap contributors" credit. Tests run with tiles off
+  (no network); `SHOEBOX_UI_TILES` opts the real-library test in.
+- `walkers` brings reqwest/tokio and rustls with aws-lc (C) for HTTPS: an
+  exception to "prefer pure Rust", as any HTTPS client needs native crypto.
+- **GPS** comes from EXIF (`GPSLatitude`/`Longitude` + refs); 0,0 counts as
+  no fix. Cached in the `exif` table (cache schema 6: the first start after
+  updating rescans once, and unseen-change badges reset). A stack uses its
+  primary's position, else any member's. GPS in sidecars isn't read yet.
+- **Markers** are photo thumbnails with a count, grouped by 60-point screen
+  cells (regrouped as you zoom). Click selects the group's photos;
+  double-click zooms into a group or opens a single photo in the loupe. The
+  map follows the grid's filters, folder, event and collection, and opens
+  fitted to all located photos. Info panel: Location row + Show on Map.
+
 ## 2026-10-17 — M6 Timeline
 - Follows the grid: the same filters, folder, event, collection and sort
   (descending sort gives newest first), one entry per stack.

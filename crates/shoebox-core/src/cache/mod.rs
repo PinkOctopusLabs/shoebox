@@ -54,7 +54,7 @@ fn label_from(s: Option<String>) -> Option<Label> {
     s.and_then(|s| Label::ALL.into_iter().find(|l| l.name() == s))
 }
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// Rebuildable tables, dropped when the schema version changes.
 /// `dupe_ignores` holds user decisions and is never dropped.
@@ -150,7 +150,7 @@ impl Cache {
                 "SELECT f.id, f.blake3, f.image_data_hash, f.width, f.height, f.analyze_error,
                         f.luma_stddev,
                         e.capture_time, e.subsec, e.offset, e.make, e.model, e.serial, e.lens,
-                        e.focal, e.fnumber, e.exposure, e.iso, e.orientation
+                        e.focal, e.fnumber, e.exposure, e.iso, e.orientation, e.gps_lat, e.gps_lon
                  FROM files f LEFT JOIN exif e ON e.file_id = f.id
                  WHERE f.root_id = ?1 AND f.rel_path = ?2 AND f.size = ?3 AND f.mtime = ?4
                    AND f.analyzer_version = ?5",
@@ -177,6 +177,9 @@ impl Cache {
                             exposure: r.get(16)?,
                             iso: r.get(17)?,
                             orientation: r.get(18)?,
+                            gps: r
+                                .get::<_, Option<f64>>(19)?
+                                .zip(r.get::<_, Option<f64>>(20)?),
                         },
                     ))
                 },
@@ -230,8 +233,9 @@ impl Cache {
             )?;
             let mut exif = tx.prepare_cached(
                 "INSERT OR REPLACE INTO exif(file_id, capture_time, subsec, offset, make, model,
-                    serial, lens, focal, fnumber, exposure, iso, width, height, orientation)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                    serial, lens, focal, fnumber, exposure, iso, width, height, orientation,
+                    gps_lat, gps_lon)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             )?;
             let mut marks = tx.prepare_cached(
                 "INSERT OR REPLACE INTO marks(file_id, rating, pick, label, keywords, sidecar, sidecar_sig, event)
@@ -269,6 +273,8 @@ impl Cache {
                     m.width,
                     m.height,
                     x.orientation,
+                    x.gps.map(|g| g.0),
+                    x.gps.map(|g| g.1),
                 ])?;
                 let k = e.marks;
                 marks.execute(params![
@@ -314,7 +320,7 @@ impl Cache {
                     e.capture_time, e.subsec, e.offset, e.make, e.model, e.serial, e.lens,
                     e.focal, e.fnumber, e.exposure, e.iso, e.orientation,
                     k.rating, k.pick, k.label, k.keywords, k.sidecar, k.sidecar_sig, k.event,
-                    f.changed_at, f.change_source
+                    f.changed_at, f.change_source, e.gps_lat, e.gps_lon
              FROM files f LEFT JOIN exif e ON e.file_id = f.id
                           LEFT JOIN marks k ON k.file_id = f.id
              WHERE f.root_id = ?1 AND f.meta_version = ?2",
@@ -348,6 +354,9 @@ impl Cache {
                             exposure: r.get(14)?,
                             iso: r.get(15)?,
                             orientation: r.get(16)?,
+                            gps: r
+                                .get::<_, Option<f64>>(26)?
+                                .zip(r.get::<_, Option<f64>>(27)?),
                         },
                     },
                     marks: match r.get::<_, Option<u8>>(17)? {
@@ -495,8 +504,9 @@ impl Cache {
             )?;
             let mut exif = tx.prepare_cached(
                 "INSERT OR REPLACE INTO exif(file_id, capture_time, subsec, offset, make, model,
-                    serial, lens, focal, fnumber, exposure, iso, width, height, orientation)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                    serial, lens, focal, fnumber, exposure, iso, width, height, orientation,
+                    gps_lat, gps_lon)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             )?;
             let mut clear = tx.prepare_cached("DELETE FROM phash WHERE file_id = ?1")?;
             let mut ph = tx.prepare_cached(
@@ -539,6 +549,8 @@ impl Cache {
                     a.width,
                     a.height,
                     x.orientation,
+                    x.gps.map(|g| g.0),
+                    x.gps.map(|g| g.1),
                 ])?;
                 clear.execute([id])?;
                 for (rot, h) in a.hashes.iter().enumerate() {

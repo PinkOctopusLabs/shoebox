@@ -19,6 +19,13 @@ pub fn toolbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 app.set_view(v);
             }
         }
+        if ui
+            .selectable_label(app.view == View::Map, "Map")
+            .on_hover_text("Photos with a location")
+            .clicked()
+        {
+            app.set_view(View::Map);
+        }
         ui.separator();
         ui.label("Size");
         ui.add(egui::Slider::new(&mut app.thumb_size, 96.0..=512.0).show_value(false));
@@ -809,6 +816,21 @@ pub fn info(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 && ui.small_button("Show in History").clicked()
             {
                 app.show_batch(batch);
+            }
+        });
+    }
+    if let Some((lat, lon)) = photo.meta.exif.gps {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Location").weak());
+            ui.label(format!(
+                "{:.5}° {}, {:.5}° {}",
+                lat.abs(),
+                if lat < 0.0 { "S" } else { "N" },
+                lon.abs(),
+                if lon < 0.0 { "W" } else { "E" }
+            ));
+            if ui.small_button("Show on Map").clicked() {
+                crate::views::map::show_on_map(app, id);
             }
         });
     }

@@ -342,9 +342,39 @@ pub fn nef(embedded_jpeg: &[u8], dims: (u32, u32), small_jpeg: &[u8], shot: &Sho
 
 /// Insert an EXIF APP1 segment straight after SOI.
 pub fn with_exif(jpeg: &[u8], shot: &Shot) -> Vec<u8> {
+    with_exif_gps(jpeg, shot, None)
+}
+
+/// [`with_exif`] plus a GPS position (degrees; south and west negative).
+pub fn with_exif_gps(jpeg: &[u8], shot: &Shot, gps: Option<(f64, f64)>) -> Vec<u8> {
     let mut w = TiffWriter::new();
     let exif = exif_entries(&mut w, shot);
-    let ifd0 = w.ifd(ifd0_camera(shot, exif), 0);
+    let mut tags = ifd0_camera(shot, exif);
+    if let Some((lat, lon)) = gps {
+        // Degrees, minutes and seconds (hundredths) as rationals.
+        let dms = |v: f64| {
+            let v = v.abs();
+            let d = v.floor();
+            let m = ((v - d) * 60.0).floor();
+            let s = ((v - d) * 60.0 - m) * 60.0;
+            Val::Rational(vec![
+                (d as u32, 1),
+                (m as u32, 1),
+                ((s * 100.0).round() as u32, 100),
+            ])
+        };
+        let gps_ifd = w.ifd(
+            vec![
+                (0x0001, Val::Ascii(if lat < 0.0 { "S" } else { "N" }.into())),
+                (0x0002, dms(lat)),
+                (0x0003, Val::Ascii(if lon < 0.0 { "W" } else { "E" }.into())),
+                (0x0004, dms(lon)),
+            ],
+            0,
+        );
+        tags.push((0x8825, Val::Long(vec![gps_ifd])));
+    }
+    let ifd0 = w.ifd(tags, 0);
     let tiff = w.finish(ifd0);
     let mut app1 = b"Exif\0\0".to_vec();
     app1.extend(tiff);

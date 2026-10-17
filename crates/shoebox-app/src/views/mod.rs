@@ -6,6 +6,7 @@ pub mod files;
 pub mod filmstrip;
 pub mod grid;
 pub mod loupe;
+pub mod map;
 pub mod masonry;
 pub mod survey;
 pub mod timeline;

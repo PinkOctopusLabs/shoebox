@@ -30,6 +30,7 @@ crossbeam-channel = "0.5.17"
 notify = "8.2.0"
 blake3 = "1.8.7"
 jiff = "0.2.38"
+walkers = "0.63.0"
 
 [dev-dependencies]
 egui_kittest = { version = "0.37.0", features = ["eframe", "snapshot", "wgpu"] }

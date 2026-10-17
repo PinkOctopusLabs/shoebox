@@ -45,7 +45,9 @@ CREATE TABLE IF NOT EXISTS exif (
     width         INTEGER,
     height        INTEGER,
     orientation   INTEGER,
-    shutter_count INTEGER
+    shutter_count INTEGER,
+    gps_lat       REAL,
+    gps_lon       REAL
 );
 
 -- Effective culling marks (sidecar > embedded XMP > EXIF), and a signature

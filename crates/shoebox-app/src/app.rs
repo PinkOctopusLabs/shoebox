@@ -37,6 +37,8 @@ pub enum View {
     Import,
     /// Tasks → History: every batch, with undo.
     History,
+    /// Photos with a GPS position on a map.
+    Map,
 }
 
 impl View {
@@ -161,6 +163,8 @@ pub struct AppPaths {
     pub thumbs: PathBuf,
     /// Trash folder instead of the system Trash (tests only).
     pub trash_dir: Option<PathBuf>,
+    /// Map tile cache; None turns map tiles (and the network) off.
+    pub tile_cache: Option<PathBuf>,
 }
 
 impl AppPaths {
@@ -173,6 +177,7 @@ impl AppPaths {
             journal: shoebox_core::paths::journal_db(&data),
             thumbs: cache.join("thumbs"),
             trash_dir: None,
+            tile_cache: Some(cache.join("tiles")),
         })
     }
 }
@@ -283,11 +288,13 @@ pub struct ShoeboxApp {
     /// A short note for the status bar (what the last operation did).
     pub(crate) notice: Option<String>,
     pub(crate) timeline: views::timeline::State,
+    pub(crate) map: views::map::State,
 }
 
 impl ShoeboxApp {
     pub fn new(cc: &eframe::CreationContext<'_>, paths: AppPaths) -> Self {
         let ctx = &cc.egui_ctx;
+        let tile_cache = paths.tile_cache.clone();
         let display = crate::display::DisplayTagger::new(cc);
         let target = crate::display::DisplayTagger::target(display.as_ref());
         tracing::info!("rendering images in {target:?}");
@@ -374,6 +381,7 @@ impl ShoeboxApp {
             collection_edit: None,
             notice: None,
             timeline: views::timeline::State::default(),
+            map: views::map::State::new(tile_cache),
         }
     }
 
@@ -1470,6 +1478,11 @@ impl ShoeboxApp {
         ))
     }
 
+    /// Photos placed on the map (tests).
+    pub fn located_count(&self) -> usize {
+        self.map.located()
+    }
+
     /// File name of the current photo (tests).
     pub fn current_name(&self) -> Option<String> {
         self.current.and_then(|c| self.name_of(c))
@@ -2017,6 +2030,7 @@ impl eframe::App for ShoeboxApp {
                 View::Import => views::files::import(self, ui),
                 View::History => views::files::history(self, ui),
                 View::Timeline => views::timeline::show(self, ui),
+                View::Map => views::map::show(self, ui),
             }
         });
         views::duplicates::apply_dialog(self, &ctx);

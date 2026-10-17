@@ -31,6 +31,7 @@ fn paths(tmp: &Path, roots: &[PathBuf]) -> AppPaths {
         journal: tmp.join("data/journal.sqlite"),
         thumbs: tmp.join("cache/thumbs"),
         trash_dir: Some(tmp.join("trash")),
+        tile_cache: None, // no network in tests
     }
 }
 
@@ -229,7 +230,9 @@ fn real_library() {
         return;
     };
     let t = tempfile::tempdir().unwrap();
-    let p = paths(t.path(), &[lib]);
+    let mut p = paths(t.path(), &[lib]);
+    // Opt in to real map tiles (network): SHOEBOX_UI_TILES=<cache dir>.
+    p.tile_cache = std::env::var_os("SHOEBOX_UI_TILES").map(PathBuf::from);
     let mut h = harness(p, egui::vec2(1600.0, 1000.0));
     let open = Instant::now();
     settle(&mut h, Duration::from_secs(600));
@@ -283,6 +286,15 @@ fn real_library() {
         frames[29]
     );
     snapshot(&mut h, "real-4-timeline");
+    // Map: give tiles a few seconds to arrive.
+    h.get_by_label("Map").click();
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_secs(8) {
+        h.step();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    eprintln!("map: {} located", h.state().located_count());
+    snapshot(&mut h, "real-5-map");
 }
 
 /// Marking through the keyboard writes sidecars, undo restores them, and
@@ -1132,4 +1144,73 @@ fn timeline_groups_days_and_jumps_to_grid() {
         "{current}"
     );
     assert_eq!(h.state().selected_count(), 1);
+}
+
+/// M6 Map: located photos become markers (nearby ones grouped); clicking a
+/// marker selects its photos; Show on Map from the Info panel. No tiles
+/// (no network) in tests.
+#[test]
+fn map_places_located_photos() {
+    let t = tempfile::tempdir().unwrap();
+    let lib = t.path().join("lib");
+    shoebox_fixtures::build_library(&lib).unwrap();
+    let shot = shoebox_fixtures::Shot {
+        datetime: "2026:06:01 12:00:00",
+        subsec: "90",
+        orientation: 1,
+        serial: "1",
+    };
+    let geo = lib.join("scan/geo");
+    std::fs::create_dir_all(&geo).unwrap();
+    for (i, (name, lat, lon)) in [
+        ("sydney-a.jpg", -33.85678, 151.21530),
+        ("sydney-b.jpg", -33.85588, 151.21530), // 100 m away
+        ("paris.jpg", 48.85826, 2.29450),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let img = shoebox_fixtures::scene(10 + i as u64, 600, 400);
+        let jpg = shoebox_fixtures::jpeg(&img, 85).unwrap();
+        let s = shoebox_fixtures::Shot {
+            subsec: ["10", "20", "30"][i],
+            ..shot.clone()
+        };
+        std::fs::write(
+            geo.join(name),
+            shoebox_fixtures::with_exif_gps(&jpg, &s, Some((lat, lon))),
+        )
+        .unwrap();
+    }
+    let p = paths(t.path(), &[lib.join("ref"), lib.join("scan")]);
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+
+    h.get_by_label("Map").click();
+    h.run_steps(3);
+    assert_eq!(h.state().view_name(), View::Map);
+    assert_eq!(h.state().located_count(), 3);
+    settle(&mut h, Duration::from_secs(30));
+    snapshot(&mut h, "24-map");
+    // Fitted to Sydney and Paris, the two Sydney photos share a marker.
+    assert!(h.query_by_label("paris.jpg").is_some());
+    let sydney: Vec<_> = ["sydney-a.jpg", "sydney-b.jpg"]
+        .iter()
+        .filter(|n| h.query_by_label(n).is_some())
+        .collect();
+    assert_eq!(sydney.len(), 1, "one marker for both Sydney photos");
+    h.get_by_label(sydney[0]).click();
+    h.run_steps(2);
+    assert_eq!(h.state().selected_count(), 2);
+
+    // Info panel → Show on Map centres on one photo, close enough to split
+    // the Sydney pair.
+    h.key_press(egui::Key::G);
+    h.run_steps(2);
+    h.state_mut().select_names(&["paris.jpg"]);
+    h.run_steps(2);
+    h.get_by_label("Show on Map").click();
+    h.run_steps(3);
+    assert_eq!(h.state().view_name(), View::Map);
+    assert!(h.query_by_label("paris.jpg").is_some());
 }
