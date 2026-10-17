@@ -59,6 +59,8 @@ CREATE TABLE IF NOT EXISTS marks (
     label       TEXT,
     keywords    TEXT NOT NULL,
     event       TEXT,
+    gps_lat_e7  INTEGER,
+    gps_lon_e7  INTEGER,
     sidecar     TEXT,
     sidecar_sig TEXT NOT NULL
 );

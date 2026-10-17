@@ -316,6 +316,7 @@ mod tests {
                 label: None,
                 keywords: kw.iter().map(|s| (*s).to_owned()).collect(),
                 event: None,
+                gps_e7: None,
             },
             sidecar: None,
             sidecar_sig: String::new(),

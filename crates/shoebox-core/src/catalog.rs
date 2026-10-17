@@ -36,6 +36,12 @@ pub struct Photo {
 }
 
 impl Photo {
+    /// Where it was taken: the sidecar's location (added or corrected in
+    /// another app) over the camera's EXIF.
+    pub fn location(&self) -> Option<(f64, f64)> {
+        self.marks.gps().or(self.meta.exif.gps)
+    }
+
     /// Latest sidecar modification time (ns), if it has a sidecar.
     pub fn sidecar_mtime_ns(&self) -> Option<i64> {
         crate::changes::sig_mtime(&self.sidecar_sig)

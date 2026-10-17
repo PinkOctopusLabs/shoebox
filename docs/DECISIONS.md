@@ -3,6 +3,19 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-17 — Shutter count, GPS from sidecars
+- **Shutter count:** ShutterCount (tag 0xA7) from a Nikon type-3
+  MakerNote ("Nikon\0", version, then a TIFF header its offsets count
+  from). It's a plain LONG (Nikon uses it as a key to encrypt other tags).
+  Read from the first 256 KB like other metadata; the real Z f NEF and JPG
+  both carry it. A TIFF export has no MakerNote, so the info panel shows the
+  stack's NEF or JPG count. No ExifTool fallback (other makes stay blank).
+- **GPS from sidecars:** `exif:GPSLatitude` / `GPSLongitude` in a sidecar
+  ("DDD,MM.mmmmN", "DDD,MM,SSN" or decimal), as digiKam and Lightroom write
+  a location you add, are read with the marks (re-read when the sidecar
+  changes) and win over the camera's EXIF: they're usually a correction.
+  Never written. The map and info panel use the result. Cache schema 7.
+
 ## 2026-10-17 — Lightroom-style layout
 Following Lightroom's Library module:
 - **Top bar, one row:** what's shown (scope chips, search, rating, flag,

@@ -110,6 +110,7 @@ fn marks_round_trip_through_sidecars_and_rescans() {
         label: Some(Label::Blue),
         keywords: vec!["Places|Italy|Rome".into()],
         event: None,
+        gps_e7: None,
     };
     let batch = c
         .set_marks(&[(i, new.clone())], vec![], &fo, &cache, false, "test")

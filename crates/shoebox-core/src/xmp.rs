@@ -29,6 +29,7 @@ pub const NS_LR: &str = "http://ns.adobe.com/lightroom/1.0/";
 pub const NS_DIGIKAM: &str = "http://www.digikam.org/ns/1.0/";
 pub const NS_IPTC_EXT: &str = "http://iptc.org/std/Iptc4xmpExt/2008-02-29/";
 pub const NS_SHOEBOX: &str = "http://ns.crankyunicorn.com/shoebox/1.0/";
+pub const NS_EXIF: &str = "http://ns.adobe.com/exif/1.0/";
 
 /// Preferred prefixes when we have to declare a namespace ourselves.
 fn default_prefix(ns: &str) -> &'static str {
@@ -54,10 +55,13 @@ pub enum Prop {
     HierarchicalSubject,
     TagsList,
     Event,
+    /// A location added in another app (read, never written).
+    GpsLatitude,
+    GpsLongitude,
 }
 
 impl Prop {
-    pub const ALL: [Prop; 9] = [
+    pub const ALL: [Prop; 11] = [
         Prop::Rating,
         Prop::PickLabel,
         Prop::Pick,
@@ -67,6 +71,8 @@ impl Prop {
         Prop::HierarchicalSubject,
         Prop::TagsList,
         Prop::Event,
+        Prop::GpsLatitude,
+        Prop::GpsLongitude,
     ];
 
     fn ns(self) -> &'static str {
@@ -77,6 +83,7 @@ impl Prop {
             Prop::Subject => NS_DC,
             Prop::HierarchicalSubject => NS_LR,
             Prop::Event => NS_IPTC_EXT,
+            Prop::GpsLatitude | Prop::GpsLongitude => NS_EXIF,
         }
     }
 
@@ -91,6 +98,8 @@ impl Prop {
             Prop::HierarchicalSubject => "hierarchicalSubject",
             Prop::TagsList => "TagsList",
             Prop::Event => "Event",
+            Prop::GpsLatitude => "GPSLatitude",
+            Prop::GpsLongitude => "GPSLongitude",
         }
     }
 

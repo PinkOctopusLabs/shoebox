@@ -111,7 +111,7 @@ fn build(app: &mut ShoeboxApp) {
         }
         // The primary's position, else any member's (a JPG may have GPS
         // when its export doesn't).
-        let gps = st.all().find_map(|m| app.catalog.photos[m].meta.exif.gps);
+        let gps = st.all().find_map(|m| app.catalog.photos[m].location());
         if let Some((lat, lon)) = gps {
             points.push(Point { pos, lat, lon });
         }
@@ -179,9 +179,7 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         app.map.fit = false;
     }
     if let Some(id) = app.map.focus.take()
-        && let Some((lat, lon)) = app
-            .index(id)
-            .and_then(|i| app.catalog.photos[i].meta.exif.gps)
+        && let Some((lat, lon)) = app.index(id).and_then(|i| app.catalog.photos[i].location())
     {
         app.map.memory.center_at(lat_lon(lat, lon));
         let _ = app.map.memory.set_zoom(15.0);

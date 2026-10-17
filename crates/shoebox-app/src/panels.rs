@@ -1181,7 +1181,7 @@ fn details(app: &mut ShoeboxApp, ui: &mut egui::Ui, id: crate::jobs::PhotoId, id
             }
         });
     }
-    if let Some((lat, lon)) = photo.meta.exif.gps {
+    if let Some((lat, lon)) = photo.location() {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Location").weak());
             ui.label(format!(

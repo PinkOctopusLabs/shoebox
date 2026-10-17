@@ -79,11 +79,20 @@ pub struct Marks {
     pub keywords: Vec<String>,
     /// `Iptc4xmpExt:Event`: the innermost event the photo belongs to.
     pub event: Option<String>,
+    /// A location from the sidecar (`exif:GPSLatitude`/`GPSLongitude`, as
+    /// digiKam or Lightroom write it), in 1e-7 degrees. Read, never written.
+    pub gps_e7: Option<(i32, i32)>,
 }
 
 impl Marks {
     pub fn is_empty(&self) -> bool {
         *self == Marks::default()
+    }
+
+    /// The sidecar's location in degrees (north and east positive).
+    pub fn gps(&self) -> Option<(f64, f64)> {
+        self.gps_e7
+            .map(|(a, b)| (f64::from(a) / 1e7, f64::from(b) / 1e7))
     }
 
     /// Interpret the owned properties of a sidecar (or embedded XMP).
@@ -150,6 +159,9 @@ impl Marks {
                 .get(&Prop::Event)
                 .and_then(Value::first)
                 .filter(|e| !e.trim().is_empty()),
+            gps_e7: xmp_gps(text(Prop::GpsLatitude).as_deref(), 'S')
+                .zip(xmp_gps(text(Prop::GpsLongitude).as_deref(), 'W'))
+                .map(|(a, b)| ((a * 1e7).round() as i32, (b * 1e7).round() as i32)),
         }
     }
 
@@ -238,6 +250,7 @@ mod tests {
                 "Events|Japan Trip".into(),
             ],
             event: Some("Japan Trip".into()),
+            gps_e7: None,
         };
         assert_eq!(round_trip(&m), m);
         assert_eq!(round_trip(&Marks::default()), Marks::default());
@@ -301,6 +314,64 @@ mod tests {
                 .changes_from(&m)
                 .iter()
                 .all(|(p, _)| *p != Prop::Label)
+        );
+    }
+}
+
+/// Degrees from an XMP GPS coordinate: "DDD,MM.mmmmk" or "DDD,MM,SSk"
+/// (k = N/S/E/W; `negative` is S or W), or plain decimal degrees.
+fn xmp_gps(v: Option<&str>, negative: char) -> Option<f64> {
+    let v = v?.trim();
+    let (body, sign) = match v.chars().last()? {
+        c if c.is_ascii_alphabetic() => (
+            &v[..v.len() - 1],
+            if c.eq_ignore_ascii_case(&negative) {
+                -1.0
+            } else {
+                1.0
+            },
+        ),
+        _ => (v, 1.0),
+    };
+    let parts: Vec<f64> = body
+        .split(',')
+        .map(|p| p.trim().parse::<f64>())
+        .collect::<Result<_, _>>()
+        .ok()?;
+    let deg = match parts.as_slice() {
+        [d] => *d,
+        [d, m] => d + m / 60.0,
+        [d, m, s] => d + m / 60.0 + s / 3600.0,
+        _ => return None,
+    };
+    (deg.is_finite() && deg.abs() <= 180.0).then_some(deg * sign)
+}
+
+#[cfg(test)]
+mod gps_tests {
+    use super::*;
+
+    #[test]
+    fn sidecar_gps_forms() {
+        let close = |a: Option<f64>, b: f64| a.is_some_and(|a| (a - b).abs() < 1e-6);
+        assert!(close(xmp_gps(Some("51,30.5N"), 'S'), 51.508_333_3));
+        assert!(close(xmp_gps(Some("0,7,30W"), 'W'), -0.125));
+        assert!(close(xmp_gps(Some("33,52.1S"), 'S'), -33.868_333_3));
+        assert!(close(xmp_gps(Some("-12.5"), 'S'), -12.5));
+        assert_eq!(xmp_gps(Some("garbage"), 'S'), None);
+        assert_eq!(xmp_gps(None, 'S'), None);
+
+        // From a digiKam-style sidecar (attributes), through Marks.
+        let doc = br#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+<rdf:Description rdf:about="" xmlns:exif="http://ns.adobe.com/exif/1.0/"
+ exif:GPSLatitude="13,45.6N" exif:GPSLongitude="100,30.25E"/>
+</rdf:RDF></x:xmpmeta>"#;
+        let m = Marks::from_props(&crate::xmp::read(doc).unwrap());
+        let (lat, lon) = m.gps().unwrap();
+        assert!((lat - 13.76).abs() < 1e-6 && (lon - 100.504_166_6).abs() < 1e-6);
+        assert!(
+            m.changes_from(&Marks::default()).is_empty(),
+            "never written"
         );
     }
 }
