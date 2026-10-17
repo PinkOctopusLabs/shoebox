@@ -7,9 +7,9 @@ use shoebox_core::marks::{Label, Pick};
 use crate::app::{FolderNode, ShoeboxApp, View, reveal};
 use crate::jobs::LibraryCommand;
 
-/// The top bar: what's shown (scope, search, filters), then background
-/// work, auto-advance and undo/redo at the right.
-pub fn toolbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+/// The bar over the photos (as Lightroom's Library Filter): what's shown
+/// (scope, search, filters).
+pub fn filter_strip(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     ui.add_space(2.0);
     filter_bar(app, ui);
     ui.add_space(2.0);
@@ -79,7 +79,7 @@ pub fn viewbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     }
 }
 
-/// Background work, auto-advance and undo/redo (laid out right to left).
+/// Background work and undo/redo (laid out right to left).
 fn work_and_undo(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     if ui
         .add_enabled(app.can_redo, egui::Button::new("Redo"))
@@ -95,8 +95,6 @@ fn work_and_undo(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     {
         app.command(LibraryCommand::Undo);
     }
-    ui.checkbox(&mut app.auto_advance, "Auto-advance")
-        .on_hover_text("Move to the next photo after marking (or hold Caps Lock)");
     ui.separator();
     let busy = app.loader.busy();
     if let Some((done, total)) = app.scan_progress {
@@ -184,9 +182,6 @@ fn filter_bar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         if !app.filter.is_empty() && ui.small_button("Clear").clicked() {
             app.filter = shoebox_core::query::Filter::default();
         }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            work_and_undo(app, ui);
-        });
     });
     if before
         != (
@@ -443,14 +438,15 @@ pub fn status(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             ui.separator();
             ui.label(RichText::new(n).color(Color32::from_rgb(80, 200, 120)));
         }
-        if let Some(e) = app.error.clone() {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            work_and_undo(app, ui);
+            if let Some(e) = app.error.clone() {
                 if ui.small_button("×").clicked() {
                     app.error = None;
                 }
                 ui.colored_label(ui.visuals().warn_fg_color, e);
-            });
-        }
+            }
+        });
     });
 }
 
@@ -1279,6 +1275,8 @@ fn organise(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     if n > 1 {
         ui.weak(format!("Changes apply to {n} selected photos"));
     }
+    ui.checkbox(&mut app.auto_advance, "Auto-advance")
+        .on_hover_text("Move to the next photo after marking (or hold Caps Lock)");
     ui.horizontal(|ui| {
         ui.label(RichText::new("Rating").weak());
         for r in 1..=5u8 {

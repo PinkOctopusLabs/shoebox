@@ -54,6 +54,11 @@ impl View {
     pub fn has_filmstrip(self) -> bool {
         matches!(self, View::Loupe | View::Compare | View::Survey)
     }
+
+    /// Views of the filtered photos, which get the filter bar.
+    pub fn has_filters(self) -> bool {
+        !matches!(self, View::Duplicates | View::Import | View::History)
+    }
 }
 
 /// Compare: the "select" and a "candidate" side by side, with zoom and pan
@@ -215,15 +220,19 @@ impl AppPaths {
 
 /// Loupe zoom: fit to the window, or a scale where 1.0 = one image pixel
 /// per screen pixel.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Zoom {
+    #[default]
     Fit,
     Scale(f32),
 }
 
+#[derive(Default)]
 pub struct LoupeState {
     pub zoom: Zoom,
     pub pan: egui::Vec2,
+    /// The photo the zoom belongs to: another photo starts at Fit.
+    pub photo: Option<PhotoId>,
 }
 
 /// A folder in the left panel, with the recursive count of photos (stacks
@@ -408,10 +417,7 @@ impl ShoeboxApp {
             right_open: true,
             bars_open: true,
             fullscreen: false,
-            loupe: LoupeState {
-                zoom: Zoom::Fit,
-                pan: egui::Vec2::ZERO,
-            },
+            loupe: LoupeState::default(),
             // 768 MB: ~3,000 small thumbnails plus a few full-size images.
             textures: Textures::new(768 << 20),
             histograms: HashMap::new(),
@@ -687,10 +693,7 @@ impl ShoeboxApp {
             self.dupes.open = None;
         }
         self.view = v;
-        self.loupe = LoupeState {
-            zoom: Zoom::Fit,
-            pan: egui::Vec2::ZERO,
-        };
+        self.loupe = LoupeState::default();
         self.scroll_to_current = true;
     }
 
@@ -2293,10 +2296,7 @@ impl ShoeboxApp {
         self.current = Some(id);
         self.selection = BTreeSet::from([id]);
         self.anchor = Some(id);
-        self.loupe = LoupeState {
-            zoom: Zoom::Fit,
-            pan: egui::Vec2::ZERO,
-        };
+        self.loupe = LoupeState::default();
         self.scroll_to_current = true;
     }
 
@@ -2558,7 +2558,6 @@ impl eframe::App for ShoeboxApp {
         self.wanted.clear();
 
         let mut bars = self.bars_open;
-        egui::Panel::top("toolbar").show_collapsible(ui, &mut bars, |ui| panels::toolbar(self, ui));
         egui::Panel::bottom("status")
             .show_collapsible(ui, &mut bars, |ui| panels::status(self, ui));
         self.bars_open = bars;
@@ -2582,7 +2581,11 @@ impl eframe::App for ShoeboxApp {
             .default_size(280.0)
             .show_collapsible(ui, &mut right, |ui| panels::info(self, ui));
         self.right_open = right;
-        // Under the photos only (added after the side panels).
+        // Over and under the photos only (added after the side panels):
+        // the filters narrow what's in the middle.
+        let mut filters = self.bars_open && self.view.has_filters();
+        egui::Panel::top("filterbar")
+            .show_collapsible(ui, &mut filters, |ui| panels::filter_strip(self, ui));
         let mut bars = self.bars_open;
         egui::Panel::bottom("viewbar")
             .show_collapsible(ui, &mut bars, |ui| panels::viewbar(self, ui));

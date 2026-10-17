@@ -3,6 +3,16 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-18 — Filters over the photos; loupe fit
+- The **filter bar** (scope chips, search, rating/flag/label, Filters) sits
+  over the middle panel, like Lightroom's Library Filter, since it narrows
+  what's there. It's hidden in Duplicates, Import and History. There's no
+  top toolbar now: **Undo/Redo** and background work are at the right of
+  the status bar, **Auto-advance** in the info panel's Organise section.
+- **Loupe:** each photo opens at Fit (also when picked from the filmstrip).
+  A plain scroll pans a zoomed image and never zooms (the grid's scroll
+  momentum used to zoom a photo as it opened); pinch or ⌘-scroll zooms.
+
 ## 2026-10-18 — UI polish
 - **Side panels** fold from ◀/▶ buttons at the ends of the view bar (Tab
   still folds both). Tab no longer also moves keyboard focus, which had put

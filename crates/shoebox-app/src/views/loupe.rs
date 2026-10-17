@@ -1,6 +1,7 @@
 //! Loupe: one image, fit to the window. Shows the 1024 px thumbnail at once,
-//! then the full decode. Space/Z toggles fit and 100%; scroll or pinch zooms
-//! about the cursor; drag pans; arrows move (handled in app).
+//! then the full decode. Space/Z toggles fit and 100%; pinch or ⌘-scroll
+//! zooms about the cursor; scroll or drag pans; arrows move (handled in app).
+//! Each photo opens at Fit.
 
 use eframe::egui::{self, Color32, Rect, RichText, pos2, vec2};
 
@@ -22,6 +23,12 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         }
     }
 
+    if app.loupe.photo != Some(id) {
+        app.loupe = crate::app::LoupeState {
+            photo: Some(id),
+            ..Default::default()
+        };
+    }
     let rect = ui.available_rect_before_wrap();
     let resp = ui.allocate_rect(rect, egui::Sense::click_and_drag());
     if let Some(pos) = app.current_pos() {
@@ -45,10 +52,14 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         Zoom::Scale(s) => s / ppp,
     };
 
-    // Zoom about the cursor: pinch, or scroll.
+    // Zoom about the cursor: pinch, or ⌘-scroll (egui turns that into a
+    // zoom). A plain scroll pans a zoomed image and never zooms, so the
+    // grid's scroll momentum can't zoom a photo as it opens.
     if let Some(cursor) = resp.hover_pos() {
-        let (pinch, scroll) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta.y));
-        let factor = pinch * (scroll * 0.0025).exp();
+        let (factor, scroll) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta));
+        if app.loupe.zoom != Zoom::Fit {
+            app.loupe.pan += scroll;
+        }
         if (factor - 1.0).abs() > 1e-4 {
             let new = (scale * factor).clamp(fit.min(0.02), 8.0 / ppp);
             let c = cursor - rect.center();

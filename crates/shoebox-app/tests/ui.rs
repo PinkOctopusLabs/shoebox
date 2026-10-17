@@ -192,6 +192,12 @@ fn browse_views_render() {
     settle(&mut h, Duration::from_secs(30));
     assert_eq!(h.state().view_name(), View::Loupe);
     snapshot(&mut h, "3-loupe");
+    // A plain scroll (say, the grid's momentum) never zooms; it opens at Fit.
+    for _ in 0..5 {
+        wheel(&mut h, -120.0);
+        h.step();
+    }
+    assert!(!h.state().loupe_zoomed(), "scrolling doesn't zoom");
 
     // Space toggles 100% and back.
     h.key_press(egui::Key::Space);
