@@ -3,6 +3,23 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-18 — UI polish
+- **Side panels** fold from ◀/▶ buttons at the ends of the view bar (Tab
+  still folds both). Tab no longer also moves keyboard focus, which had put
+  it in the search box so the next Tab did nothing.
+- The left and right panels' scroll bars sit beside the rows instead of
+  floating over the counts and + buttons.
+- **Info panel:** empty rows are left out; with nothing selected, a short
+  message. Paths show the home folder as `~` (full path on hover), with
+  Reveal in Finder beside them.
+- **Grid:** a colour label is a dot at the top left (the strip along the top
+  looked like part of the selection). Format badges stay on every tile.
+- **View bar:** Size shows only for Grid, Masonry and Timeline; Sort not in
+  Duplicates, Import or History.
+- **Auto-advance** is a checkbox, so its state is visible.
+- egui's small text is 11 pt (was 9), for the duplicate captions, import
+  and history tables.
+
 ## 2026-10-18 — DxO sidecar check deferred
 - The check of which sidecar name DxO PhotoLab 9 writes, and the golden
   test on a real DxO sidecar, are off the list for now. The default stays

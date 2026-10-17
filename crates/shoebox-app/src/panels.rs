@@ -19,19 +19,28 @@ pub fn toolbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
 /// thumbnail size at the right.
 pub fn viewbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     let before = (app.sort, app.sort_desc);
+    // Size for the thumbnail views; sort wherever photos are in order.
+    let sized = matches!(app.view, View::Grid | View::Masonry | View::Timeline);
+    let sorted = !matches!(app.view, View::Duplicates | View::Import | View::History);
     let right = |app: &mut ShoeboxApp, ui: &mut egui::Ui| {
-        ui.add(egui::Slider::new(&mut app.thumb_size, 96.0..=512.0).show_value(false))
-            .on_hover_text("Thumbnail size");
-        ui.weak("Size");
-        ui.separator();
-        if app.semantic_query().is_some() {
+        panel_toggle(ui, &mut app.right_open, false);
+        if sized {
+            ui.spacing_mut().slider_width = 80.0;
+            ui.add(egui::Slider::new(&mut app.thumb_size, 96.0..=512.0).show_value(false))
+                .on_hover_text("Thumbnail size");
+        }
+        if sized && sorted {
+            ui.separator();
+        }
+        if sorted && app.semantic_query().is_some() {
             ui.weak("Best match first");
-        } else {
+        } else if sorted {
             sort_controls(app, ui);
         }
     };
     let mut wrap = false;
     ui.horizontal(|ui| {
+        panel_toggle(ui, &mut app.left_open, true);
         for (v, name, key) in View::ALL {
             let hint = format!("{name} ({})", key.name());
             if ui
@@ -51,7 +60,7 @@ pub fn viewbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         }
         layout_toggle(app, ui);
         // Sort and size at the right when there's room, else on a second line.
-        if ui.available_width() >= 340.0 {
+        if ui.available_width() >= 300.0 {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 right(app, ui)
             });
@@ -86,7 +95,7 @@ fn work_and_undo(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     {
         app.command(LibraryCommand::Undo);
     }
-    ui.toggle_value(&mut app.auto_advance, "Auto-advance")
+    ui.checkbox(&mut app.auto_advance, "Auto-advance")
         .on_hover_text("Move to the next photo after marking (or hold Caps Lock)");
     ui.separator();
     let busy = app.loader.busy();
@@ -414,7 +423,8 @@ pub fn status(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         ));
         if let Some(p) = app.current.and_then(|c| app.photo(c)) {
             ui.separator();
-            ui.label(RichText::new(p.path.display().to_string()).weak());
+            ui.label(RichText::new(short_path(&p.path)).weak())
+                .on_hover_text(p.path.display().to_string());
         }
         let interrupted = app.history.interrupted();
         if interrupted > 0 {
@@ -451,6 +461,8 @@ pub(crate) fn pick_folder() -> Option<std::path::PathBuf> {
 }
 
 pub fn library(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    // A scroll bar beside the rows, not over their counts and + buttons.
+    ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| library_contents(app, ui));
@@ -1077,12 +1089,21 @@ fn folder_node(
 /// The right panel: histogram, the photo's details, and organising, each a
 /// folding section.
 pub fn info(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
             let Some(id) = app.current else {
-                section(app, ui, "Info", None);
-                ui.weak("No photo selected");
+                ui.add_space(40.0);
+                ui.vertical_centered(|ui| {
+                    ui.weak("No photo selected");
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new("Click a photo to see its details")
+                            .small()
+                            .weak(),
+                    );
+                });
                 return;
             };
             let Some(idx) = app.index(id) else { return };
@@ -1105,7 +1126,8 @@ pub fn info(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
 fn details(app: &mut ShoeboxApp, ui: &mut egui::Ui, id: crate::jobs::PhotoId, idx: usize) {
     let photo = app.catalog.photos[idx].clone();
     let x = &photo.meta.exif;
-    let opt = |v: Option<String>| v.unwrap_or_else(|| "—".into());
+    // Rows with nothing to say are left out.
+    let opt = |v: Option<String>| v.unwrap_or_default();
     let rows: Vec<(&str, String)> = vec![
         (
             "Captured",
@@ -1170,7 +1192,7 @@ fn details(app: &mut ShoeboxApp, ui: &mut egui::Ui, id: crate::jobs::PhotoId, id
         .num_columns(2)
         .spacing(vec2(10.0, 4.0))
         .show(ui, |ui| {
-            for (k, v) in rows {
+            for (k, v) in rows.into_iter().filter(|(_, v)| !v.is_empty()) {
                 ui.label(RichText::new(k).weak());
                 ui.label(v);
                 ui.end_row();
@@ -1211,8 +1233,18 @@ fn details(app: &mut ShoeboxApp, ui: &mut egui::Ui, id: crate::jobs::PhotoId, id
         });
     }
     ui.add_space(6.0);
-    ui.label(RichText::new("Path").weak());
-    ui.add(egui::Label::new(photo.path.display().to_string()).wrap());
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Path").weak());
+        if ui
+            .small_button(crate::app::REVEAL_LABEL)
+            .on_hover_text("Show the file in its folder")
+            .clicked()
+        {
+            reveal(&photo.path);
+        }
+    });
+    ui.add(egui::Label::new(short_path(&photo.path)).wrap())
+        .on_hover_text(photo.path.display().to_string());
 
     let siblings = match &app.siblings_of {
         Some((sid, s)) if *sid == id => s.clone(),
@@ -1687,4 +1719,31 @@ fn group_thousands(n: u32) -> String {
         out.push(c);
     }
     out
+}
+
+/// A path with the home folder as `~` (the full path goes in a tooltip).
+pub(crate) fn short_path(path: &std::path::Path) -> String {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    match home.as_deref().and_then(|h| path.strip_prefix(h).ok()) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
+/// A button that folds a side panel away or back (Tab does both).
+fn panel_toggle(ui: &mut egui::Ui, open: &mut bool, left: bool) {
+    let (glyph, side) = match (left, *open) {
+        (true, true) => ("◀", "Hide the library panel"),
+        (true, false) => ("▶", "Show the library panel"),
+        (false, true) => ("▶", "Hide the info panel"),
+        (false, false) => ("◀", "Show the info panel"),
+    };
+    let r = ui
+        .add(egui::Button::new(RichText::new(glyph).size(10.0)).frame(false))
+        .on_hover_text(format!("{side} (Tab: both)"));
+    if r.clicked() {
+        *open = !*open;
+        // Keep Tab for the panels, not for moving focus from this button.
+        r.surrender_focus();
+    }
 }

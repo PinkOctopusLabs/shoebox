@@ -117,7 +117,7 @@ fn library(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         .spacing([12.0, 6.0])
         .show(ui, |ui| {
             for root in app.settings.roots.clone() {
-                ui.label(root.path.display().to_string())
+                ui.label(crate::panels::short_path(&root.path))
                     .on_hover_text(root.path.display().to_string());
                 let mut reference = root.reference;
                 if ui

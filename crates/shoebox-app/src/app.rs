@@ -349,6 +349,12 @@ pub struct ShoeboxApp {
 impl ShoeboxApp {
     pub fn new(cc: &eframe::CreationContext<'_>, paths: AppPaths) -> Self {
         let ctx = &cc.egui_ctx;
+        // egui's small text (9 pt) is too small for paths and captions.
+        ctx.all_styles_mut(|s| {
+            if let Some(f) = s.text_styles.get_mut(&egui::TextStyle::Small) {
+                f.size = 11.0;
+            }
+        });
         let tile_cache = paths.tile_cache.clone();
         let display = crate::display::DisplayTagger::new(cc);
         let target = crate::display::DisplayTagger::target(display.as_ref());
@@ -2352,6 +2358,9 @@ impl ShoeboxApp {
         let m = input.modifiers;
         let pressed = |k| input.key_pressed(k);
         if pressed(egui::Key::Tab) {
+            // Tab is the panels' key here, not egui's move-focus (which
+            // would land in the search box and take the next Tab).
+            ctx.memory_mut(|mem| mem.move_focus(egui::FocusDirection::None));
             if m.shift {
                 let show = !(self.left_open || self.right_open || self.bars_open);
                 (self.left_open, self.right_open, self.bars_open) = (show, show, show);

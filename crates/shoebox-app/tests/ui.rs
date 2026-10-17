@@ -129,6 +129,20 @@ fn browse_views_render() {
     snapshot(&mut h, "1a-folder-chip");
     h.get_by_label("📁 scan  ✖").click();
     h.run_steps(2);
+    // The side panels fold away from buttons at the view bar's ends; Tab
+    // hides both, then shows both.
+    assert!(h.query_by_label("Recently changed").is_some());
+    h.get_by_label("◀").click(); // the left one (the right one shows ▶)
+    h.run_steps(3);
+    assert!(
+        h.query_by_label("Recently changed").is_none(),
+        "left hidden"
+    );
+    for _ in 0..2 {
+        h.key_press(egui::Key::Tab);
+        h.run_steps(3);
+    }
+    assert!(h.query_by_label("Recently changed").is_some(), "left back");
     assert!(!h.state().filtered(), "the chip clears it");
     assert_eq!(h.state().shown_count(), photos);
 
@@ -137,8 +151,10 @@ fn browse_views_render() {
     h.get_by_label("f0005.jpg").click_secondary();
     h.run_steps(3);
     assert_eq!(h.state().selected_count(), 1);
-    assert!(
-        h.query_by_label(REVEAL).is_some(),
+    // The menu's item, and the info panel's button beside the path.
+    assert_eq!(
+        h.query_all_by_label(REVEAL).count(),
+        2,
         "context menu shows {REVEAL}"
     );
     snapshot(&mut h, "1b-context-menu");

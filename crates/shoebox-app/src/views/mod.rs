@@ -312,10 +312,12 @@ pub fn cell(
         ui.interact(r, ui.scope_id().with(("change", id)), egui::Sense::hover())
             .on_hover_text(tip);
     }
-    // Colour label: a strip along the top of the cell.
+    // Colour label: a dot at the top left (after the flag, if any).
     if let Some(l) = marks.label {
-        let strip = Rect::from_min_size(inner.left_top(), vec2(inner.width(), 4.0));
-        painter.rect_filled(strip, 2.0, label_colour(l));
+        let x = if flag.is_some() { 30.0 } else { 12.0 };
+        let c = inner.left_top() + vec2(x, 14.0);
+        painter.circle_filled(c, 6.0, Color32::from_black_alpha(160));
+        painter.circle_filled(c, 4.5, label_colour(l));
     }
 
     if selected || current {
