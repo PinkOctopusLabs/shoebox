@@ -3,6 +3,21 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-17 — Day headers, justified rows
+- **Grid day headers** (the toolbar's **Days**, saved in settings): each day
+  starts a new row under "Friday 24 April 2026 · 86 photos". Only when
+  sorted by capture time and not showing a best-match search. The grid now
+  lays out lines (headings and rows) with their offsets and draws those in
+  view; Up and Down follow the laid-out rows.
+- **Justified rows** (Masonry's **Rows**): photos at the thumbnail height
+  fill a row, which is then scaled to the width (at most 1.5× taller, so a
+  lone panorama doesn't make a giant row); the last row isn't stretched.
+  Strict left-to-right date order, as the spec says.
+- Fixed: two settings changed in quick succession could lose the second,
+  because the library worker's echo of the first save overwrote it. After
+  the first load the app now takes only the library folders from the
+  worker; every other setting is the UI's.
+
 ## 2026-10-17 — Polish: toolbar, left panel, grid cells
 - **Toolbar** is two fixed rows: views, size, auto-advance, undo/redo; then
   what's narrowing the grid (folder, event, collection or smart filter, each

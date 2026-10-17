@@ -281,6 +281,7 @@ pub struct ShoeboxApp {
     pub(crate) histograms: HashMap<PhotoId, Box<[[u32; 256]; 4]>>,
     pub(crate) siblings_of: Option<(PhotoId, Vec<usize>)>,
     pub(crate) masonry: views::masonry::Layout,
+    pub(crate) grid: views::grid::Layout,
     /// Loads wanted this frame, sent to the loader at the end of the frame.
     wanted: Vec<(Key, Priority, Job)>,
     pub(crate) scan_progress: Option<(usize, usize)>,
@@ -337,6 +338,8 @@ pub struct ShoeboxApp {
     pub(crate) map: views::map::State,
     /// Left-panel sections folded away.
     pub(crate) collapsed: HashSet<&'static str>,
+    /// Settings came from disk (after that, only roots come from the worker).
+    settings_loaded: bool,
     semantic: crate::semantic::Semantic,
     pub(crate) sem: crate::semantic::SearchState,
     people: crate::people::PeopleWorker,
@@ -408,6 +411,7 @@ impl ShoeboxApp {
             histograms: HashMap::new(),
             siblings_of: None,
             masonry: views::masonry::Layout::default(),
+            grid: views::grid::Layout::default(),
             wanted: Vec::new(),
             scan_progress: None,
             scanning: true,
@@ -447,6 +451,7 @@ impl ShoeboxApp {
             timeline: views::timeline::State::default(),
             map: views::map::State::new(tile_cache),
             collapsed: HashSet::new(),
+            settings_loaded: false,
             semantic,
             sem: Default::default(),
             people,
@@ -616,6 +621,25 @@ impl ShoeboxApp {
         self.tree.iter().find_map(|n| find(n, name)).unwrap_or(0)
     }
 
+    /// Grid day headings are on and make sense (sorted by capture time,
+    /// not a best-match search).
+    pub(crate) fn day_headers_shown(&self) -> bool {
+        self.settings.day_headers
+            && self.sort == query::Sort::CaptureTime
+            && self.semantic_query().is_none()
+    }
+
+    /// The capture day ("YYYY:MM:DD") of photo `i`'s stack.
+    pub(crate) fn capture_day(&self, i: usize) -> Option<String> {
+        let primary = self.catalog.stacks[self.catalog.stack_of[i]].primary;
+        let t = self.catalog.photos[primary]
+            .meta
+            .exif
+            .capture_time
+            .as_deref()?;
+        t.get(..10).map(str::to_owned)
+    }
+
     /// Whether any filter is set (tests).
     pub fn filtered(&self) -> bool {
         !self.filter.is_empty() || self.folder.is_some()
@@ -673,7 +697,15 @@ impl ShoeboxApp {
                     settings,
                     complete,
                 } => {
-                    self.settings = settings;
+                    // After the first load the UI owns every setting but the
+                    // library folders: a worker's echo of an earlier save
+                    // mustn't undo a later change.
+                    if self.settings_loaded {
+                        self.settings.roots = settings.roots;
+                    } else {
+                        self.settings = settings;
+                        self.settings_loaded = true;
+                    }
                     self.apply_settings();
                     self.set_catalog(*published);
                     self.semantic.send(crate::semantic::Command::Catalog(
@@ -2470,11 +2502,21 @@ impl ShoeboxApp {
             self.step(-1);
         }
         if self.view == View::Grid {
-            if pressed(egui::Key::ArrowDown) {
-                self.step(cols);
-            }
-            if pressed(egui::Key::ArrowUp) {
-                self.step(-cols);
+            // Up and Down follow the laid-out rows (days start new ones).
+            let vertical = isize::from(pressed(egui::Key::ArrowDown))
+                - isize::from(pressed(egui::Key::ArrowUp));
+            if vertical != 0 {
+                match self.current_pos().and_then(|p| {
+                    let rows = &self.grid.rows;
+                    let r = rows.iter().position(|&(s, e)| (s..e).contains(&p))?;
+                    let t = r.checked_add_signed(vertical).filter(|&t| t < rows.len())?;
+                    let (s, e) = rows[t];
+                    Some((s + (p - rows[r].0)).min(e - 1) as isize - p as isize)
+                }) {
+                    Some(d) => self.step(d),
+                    None if self.grid.rows.is_empty() => self.step(vertical * cols),
+                    None => {}
+                }
             }
         }
         if self.view == View::Loupe && (pressed(egui::Key::Space) || pressed(egui::Key::Z)) {

@@ -29,6 +29,7 @@ pub fn toolbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         ui.separator();
         ui.label("Size");
         ui.add(egui::Slider::new(&mut app.thumb_size, 96.0..=512.0).show_value(false));
+        layout_toggle(app, ui);
         ui.separator();
         ui.toggle_value(&mut app.auto_advance, "Auto-advance")
             .on_hover_text("Move to the next photo after marking (or hold Caps Lock)");
@@ -1595,5 +1596,25 @@ fn scope_chips(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 }
             }
         }
+    }
+}
+
+/// Grid: day headings on or off. Masonry: columns or justified rows.
+fn layout_toggle(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    let mut s = app.settings.clone();
+    match app.view {
+        View::Grid => {
+            ui.toggle_value(&mut s.day_headers, "Days")
+                .on_hover_text("A heading for each day (when sorted by capture time)");
+        }
+        View::Masonry => {
+            ui.toggle_value(&mut s.justified_rows, "Rows")
+                .on_hover_text("Justified rows in date order, instead of columns");
+        }
+        _ => {}
+    }
+    if s != app.settings {
+        app.save_settings(s);
+        app.refilter();
     }
 }

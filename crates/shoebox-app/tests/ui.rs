@@ -2118,6 +2118,29 @@ fn analysis_real_library() {
         f.skipped
     );
     snapshot(&mut h, "real-1-grid");
+    // (The data folder may be kept between runs: set, don't toggle.)
+    let set = |h: &mut Harness<'_, ShoeboxApp>, label: &str, on: bool| {
+        let current = |a: &ShoeboxApp| match label {
+            "Days" => a.settings().day_headers,
+            _ => a.settings().justified_rows,
+        };
+        if current(h.state()) != on {
+            h.get_by_label(label).click();
+            h.run_steps(4);
+        }
+        assert_eq!(current(h.state()), on);
+    };
+    set(&mut h, "Days", true);
+    snapshot(&mut h, "real-2-days");
+    set(&mut h, "Days", false);
+    h.state_mut().set_view(View::Masonry);
+    h.run_steps(4);
+    set(&mut h, "Rows", true);
+    h.run_steps(4);
+    snapshot(&mut h, "real-3-rows");
+    set(&mut h, "Rows", false);
+    h.state_mut().set_view(View::Grid);
+    h.run_steps(4);
     let things = h.state().things();
     eprintln!("{} tags in use; most common:", things.len());
     for (name, n) in things.iter().take(60) {

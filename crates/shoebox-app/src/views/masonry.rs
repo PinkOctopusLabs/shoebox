@@ -1,6 +1,8 @@
 //! Masonry: true aspect ratios in equal-width columns; each photo goes into
-//! the shortest column, in date order. Layout comes from metadata, so it's
-//! ready before any thumbnail decodes. Virtualised: only visible cells draw.
+//! the shortest column, in date order. Or (a setting) justified rows: equal
+//! height within a row, rows filling the width, strict left-to-right order.
+//! Layout comes from metadata, so it's ready before any thumbnail decodes.
+//! Virtualised: only visible cells draw.
 
 use eframe::egui::{self, Rect, pos2, vec2};
 
@@ -9,7 +11,7 @@ use crate::app::ShoeboxApp;
 
 #[derive(Default)]
 pub struct Layout {
-    key: (u64, u32, u32),
+    key: (u64, u32, u32, bool),
     /// Cell rects in content coordinates, by position in `shown`.
     rects: Vec<Rect>,
     height: f32,
@@ -22,12 +24,22 @@ impl Layout {
         generation: u64,
         width: f32,
         target: f32,
+        justified: bool,
     ) {
-        let key = (generation, width.round() as u32, target.round() as u32);
+        let key = (
+            generation,
+            width.round() as u32,
+            target.round() as u32,
+            justified,
+        );
         if key == self.key && !self.rects.is_empty() {
             return;
         }
         self.key = key;
+        if justified {
+            (self.rects, self.height) = justify(aspects, width, target);
+            return;
+        }
         let cols = (((width + GAP) / (target + GAP)).floor() as usize).max(1);
         let col_w = (width - GAP * (cols as f32 - 1.0)) / cols as f32;
         let mut heights = vec![0.0f32; cols];
@@ -49,6 +61,46 @@ impl Layout {
     }
 }
 
+/// Justified rows: photos at `target` height fill a row until it's wider
+/// than `width`, then the row is scaled to fit exactly. The last row keeps
+/// the target height.
+fn justify(aspects: impl Iterator<Item = f32>, width: f32, target: f32) -> (Vec<Rect>, f32) {
+    let aspects: Vec<f32> = aspects.map(|a| a.clamp(0.2, 5.0)).collect();
+    let mut rects = Vec::with_capacity(aspects.len());
+    let mut y = 0.0;
+    let mut start = 0;
+    while start < aspects.len() {
+        let mut end = start;
+        let mut sum = 0.0;
+        while end < aspects.len() {
+            sum += aspects[end];
+            end += 1;
+            let gaps = GAP * (end - start - 1) as f32;
+            if sum * target + gaps >= width {
+                break;
+            }
+        }
+        let gaps = GAP * (end - start - 1) as f32;
+        let full = sum * target + gaps >= width;
+        // Scale a full row to the width (never taller than 1.5× target, for
+        // a lone panorama the row is just wide).
+        let h = if full {
+            ((width - gaps) / sum).min(target * 1.5)
+        } else {
+            target
+        };
+        let mut x = 0.0;
+        for &a in &aspects[start..end] {
+            let w = a * h;
+            rects.push(Rect::from_min_size(pos2(x, y), vec2(w, h)));
+            x += w + GAP;
+        }
+        y += h + GAP;
+        start = end;
+    }
+    (rects, y)
+}
+
 pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     let width = ui.available_width();
     let aspects: Vec<f32> = app
@@ -57,7 +109,13 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         .map(|&i| app.catalog.photos[i].meta.aspect().unwrap_or(1.5))
         .collect();
     let mut layout = std::mem::take(&mut app.masonry);
-    layout.update(aspects.into_iter(), app.shown_gen, width, app.thumb_size);
+    layout.update(
+        aspects.into_iter(),
+        app.shown_gen,
+        width,
+        app.thumb_size,
+        app.settings.justified_rows,
+    );
     let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
     if app.scroll_to_current
         && let Some(r) = app.current_pos().and_then(|p| layout.rects.get(p))
@@ -77,4 +135,26 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         }
     });
     app.masonry = layout;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn justified_rows_fill_the_width() {
+        // Width 1000, target 200: three 1.5 photos (300 px each + gaps)
+        // don't fill a row, four do.
+        let (r, _) = justify([1.5, 1.5, 1.5, 1.5, 1.5, 0.75].into_iter(), 1000.0, 200.0);
+        let row1 = &r[..4];
+        assert!(row1.iter().all(|x| (x.top() - 0.0).abs() < 1e-3));
+        let right = row1[3].right();
+        assert!((right - 1000.0).abs() < 0.5, "fills the width: {right}");
+        let h = row1[0].height();
+        assert!(h < 200.0 && row1.iter().all(|x| (x.height() - h).abs() < 1e-3));
+        // The last row isn't stretched.
+        assert!((r[4].height() - 200.0).abs() < 1e-3);
+        assert!(r[4].top() > row1[0].bottom());
+        assert!(r[5].left() > r[4].right(), "strict left-to-right order");
+    }
 }

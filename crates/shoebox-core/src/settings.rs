@@ -49,6 +49,13 @@ pub struct Settings {
     /// Find and group the faces in photos (downloads models once).
     #[serde(default)]
     pub people: bool,
+    /// Grid: a heading for each day (when sorted by capture time).
+    #[serde(default)]
+    pub day_headers: bool,
+    /// Masonry: justified rows (equal height, strict date order) instead of
+    /// columns.
+    #[serde(default)]
+    pub justified_rows: bool,
 }
 
 /// Default for [`Settings::image_memory_mb`].
