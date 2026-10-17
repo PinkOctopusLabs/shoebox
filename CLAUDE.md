@@ -21,6 +21,12 @@ A Rust + egui photo library app for macOS. **`docs/SPEC.md` is the source of tru
 - `crates/shoebox-fixtures`: synthetic test library generator (dev-only).
 - `tests/fixtures/`: synthetic fixtures (built per test by `shoebox-fixtures`; `cargo run -p shoebox-fixtures -- <empty dir>` writes them to disk). Real camera files go in the gitignored `tests/fixtures/real/`; tests that need them skip when it's absent.
 
+## Building the app
+- `scripts/bundle-macos.sh` → `target/release/bundle/Shoebox.app` (+ zip). Ad-hoc
+  signed by default; `SIGN_IDENTITY="Developer ID Application: …"` and
+  `NOTARY_PROFILE=<notarytool profile>` for a notarized build.
+- To try a build without touching real settings: `SHOEBOX_DATA_DIR=<scratch dir>`.
+
 ## Working rules
 - One milestone at a time, in order, each as a reviewable chunk.
 - Before finishing any task: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.

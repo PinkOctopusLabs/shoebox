@@ -168,9 +168,21 @@ pub struct AppPaths {
 }
 
 impl AppPaths {
+    /// Apple's layout (Application Support and Caches, by bundle id), or
+    /// everything under `$SHOEBOX_DATA_DIR` when that's set (the same
+    /// variable as the CLI's; useful for trying a build without touching
+    /// your real settings).
     pub fn default_locations() -> anyhow::Result<Self> {
-        let data = shoebox_core::paths::default_data_dir()?;
-        let cache = shoebox_core::paths::default_cache_dir()?;
+        let (data, cache) = match std::env::var_os("SHOEBOX_DATA_DIR").filter(|v| !v.is_empty()) {
+            Some(d) => {
+                let d = PathBuf::from(d);
+                (d.clone(), d.join("cache"))
+            }
+            None => (
+                shoebox_core::paths::default_data_dir()?,
+                shoebox_core::paths::default_cache_dir()?,
+            ),
+        };
         Ok(Self {
             settings: shoebox_core::paths::settings_file(&data),
             cache_db: shoebox_core::paths::cache_db(&data),

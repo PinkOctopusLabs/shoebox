@@ -3,6 +3,22 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-17 — Mac app bundle
+- `scripts/bundle-macos.sh` builds `Shoebox.app` (release, Info.plist with
+  the bundle id, minimum macOS 27, folder-access usage strings; icon from
+  `assets/icon-1024.png`, drawn by `examples/make_icon.rs`) and a zip. The
+  `shoebox` CLI ships in `Contents/Helpers/` (in `MacOS/` it would replace
+  `Shoebox` on the case-insensitive file system).
+- Signed with the hardened runtime: ad-hoc by default (runs on this Mac),
+  or `SIGN_IDENTITY` (a Developer ID) plus `NOTARY_PROFILE` to notarize and
+  staple for other Macs. Not sandboxed: Shoebox moves files anywhere inside
+  the folders you add, which a sandbox would only allow with security-scoped
+  bookmarks for every root; worth revisiting for the Mac App Store only.
+- Launched from Finder there's no terminal, so logs (and panics) go to
+  `~/Library/Logs/Shoebox/shoebox.log`. `--version` prints the version.
+  `SHOEBOX_DATA_DIR` makes the app (like the CLI) keep everything in one
+  folder, for trying a build without touching real settings.
+
 ## 2026-10-17 — M6 Map
 - **Tiles**: OpenStreetMap through the `walkers` egui map widget (the
   person chose online, cached tiles). Tiles cache under the app's Caches
