@@ -79,6 +79,7 @@ fn filter_bar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         app.sem.by_content,
     );
     ui.horizontal_wrapped(|ui| {
+        scope_chips(app, ui);
         search_box(app, ui);
         egui::ComboBox::from_id_salt("f-rating")
             .selected_text(if app.filter.min_rating == 0 {
@@ -131,55 +132,17 @@ fn filter_bar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                     );
                 }
             });
-        for t in ["NEF", "JPG", "TIF", "PNG", "HEIC"] {
-            let mut on = app.filter.types.iter().any(|x| x == t);
-            if ui.toggle_value(&mut on, t).changed() {
-                if on {
-                    app.filter.types.push(t.to_owned());
-                } else {
-                    app.filter.types.retain(|x| x != t);
-                }
-            }
-        }
-        option_combo(
-            ui,
-            "f-camera",
-            "Any camera",
-            &app.cameras.clone(),
-            &mut app.filter.camera,
-        );
-        option_combo(
-            ui,
-            "f-lens",
-            "Any lens",
-            &app.lenses.clone(),
-            &mut app.filter.lens,
-        );
-        ui.toggle_value(&mut app.filter.nef_missing, "NEF missing");
-        ui.toggle_value(&mut app.filter.undated, "Undated");
-        let changed_name = |d: Option<u32>| match d {
-            None => "Any time".to_owned(),
-            Some(1) => "Changed today".to_owned(),
-            Some(d) => format!("Changed in {d} days"),
-        };
-        egui::ComboBox::from_id_salt("f-changed")
-            .selected_text(changed_name(app.filter.changed_within_days))
-            .show_ui(ui, |ui| {
-                for d in [None, Some(1), Some(7), Some(30)] {
-                    ui.selectable_value(&mut app.filter.changed_within_days, d, changed_name(d));
-                }
-            });
-        ui.toggle_value(&mut app.filter.unseen_changes, "Unseen changes")
-            .on_hover_text("Changed since you last viewed them");
-        ui.separator();
-        if app.semantic_query().is_some() {
-            ui.label("Best match first");
-        } else {
-            sort_controls(app, ui);
-        }
+        filters_button(app, ui);
         if !app.filter.is_empty() && ui.small_button("Clear").clicked() {
             app.filter = shoebox_core::query::Filter::default();
         }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if app.semantic_query().is_some() {
+                ui.weak("Best match first");
+            } else {
+                sort_controls(app, ui);
+            }
+        });
     });
     if before
         != (
@@ -273,28 +236,117 @@ fn search_box(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     }
 }
 
+/// Sort order and direction (laid out right to left).
 fn sort_controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    if ui
+        .small_button(if app.sort_desc { "⏷" } else { "⏶" })
+        .on_hover_text(if app.sort_desc {
+            "Descending (click to reverse)"
+        } else {
+            "Ascending (click to reverse)"
+        })
+        .clicked()
     {
-        egui::ComboBox::from_id_salt("sort")
-            .selected_text(
-                shoebox_core::query::Sort::ALL
-                    .iter()
-                    .find(|(s, _)| *s == app.sort)
-                    .map_or("", |(_, n)| *n),
-            )
-            .show_ui(ui, |ui| {
-                for (s, n) in shoebox_core::query::Sort::ALL {
-                    ui.selectable_value(&mut app.sort, s, n);
+        app.sort_desc = !app.sort_desc;
+    }
+    egui::ComboBox::from_id_salt("sort")
+        .selected_text(
+            shoebox_core::query::Sort::ALL
+                .iter()
+                .find(|(s, _)| *s == app.sort)
+                .map_or("", |(_, n)| *n),
+        )
+        .show_ui(ui, |ui| {
+            for (s, n) in shoebox_core::query::Sort::ALL {
+                ui.selectable_value(&mut app.sort, s, n);
+            }
+        });
+    ui.weak("Sort");
+}
+
+/// How many of the less-used filters (in the Filters pop-over) are set.
+fn extra_filters(f: &shoebox_core::query::Filter) -> usize {
+    [
+        !f.types.is_empty(),
+        f.camera.is_some(),
+        f.lens.is_some(),
+        f.nef_missing,
+        f.undated,
+        f.changed_within_days.is_some(),
+        f.unseen_changes,
+    ]
+    .iter()
+    .filter(|&&on| on)
+    .count()
+}
+
+/// "Filters ▾": file type, camera, lens, NEF missing, undated, changed.
+fn filters_button(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    let n = extra_filters(&app.filter);
+    let text = if n == 0 {
+        "Filters ⏷".to_owned()
+    } else {
+        format!("Filters ({n}) ⏷")
+    };
+    let btn = ui.add(egui::Button::new(text).selected(n > 0));
+    egui::Popup::from_toggle_button_response(&btn)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.set_min_width(260.0);
+            ui.weak("File type");
+            ui.horizontal(|ui| {
+                for t in ["NEF", "JPG", "TIF", "PNG", "HEIC", "MOV"] {
+                    let mut on = app.filter.types.iter().any(|x| x == t);
+                    if ui.toggle_value(&mut on, t).changed() {
+                        if on {
+                            app.filter.types.push(t.to_owned());
+                        } else {
+                            app.filter.types.retain(|x| x != t);
+                        }
+                    }
                 }
             });
-        if ui
-            .small_button(if app.sort_desc { "Desc" } else { "Asc" })
-            .on_hover_text("Reverse order")
-            .clicked()
-        {
-            app.sort_desc = !app.sort_desc;
-        }
-    }
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                option_combo(
+                    ui,
+                    "f-camera",
+                    "Any camera",
+                    &app.cameras.clone(),
+                    &mut app.filter.camera,
+                );
+                option_combo(
+                    ui,
+                    "f-lens",
+                    "Any lens",
+                    &app.lenses.clone(),
+                    &mut app.filter.lens,
+                );
+            });
+            ui.add_space(4.0);
+            ui.checkbox(&mut app.filter.nef_missing, "NEF missing")
+                .on_hover_text("Photos without a RAW file");
+            ui.checkbox(&mut app.filter.undated, "Undated")
+                .on_hover_text("No capture time");
+            ui.checkbox(&mut app.filter.unseen_changes, "Unseen changes")
+                .on_hover_text("Changed since you last viewed them");
+            let changed_name = |d: Option<u32>| match d {
+                None => "Changed any time".to_owned(),
+                Some(1) => "Changed today".to_owned(),
+                Some(d) => format!("Changed in {d} days"),
+            };
+            egui::ComboBox::from_id_salt("f-changed")
+                .selected_text(changed_name(app.filter.changed_within_days))
+                .show_ui(ui, |ui| {
+                    for d in [None, Some(1), Some(7), Some(30)] {
+                        ui.selectable_value(
+                            &mut app.filter.changed_within_days,
+                            d,
+                            changed_name(d),
+                        );
+                    }
+                });
+        });
 }
 
 fn option_combo(
@@ -364,65 +416,63 @@ pub(crate) fn pick_folder() -> Option<std::path::PathBuf> {
 }
 
 pub fn library(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        ui.heading("Library");
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("+").on_hover_text("Add a folder").clicked()
-                && let Some(p) = pick_folder()
-            {
-                app.scanning = true;
-                app.command(LibraryCommand::AddRoot(p));
-            }
-        });
-    });
-    ui.separator();
     egui::ScrollArea::vertical()
-        .auto_shrink([false, true])
-        .max_height(ui.available_height() * 0.6)
-        .show(ui, |ui| {
-            let all_selected = app.folder.is_none();
-            if ui
-                .selectable_label(
-                    all_selected,
-                    format!("All photos  {}", app.catalog.stacks.len()),
-                )
-                .clicked()
-            {
-                app.set_folder(None);
-            }
-            let tree = std::mem::take(&mut app.tree);
-            for (i, root) in tree.iter().enumerate() {
-                let reference = app
-                    .settings
-                    .roots
-                    .iter()
-                    .any(|r| r.path == root.path && r.reference);
-                folder_node(app, ui, root, Some(reference), i == 0);
-            }
-            app.tree = tree;
-        });
-    ui.separator();
+        .auto_shrink([false, false])
+        .show(ui, |ui| library_contents(app, ui));
+}
+
+fn library_contents(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    let (open, add) = section(app, ui, "Library", Some(("Add a folder", true)));
+    if add && let Some(p) = pick_folder() {
+        app.scanning = true;
+        app.command(LibraryCommand::AddRoot(p));
+    }
+    if open {
+        let all_selected = app.folder.is_none()
+            && app.selected_event.is_none()
+            && app.selected_collection.is_none();
+        if row(
+            ui,
+            all_selected,
+            "All photos",
+            Some(app.catalog.stacks.len()),
+        )
+        .clicked()
+        {
+            app.show_everything();
+        }
+        let tree = std::mem::take(&mut app.tree);
+        for (i, root) in tree.iter().enumerate() {
+            let reference = app
+                .settings
+                .roots
+                .iter()
+                .any(|r| r.path == root.path && r.reference);
+            folder_node(app, ui, root, Some(reference), i == 0);
+        }
+        app.tree = tree;
+    }
     events_panel(app, ui);
     collections_panel(app, ui);
     smart_filters(app, ui);
     people_panel(app, ui);
     things_panel(app, ui);
-    ui.separator();
-    ui.label(RichText::new("Tasks").strong());
+    let (open, _) = section(app, ui, "Tasks", None);
+    if !open {
+        return;
+    }
     let groups = app.dupes.review.as_ref().map(|_| app.dupes.visible().len());
     let label = match groups {
         Some(n) => format!("Duplicates  {n}"),
         None => "Duplicates".to_owned(),
     };
-    if ui
-        .selectable_label(app.view == View::Duplicates, label)
+    if row(ui, app.view == View::Duplicates, label, None)
         .on_hover_text("Find and review duplicate files")
         .clicked()
     {
         app.set_view(View::Duplicates);
     }
-    if ui
-        .selectable_label(app.view == View::Import, "Import…")
+    if row(ui, app.view == View::Import, "Import…", None)
         .on_hover_text("Copy photos from a card or folder into the library")
         .clicked()
     {
@@ -435,16 +485,14 @@ pub fn library(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     } else {
         RichText::new("History")
     };
-    if ui
-        .selectable_label(app.view == View::History, label)
+    if row(ui, app.view == View::History, label, None)
         .on_hover_text("Every file operation, with undo")
         .clicked()
     {
         app.command(LibraryCommand::LoadHistory);
         app.set_view(View::History);
     }
-    if ui
-        .selectable_label(app.settings_ui.open, "Settings…")
+    if row(ui, app.settings_ui.open, "Settings…", None)
         .on_hover_text(format!(
             "{} ,",
             if cfg!(target_os = "macos") {
@@ -460,21 +508,21 @@ pub fn library(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
 }
 
 fn collections_panel(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Collections").strong());
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .add_enabled(
-                    app.collection_edit.is_none(),
-                    egui::Button::new("+").small(),
-                )
-                .on_hover_text("New collection from the selection")
-                .clicked()
-            {
-                app.collection_edit = Some((None, String::new()));
-            }
-        });
-    });
+    let (open, add) = section(
+        app,
+        ui,
+        "Collections",
+        Some((
+            "New collection from the selection",
+            app.collection_edit.is_none(),
+        )),
+    );
+    if add {
+        app.collection_edit = Some((None, String::new()));
+    }
+    if !open {
+        return;
+    }
     if let Some((id, name)) = app.collection_edit.as_mut() {
         let r = ui.add(egui::TextEdit::singleline(name).hint_text("Name, then Enter"));
         r.request_focus();
@@ -493,7 +541,7 @@ fn collections_panel(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     for c in app.collections.clone() {
         let n = app.collection_members.get(&c.id).map_or(0, |m| m.len());
         let selected = app.selected_collection.as_deref() == Some(c.id.as_str());
-        let r = ui.selectable_label(selected, format!("{}  {n}", c.name));
+        let r = row(ui, selected, c.name.as_str(), Some(n));
         if r.clicked() {
             app.select_collection(if selected { None } else { Some(c.id.clone()) });
         }
@@ -527,22 +575,22 @@ fn collections_panel(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
 }
 
 fn events_panel(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Events").strong());
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .add_enabled(app.event_edit.is_none(), egui::Button::new("+").small())
-                .on_hover_text("New event from the selection (⌘E), or type a date range")
-                .clicked()
-            {
-                app.new_event_from_selection(None);
-            }
-        });
-    });
-    event_editor(app, ui);
-    if app.selected_event.is_some() && ui.small_button("Show all photos").clicked() {
-        app.select_event(None);
+    let (open, add) = section(
+        app,
+        ui,
+        "Events",
+        Some((
+            "New event from the selection (⌘E), or type a date range",
+            app.event_edit.is_none(),
+        )),
+    );
+    if add {
+        app.new_event_from_selection(None);
     }
+    if !open {
+        return;
+    }
+    event_editor(app, ui);
     let events = app.events.clone();
     let ids: std::collections::HashSet<&str> = events.iter().map(|e| e.id.as_str()).collect();
     // Top-level events (no parent, or a parent that no longer exists), by year.
@@ -617,8 +665,7 @@ fn event_node(
     let state =
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
     let header = state.show_header(ui, |ui| {
-        let r = ui
-            .selectable_label(selected, format!("{}  {}", e.name, members.len()))
+        let r = row(ui, selected, e.name.as_str(), Some(members.len()))
             .on_hover_text(format!("{} to {}", e.start, e.end));
         if r.clicked() {
             app.select_event(if selected { None } else { Some(e.id.clone()) });
@@ -742,23 +789,27 @@ fn people_panel(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     if view.groups.is_empty() {
         return;
     }
-    ui.label(RichText::new("People").strong())
-        .on_hover_text("Faces grouped by likeness; click to see their photos and name them");
+    let (open, _) = section(app, ui, "People", None);
+    if !open {
+        return;
+    }
     let all = app.ppl.all;
     let mut chosen = None;
-    for g in view.groups.iter().take(if all { usize::MAX } else { 12 }) {
+    for g in view.groups.iter().take(if all { usize::MAX } else { 8 }) {
         let sel = app.ppl.showing.as_ref() == Some(&g.key);
-        let text = format!("{}  {}", app.ppl.label(g), g.photos.len());
         let text = if g.name.is_some() {
-            RichText::new(text)
+            RichText::new(app.ppl.label(g))
         } else {
-            RichText::new(text).italics()
+            RichText::new(app.ppl.label(g)).italics()
         };
-        if ui.selectable_label(sel, text).clicked() {
+        if row(ui, sel, text, Some(g.photos.len()))
+            .on_hover_text("Click to see their photos and name them")
+            .clicked()
+        {
             chosen = Some(if sel { None } else { Some(g.key.clone()) });
         }
     }
-    if view.groups.len() > 12
+    if view.groups.len() > 8
         && ui
             .link(if all {
                 "Show fewer".to_owned()
@@ -788,17 +839,22 @@ fn things_panel(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         return;
     }
     let mut chosen = None;
-    ui.label(RichText::new("Things").strong())
-        .on_hover_text("Tags semantic search suggests, by how many photos have them");
+    let (open, _) = section(app, ui, "Things", None);
+    if !open {
+        return;
+    }
     let all = app.sem.things_all;
-    for &(l, n) in tags.counts.iter().take(if all { usize::MAX } else { 12 }) {
-        let name = &tags.names[l as usize];
+    for &(l, n) in tags.counts.iter().take(if all { usize::MAX } else { 8 }) {
+        let name = tags.names[l as usize].as_str();
         let sel = app.sem.tag == Some(l);
-        if ui.selectable_label(sel, format!("{name}  {n}")).clicked() {
+        if row(ui, sel, name, Some(n))
+            .on_hover_text("Photos Shoebox suggests this tag for")
+            .clicked()
+        {
             chosen = Some(if sel { None } else { Some(l) });
         }
     }
-    if tags.counts.len() > 12
+    if tags.counts.len() > 8
         && ui
             .link(if all {
                 "Show fewer".to_owned()
@@ -817,19 +873,19 @@ fn things_panel(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
 }
 
 fn smart_filters(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Smart filters").strong());
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let can_save = !app.filter.is_empty() && app.new_smart_filter.is_none();
-            if ui
-                .add_enabled(can_save, egui::Button::new("+").small())
-                .on_hover_text("Save the current filter")
-                .clicked()
-            {
-                app.new_smart_filter = Some(String::new());
-            }
-        });
-    });
+    let can_save = !app.filter.is_empty() && app.new_smart_filter.is_none();
+    let (open, add) = section(
+        app,
+        ui,
+        "Smart filters",
+        Some(("Save the current filter", can_save)),
+    );
+    if add {
+        app.new_smart_filter = Some(String::new());
+    }
+    if !open {
+        return;
+    }
     if let Some(name) = app.new_smart_filter.as_mut() {
         let r = ui.add(egui::TextEdit::singleline(name).hint_text("Name, then Enter"));
         r.request_focus();
@@ -851,22 +907,32 @@ fn smart_filters(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     }
     // Built in: everything changed in the last week, newest first.
     let recent = shoebox_core::query::recently_changed();
-    if ui
-        .selectable_label(app.filter == recent, "Recently changed")
+    let on = app.filter == recent;
+    if row(ui, on, "Recently changed", None)
         .on_hover_text("Image or sidecar modified in the last 7 days")
         .clicked()
     {
-        app.filter = recent;
-        app.sort = shoebox_core::query::Sort::Modified;
+        if on {
+            app.filter = shoebox_core::query::Filter::default();
+            app.sort = shoebox_core::query::Sort::CaptureTime;
+        } else {
+            app.filter = recent;
+            app.sort = shoebox_core::query::Sort::Modified;
+        }
         app.sort_desc = false;
         app.refilter();
         app.scroll_to_current = true;
     }
     let mut delete = None;
     for (i, sf) in app.settings.smart_filters.clone().iter().enumerate() {
-        let r = ui.selectable_label(app.filter == sf.filter, &sf.name);
+        let on = app.filter == sf.filter;
+        let r = row(ui, on, sf.name.as_str(), None);
         if r.clicked() {
-            app.filter = sf.filter.clone();
+            app.filter = if on {
+                shoebox_core::query::Filter::default()
+            } else {
+                sf.filter.clone()
+            };
             app.refilter();
             app.scroll_to_current = true;
         }
@@ -894,17 +960,18 @@ fn folder_node(
     open: bool,
 ) {
     let selected = app.folder.as_deref() == Some(node.path.as_path());
-    let mut label = format!("{}  {}", node.name, node.count);
-    if root == Some(true) {
-        label.push_str("  🔒");
-    }
+    let name = if root == Some(true) {
+        format!("{}  🔒", node.name)
+    } else {
+        node.name.clone()
+    };
     let id = ui.make_persistent_id(("folder", &node.path));
     let state =
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, open);
     let header = state.show_header(ui, |ui| {
-        let r = ui.selectable_label(selected, label);
+        let r = row(ui, selected, name, Some(node.count));
         if r.clicked() {
-            app.set_folder(Some(node.path.clone()));
+            app.set_folder((!selected).then(|| node.path.clone()));
         }
         // Drop photos on a folder to move them there.
         if r.dnd_hover_payload::<crate::views::DragPhotos>().is_some() {
@@ -1368,5 +1435,165 @@ fn people_task(s: &crate::semantic::Status) -> Option<String> {
             s.total
         )),
         _ => None,
+    }
+}
+
+/// A list row in the left panel: the name, and a count in muted text at the
+/// right. Its accessible label is "name  count".
+pub(crate) fn row(
+    ui: &mut egui::Ui,
+    selected: bool,
+    name: impl Into<RichText>,
+    count: Option<usize>,
+) -> egui::Response {
+    let name: RichText = name.into();
+    let label = match count {
+        Some(n) => format!("{}  {n}", name.text()),
+        None => name.text().to_owned(),
+    };
+    let height = ui.spacing().interact_size.y;
+    let (rect, resp) =
+        ui.allocate_exact_size(vec2(ui.available_width(), height), egui::Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, &label));
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.style().interact_selectable(&resp, selected);
+        if selected || resp.hovered() || resp.has_focus() {
+            ui.painter().rect_filled(rect, 4.0, visuals.weak_bg_fill);
+        }
+        let pad = 6.0;
+        // A selected row shows how to undo it: hover reveals ✖ for the count.
+        let count = if selected && resp.hovered() {
+            None
+        } else {
+            count
+        };
+        if selected && resp.hovered() {
+            let g = ui.painter().layout_no_wrap(
+                "✖".to_owned(),
+                egui::FontId::proportional(11.0),
+                visuals.text_color(),
+            );
+            let pos = pos2(
+                rect.right() - pad - g.size().x,
+                rect.center().y - g.size().y / 2.0,
+            );
+            ui.painter().galley(pos, g, visuals.text_color());
+        }
+        let count_w = count.map_or(0.0, |n| {
+            let g = ui.painter().layout_no_wrap(
+                n.to_string(),
+                egui::FontId::proportional(12.0),
+                ui.visuals().weak_text_color(),
+            );
+            let w = g.size().x;
+            let pos = pos2(rect.right() - pad - w, rect.center().y - g.size().y / 2.0);
+            ui.painter().galley(pos, g, ui.visuals().weak_text_color());
+            w + 8.0
+        });
+        let galley = egui::WidgetText::from(name).into_galley(
+            ui,
+            Some(egui::TextWrapMode::Truncate),
+            (rect.width() - 2.0 * pad - count_w).max(10.0),
+            egui::TextStyle::Body,
+        );
+        let pos = pos2(rect.left() + pad, rect.center().y - galley.size().y / 2.0);
+        ui.painter().galley(pos, galley, visuals.text_color());
+    }
+    resp
+}
+
+/// A section heading in the left panel, folding its contents when clicked,
+/// with an optional "+" at the right. Returns (open, "+" clicked).
+fn section(
+    app: &mut ShoeboxApp,
+    ui: &mut egui::Ui,
+    title: &'static str,
+    add: Option<(&str, bool)>,
+) -> (bool, bool) {
+    let open = !app.collapsed.contains(title);
+    let mut added = false;
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        let arrow = if open { "⏷" } else { "⏵" };
+        let text = RichText::new(format!("{arrow} {}", title.to_uppercase()))
+            .size(11.0)
+            .strong()
+            .color(ui.visuals().weak_text_color());
+        if ui
+            .add(egui::Label::new(text).sense(egui::Sense::click()))
+            .on_hover_text(if open { "Hide" } else { "Show" })
+            .clicked()
+        {
+            if open {
+                app.collapsed.insert(title);
+            } else {
+                app.collapsed.remove(title);
+            }
+        }
+        if let Some((hint, enabled)) = add {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                added = ui
+                    .add_enabled(enabled, egui::Button::new("+").small().frame(false))
+                    .on_hover_text(hint)
+                    .clicked();
+            });
+        }
+    });
+    (open, added)
+}
+
+/// What's narrowing the grid (a folder, event, collection or smart filter),
+/// each as a chip with a ✖ that clears it.
+fn scope_chips(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    let mut chips: Vec<(String, u8)> = Vec::new();
+    if let Some(f) = &app.folder {
+        let name = f
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        chips.push((format!("📁 {name}"), 0));
+    }
+    if let Some(e) = app
+        .selected_event
+        .as_ref()
+        .and_then(|id| app.events.iter().find(|e| &e.id == id))
+    {
+        chips.push((format!("Event: {}", e.name), 1));
+    }
+    if let Some(c) = app
+        .selected_collection
+        .as_ref()
+        .and_then(|id| app.collections.iter().find(|c| &c.id == id))
+    {
+        chips.push((format!("Collection: {}", c.name), 2));
+    }
+    let smart = if app.filter == shoebox_core::query::recently_changed() {
+        Some("Recently changed".to_owned())
+    } else {
+        app.settings
+            .smart_filters
+            .iter()
+            .find(|sf| !app.filter.is_empty() && sf.filter == app.filter)
+            .map(|sf| sf.name.clone())
+    };
+    if let Some(name) = smart {
+        chips.push((name, 3));
+    }
+    for (text, kind) in chips {
+        let r = ui
+            .add(egui::Button::new(format!("{text}  ✖")).selected(true))
+            .on_hover_text("Clear");
+        if r.clicked() {
+            match kind {
+                0 => app.set_folder(None),
+                1 => app.select_event(None),
+                2 => app.select_collection(None),
+                _ => {
+                    app.filter = shoebox_core::query::Filter::default();
+                    app.sort = shoebox_core::query::Sort::CaptureTime;
+                    app.sort_desc = false;
+                }
+            }
+        }
     }
 }

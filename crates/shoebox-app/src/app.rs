@@ -335,6 +335,8 @@ pub struct ShoeboxApp {
     pub(crate) notice: Option<String>,
     pub(crate) timeline: views::timeline::State,
     pub(crate) map: views::map::State,
+    /// Left-panel sections folded away.
+    pub(crate) collapsed: HashSet<&'static str>,
     semantic: crate::semantic::Semantic,
     pub(crate) sem: crate::semantic::SearchState,
     people: crate::people::PeopleWorker,
@@ -444,6 +446,7 @@ impl ShoeboxApp {
             notice: None,
             timeline: views::timeline::State::default(),
             map: views::map::State::new(tile_cache),
+            collapsed: HashSet::new(),
             semantic,
             sem: Default::default(),
             people,
@@ -600,6 +603,22 @@ impl ShoeboxApp {
 
     pub fn view_name(&self) -> View {
         self.view
+    }
+
+    /// The left panel's photo count for a folder of this name (tests).
+    pub fn folder_count(&self, name: &str) -> usize {
+        fn find(n: &FolderNode, name: &str) -> Option<usize> {
+            if n.name == name {
+                return Some(n.count);
+            }
+            n.children.values().find_map(|c| find(c, name))
+        }
+        self.tree.iter().find_map(|n| find(n, name)).unwrap_or(0)
+    }
+
+    /// Whether any filter is set (tests).
+    pub fn filtered(&self) -> bool {
+        !self.filter.is_empty() || self.folder.is_some()
     }
 
     pub fn shown_count(&self) -> usize {
@@ -1086,6 +1105,20 @@ impl ShoeboxApp {
             .collect()
     }
 
+    /// Things: (tag, photos), most photos first (tests).
+    pub fn things(&self) -> Vec<(String, usize)> {
+        self.sem
+            .tags
+            .as_ref()
+            .map(|t| {
+                t.counts
+                    .iter()
+                    .map(|&(l, n)| (t.names[l as usize].clone(), n))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Suggested tags of a photo (tests).
     pub fn tags_of(&self, file_name: &str) -> Vec<String> {
         self.catalog
@@ -1195,6 +1228,16 @@ impl ShoeboxApp {
             self.set_folder(None);
         }
         self.command(LibraryCommand::RemoveRoot(path));
+    }
+
+    /// "All photos": no folder, event, collection, person, tag or similar.
+    pub(crate) fn show_everything(&mut self) {
+        self.selected_event = None;
+        self.selected_collection = None;
+        self.ppl.showing = None;
+        self.sem.tag = None;
+        self.sem.similar = None;
+        self.set_folder(None);
     }
 
     pub(crate) fn set_folder(&mut self, folder: Option<PathBuf>) {

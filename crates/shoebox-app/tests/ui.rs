@@ -107,6 +107,31 @@ fn browse_views_render() {
     );
     snapshot(&mut h, "1-grid");
 
+    // Left-panel items toggle: a second click shows everything again.
+    h.get_by_label("Recently changed").click();
+    h.run_steps(2);
+    assert!(h.state().filtered());
+    h.get_by_label("Recently changed").click();
+    h.run_steps(2);
+    assert!(!h.state().filtered(), "Recently changed deselects");
+    h.get_by_label(&format!("scan  {}", h.state().folder_count("scan")))
+        .click();
+    h.run_steps(2);
+    assert!(h.state().filtered());
+    h.get_by_label(&format!("scan  {}", h.state().folder_count("scan")))
+        .click();
+    h.run_steps(2);
+    assert!(!h.state().filtered(), "a folder deselects");
+    // …and what's narrowing the grid shows above it, with a ✖.
+    h.get_by_label(&format!("scan  {}", h.state().folder_count("scan")))
+        .click();
+    h.run_steps(3);
+    snapshot(&mut h, "1a-folder-chip");
+    h.get_by_label("📁 scan  ✖").click();
+    h.run_steps(2);
+    assert!(!h.state().filtered(), "the chip clears it");
+    assert_eq!(h.state().shown_count(), photos);
+
     // Right-click a photo: it becomes the selection and the menu offers
     // Reveal in Finder. (The item isn't clicked, so Finder doesn't open.)
     h.get_by_label("f0005.jpg").click_secondary();
@@ -2035,5 +2060,105 @@ fn people_real_model() {
         h.run_steps(4);
         eprintln!("  {label}: {:?}", h.state().shown_names());
         snapshot(&mut h, &format!("people-real-{i}"));
+    }
+}
+
+/// Tags and People on a real library, opened in place (it must be an APFS
+/// clone: `cp -cR Photos Photos-test`; nothing is written there, but don't
+/// risk the original). Prints tag counts, sample tags and people groups.
+/// `SHOEBOX_UI_LIBRARY=<clone> SHOEBOX_ML_MODEL=<dir> SHOEBOX_FACES_MODEL=<dir>
+/// [SHOEBOX_UI_DATA=<dir to keep analysis between runs>]
+/// cargo test --release -p shoebox-app --test ui -- --ignored analysis_real --nocapture`
+#[test]
+#[ignore]
+fn analysis_real_library() {
+    let (Some(lib), Some(model), Some(faces)) = (
+        std::env::var_os("SHOEBOX_UI_LIBRARY"),
+        std::env::var_os("SHOEBOX_ML_MODEL"),
+        std::env::var_os("SHOEBOX_FACES_MODEL"),
+    ) else {
+        eprintln!("set SHOEBOX_UI_LIBRARY, SHOEBOX_ML_MODEL and SHOEBOX_FACES_MODEL");
+        return;
+    };
+    let t = tempfile::tempdir().unwrap();
+    let data =
+        std::env::var_os("SHOEBOX_UI_DATA").map_or_else(|| t.path().to_owned(), PathBuf::from);
+    let mut p = paths(&data, &[PathBuf::from(lib)]);
+    p.model = shoebox_app::semantic::ModelSource::Download {
+        dir: PathBuf::from(model),
+        staging: data.join("staging"),
+    };
+    p.faces = shoebox_app::people::FaceSource::Download {
+        dir: PathBuf::from(faces),
+        staging: data.join("staging"),
+    };
+    let mut s = Settings::load(&p.settings).unwrap();
+    s.semantic_search = true;
+    s.people = true;
+    s.save(&p.settings).unwrap();
+    let mut h = harness(p, egui::vec2(1600.0, 1000.0));
+    settle(&mut h, Duration::from_secs(600));
+    let start = Instant::now();
+    let done = |a: &ShoeboxApp| {
+        let (s, f) = (a.semantic_status(), a.people_status());
+        s.ready() && !s.indexing() && f.ready() && !f.indexing() && !a.things().is_empty()
+    };
+    wait_for(&mut h, Duration::from_secs(7200), "analysis", done);
+    h.run_steps(5);
+    let (s, f) = (
+        h.state().semantic_status().clone(),
+        h.state().people_status().clone(),
+    );
+    eprintln!(
+        "analysed in {:.0} s: {} photos embedded ({} skipped), {} looked at for faces ({} skipped)",
+        start.elapsed().as_secs_f32(),
+        s.indexed,
+        s.skipped,
+        f.indexed,
+        f.skipped
+    );
+    snapshot(&mut h, "real-1-grid");
+    let things = h.state().things();
+    eprintln!("{} tags in use; most common:", things.len());
+    for (name, n) in things.iter().take(60) {
+        eprintln!("  {name}: {n}");
+    }
+    let names = h.state().shown_names();
+    let tagged = names
+        .iter()
+        .filter(|n| !h.state().tags_of(n).is_empty())
+        .count();
+    eprintln!(
+        "{tagged} of {} photos have suggested tags; a sample:",
+        names.len()
+    );
+    for n in names.iter().step_by((names.len() / 40).max(1)) {
+        eprintln!("  {n}: {:?}", h.state().tags_of(n));
+    }
+    for tag in std::env::var("SHOEBOX_UI_TAGS")
+        .unwrap_or_default()
+        .split(',')
+    {
+        if tag.is_empty() {
+            continue;
+        }
+        let with: Vec<&String> = names
+            .iter()
+            .filter(|n| h.state().tags_of(n).iter().any(|t| t == tag))
+            .collect();
+        eprintln!("tag {tag}: {with:?}");
+    }
+    let groups = h.state().people_groups();
+    eprintln!("{} people groups:", groups.len());
+    for (label, n) in groups.iter().take(40) {
+        eprintln!("  {label}: {n} photos");
+    }
+    h.run_steps(3);
+    for (label, n) in groups.iter().take(10) {
+        h.get_by_label(&format!("{label}  {n}")).click();
+        h.run_steps(4);
+        eprintln!("group {label}: {:?}", h.state().shown_names());
+        h.get_by_label(&format!("{label}  {n}")).click();
+        h.run_steps(4);
     }
 }

@@ -17,7 +17,7 @@ use eframe::egui::{self, Color32, Rect, Stroke, StrokeKind, pos2, vec2};
 use crate::app::ShoeboxApp;
 use crate::jobs::{Priority, Size};
 
-pub const GAP: f32 = 6.0;
+pub const GAP: f32 = 4.0;
 
 /// Photos being dragged (onto a folder to move them, or a collection).
 pub struct DragPhotos(pub Vec<crate::jobs::PhotoId>);
@@ -187,23 +187,24 @@ pub fn cell(
 
     let selected = app.selection.contains(&id);
     let current = app.current == Some(id);
-    let bg = if selected {
-        visuals.selection.bg_fill.gamma_multiply(0.35)
-    } else {
-        visuals.faint_bg_color
-    };
     if !fill {
-        painter.rect_filled(rect, 3.0, bg);
+        let bg = if selected {
+            visuals.selection.bg_fill.gamma_multiply(0.35)
+        } else {
+            visuals.faint_bg_color
+        };
+        painter.rect_filled(rect, 4.0, bg);
     }
     let photo = &app.catalog.photos[idx];
-    let inner = if fill { rect } else { rect.shrink(6.0) };
-    match app.textures.best(id, size) {
+    let cell_inner = if fill { rect } else { rect.shrink(4.0) };
+    // Badges and marks sit on the image itself, not the cell around it.
+    let inner = match app.textures.best(id, size) {
         Some(tex) => {
             let [w, h] = tex.size();
             let target = if fill {
-                inner
+                cell_inner
             } else {
-                fit(inner, w as f32 / h as f32)
+                fit(cell_inner, w as f32 / h as f32)
             };
             painter.image(
                 tex.id(),
@@ -211,12 +212,13 @@ pub fn cell(
                 Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
                 Color32::WHITE,
             );
+            target
         }
         None => {
             let target = if fill {
-                inner
+                cell_inner
             } else {
-                fit(inner, photo.meta.aspect().unwrap_or(1.5))
+                fit(cell_inner, photo.meta.aspect().unwrap_or(1.5))
             };
             painter.rect_filled(target, 2.0, visuals.extreme_bg_color);
             if app.textures.failed.keys().any(|k| k.photo == id) {
@@ -228,8 +230,9 @@ pub fn cell(
                     visuals.warn_fg_color,
                 );
             }
+            target
         }
-    }
+    };
     // Badges. Bottom left: file type, or the stack's formats and size.
     let st = app.stack_of(idx);
     let expanded = app.expanded.contains(&app.ids[st.primary]);
@@ -244,7 +247,7 @@ pub fn cell(
     let font = egui::FontId::monospace(9.5);
     let galley = painter.layout_no_wrap(label, font, Color32::WHITE);
     let badge = Rect::from_min_size(
-        pos2(inner.left() + 3.0, inner.bottom() - galley.size().y - 5.0),
+        pos2(inner.left() + 4.0, inner.bottom() - galley.size().y - 6.0),
         galley.size() + vec2(6.0, 2.0),
     );
     painter.rect_filled(badge, 2.0, Color32::from_black_alpha(150));
@@ -261,7 +264,7 @@ pub fn cell(
         None => None,
     };
     if let Some((glyph, colour)) = flag {
-        let r = Rect::from_min_size(inner.left_top() + vec2(3.0, 3.0), vec2(16.0, 16.0));
+        let r = Rect::from_min_size(inner.left_top() + vec2(4.0, 6.0), vec2(16.0, 16.0));
         painter.rect_filled(r, 3.0, Color32::from_black_alpha(160));
         painter.text(
             r.center(),
@@ -301,11 +304,7 @@ pub fn cell(
     }
     // Colour label: a strip along the top of the cell.
     if let Some(l) = marks.label {
-        // Inset, so the selection border doesn't cover it.
-        let strip = Rect::from_min_size(
-            rect.left_top() + vec2(4.0, 4.0),
-            vec2(rect.width() - 8.0, 4.0),
-        );
+        let strip = Rect::from_min_size(inner.left_top(), vec2(inner.width(), 4.0));
         painter.rect_filled(strip, 2.0, label_colour(l));
     }
 

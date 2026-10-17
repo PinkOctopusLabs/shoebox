@@ -3,6 +3,27 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-17 — Polish: toolbar, left panel, grid cells
+- **Toolbar** is two fixed rows: views, size, auto-advance, undo/redo; then
+  what's narrowing the grid (folder, event, collection or smart filter, each
+  a chip with ✖), search, rating, flag, label, **Filters ▾** (file type,
+  camera, lens, NEF missing, undated, changed, unseen; the button counts the
+  ones set) and Clear, with sort at the right. It no longer wraps to a third.
+- **Left panel** scrolls as one, with folding section headings (small
+  capitals, "+" at the right) and rows with counts right-aligned in muted
+  text. Every row toggles: clicking a selected folder, event, collection,
+  smart filter (including Recently changed), person or tag shows everything
+  again, and a selected row shows ✖ on hover. People and Things list 8, then
+  "Show all".
+- **Grid cells:** badges, flag, rating, change dot and label strip sit on
+  the image, not the cell around it (the type badge used to sit in a strip
+  below landscape photos); 4 px gaps.
+- Checked on a clone of the real library (1,537 photos): suggested tags were
+  right in every contact sheet looked at (monkey, cat, cliff, sunset,
+  swimming pool, glasses); People found the two travellers and a boatman,
+  with one person split over three groups (hat, swimming; naming them alike
+  merges them) and three groups of the cat (YuNet finds cat faces).
+
 ## 2026-10-17 — M6 faces: People
 The spec says faces with InsightFace. InsightFace's models are licensed
 "for non-commercial research purposes only", so Shoebox uses OpenCV Zoo's
