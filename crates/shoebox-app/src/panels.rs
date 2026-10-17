@@ -1102,7 +1102,18 @@ pub fn info(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             "Sidecar modified",
             opt(photo.sidecar_mtime_ns().map(crate::app::local_time_ns)),
         ),
-        ("Shutter count", "—".into()),
+        (
+            "Shutter count",
+            // A TIFF export has no MakerNote; its NEF or JPG does.
+            opt(x
+                .shutter_count
+                .or_else(|| {
+                    app.stack_of(idx)
+                        .all()
+                        .find_map(|i| app.catalog.photos[i].meta.exif.shutter_count)
+                })
+                .map(group_thousands)),
+        ),
     ];
     egui::Grid::new("info-grid")
         .num_columns(2)
@@ -1617,4 +1628,17 @@ fn layout_toggle(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         app.save_settings(s);
         app.refilter();
     }
+}
+
+/// 12345 → "12,345".
+fn group_thousands(n: u32) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }

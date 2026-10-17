@@ -21,6 +21,8 @@ pub struct ExifInfo {
     pub orientation: Option<u16>,
     /// Latitude and longitude in degrees (north and east positive).
     pub gps: Option<(f64, f64)>,
+    /// Shutter actuations, from a Nikon MakerNote.
+    pub shutter_count: Option<u32>,
 }
 
 fn ascii(e: &exif::Exif, tag: Tag) -> Option<String> {
@@ -100,7 +102,48 @@ pub fn read(data: &[u8]) -> ExifInfo {
         iso: uint(&e, Tag::PhotographicSensitivity),
         orientation: uint(&e, Tag::Orientation).and_then(|v| u16::try_from(v).ok()),
         gps: gps(&e),
+        shutter_count: match e.get_field(Tag::MakerNote, In::PRIMARY).map(|f| &f.value) {
+            Some(Value::Undefined(note, _)) => nikon_shutter_count(note),
+            _ => None,
+        },
     }
+}
+
+/// ShutterCount (tag 0xA7, a plain LONG) from a Nikon type-3 MakerNote:
+/// "Nikon\0", a version, then a TIFF header whose offsets count from itself.
+/// (The tag isn't encrypted; Nikon uses it as a key for other ones.)
+fn nikon_shutter_count(note: &[u8]) -> Option<u32> {
+    let tiff = note.strip_prefix(b"Nikon\0")?.get(4..)?;
+    let big = match tiff.get(..2)? {
+        b"MM" => true,
+        b"II" => false,
+        _ => return None,
+    };
+    let u16_at = |o: usize| -> Option<u16> {
+        let b: [u8; 2] = tiff.get(o..o + 2)?.try_into().ok()?;
+        Some(if big {
+            u16::from_be_bytes(b)
+        } else {
+            u16::from_le_bytes(b)
+        })
+    };
+    let u32_at = |o: usize| -> Option<u32> {
+        let b: [u8; 4] = tiff.get(o..o + 4)?.try_into().ok()?;
+        Some(if big {
+            u32::from_be_bytes(b)
+        } else {
+            u32::from_le_bytes(b)
+        })
+    };
+    let ifd = u32_at(4)? as usize;
+    let n = usize::from(u16_at(ifd)?);
+    (0..n).find_map(|k| {
+        let e = ifd + 2 + 12 * k;
+        // Tag 0xA7, type LONG (4), one value: stored in the entry itself.
+        (u16_at(e)? == 0xA7 && u16_at(e + 2)? == 4 && u32_at(e + 4)? == 1)
+            .then(|| u32_at(e + 8))
+            .flatten()
+    })
 }
 
 /// Seconds since the Unix epoch (ignoring time zone) from EXIF
@@ -136,7 +179,7 @@ pub fn capture_seconds(datetime: &str, subsec: Option<&str>) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
-    use super::capture_seconds;
+    use super::{capture_seconds, nikon_shutter_count, read};
 
     #[test]
     fn reads_gps() {
@@ -206,5 +249,33 @@ mod tests {
         assert!((b - a - 1.85).abs() < 1e-6);
         assert_eq!(capture_seconds("0000:00:00 00:00:00", None), None);
         assert_eq!(capture_seconds("garbage", None), None);
+    }
+
+    #[test]
+    fn nikon_shutter_count_from_makernote() {
+        // "Nikon\0" + version + big-endian TIFF header, IFD at 8 with two
+        // entries: something else, then 0xA7 = 1919.
+        let mut note = b"Nikon\0\x02\x10\x00\x00".to_vec();
+        note.extend_from_slice(b"MM\x00\x2a\x00\x00\x00\x08");
+        note.extend_from_slice(&2u16.to_be_bytes());
+        note.extend_from_slice(&[0x00, 0x1d, 0, 2, 0, 0, 0, 4, b'1', b'2', b'3', 0]);
+        note.extend_from_slice(&[0x00, 0xa7, 0, 4, 0, 0, 0, 1]);
+        note.extend_from_slice(&1919u32.to_be_bytes());
+        assert_eq!(nikon_shutter_count(&note), Some(1919));
+        assert_eq!(nikon_shutter_count(b"Canon"), None);
+        assert_eq!(nikon_shutter_count(&note[..20]), None, "truncated");
+    }
+
+    /// The real Z f NEF and its JPG (gitignored fixtures; skipped without).
+    #[test]
+    fn real_nikon_shutter_count() {
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/real");
+        for f in ["20260501-203002-65.nef", "20260501-203002-65.jpg"] {
+            let Ok(data) = std::fs::read(dir.join(f)) else {
+                return;
+            };
+            assert!(read(&data).shutter_count.is_some_and(|n| n > 0), "{f}");
+        }
     }
 }
