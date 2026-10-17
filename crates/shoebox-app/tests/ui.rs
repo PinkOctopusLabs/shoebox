@@ -2190,8 +2190,8 @@ fn analysis_real_library() {
     }
 }
 
-/// A Live Photo (JPG + MOV, one base name) stacks as one photo; a lone clip
-/// shows its poster frame, and the loupe offers to open it. Needs ffmpeg to
+/// A Live Photo (JPG + MOV, one base name) stacks as one photo; lone clips
+/// (MOV and MP4) show their poster frames, and the loupe offers to open it. Needs ffmpeg to
 /// make the movies (skipped without it).
 #[test]
 fn live_photos_and_movies() {
@@ -2207,7 +2207,10 @@ fn live_photos_and_movies() {
             .status()
             .is_ok_and(|s| s.success())
     };
-    if !ffmpeg(&lib.join("IMG_0001.mov"), "red") || !ffmpeg(&lib.join("clip.mov"), "blue") {
+    if !ffmpeg(&lib.join("IMG_0001.mov"), "red")
+        || !ffmpeg(&lib.join("clip.mov"), "blue")
+        || !ffmpeg(&lib.join("phone.mp4"), "green")
+    {
         eprintln!("ffmpeg not available: skipped");
         return;
     }
@@ -2220,11 +2223,11 @@ fn live_photos_and_movies() {
     let p = paths(t.path(), std::slice::from_ref(&lib));
     let mut h = harness(p, egui::vec2(1200.0, 800.0));
     settle(&mut h, Duration::from_secs(60));
-    assert_eq!(h.state().photo_count(), 3);
-    assert_eq!(h.state().shown_count(), 2, "the Live Photo is one photo");
-    assert_eq!(h.state().failed_count(), 0, "the clip's poster frame loads");
+    assert_eq!(h.state().photo_count(), 4);
+    assert_eq!(h.state().shown_count(), 3, "the Live Photo is one photo");
+    assert_eq!(h.state().failed_count(), 0, "the clips' poster frames load");
     snapshot(&mut h, "movies-1-grid");
-    h.get_by_label("clip.mov").click();
+    h.get_by_label("phone.mp4").click();
     h.run_steps(2);
     h.state_mut().set_view(View::Loupe);
     settle(&mut h, Duration::from_secs(30));

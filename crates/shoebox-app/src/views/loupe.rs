@@ -118,7 +118,7 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     );
     // A movie shows its poster frame; playing it is QuickTime's job.
     let photo = &app.catalog.photos[idx];
-    if photo.format == shoebox_decode::Format::Mov {
+    if photo.format.is_movie() {
         let path = photo.path.clone();
         let at = rect.center_bottom() + vec2(0.0, -40.0);
         let area = egui::Area::new(ui.scope_id().with("movie"))

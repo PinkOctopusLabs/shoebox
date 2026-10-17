@@ -91,7 +91,7 @@ fn rank(f: Format) -> u8 {
         Format::Png => 3,
         Format::Heic => 4,
         // A Live Photo's video is never the photo shown.
-        Format::Mov => 5,
+        Format::Mov | Format::Mp4 => 5,
     }
 }
 

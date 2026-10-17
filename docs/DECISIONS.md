@@ -3,6 +3,13 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-18 — MP4
+- `.mp4` and `.m4v` are movies too (`Format::Mp4`, badge **▶ MP4**, its own
+  file-type filter). MPEG-4 is QuickTime's box structure, so the same header
+  reader, poster frames, exact-copy duplicates and import naming apply.
+  Without Apple's creation-date key (most non-Apple phones and cameras),
+  the time is the `mvhd` UTC time in this Mac's time zone.
+
 ## 2026-10-17 — Live Photos and movies (MOV)
 - `.mov` files are part of the library. A Live Photo (HEIC or JPG + MOV
   with one base name) stacks as one photo with a **LIVE** badge; the video
@@ -22,7 +29,7 @@ deliberately differ and why.
   hashes for video. **Import** names a Live Photo's video from its photo's
   capture time, so the pair keeps one name.
 - Playback is a non-goal (spec): the loupe shows the poster frame and an
-  "Open in QuickTime Player" button. `.mp4` isn't included yet.
+  "Open in QuickTime Player" button.
 
 ## 2026-10-17 — Shutter count, GPS from sidecars
 - **Shutter count:** ShutterCount (tag 0xA7) from a Nikon type-3

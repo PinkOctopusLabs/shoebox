@@ -62,7 +62,7 @@ fn dims_from(format: Format, data: &[u8]) -> Option<(u32, u32)> {
         Format::Tiff => shoebox_decode::nef::ifd0_dimensions(data).ok().flatten(),
         // The largest image described in any IFD (the raw or JpgFromRaw).
         Format::Nef => shoebox_decode::nef::max_dimensions(data).ok().flatten(),
-        Format::Heic | Format::Mov => None,
+        Format::Heic | Format::Mov | Format::Mp4 => None,
     }
 }
 
@@ -123,7 +123,7 @@ fn movie_time(info: &shoebox_decode::mov::MovInfo) -> Option<jiff::Zoned> {
 
 /// Read metadata, trying the first 256 KB before falling back to the whole file.
 pub fn read(path: &Path, format: Format) -> Result<Meta> {
-    if format == Format::Mov {
+    if format.is_movie() {
         return movie(path);
     }
     let mut f = std::fs::File::open(path).map_err(io(path))?;

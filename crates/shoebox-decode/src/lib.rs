@@ -58,6 +58,9 @@ pub enum Format {
     /// QuickTime movie (a Live Photo's video, or a clip): a poster frame
     /// through AVFoundation on macOS; see [`render_path`].
     Mov,
+    /// MPEG-4 movie (`.mp4`, `.m4v`): the same box structure as QuickTime,
+    /// handled the same way.
+    Mp4,
 }
 
 impl Format {
@@ -70,6 +73,7 @@ impl Format {
             "png" => Format::Png,
             "heic" | "heif" | "hif" => Format::Heic,
             "mov" => Format::Mov,
+            "mp4" | "m4v" => Format::Mp4,
             _ => return None,
         })
     }
@@ -82,7 +86,13 @@ impl Format {
             Format::Png => "PNG",
             Format::Heic => "HEIC",
             Format::Mov => "MOV",
+            Format::Mp4 => "MP4",
         }
+    }
+
+    /// A movie (MOV or MP4): its picture comes from [`render_path`].
+    pub fn is_movie(self) -> bool {
+        matches!(self, Format::Mov | Format::Mp4)
     }
 }
 
@@ -114,7 +124,7 @@ pub fn decode_luma(format: Format, data: &[u8]) -> Result<Gray, DecodeError> {
         Format::Tiff => tiff::decode_luma(data),
         Format::Png => png::decode_luma(data),
         Format::Heic => heic_luma(data, 1 << 14),
-        Format::Mov => Err(video_from_bytes()),
+        Format::Mov | Format::Mp4 => Err(video_from_bytes()),
     }
 }
 
@@ -160,7 +170,7 @@ pub fn image_data_ranges(
         }
         Format::Tiff => tiff::image_data_ranges(data)?,
         Format::Png => png::idat_ranges(data)?,
-        Format::Heic | Format::Mov => return Ok(None),
+        Format::Heic | Format::Mov | Format::Mp4 => return Ok(None),
     }))
 }
 
@@ -182,7 +192,7 @@ pub fn dimensions(format: Format, data: &[u8]) -> Result<(u32, u32), DecodeError
             let g = heic_luma(data, 1 << 14)?;
             Ok((g.width, g.height))
         }
-        Format::Mov => {
+        Format::Mov | Format::Mp4 => {
             let i = mov::info(&mut std::io::Cursor::new(data))?;
             i.width
                 .zip(i.height)
@@ -257,7 +267,7 @@ pub fn render(
         Format::Tiff => tiff::decode_rgb(data)?,
         Format::Png => png::decode_rgb(data)?,
         Format::Heic => return heic_render(data, long_edge.unwrap_or(1 << 14), target),
-        Format::Mov => return Err(video_from_bytes()),
+        Format::Mov | Format::Mp4 => return Err(video_from_bytes()),
     };
     if let Some(l) = long_edge {
         img = img.fit_long_edge(l);
@@ -275,7 +285,7 @@ pub fn render_path(
     orientation: u16,
     target: Target,
 ) -> Result<Rgb8, DecodeError> {
-    if format == Format::Mov {
+    if format.is_movie() {
         return video_poster(path, long_edge.unwrap_or(4096), target);
     }
     let data =
@@ -343,6 +353,23 @@ pub fn embedded_xmp(format: Format, data: &[u8]) -> Option<std::ops::Range<usize
             Some(start..start + raw.len())
         }
         Format::Png => png::itxt_xmp(data),
-        Format::Heic | Format::Mov => None,
+        Format::Heic | Format::Mov | Format::Mp4 => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Format;
+    use std::path::Path;
+
+    #[test]
+    fn movie_formats() {
+        let f = |p: &str| Format::from_path(Path::new(p));
+        assert_eq!(f("a.MOV"), Some(Format::Mov));
+        assert_eq!(f("a.mp4"), Some(Format::Mp4));
+        assert_eq!(f("a.M4V"), Some(Format::Mp4));
+        assert!(f("a.mp4").is_some_and(Format::is_movie));
+        assert!(!Format::Heic.is_movie());
+        assert_eq!(Format::Mp4.label(), "MP4");
     }
 }

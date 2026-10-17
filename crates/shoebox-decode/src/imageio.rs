@@ -145,6 +145,7 @@ pub fn type_hint(format: crate::Format) -> &'static str {
         crate::Format::Png => "public.png",
         crate::Format::Heic => "public.heic",
         crate::Format::Mov => "com.apple.quicktime-movie",
+        crate::Format::Mp4 => "public.mpeg-4",
     }
 }
 

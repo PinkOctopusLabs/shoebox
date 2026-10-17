@@ -1,4 +1,4 @@
-//! A movie's poster frame and header: `cargo run -p shoebox-decode --example poster -- <file.mov>`.
+//! A movie's poster frame and header: `cargo run -p shoebox-decode --example poster -- <file.mov or .mp4>`.
 
 fn main() {
     for arg in std::env::args().skip(1) {

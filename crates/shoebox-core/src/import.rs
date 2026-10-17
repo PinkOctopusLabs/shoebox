@@ -193,7 +193,7 @@ pub fn plan(
     for frame in &frames {
         // A Live Photo's video is named from its photo's capture time, so
         // the pair keeps one name (the video's own clock can differ).
-        let is_movie = |s: &Source| Format::from_path(&s.path) == Some(Format::Mov);
+        let is_movie = |s: &Source| Format::from_path(&s.path).is_some_and(Format::is_movie);
         let lead = frame
             .iter()
             .find(|s| !is_movie(s) && s.fields.capture_time.is_some());

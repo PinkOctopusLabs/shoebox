@@ -119,7 +119,7 @@ fn stddev(px: &[u8]) -> f32 {
 pub fn analyze_path(path: &Path) -> Result<Analysis> {
     let format = Format::from_path(path)
         .ok_or_else(|| CoreError::Invalid(format!("unsupported file type: {}", path.display())))?;
-    if format == Format::Mov {
+    if format.is_movie() {
         return analyze_movie(path);
     }
     let data = std::fs::read(path).map_err(io(path))?;
