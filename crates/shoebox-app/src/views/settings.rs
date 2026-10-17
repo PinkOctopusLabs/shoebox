@@ -287,9 +287,9 @@ fn updates(ui: &mut egui::Ui) {
             }
             note(
                 ui,
-                "Updates come from the project's GitHub releases, signed by Pink \
-                 Octopus Labs. An update installs when you quit Shoebox, and never \
-                 while a file operation is running.",
+                "Updates come from the project's GitHub releases and install only if \
+                 they carry the project's update signature. An update installs when \
+                 you quit Shoebox, and never while a file operation is running.",
             );
             ui.add_space(6.0);
             if ui.button("Check Now").clicked() {

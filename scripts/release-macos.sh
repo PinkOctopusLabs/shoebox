@@ -6,7 +6,7 @@
 #   scripts/release-macos.sh 0.2.0
 #
 # Environment:
-#   SIGN_IDENTITY   required: "Developer ID Application: Pink Octopus Labs (TEAMID)"
+#   SIGN_IDENTITY   required: "Developer ID Application: Name (TEAMID)"
 #   NOTARY_PROFILE  required: a `xcrun notarytool store-credentials` profile
 #   SPARKLE_ACCOUNT Keychain account of the EdDSA update key (default "shoebox",
 #                   made with: "$(scripts/fetch-sparkle.sh)/bin/generate_keys" --account shoebox)
