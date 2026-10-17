@@ -36,8 +36,12 @@ A Rust + egui photo library app for macOS. **`docs/SPEC.md` is the source of tru
 - Target `aarch64-apple-darwin`, toolchain pinned in `rust-toolchain.toml`, minimum macOS 27, release `lto = "thin"`.
 - Prefer pure-Rust crates. Keep code portable to Linux: platform-specific code
   goes behind `cfg` with a macOS and a Linux branch (see `docs/DECISIONS.md`).
-  Ship and routinely test on macOS only; for an occasional Linux check:
+  Ship and routinely test on macOS only. CI (GitHub Actions, public repo
+  PinkOctopusLabs/shoebox) runs macOS and Linux on every push, without the
+  GPU-only UI tests; locally, for a Linux check:
   `docker run --rm -v "$PWD":/src:ro -v shoebox-linux-target:/target -e CARGO_TARGET_DIR=/target -w /src rust:1.99-bookworm cargo test --workspace`
+- The repo is public: never commit real photos, real GPS positions or other
+  personal data (real files go in the gitignored `tests/fixtures/real/`).
 
 ## Safety rules (hard requirements)
 1. Never delete files outside the app's own cache directories. "Remove" means move to `_rejected/`/`_duplicates/`, or the macOS Trash on explicit command.

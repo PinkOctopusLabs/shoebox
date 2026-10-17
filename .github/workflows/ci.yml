@@ -8,7 +8,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
+  macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,4 +24,20 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
-        run: cargo test --workspace
+        # The headless UI tests (shoebox-app/tests/ui.rs) need a GPU, which
+        # hosted runners don't have; they run locally.
+        run: |
+          cargo test --workspace --exclude shoebox-app
+          cargo test -p shoebox-app --lib --test glyphs
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test
+        run: cargo test --workspace --exclude shoebox-app
