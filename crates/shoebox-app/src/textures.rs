@@ -30,6 +30,16 @@ impl Textures {
         }
     }
 
+    /// Change the memory budget (evicting down to it on the next insert).
+    pub fn set_budget(&mut self, bytes: usize) {
+        self.budget = bytes;
+    }
+
+    /// Bytes of textures held now.
+    pub fn used(&self) -> usize {
+        self.used
+    }
+
     /// Call once per frame before drawing.
     pub fn begin_frame(&mut self) {
         self.frame += 1;

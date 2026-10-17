@@ -13,7 +13,7 @@ A Rust + egui photo library app for macOS. **`docs/SPEC.md` is the source of tru
   `jobs.rs` (background loader + library worker; the UI thread never reads
   files), `watch.rs` (file watcher feeding the library worker), `updater.rs`
   (Sparkle, loaded at runtime from bundled builds only), `textures.rs` (LRU budget), `views/` (grid, masonry, loupe,
-  filmstrip, compare, survey, duplicates, timeline, map, files = import/history/dialogs), `panels.rs`. Headless UI tests in `tests/ui.rs` render PNGs
+  filmstrip, compare, survey, duplicates, timeline, map, settings, files = import/history/dialogs), `menu.rs` (Settings… in the macOS app menu), `panels.rs`. Headless UI tests in `tests/ui.rs` render PNGs
   (`SHOEBOX_UI_SNAPSHOTS=<dir>`); `--ignored` runs the 10k scroll test,
   with `SHOEBOX_UI_BIG=<dir>` the 200k performance test (library from
   `cargo run --release -p shoebox-fixtures --example big_library -- <dir>`;

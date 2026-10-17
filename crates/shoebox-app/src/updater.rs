@@ -27,6 +27,36 @@ pub fn tick(ctx: &eframe::egui::Context, working: bool) {
     let _ = (ctx, working);
 }
 
+/// The updater's preferences, when this build has one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Prefs {
+    /// Check once a day.
+    pub auto_check: bool,
+    /// Download and install updates (on quit) without asking.
+    pub auto_install: bool,
+}
+
+/// The current preferences, or None when this build has no updater.
+pub fn prefs() -> Option<Prefs> {
+    #[cfg(target_os = "macos")]
+    return mac::prefs();
+    #[cfg(not(target_os = "macos"))]
+    None
+}
+
+pub fn set_prefs(p: Prefs) {
+    #[cfg(target_os = "macos")]
+    mac::set_prefs(p);
+    #[cfg(not(target_os = "macos"))]
+    let _ = p;
+}
+
+/// Check now, showing Sparkle's window with the result.
+pub fn check_now() {
+    #[cfg(target_os = "macos")]
+    mac::check_now();
+}
+
 #[cfg(target_os = "macos")]
 mod mac {
     use std::cell::RefCell;
@@ -42,7 +72,7 @@ mod mac {
     struct State {
         ctx: egui::Context,
         /// Sparkle holds only weak references to these.
-        _controller: Retained<AnyObject>,
+        controller: Retained<AnyObject>,
         _delegate: Retained<Delegate>,
         /// Sparkle's "go ahead and relaunch", held while the worker is busy.
         relaunch: Option<RcBlock<dyn Fn()>>,
@@ -149,7 +179,7 @@ mod mac {
         tracing::info!("updates on (Sparkle)");
         STATE.set(Some(State {
             ctx: ctx.clone(),
-            _controller: controller,
+            controller,
             _delegate: delegate,
             relaunch: None,
         }));
@@ -185,6 +215,47 @@ mod mac {
             let _: () = msg_send![&*item, setTarget: controller];
             let count: isize = msg_send![&*app_menu, numberOfItems];
             let _: () = msg_send![&*app_menu, insertItem: &*item, atIndex: count.min(1)];
+        }
+    }
+
+    /// SPUStandardUpdaterController's `updater`, if the updater runs.
+    fn updater() -> Option<Retained<AnyObject>> {
+        STATE.with_borrow(|s| {
+            let s = s.as_ref()?;
+            // SAFETY: the controller's `updater` property, on the main thread.
+            let u: Option<Retained<AnyObject>> = unsafe { msg_send![&*s.controller, updater] };
+            u
+        })
+    }
+
+    pub fn prefs() -> Option<super::Prefs> {
+        let u = updater()?;
+        // SAFETY: SPUUpdater's BOOL properties, on the main thread.
+        unsafe {
+            Some(super::Prefs {
+                auto_check: msg_send![&*u, automaticallyChecksForUpdates],
+                auto_install: msg_send![&*u, automaticallyDownloadsUpdates],
+            })
+        }
+    }
+
+    pub fn set_prefs(p: super::Prefs) {
+        let Some(u) = updater() else { return };
+        // SAFETY: SPUUpdater's BOOL property setters, on the main thread.
+        unsafe {
+            let _: () = msg_send![&*u, setAutomaticallyChecksForUpdates: p.auto_check];
+            let _: () = msg_send![&*u, setAutomaticallyDownloadsUpdates: p.auto_install];
+        }
+    }
+
+    pub fn check_now() {
+        // Out of the RefCell first: Sparkle may call the delegate back.
+        let Some(c) = STATE.with_borrow(|s| s.as_ref().map(|s| s.controller.clone())) else {
+            return;
+        };
+        // SAFETY: the controller's documented action, on the main thread.
+        unsafe {
+            let _: () = msg_send![&*c, checkForUpdates: Option::<&AnyObject>::None];
         }
     }
 

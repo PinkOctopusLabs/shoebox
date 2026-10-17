@@ -93,6 +93,7 @@ fn main() -> anyhow::Result<()> {
         options,
         Box::new(|cc| {
             let app = ShoeboxApp::new(cc, paths);
+            shoebox_app::menu::install(&cc.egui_ctx);
             shoebox_app::updater::start(&cc.egui_ctx);
             Ok(Box::new(app))
         }),

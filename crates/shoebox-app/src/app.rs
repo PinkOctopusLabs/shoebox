@@ -208,13 +208,25 @@ pub struct LoupeState {
     pub pan: egui::Vec2,
 }
 
-/// A folder in the left panel, with the recursive count of images.
+/// A folder in the left panel, with the recursive count of photos (stacks
+/// with a file in it or below: what selecting the folder shows).
 #[derive(Debug, Default)]
 pub struct FolderNode {
     pub path: PathBuf,
     pub name: String,
     pub count: usize,
     pub children: std::collections::BTreeMap<String, FolderNode>,
+    /// The last stack counted here (1-based), so a stack counts once.
+    counted: usize,
+}
+
+impl FolderNode {
+    fn count_stack(&mut self, stamp: usize) {
+        if self.counted != stamp {
+            self.counted = stamp;
+            self.count += 1;
+        }
+    }
 }
 
 pub struct ShoeboxApp {
@@ -222,6 +234,9 @@ pub struct ShoeboxApp {
     library: Library,
     pub(crate) catalog: Arc<Catalog>,
     pub(crate) settings: Settings,
+    pub(crate) settings_ui: views::settings::State,
+    /// Where map tiles cache when they're on (None: never fetch tiles).
+    tile_cache: Option<PathBuf>,
     /// `ids[i]` is the stable id of `catalog.photos[i]`.
     pub(crate) ids: Vec<PhotoId>,
     index_of: HashMap<PhotoId, usize>,
@@ -332,6 +347,8 @@ impl ShoeboxApp {
             library,
             catalog: Arc::new(Catalog::default()),
             settings: Settings::default(),
+            settings_ui: Default::default(),
+            tile_cache: tile_cache.clone(),
             ids: Vec::new(),
             index_of: HashMap::new(),
             tree: Vec::new(),
@@ -593,6 +610,7 @@ impl ShoeboxApp {
                     complete,
                 } => {
                     self.settings = settings;
+                    self.apply_settings();
                     self.set_catalog(*published);
                     if complete {
                         self.scanning = false;
@@ -751,6 +769,54 @@ impl ShoeboxApp {
         self.recompute_events();
         self.recompute_collections();
         self.refilter();
+    }
+
+    /// Open the Settings window.
+    pub fn open_settings(&mut self) {
+        self.settings_ui.open(&self.settings);
+    }
+
+    pub fn settings_open(&self) -> bool {
+        self.settings_ui.open
+    }
+
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    /// Whether the map would fetch tiles (tests).
+    pub fn map_tiles_on(&self) -> bool {
+        self.map.tile_cache.is_some()
+    }
+
+    /// Use and save changed settings (library folders change through their
+    /// own commands).
+    pub(crate) fn save_settings(&mut self, s: Settings) {
+        self.settings = s.clone();
+        self.apply_settings();
+        self.command(LibraryCommand::SaveSettings(Box::new(s)));
+    }
+
+    /// Apply the settings the UI uses directly.
+    fn apply_settings(&mut self) {
+        self.textures.set_budget(self.settings.image_memory_bytes());
+        let tiles = if self.settings.offline_map {
+            None
+        } else {
+            self.tile_cache.clone()
+        };
+        if self.map.tile_cache != tiles {
+            self.map = views::map::State::new(tiles);
+        }
+    }
+
+    /// Stop showing a library folder (nothing on disk changes).
+    pub(crate) fn remove_root(&mut self, path: PathBuf) {
+        self.scanning = true;
+        if self.folder.as_ref().is_some_and(|f| f.starts_with(&path)) {
+            self.set_folder(None);
+        }
+        self.command(LibraryCommand::RemoveRoot(path));
     }
 
     pub(crate) fn set_folder(&mut self, folder: Option<PathBuf>) {
@@ -1788,6 +1854,19 @@ impl ShoeboxApp {
     // --- input -------------------------------------------------------------
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
+        if crate::menu::take_open_settings() {
+            self.open_settings();
+        }
+        let comma = ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Comma));
+        if comma && !self.settings_ui.open {
+            self.open_settings();
+        } else if self.settings_ui.open {
+            // The window takes the keyboard: Escape (or ⌘,) closes it.
+            if comma || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.settings_ui.open = false;
+            }
+            return;
+        }
         if ctx.egui_wants_keyboard_input() {
             return;
         }
@@ -2033,6 +2112,7 @@ impl eframe::App for ShoeboxApp {
         });
         views::duplicates::apply_dialog(self, &ctx);
         views::files::dialogs(self, &ctx);
+        views::settings::show(self, &ctx);
         self.scroll_to_current = false;
 
         let wanted = std::mem::take(&mut self.wanted);
@@ -2041,39 +2121,46 @@ impl eframe::App for ShoeboxApp {
 }
 
 pub(crate) fn build_tree(catalog: &Catalog) -> Vec<FolderNode> {
-    catalog
+    let mut roots: Vec<FolderNode> = catalog
         .roots
         .iter()
-        .enumerate()
-        .map(|(ri, root)| {
-            let mut node = FolderNode {
-                path: root.path.clone(),
-                name: root.path.file_name().map_or_else(
-                    || root.path.display().to_string(),
-                    |n| n.to_string_lossy().into_owned(),
-                ),
-                ..Default::default()
-            };
-            for p in catalog.photos.iter().filter(|p| p.root == ri) {
-                node.count += 1;
-                let mut cur = &mut node;
-                let parts: Vec<&str> = p.rel.split('/').collect();
-                for part in &parts[..parts.len().saturating_sub(1)] {
-                    let path = cur.path.join(part);
-                    cur = cur
-                        .children
-                        .entry((*part).to_owned())
-                        .or_insert_with(|| FolderNode {
-                            path,
-                            name: (*part).to_owned(),
-                            ..Default::default()
-                        });
-                    cur.count += 1;
-                }
-            }
-            node
+        .map(|root| FolderNode {
+            path: root.path.clone(),
+            name: root.path.file_name().map_or_else(
+                || root.path.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            ),
+            ..Default::default()
         })
-        .collect()
+        .collect();
+    for (si, stack) in catalog.stacks.iter().enumerate() {
+        let stamp = si + 1;
+        for i in stack.all() {
+            let p = &catalog.photos[i];
+            let Some(mut cur) = roots.get_mut(p.root) else {
+                continue;
+            };
+            cur.count_stack(stamp);
+            let mut parts: Vec<&str> = p.rel.split('/').collect();
+            parts.pop(); // the file name
+            for part in parts {
+                if !cur.children.contains_key(part) {
+                    let node = FolderNode {
+                        path: cur.path.join(part),
+                        name: part.to_owned(),
+                        ..Default::default()
+                    };
+                    cur.children.insert(part.to_owned(), node);
+                }
+                let Some(next) = cur.children.get_mut(part) else {
+                    break;
+                };
+                cur = next;
+                cur.count_stack(stamp);
+            }
+        }
+    }
+    roots
 }
 
 /// Menu label for [`reveal`] on this platform.

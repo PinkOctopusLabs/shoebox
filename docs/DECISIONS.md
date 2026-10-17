@@ -3,6 +3,22 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-17 — Settings window; counts are photos
+- **Settings** (⌘, from the app menu or the keyboard, or Tasks → Settings…)
+  is an in-app window with tabs, applied and saved as you change them:
+  Library (folders, Reference, Remove, Add Folder…), Sidecars (marks to
+  every member; also `name.xmp` for RAWs), Naming (import and rename
+  templates with a live example; invalid ones aren't saved), Map (OSM tiles
+  on/off: new, so the map can be used without any network), Memory (the
+  spec's configurable texture budget, 256 MB–4 GB, default 768 MB) and
+  Updates (Sparkle's automatic check / install, Check Now; builds without
+  Sparkle say so). Escape closes it; while open, keys don't reach the grid.
+- Not in the window: the masonry "justified rows" setting (that layout
+  isn't built yet) and duplicate thresholds (set in the Duplicates view).
+- **Counts are photos (stacks), not files**: "All photos" and each folder
+  count the stacks with a file in that folder (what selecting it shows);
+  a NEF + JPG counts once. The status bar still gives files as "total".
+
 ## 2026-10-17 — 200,000-file performance check
 A synthetic library shaped like a camera library
 (`shoebox-fixtures --example big_library`: 200,000 files, 117,709 frames,

@@ -86,6 +86,13 @@ fn browse_views_render() {
     let mut h = harness(p, egui::vec2(1400.0, 900.0));
     settle(&mut h, Duration::from_secs(60));
     assert_eq!(h.state().photo_count(), 17); // 7 reference + 10 scan images
+    // The library panel counts photos (stacks), as the grid shows them.
+    let photos = h.state().shown_count();
+    assert!(photos < 17, "the fixtures stack NEF + JPG");
+    assert!(
+        h.query_by_label(&format!("All photos  {photos}")).is_some(),
+        "All photos counts stacks"
+    );
     snapshot(&mut h, "1-grid");
 
     // Right-click a photo: it becomes the selection and the menu offers
@@ -1473,4 +1480,112 @@ fn map_places_located_photos() {
     h.run_steps(3);
     assert_eq!(h.state().view_name(), View::Map);
     assert!(h.query_by_label("paris.jpg").is_some());
+}
+
+/// The Settings window: opened with ⌘,, each change saved to settings.json
+/// as it's made, invalid templates not saved, Escape closes it.
+#[test]
+fn settings_window() {
+    let t = tempfile::tempdir().unwrap();
+    let lib = t.path().join("lib");
+    shoebox_fixtures::build_library(&lib).unwrap();
+    let mut p = paths(t.path(), &[lib.join("ref"), lib.join("scan")]);
+    // Tiles "on" but the map is never shown, so nothing is fetched.
+    p.tile_cache = Some(t.path().join("tiles"));
+    let file = p.settings.clone();
+    let saved = move || Settings::load(&file).unwrap();
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+    assert!(h.state().map_tiles_on());
+
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Comma);
+    h.run_steps(2);
+    assert!(h.state().settings_open());
+    snapshot(&mut h, "settings-1-library");
+
+    // Library: mark the scan folder as Reference, then back.
+    let scan = std::fs::canonicalize(lib.join("scan")).unwrap();
+    let is_ref = move |a: &ShoeboxApp| {
+        a.settings()
+            .roots
+            .iter()
+            .any(|r| r.path == scan && r.reference)
+    };
+    h.get_all_by_label("Reference").last().unwrap().click();
+    wait_for(
+        &mut h,
+        Duration::from_secs(30),
+        "scan marked reference",
+        |a| is_ref(a),
+    );
+    h.get_all_by_label("Reference").last().unwrap().click();
+    wait_for(
+        &mut h,
+        Duration::from_secs(30),
+        "scan writable again",
+        |a| !is_ref(a),
+    );
+
+    // Sidecars.
+    h.get_by_label("Sidecars").click();
+    h.run_steps(2);
+    h.get_by_label("Write ratings, flags and labels to every file of a photo")
+        .click();
+    h.run_steps(2);
+    assert!(h.state().settings().marks_to_all_stack_members);
+    snapshot(&mut h, "settings-2-sidecars");
+
+    // Naming: an unknown token isn't saved; a valid template is.
+    h.get_by_label("Naming").click();
+    h.run_steps(2);
+    let replace = |h: &mut Harness<'_, ShoeboxApp>, text: &str| {
+        // The import template's field (the first starting with a year folder).
+        h.get_all_by_role(egui::accesskit::Role::TextInput)
+            .find(|n| n.value().is_some_and(|v| v.starts_with("{YYYY}/")))
+            .unwrap()
+            .click();
+        h.run_steps(1);
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.event(egui::Event::Text(text.into()));
+        h.run_steps(2);
+    };
+    replace(&mut h, "{YYYY}/{nope}.{ext}");
+    snapshot(&mut h, "settings-3-naming-invalid");
+    assert_eq!(h.state().settings().import_template, "");
+    replace(&mut h, "{YYYY}/{YYYYMMDD}-{seq}.{ext}");
+    assert_eq!(
+        h.state().settings().import_template,
+        "{YYYY}/{YYYYMMDD}-{seq}.{ext}"
+    );
+
+    // Map tiles off, and memory.
+    // (The toolbar has a Map button too; the window's tab comes last.)
+    h.get_all_by_label("Map").last().unwrap().click();
+    h.run_steps(2);
+    h.get_by_label("Load map tiles from OpenStreetMap").click();
+    h.run_steps(2);
+    assert!(h.state().settings().offline_map);
+    assert!(!h.state().map_tiles_on());
+    h.get_by_label("Updates").click();
+    h.run_steps(2);
+    assert!(
+        h.query_by_label_contains("doesn't update itself").is_some(),
+        "tests have no updater"
+    );
+    snapshot(&mut h, "settings-4-updates");
+
+    // Everything reached settings.json.
+    wait_for(&mut h, Duration::from_secs(10), "settings saved", |_| {
+        let s = saved();
+        s.offline_map && s.marks_to_all_stack_members
+    });
+    let s = saved();
+    assert_eq!(s.import_template, "{YYYY}/{YYYYMMDD}-{seq}.{ext}");
+    assert_eq!(s.roots.len(), 2);
+    assert!(s.roots.iter().all(|r| !r.reference));
+
+    // Escape closes it; keys reach the grid again.
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert!(!h.state().settings_open());
 }

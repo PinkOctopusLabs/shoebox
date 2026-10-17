@@ -8,6 +8,7 @@ pub mod grid;
 pub mod loupe;
 pub mod map;
 pub mod masonry;
+pub mod settings;
 pub mod survey;
 pub mod timeline;
 

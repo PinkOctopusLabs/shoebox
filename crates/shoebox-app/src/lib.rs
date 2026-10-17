@@ -3,6 +3,7 @@
 pub mod app;
 mod display;
 pub mod jobs;
+pub mod menu;
 mod panels;
 mod platform;
 pub mod textures;

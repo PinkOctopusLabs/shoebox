@@ -256,7 +256,7 @@ pub fn status(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     });
 }
 
-fn pick_folder() -> Option<std::path::PathBuf> {
+pub(crate) fn pick_folder() -> Option<std::path::PathBuf> {
     rfd::FileDialog::new()
         .set_title("Add a folder to the library")
         .pick_folder()
@@ -283,7 +283,7 @@ pub fn library(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             if ui
                 .selectable_label(
                     all_selected,
-                    format!("All photos  {}", app.catalog.photos.len()),
+                    format!("All photos  {}", app.catalog.stacks.len()),
                 )
                 .clicked()
             {
@@ -339,6 +339,20 @@ pub fn library(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     {
         app.command(LibraryCommand::LoadHistory);
         app.set_view(View::History);
+    }
+    if ui
+        .selectable_label(app.settings_ui.open, "Settings…")
+        .on_hover_text(format!(
+            "{} ,",
+            if cfg!(target_os = "macos") {
+                "⌘"
+            } else {
+                "Ctrl"
+            }
+        ))
+        .clicked()
+    {
+        app.open_settings();
     }
 }
 
@@ -705,15 +719,7 @@ fn folder_node(
                     ui.close();
                 }
                 if ui.button("Remove from library (files untouched)").clicked() {
-                    app.scanning = true;
-                    if app
-                        .folder
-                        .as_ref()
-                        .is_some_and(|f| f.starts_with(&node.path))
-                    {
-                        app.set_folder(None);
-                    }
-                    app.command(LibraryCommand::RemoveRoot(node.path.clone()));
+                    app.remove_root(node.path.clone());
                     ui.close();
                 }
             }

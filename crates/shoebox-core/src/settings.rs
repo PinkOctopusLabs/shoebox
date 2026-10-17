@@ -37,7 +37,16 @@ pub struct Settings {
     /// Batch rename template (empty = the default).
     #[serde(default)]
     pub rename_template: String,
+    /// Don't fetch map tiles (the map shows markers on a blank background).
+    #[serde(default)]
+    pub offline_map: bool,
+    /// GPU memory for images, in MB (0 = the default).
+    #[serde(default)]
+    pub image_memory_mb: u32,
 }
+
+/// Default for [`Settings::image_memory_mb`].
+pub const DEFAULT_IMAGE_MEMORY_MB: u32 = 768;
 
 impl Settings {
     pub fn import_template(&self) -> &str {
@@ -54,6 +63,15 @@ impl Settings {
         } else {
             &self.rename_template
         }
+    }
+
+    /// GPU memory for images, in bytes.
+    pub fn image_memory_bytes(&self) -> usize {
+        let mb = match self.image_memory_mb {
+            0 => DEFAULT_IMAGE_MEMORY_MB,
+            mb => mb.clamp(128, 16_384),
+        };
+        (mb as usize) << 20
     }
 
     /// Paths of the roots Shoebox may change.

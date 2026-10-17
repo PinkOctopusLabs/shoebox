@@ -29,7 +29,7 @@ fn short(app: &ShoeboxApp, p: &Path) -> String {
 }
 
 /// A template's result for a sample frame, or why it's invalid.
-fn sample(template: &str, import: bool) -> Result<String, String> {
+pub(crate) fn sample(template: &str, import: bool) -> Result<String, String> {
     let t = Template::parse(template).map_err(|e| e.to_string())?;
     let f = Fields {
         capture_time: Some("2026:05:01 12:34:56".into()),
