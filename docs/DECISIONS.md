@@ -3,6 +3,18 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-17 — Lightroom-style layout
+Following Lightroom's Library module:
+- **Top bar, one row:** what's shown (scope chips, search, rating, flag,
+  label, Filters ▾, Clear), with background work, Auto-advance and
+  Undo/Redo at the right.
+- **A bar under the photos** (between the side panels): view buttons,
+  Days/Rows, then sort and thumbnail size at the right.
+- **Info panel** in folding sections like the left panel's: Histogram,
+  Info, Organise.
+- **Tiles** a step lighter than the background, the selected one lighter
+  still.
+
 ## 2026-10-17 — Day headers, justified rows
 - **Grid day headers** (the toolbar's **Days**, saved in settings): each day
   starts a new row under "Friday 24 April 2026 · 86 photos". Only when

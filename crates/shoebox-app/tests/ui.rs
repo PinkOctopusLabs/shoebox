@@ -2118,6 +2118,10 @@ fn analysis_real_library() {
         f.skipped
     );
     snapshot(&mut h, "real-1-grid");
+    let first = h.state().shown_names()[0].clone();
+    h.get_by_label(&first).click();
+    h.run_steps(6);
+    snapshot(&mut h, "real-1b-selected");
     // (The data folder may be kept between runs: set, don't toggle.)
     let set = |h: &mut Harness<'_, ShoeboxApp>, label: &str, on: bool| {
         let current = |a: &ShoeboxApp| match label {

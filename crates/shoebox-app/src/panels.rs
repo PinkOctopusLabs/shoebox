@@ -7,7 +7,18 @@ use shoebox_core::marks::{Label, Pick};
 use crate::app::{FolderNode, ShoeboxApp, View, reveal};
 use crate::jobs::LibraryCommand;
 
+/// The top bar: what's shown (scope, search, filters), then background
+/// work, auto-advance and undo/redo at the right.
 pub fn toolbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    ui.add_space(2.0);
+    filter_bar(app, ui);
+    ui.add_space(2.0);
+}
+
+/// The bar under the photos (as in Lightroom): views, layout, then sort and
+/// thumbnail size at the right.
+pub fn viewbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    let before = (app.sort, app.sort_desc);
     ui.horizontal(|ui| {
         for (v, name, key) in View::ALL {
             let hint = format!("{name} ({})", key.name());
@@ -26,50 +37,63 @@ pub fn toolbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         {
             app.set_view(View::Map);
         }
-        ui.separator();
-        ui.label("Size");
-        ui.add(egui::Slider::new(&mut app.thumb_size, 96.0..=512.0).show_value(false));
         layout_toggle(app, ui);
-        ui.separator();
-        ui.toggle_value(&mut app.auto_advance, "Auto-advance")
-            .on_hover_text("Move to the next photo after marking (or hold Caps Lock)");
-        if ui
-            .add_enabled(app.can_undo, egui::Button::new("Undo"))
-            .on_hover_text("Undo (⌘Z)")
-            .clicked()
-        {
-            app.command(LibraryCommand::Undo);
-        }
-        if ui
-            .add_enabled(app.can_redo, egui::Button::new("Redo"))
-            .on_hover_text("Redo (Shift+⌘Z)")
-            .clicked()
-        {
-            app.command(LibraryCommand::Redo);
-        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let busy = app.loader.busy();
-            if let Some((done, total)) = app.scan_progress {
-                ui.add(egui::Spinner::new());
-                ui.label(format!("Reading {done}/{total}"));
-            } else if app.scanning {
-                ui.add(egui::Spinner::new());
-                ui.label("Scanning…");
-            } else if busy > 0 {
-                ui.add(egui::Spinner::new());
-                ui.label(format!("{busy} thumbnails"));
-            } else if let Some(task) = semantic_task(&app.sem.status) {
-                ui.add(egui::Spinner::new());
-                ui.label(task)
-                    .on_hover_text("Semantic search (see Search in Settings)");
-            } else if let Some(task) = people_task(&app.ppl.status) {
-                ui.add(egui::Spinner::new());
-                ui.label(task)
-                    .on_hover_text("People (see People in Settings)");
+            ui.add(egui::Slider::new(&mut app.thumb_size, 96.0..=512.0).show_value(false))
+                .on_hover_text("Thumbnail size");
+            ui.weak("Size");
+            ui.separator();
+            if app.semantic_query().is_some() {
+                ui.weak("Best match first");
+            } else {
+                sort_controls(app, ui);
             }
         });
     });
-    filter_bar(app, ui);
+    if before != (app.sort, app.sort_desc) {
+        app.refilter();
+        app.scroll_to_current = true;
+    }
+}
+
+/// Background work, auto-advance and undo/redo (laid out right to left).
+fn work_and_undo(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    if ui
+        .add_enabled(app.can_redo, egui::Button::new("Redo"))
+        .on_hover_text("Redo (Shift+⌘Z)")
+        .clicked()
+    {
+        app.command(LibraryCommand::Redo);
+    }
+    if ui
+        .add_enabled(app.can_undo, egui::Button::new("Undo"))
+        .on_hover_text("Undo (⌘Z)")
+        .clicked()
+    {
+        app.command(LibraryCommand::Undo);
+    }
+    ui.toggle_value(&mut app.auto_advance, "Auto-advance")
+        .on_hover_text("Move to the next photo after marking (or hold Caps Lock)");
+    ui.separator();
+    let busy = app.loader.busy();
+    if let Some((done, total)) = app.scan_progress {
+        ui.label(format!("Reading {done}/{total}"));
+        ui.add(egui::Spinner::new());
+    } else if app.scanning {
+        ui.label("Scanning…");
+        ui.add(egui::Spinner::new());
+    } else if busy > 0 {
+        ui.label(format!("{busy} thumbnails"));
+        ui.add(egui::Spinner::new());
+    } else if let Some(task) = semantic_task(&app.sem.status) {
+        ui.label(task)
+            .on_hover_text("Semantic search (see Search in Settings)");
+        ui.add(egui::Spinner::new());
+    } else if let Some(task) = people_task(&app.ppl.status) {
+        ui.label(task)
+            .on_hover_text("People (see People in Settings)");
+        ui.add(egui::Spinner::new());
+    }
 }
 
 fn filter_bar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
@@ -138,11 +162,7 @@ fn filter_bar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             app.filter = shoebox_core::query::Filter::default();
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if app.semantic_query().is_some() {
-                ui.weak("Best match first");
-            } else {
-                sort_controls(app, ui);
-            }
+            work_and_undo(app, ui);
         });
     });
     if before
@@ -1040,18 +1060,35 @@ fn folder_node(
     });
 }
 
+/// The right panel: histogram, the photo's details, and organising, each a
+/// folding section.
 pub fn info(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
-    ui.heading("Info");
-    ui.separator();
-    let Some(id) = app.current else {
-        ui.weak("No photo selected");
-        return;
-    };
-    let Some(idx) = app.index(id) else { return };
-    app.want(idx, crate::jobs::Size::Small, crate::jobs::Priority::Near);
-    if let Some(h) = app.histograms.get(&id) {
-        histogram(ui, h);
-    }
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            let Some(id) = app.current else {
+                section(app, ui, "Info", None);
+                ui.weak("No photo selected");
+                return;
+            };
+            let Some(idx) = app.index(id) else { return };
+            app.want(idx, crate::jobs::Size::Small, crate::jobs::Priority::Near);
+            let (open, _) = section(app, ui, "Histogram", None);
+            if open && let Some(h) = app.histograms.get(&id) {
+                histogram(ui, h);
+            }
+            let (open, _) = section(app, ui, "Info", None);
+            if open {
+                details(app, ui, id, idx);
+            }
+            let (open, _) = section(app, ui, "Organise", None);
+            if open {
+                organise(app, ui);
+            }
+        });
+}
+
+fn details(app: &mut ShoeboxApp, ui: &mut egui::Ui, id: crate::jobs::PhotoId, idx: usize) {
     let photo = app.catalog.photos[idx].clone();
     let x = &photo.meta.exif;
     let opt = |v: Option<String>| v.unwrap_or_else(|| "—".into());
@@ -1188,14 +1225,9 @@ pub fn info(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             });
         }
     }
-
-    ui.add_space(10.0);
-    organise(app, ui);
 }
 
 fn organise(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
-    ui.heading("Organise");
-    ui.separator();
     let Some(m) = app.current_marks() else { return };
     let n = app.selection.len().max(1);
     if n > 1 {

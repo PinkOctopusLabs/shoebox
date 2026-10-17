@@ -2568,6 +2568,10 @@ impl eframe::App for ShoeboxApp {
             .default_size(280.0)
             .show_collapsible(ui, &mut right, |ui| panels::info(self, ui));
         self.right_open = right;
+        // Under the photos only (added after the side panels).
+        let mut bars = self.bars_open;
+        egui::Panel::bottom("viewbar")
+            .show_collapsible(ui, &mut bars, |ui| panels::viewbar(self, ui));
 
         // Viewing a stack in the loupe clears its change badge.
         if self.view == View::Loupe

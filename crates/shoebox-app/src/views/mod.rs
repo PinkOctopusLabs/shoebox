@@ -188,12 +188,15 @@ pub fn cell(
     let selected = app.selection.contains(&id);
     let current = app.current == Some(id);
     if !fill {
-        let bg = if selected {
-            visuals.selection.bg_fill.gamma_multiply(0.35)
-        } else {
-            visuals.faint_bg_color
+        // Tiles a step lighter than the background, selected ones lighter
+        // still (as in Lightroom).
+        let bg = match (visuals.dark_mode, selected) {
+            (true, false) => Color32::from_gray(38),
+            (true, true) => Color32::from_gray(66),
+            (false, false) => Color32::from_gray(222),
+            (false, true) => Color32::from_gray(196),
         };
-        painter.rect_filled(rect, 4.0, bg);
+        painter.rect_filled(rect, 3.0, bg);
     }
     let photo = &app.catalog.photos[idx];
     let cell_inner = if fill { rect } else { rect.shrink(4.0) };
