@@ -87,7 +87,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSApplicationCategoryType</key><string>public.app-category.photography</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
-  <key>NSHumanReadableCopyright</key><string>© $(date +%Y) Pink Octopus Labs</string>
+  <key>NSHumanReadableCopyright</key><string>© $(date +%Y) Pink Octopus Pty Ltd</string>
   <key>NSDesktopFolderUsageDescription</key><string>Shoebox shows and organises the photos in library folders you add.</string>
   <key>NSDocumentsFolderUsageDescription</key><string>Shoebox shows and organises the photos in library folders you add.</string>
   <key>NSDownloadsFolderUsageDescription</key><string>Shoebox shows and organises the photos in library folders you add.</string>
