@@ -853,6 +853,9 @@ impl ShoeboxApp {
         if let Some((_, p)) = &self.sem.similar {
             return Some(Query::Similar(p.clone()));
         }
+        if let Some(t) = self.sem.tag {
+            return Some(Query::Tag(t));
+        }
         let t = self.filter.search.trim();
         (self.sem.by_content && !t.is_empty()).then(|| Query::Text(t.to_owned()))
     }
@@ -867,12 +870,58 @@ impl ShoeboxApp {
         let Some(i) = self.index(id) else { return };
         let primary = self.catalog.stacks[self.catalog.stack_of[i]].primary;
         self.sem.similar = Some((self.ids[primary], self.catalog.photos[primary].path.clone()));
+        self.sem.tag = None;
         self.filter.search.clear();
         self.sem.results = None;
         if !matches!(self.view, View::Grid | View::Masonry) {
             self.set_view(View::Grid);
         }
         self.refilter();
+    }
+
+    /// Show the photos with this suggested tag.
+    pub(crate) fn show_tag(&mut self, label: u16) {
+        self.sem.tag = Some(label);
+        self.sem.similar = None;
+        self.sem.results = None;
+        if !matches!(self.view, View::Grid | View::Masonry) {
+            self.set_view(View::Grid);
+        }
+        self.refilter();
+        self.scroll_to_current = true;
+    }
+
+    pub(crate) fn clear_tag(&mut self) {
+        self.sem.tag = None;
+        self.sem.results = None;
+        self.refilter();
+    }
+
+    /// Suggested tags of a photo (its stack's primary), best first, without
+    /// those it already has as keywords.
+    pub(crate) fn suggested_tags(&self, id: PhotoId) -> Vec<String> {
+        let (Some(tags), Some(i)) = (&self.sem.tags, self.index(id)) else {
+            return Vec::new();
+        };
+        let primary = self.catalog.stacks[self.catalog.stack_of[i]].primary;
+        let have = &self.catalog.photos[primary].marks.keywords;
+        tags.by_photo
+            .get(&self.ids[primary])
+            .into_iter()
+            .flatten()
+            .map(|&(l, _)| tags.names[l as usize].clone())
+            .filter(|n| !have.iter().any(|k| k.eq_ignore_ascii_case(n)))
+            .collect()
+    }
+
+    /// Suggested tags of a photo (tests).
+    pub fn tags_of(&self, file_name: &str) -> Vec<String> {
+        self.catalog
+            .photos
+            .iter()
+            .position(|p| p.path.file_name().is_some_and(|n| n == file_name))
+            .map(|i| self.suggested_tags(self.ids[i]))
+            .unwrap_or_default()
     }
 
     /// Stop showing similar photos.
@@ -925,6 +974,16 @@ impl ShoeboxApp {
                         changed = true;
                     }
                 }
+                E::Tags(t) => {
+                    if self.sem.tag.is_some_and(|l| t.names.len() <= l as usize) {
+                        self.sem.tag = None;
+                    }
+                    self.sem.tags = Some(t);
+                    if self.sem.tag.is_some() {
+                        self.sem.results = None; // recount
+                        changed = true;
+                    }
+                }
             }
         }
         self.sem.typed(&self.filter.search);
@@ -933,7 +992,22 @@ impl ShoeboxApp {
             self.sem.results = None;
             changed = true;
         }
-        if let Some(wait) = self.sem.request(&self.semantic, want) {
+        if let Some(crate::semantic::Query::Tag(l)) = want {
+            // Answered here, from the tags.
+            let q = crate::semantic::Query::Tag(l);
+            if let Some(tags) = &self.sem.tags
+                && self.sem.results.as_ref().is_none_or(|(r, _)| *r != q)
+            {
+                let scores = tags
+                    .by_photo
+                    .iter()
+                    .filter_map(|(id, t)| t.iter().find(|x| x.0 == l).map(|x| (*id, x.1)))
+                    .collect();
+                self.sem.results = Some((q, scores));
+                changed = true;
+            }
+            self.sem.request(&self.semantic, None);
+        } else if let Some(wait) = self.sem.request(&self.semantic, want) {
             ctx.request_repaint_after(wait);
         }
         if changed {

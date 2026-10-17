@@ -31,7 +31,7 @@ deletes anything, and keeps a journal of every file operation it makes.
 - **Live sync:** changes made by other apps to your folders show up at once,
   marked so you can see what changed.
 - **Semantic search** (optional): describe a photo, in any language, and
-  find it; or find photos similar to one. Runs Google's SigLIP 2 model on
+  find it; find photos similar to one; browse suggested tags (Things). Runs Google's SigLIP 2 model on
   your Mac (downloaded once, 1.5 GB, when you turn it on); your photos
   never leave it.
 - **CLI:** `shoebox scan | dupes | apply | import | rename | history | undo |

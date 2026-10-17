@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::{CoreError, Result, io};
 
@@ -151,6 +151,118 @@ impl Index {
             .map(|(i, s)| (self.paths[i].clone(), s))
             .collect()
     }
+
+    /// Suggested tags for every file: for each, up to [`TagRule::max`]
+    /// labels (index into `labels`, score), best first. See [`TagRule`].
+    pub fn tag(&self, labels: &[Vector], rule: &TagRule) -> Vec<(PathBuf, Vec<(u16, f32)>)> {
+        // Each label's score on photos without that subject: its 25th
+        // percentile over the library (a sample of it).
+        let baseline: Vec<f32> = if self.len() >= rule.min_library {
+            let step = (self.len() / 20_000).max(1);
+            let sample: Vec<&Vector> = self.vectors.iter().step_by(step).collect();
+            labels
+                .par_iter()
+                .map(|l| {
+                    let mut c: Vec<f32> = sample.iter().map(|v| v.dot(l)).collect();
+                    c.sort_by(f32::total_cmp);
+                    c[c.len() / 4]
+                })
+                .collect()
+        } else {
+            vec![0.0; labels.len()]
+        };
+        self.vectors
+            .par_iter()
+            .enumerate()
+            .filter_map(|(i, v)| {
+                let c: Vec<f32> = labels.iter().map(|l| v.dot(l)).collect();
+                // This photo's score on labels in general.
+                let mut sorted = c.clone();
+                sorted.sort_by(f32::total_cmp);
+                let typical = sorted.get(sorted.len() / 2).copied().unwrap_or(0.0);
+                let lift: Vec<f32> = c
+                    .iter()
+                    .zip(&baseline)
+                    .map(|(c, b)| c - b - typical)
+                    .collect();
+                let best = lift.iter().copied().fold(f32::MIN, f32::max);
+                let mut tags: Vec<(u16, f32, f32)> = (0..labels.len())
+                    .filter(|&j| {
+                        c[j] >= rule.min_score
+                            && lift[j] >= rule.min_lift
+                            && lift[j] >= best - rule.margin
+                    })
+                    .map(|j| (j as u16, c[j], lift[j]))
+                    .collect();
+                if tags.is_empty() {
+                    return None;
+                }
+                tags.sort_by(|a, b| b.2.total_cmp(&a.2));
+                tags.truncate(rule.max);
+                Some((
+                    self.paths[i].clone(),
+                    tags.into_iter().map(|(j, c, _)| (j, c)).collect(),
+                ))
+            })
+            .collect()
+    }
+}
+
+/// When a photo gets a label as a suggested tag. Scores aren't comparable
+/// across labels or across photos (with SigLIP, "stars" scores well on many
+/// things, and some photos score well on every label), so a tag needs a
+/// *lift*: its score minus the label's usual score on the library's photos
+/// (25th percentile, so a subject in up to 3/4 of the library still
+/// stands out) minus the photo's median score over all labels.
+#[derive(Debug, Clone)]
+pub struct TagRule {
+    /// Score (cosine) a tag needs at least.
+    pub min_score: f32,
+    /// Lift a tag needs at least.
+    pub min_lift: f32,
+    /// Lift within this of the photo's best label.
+    pub margin: f32,
+    /// Tags per photo.
+    pub max: usize,
+    /// Below this many photos there's no per-label baseline (zero).
+    pub min_library: usize,
+}
+
+/// Labels' vectors, kept so the text model isn't needed to tag.
+impl Store {
+    /// Stored vectors for these prompts, if all of them are stored.
+    pub fn labels(&self, prompts: &[String]) -> Result<Option<Vec<Vector>>> {
+        let mut st = self
+            .conn
+            .prepare_cached("SELECT scale, vec FROM labels WHERE model = ?1 AND prompt = ?2")?;
+        let mut out = Vec::with_capacity(prompts.len());
+        for p in prompts {
+            let row = st
+                .query_row(params![self.model, p], |r| {
+                    Ok((r.get::<_, f64>(0)?, r.get::<_, Vec<u8>>(1)?))
+                })
+                .optional()?;
+            match row {
+                Some((scale, vec)) => out.push(Vector::from_blob(scale as f32, &vec)),
+                None => return Ok(None),
+            }
+        }
+        Ok(Some(out))
+    }
+
+    pub fn put_labels(&mut self, labels: &[(String, Vector)]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut st = tx.prepare_cached(
+                "INSERT OR REPLACE INTO labels(model, prompt, scale, vec) VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for (p, v) in labels {
+                st.execute(params![self.model, p, f64::from(v.scale), v.to_blob()])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
 }
 
 /// The embeddings database.
@@ -208,7 +320,14 @@ impl Store {
                  scale REAL NOT NULL,
                  vec   BLOB NOT NULL
              );
-             CREATE INDEX IF NOT EXISTS embeddings_file ON embeddings(size, mtime);",
+             CREATE INDEX IF NOT EXISTS embeddings_file ON embeddings(size, mtime);
+             CREATE TABLE IF NOT EXISTS labels (
+                 model  TEXT NOT NULL,
+                 prompt TEXT NOT NULL,
+                 scale  REAL NOT NULL,
+                 vec    BLOB NOT NULL,
+                 PRIMARY KEY (model, prompt)
+             );",
         )?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(Self {
@@ -368,6 +487,72 @@ mod tests {
         let names: Vec<_> = hits.iter().map(|(p, _)| p.to_str().unwrap()).collect();
         assert_eq!(names, ["/a", "/b"]);
         assert!(hits[0].1 > hits[1].1);
+    }
+
+    fn rule() -> TagRule {
+        TagRule {
+            min_score: 0.5,
+            min_lift: 0.1,
+            margin: 0.3,
+            max: 2,
+            min_library: 8,
+        }
+    }
+
+    #[test]
+    fn tags_need_lift_over_their_label_and_the_photo() {
+        // Labels: x, y, and "z" which scores high on every photo.
+        let labels: Vec<Vector> = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+            .iter()
+            .map(|v| Vector::quantise(v))
+            .collect();
+        let mut ix = Index::default();
+        // Ten ordinary photos: mostly z, a little x or y.
+        for i in 0..10 {
+            let v = if i % 2 == 0 {
+                [0.3, 0.0, 0.95]
+            } else {
+                [0.0, 0.3, 0.95]
+            };
+            ix.insert(format!("/p{i}").into(), Vector::quantise(&unit(&v)));
+        }
+        // One clearly x.
+        ix.insert("/x".into(), Vector::quantise(&unit(&[0.8, 0.0, 0.6])));
+        let tags: HashMap<PathBuf, Vec<(u16, f32)>> =
+            ix.tag(&labels, &rule()).into_iter().collect();
+        assert_eq!(
+            tags[Path::new("/x")]
+                .iter()
+                .map(|t| t.0)
+                .collect::<Vec<_>>(),
+            [0],
+            "x, not z: z scores 0.6 here, below its usual 0.95"
+        );
+        assert!(
+            tags.values().flatten().all(|t| t.0 != 2),
+            "z is never a tag: it's high everywhere"
+        );
+
+        // A tiny library: no per-label baseline, only the photo's own
+        // (its median label score, 0.6: z isn't above it).
+        let mut small = Index::default();
+        small.insert("/x".into(), Vector::quantise(&unit(&[0.8, 0.0, 0.6])));
+        let t = small.tag(&labels, &rule());
+        assert_eq!(t[0].1.iter().map(|t| t.0).collect::<Vec<_>>(), [0]);
+    }
+
+    #[test]
+    fn label_vectors_are_stored() -> anyhow::Result<()> {
+        let mut s = Store::open_in_memory("m")?;
+        let prompts = vec!["a dog".to_owned(), "a cat".to_owned()];
+        assert!(s.labels(&prompts)?.is_none());
+        let v = Vector::quantise(&[0.6, 0.8]);
+        s.put_labels(&[(prompts[0].clone(), v.clone())])?;
+        assert!(s.labels(&prompts)?.is_none(), "one missing");
+        s.put_labels(&[(prompts[1].clone(), v.clone())])?;
+        assert_eq!(s.labels(&prompts)?, Some(vec![v.clone(), v]));
+        assert!(Store::open_in_memory("other")?.labels(&prompts)?.is_none());
+        Ok(())
     }
 
     #[test]

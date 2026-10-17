@@ -7,9 +7,9 @@ A Rust + egui photo library app for macOS. **`docs/SPEC.md` is the source of tru
   M3: `xmp` (read any form, edit by splicing original bytes), `marks`, `sidecar` (precedence + write planning), `stacks`, `query` (filters, sort, smart filters), `events`, `changes` (unseen-change tracking).
   M4: `review` (duplicate groups for the app, auto-select, decisions → one batch).
   M5: `template` (naming), `import` (plan verified copies), `organise` (stack moves, renames, reject, reference rewrites), `collections`.
-  M6: `timeline` (days, calendar maths, heat levels), `embeddings` (semantic search store + 8-bit exhaustive search; own `embeddings.sqlite`).
+  M6: `timeline` (days, calendar maths, heat levels), `embeddings` (semantic search store + 8-bit exhaustive search + tag rule; own `embeddings.sqlite`).
 - `crates/shoebox-decode`: JPEG/TIFF/PNG decoding, NEF embedded-preview extraction, grayscale thumbnails.
-- `crates/shoebox-ml`: semantic search model (SigLIP 2 on candle; Metal on macOS): pinned, checksummed download (`download`), f16 split (`convert`), image/text encoders. Never touches the library. `examples/probe.rs` times and ranks a folder; `examples/fetch.rs` downloads. `vendor/candle-metal-kernels` is candle's with one fix (Metal 3.2 shaders; see `vendor/README.md`).
+- `crates/shoebox-ml`: semantic search model (SigLIP 2 on candle; Metal on macOS): pinned, checksummed download (`download`), f16 split (`convert`), image/text encoders, `labels.txt` (tag list). Never touches the library. `examples/probe.rs` times and ranks a folder; `examples/fetch.rs` downloads. `vendor/candle-metal-kernels` is candle's with one fix (Metal 3.2 shaders; see `vendor/README.md`).
 - `crates/shoebox-app`: the eframe/egui app (`cargo run --release -p shoebox-app`).
   `jobs.rs` (background loader + library worker; the UI thread never reads
   files), `watch.rs` (file watcher feeding the library worker), `semantic.rs`

@@ -1634,6 +1634,16 @@ impl shoebox_app::semantic::Model for ColourModel {
             _ => Err(format!("the test model doesn't know \"{text}\"")),
         }
     }
+
+    fn labels(&self) -> Vec<shoebox_ml::Label> {
+        ["red", "green", "blue"]
+            .into_iter()
+            .map(|name| shoebox_ml::Label {
+                name,
+                prompt: name.to_owned(),
+            })
+            .collect()
+    }
 }
 
 /// Semantic search end to end with a test model: indexing, a text query
@@ -1714,6 +1724,34 @@ fn semantic_search_in_the_app() {
     wait_for(&mut h, Duration::from_secs(10), "all photos", |a| {
         a.shown_count() == 5
     });
+
+    // Suggested tags: Things lists them with counts; one shows its photos.
+    wait_for(&mut h, Duration::from_secs(10), "tags", |a| {
+        a.tags_of("reddish.jpg") == ["red"]
+    });
+    assert_eq!(h.state().tags_of("blue.jpg"), ["blue"]);
+    h.run_steps(3); // the toolbar's height changed with the chip gone
+    h.get_by_label("red  2").click();
+    wait_for(&mut h, Duration::from_secs(10), "tagged red", |a| {
+        a.shown_count() == 2
+    });
+    assert_eq!(h.state().shown_names(), ["red.jpg", "reddish.jpg"]);
+    snapshot(&mut h, "semantic-3-things");
+    // Accepting a suggestion makes it a keyword (in the sidecar) and it's
+    // no longer suggested.
+    h.get_by_label("reddish.jpg").click();
+    h.run_steps(2);
+    h.get_by_label("+ red").click();
+    wait_for(&mut h, Duration::from_secs(10), "keyword", |a| {
+        a.marks_of("reddish.jpg")
+            .is_some_and(|m| m.keywords == ["red"])
+    });
+    assert!(h.state().tags_of("reddish.jpg").is_empty());
+    assert!(lib.join("reddish.jpg.xmp").exists());
+    h.get_by_label("✖").click();
+    wait_for(&mut h, Duration::from_secs(10), "all photos", |a| {
+        a.shown_count() == 5
+    });
     drop(h);
 
     // A restart reuses the stored embeddings.
@@ -1778,6 +1816,12 @@ fn semantic_search_real_model() {
         s.skipped,
         start.elapsed().as_secs_f32()
     );
+    wait_for(&mut h, Duration::from_secs(60), "tags", |a| {
+        a.shown_names().iter().any(|n| !a.tags_of(n).is_empty())
+    });
+    for n in h.state().shown_names() {
+        eprintln!("tags {n}: {:?}", h.state().tags_of(&n));
+    }
     h.get_by_label("Content").click();
     h.run_steps(2);
     h.get_all_by_role(egui::accesskit::Role::TextInput)

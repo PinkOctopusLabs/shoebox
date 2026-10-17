@@ -1,0 +1,318 @@
+# Things Shoebox can suggest as tags (zero-shot, with SigLIP).
+# One per line; blank lines and # comments are ignored.
+# Each is scored as "a photo of <label>".
+
+# People
+a person
+a portrait
+a group of people
+a crowd
+a child
+a baby
+a selfie
+a couple
+a family
+
+# Animals
+a dog
+a cat
+a horse
+a cow
+a sheep
+a pig
+a goat
+a chicken
+a duck
+a bird
+a parrot
+an owl
+an eagle
+a seagull
+a swan
+a penguin
+a fish
+a shark
+a dolphin
+a whale
+a turtle
+a frog
+a snake
+a lizard
+an insect
+a butterfly
+a bee
+a spider
+a deer
+a bear
+a fox
+a wolf
+a rabbit
+a squirrel
+a monkey
+an elephant
+a giraffe
+a zebra
+a lion
+a tiger
+a kangaroo
+a koala
+a camel
+
+# Plants and nature
+a flower
+a rose
+a sunflower
+a tulip
+a tree
+a forest
+a leaf
+autumn leaves
+a cactus
+a palm tree
+grass
+a mushroom
+moss
+blossom
+
+# Landscapes and places
+a landscape
+a mountain
+a snowy mountain
+a volcano
+a hill
+a valley
+a cliff
+a canyon
+a desert
+sand dunes
+a beach
+the sea
+waves
+a coast
+an island
+a lake
+a river
+a waterfall
+a glacier
+a cave
+a field
+a meadow
+farmland
+a vineyard
+a garden
+a park
+a countryside road
+a path in the woods
+a city
+a city skyline
+a street
+an alley
+a market
+a shop
+a village
+a harbour
+a pier
+a bridge
+a castle
+a church
+a cathedral
+a mosque
+a temple
+a shrine
+a pagoda
+a palace
+a tower
+a skyscraper
+a lighthouse
+a windmill
+a ruin
+a monument
+a statue
+a fountain
+a stadium
+an airport
+a train station
+a museum
+a gallery
+a library
+a restaurant
+a cafe
+a bar
+a hotel room
+a swimming pool
+a playground
+a campsite
+a ski slope
+a farm
+
+# Indoors
+a room
+a living room
+a bedroom
+a kitchen
+a bathroom
+an office
+a classroom
+a stage
+
+# Sky, weather and light
+the sky
+clouds
+a sunset
+a sunrise
+the night sky
+stars
+the moon
+a rainbow
+fog
+rain
+snow
+lightning
+a storm
+the aurora
+a silhouette
+city lights at night
+
+# Vehicles and transport
+a car
+a vintage car
+a truck
+a bus
+a train
+a tram
+a motorcycle
+a bicycle
+a scooter
+a boat
+a sailing boat
+a ship
+a kayak
+an aeroplane
+a helicopter
+a hot air balloon
+a road
+a railway
+
+# Food and drink
+food
+a meal
+breakfast
+a sandwich
+a burger
+pizza
+pasta
+sushi
+noodles
+a salad
+soup
+bread
+a cake
+a dessert
+ice cream
+chocolate
+fruit
+an apple
+a banana
+an orange
+strawberries
+vegetables
+a barbecue
+coffee
+tea
+wine
+beer
+a cocktail
+
+# Things
+a building
+a house
+a door
+a window
+stairs
+a fence
+a wall
+graffiti
+a sign
+text
+a book
+a newspaper
+a document
+a receipt
+a map
+a screenshot
+a computer
+a phone
+a camera
+a television
+a clock
+a lamp
+a candle
+a chair
+a sofa
+a bed
+a table
+a bottle
+a cup
+a vase
+a toy
+a teddy bear
+a ball
+a kite
+an umbrella
+a bag
+a hat
+glasses
+shoes
+a dress
+jewellery
+a painting
+a sculpture
+a musical instrument
+a guitar
+a piano
+a drum
+a flag
+a tent
+a gift
+balloons
+a christmas tree
+fireworks
+a pumpkin
+
+# Activities and events
+a wedding
+a birthday party
+a party
+a concert
+a festival
+a parade
+a sports game
+football
+basketball
+tennis
+golf
+running
+swimming
+surfing
+skiing
+snowboarding
+hiking
+climbing
+cycling
+fishing
+dancing
+cooking
+reading
+playing
+a picnic
+graduation
+
+# Kinds of photo
+a close-up
+a macro photo
+an aerial view
+an underwater photo
+a black and white photo
+a long exposure
+a blurry photo
+a dark photo

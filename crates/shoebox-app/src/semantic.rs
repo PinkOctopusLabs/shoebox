@@ -35,6 +35,38 @@ pub trait Model: Send {
     fn release_images(&mut self) {}
     /// Free what the text side holds (no query for a while).
     fn release_text(&mut self) {}
+    /// The tags it can suggest.
+    fn labels(&self) -> Vec<shoebox_ml::Label> {
+        shoebox_ml::labels()
+    }
+}
+
+/// When a photo gets a suggested tag (measured on sample photos; see
+/// docs/DECISIONS.md and [`shoebox_core::embeddings::TagRule`]): a score of
+/// 0.09 (where real matches start), a lift of 0.045, within 0.03 of the
+/// photo's best label; at most 5.
+fn tag_rule() -> shoebox_core::embeddings::TagRule {
+    shoebox_core::embeddings::TagRule {
+        min_score: 0.09,
+        min_lift: 0.045,
+        margin: 0.03,
+        max: 5,
+        min_library: 8,
+    }
+}
+
+/// Re-tag after this many more photos are indexed (and when indexing ends).
+const RETAG_EVERY: usize = 2000;
+
+/// Suggested tags for the library.
+#[derive(Debug, Default)]
+pub struct Tags {
+    /// Tag names (keywords they'd become), by label index.
+    pub names: Vec<String>,
+    /// Each photo's tags (label, score), best first, by primary photo.
+    pub by_photo: std::collections::HashMap<crate::jobs::PhotoId, Vec<(u16, f32)>>,
+    /// Labels with photos, most photos first.
+    pub counts: Vec<(u16, usize)>,
 }
 
 /// Where the model comes from.
@@ -154,6 +186,8 @@ pub enum Event {
         id: u64,
         error: String,
     },
+    /// Suggested tags for the library (after indexing).
+    Tags(Arc<Tags>),
 }
 
 pub struct Semantic {
@@ -220,6 +254,10 @@ struct Worker<F: Fn(Event)> {
     catalog: Option<(Arc<Catalog>, bool)>,
     text_used: Option<Instant>,
     pool: Option<rayon::ThreadPool>,
+    /// Label vectors (computed once per model, then stored).
+    labels: Option<(Vec<String>, Vec<Vector>)>,
+    /// Index size when last tagged (None: needs tagging).
+    tagged: Option<usize>,
 }
 
 impl<F: Fn(Event)> Worker<F> {
@@ -239,6 +277,8 @@ impl<F: Fn(Event)> Worker<F> {
             pending: Default::default(),
             catalog: None,
             text_used: None,
+            labels: None,
+            tagged: None,
             // Decoding shares the machine with thumbnails: a few threads.
             pool: rayon::ThreadPoolBuilder::new()
                 .num_threads(4)
@@ -478,10 +518,91 @@ impl<F: Fn(Event)> Worker<F> {
                 self.status.skipped = 0;
                 self.keys = keys;
                 self.formats = formats;
+                self.tagged = None;
             }
             Err(e) => self.status.model = ModelState::Failed(e.to_string()),
         }
         self.publish();
+        self.maybe_tag();
+    }
+
+    /// Re-tag the library when indexing has finished, or every few thousand
+    /// photos while it runs.
+    fn maybe_tag(&mut self) {
+        let n = self.index.len();
+        let due = match self.tagged {
+            None => self.pending.is_empty() || n >= RETAG_EVERY,
+            Some(t) => (self.pending.is_empty() && t != n) || n >= t + RETAG_EVERY,
+        };
+        if !due || n == 0 {
+            return;
+        }
+        let Some(model) = &mut self.model else { return };
+        if self.labels.is_none() {
+            let labels = model.labels();
+            let prompts: Vec<String> = labels.iter().map(|l| l.prompt.clone()).collect();
+            let stored = self
+                .store
+                .as_ref()
+                .and_then(|s| s.labels(&prompts).ok().flatten());
+            let vecs = match stored {
+                Some(v) => v,
+                None => {
+                    let t = Instant::now();
+                    let mut v = Vec::with_capacity(prompts.len());
+                    for p in &prompts {
+                        match model.embed_text(p) {
+                            Ok(e) => v.push(Vector::quantise(&e)),
+                            Err(e) => {
+                                tracing::warn!("tag \"{p}\": {e}");
+                                return;
+                            }
+                        }
+                    }
+                    self.text_used = Some(Instant::now());
+                    tracing::info!("{} tag labels embedded in {:?}", v.len(), t.elapsed());
+                    if let Some(s) = &mut self.store {
+                        let rows: Vec<(String, Vector)> =
+                            prompts.iter().cloned().zip(v.iter().cloned()).collect();
+                        if let Err(e) = s.put_labels(&rows) {
+                            tracing::warn!("tag labels: {e}");
+                        }
+                    }
+                    v
+                }
+            };
+            let names = labels.iter().map(|l| l.name.to_owned()).collect();
+            self.labels = Some((names, vecs));
+        }
+        let Some((names, vecs)) = &self.labels else {
+            return;
+        };
+        let t = Instant::now();
+        let tagged = self.index.tag(vecs, &tag_rule());
+        let mut counts = vec![0usize; names.len()];
+        let by_photo: std::collections::HashMap<_, _> = tagged
+            .into_iter()
+            .map(|(p, tags)| {
+                for &(l, _) in &tags {
+                    counts[l as usize] += 1;
+                }
+                (crate::jobs::photo_id(&p), tags)
+            })
+            .collect();
+        let mut counts: Vec<(u16, usize)> = counts
+            .into_iter()
+            .enumerate()
+            .filter(|&(_, c)| c > 0)
+            .map(|(l, c)| (l as u16, c))
+            .collect();
+        counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        tracing::info!("tagged {n} photos in {:?}", t.elapsed());
+        self.tagged = Some(n);
+        (self.notify)(Event::Tags(Arc::new(Tags {
+            names: names.clone(),
+            by_photo,
+            counts,
+        })));
     }
 
     fn index_batch(&mut self) {
@@ -528,6 +649,7 @@ impl<F: Fn(Event)> Worker<F> {
             }
         }
         self.publish();
+        self.maybe_tag();
     }
 }
 
@@ -590,6 +712,8 @@ pub enum Query {
     Text(String),
     /// Photos that look like this one (its primary's path).
     Similar(PathBuf),
+    /// Photos with this suggested tag (answered from [`Tags`], no worker).
+    Tag(u16),
 }
 
 /// The UI's side of semantic search.
@@ -602,6 +726,12 @@ pub struct SearchState {
     pub similar: Option<(crate::jobs::PhotoId, PathBuf)>,
     /// Find Similar was chosen for this photo (applied next frame).
     pub similar_request: Option<crate::jobs::PhotoId>,
+    /// Showing the photos with this suggested tag (Things in the left panel).
+    pub tag: Option<u16>,
+    /// The library's suggested tags, once computed.
+    pub tags: Option<Arc<Tags>>,
+    /// Things lists every tag, not just the most common.
+    pub things_all: bool,
     /// The latest results: score per primary photo.
     pub results: Option<(Query, std::collections::HashMap<crate::jobs::PhotoId, f32>)>,
     /// A query is out.
@@ -691,6 +821,7 @@ impl SearchState {
                 id,
                 path: p.clone(),
             },
+            Query::Tag(_) => return None,
         });
         self.sent = Some(Sent {
             id,

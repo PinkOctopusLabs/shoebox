@@ -93,6 +93,101 @@ fn main() -> Result<()> {
         "text encoder loaded in {:.0} ms",
         t.elapsed().as_secs_f64() * 1e3
     );
+    if std::env::var_os("PROBE_TAGS").is_some() {
+        let labels = shoebox_ml::labels();
+        let t = Instant::now();
+        let lv: Vec<Vec<f32>> = labels
+            .iter()
+            .map(|l| text.embed(&l.prompt))
+            .collect::<Result<_, _>>()?;
+        println!(
+            "{} labels embedded in {:.1} s",
+            labels.len(),
+            t.elapsed().as_secs_f32()
+        );
+        // Each label's mean and spread over these images.
+        let stats: Vec<(f32, f32)> = lv
+            .iter()
+            .map(|v| {
+                let c: Vec<f32> = embs
+                    .iter()
+                    .map(|e| v.iter().zip(e).map(|(a, b)| a * b).sum::<f32>())
+                    .collect();
+                let m = c.iter().sum::<f32>() / c.len() as f32;
+                let var = c.iter().map(|x| (x - m) * (x - m)).sum::<f32>() / c.len() as f32;
+                (m, var.sqrt().max(1e-3))
+            })
+            .collect();
+        let p25: Vec<f32> = lv
+            .iter()
+            .map(|v| {
+                let mut c: Vec<f32> = embs
+                    .iter()
+                    .map(|e| v.iter().zip(e).map(|(a, b)| a * b).sum::<f32>())
+                    .collect();
+                c.sort_by(f32::total_cmp);
+                c[c.len() / 4]
+            })
+            .collect();
+        for (e, p) in embs.iter().zip(&files) {
+            let mut z: Vec<(f32, f32, &str)> = lv
+                .iter()
+                .zip(&labels)
+                .zip(&stats)
+                .map(|((v, l), (m, sd))| {
+                    let c = v.iter().zip(e).map(|(a, b)| a * b).sum::<f32>();
+                    ((c - m) / sd, c, l.name)
+                })
+                .collect();
+            z.sort_by(|a, b| b.0.total_cmp(&a.0));
+            let top: Vec<String> = z
+                .iter()
+                .take(6)
+                .map(|(z, c, n)| format!("{n} z{z:.1}/{c:.3}"))
+                .collect();
+            println!("  z {}", top.join(", "));
+            // Double-centred: minus the label's 25th percentile over these
+            // images, minus this image's median over labels.
+            let raw: Vec<f32> = lv
+                .iter()
+                .map(|v| v.iter().zip(e).map(|(a, b)| a * b).sum::<f32>())
+                .collect();
+            let mut sorted = raw.clone();
+            sorted.sort_by(f32::total_cmp);
+            let med = sorted[sorted.len() / 2];
+            let mut d: Vec<(f32, f32, &str)> = raw
+                .iter()
+                .zip(&labels)
+                .zip(&p25)
+                .map(|((c, l), q)| (c - q - med, *c, l.name))
+                .collect();
+            d.sort_by(|a, b| b.0.total_cmp(&a.0));
+            let top: Vec<String> = d
+                .iter()
+                .take(6)
+                .map(|(d, c, n)| format!("{n} d{d:.3}/{c:.3}"))
+                .collect();
+            println!("  d {}", top.join(", "));
+            let mut s: Vec<(f32, &str)> = lv
+                .iter()
+                .zip(&labels)
+                .map(|(v, l)| (v.iter().zip(e).map(|(a, b)| a * b).sum::<f32>(), l.name))
+                .collect();
+            s.sort_by(|a, b| b.0.total_cmp(&a.0));
+            let top: Vec<String> = s
+                .iter()
+                .take(8)
+                .map(|(c, n)| format!("{n} {c:.3}"))
+                .collect();
+            println!(
+                "{}: {}",
+                p.file_name()
+                    .map(|n| n.to_string_lossy())
+                    .unwrap_or_default(),
+                top.join(", ")
+            );
+        }
+    }
     for c in [0.0f32, 0.05, 0.08, 0.1, 0.12] {
         println!("p(cos = {c}) = {:.5}", text.probability(c));
     }

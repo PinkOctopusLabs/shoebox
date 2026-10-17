@@ -215,6 +215,23 @@ fn search_box(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         }
         return;
     }
+    if let Some(l) = app.sem.tag {
+        let name = app
+            .sem
+            .tags
+            .as_ref()
+            .and_then(|t| t.names.get(l as usize).cloned())
+            .unwrap_or_default();
+        ui.label(format!("Tagged \u{201c}{name}\u{201d}"));
+        if ui
+            .small_button("✖")
+            .on_hover_text("Show all photos")
+            .clicked()
+        {
+            app.clear_tag();
+        }
+        return;
+    }
     if app.settings.semantic_search {
         let ready = app.sem.status.ready();
         ui.add_enabled_ui(ready, |ui| {
@@ -380,6 +397,7 @@ pub fn library(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     events_panel(app, ui);
     collections_panel(app, ui);
     smart_filters(app, ui);
+    things_panel(app, ui);
     ui.separator();
     ui.label(RichText::new("Tasks").strong());
     let groups = app.dupes.review.as_ref().map(|_| app.dupes.visible().len());
@@ -650,6 +668,46 @@ fn event_node(
             }
         }
     });
+}
+
+/// Suggested tags across the library (semantic search), with counts.
+fn things_panel(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    if !app.settings.semantic_search {
+        return;
+    }
+    let Some(tags) = app.sem.tags.clone() else {
+        return;
+    };
+    if tags.counts.is_empty() {
+        return;
+    }
+    let mut chosen = None;
+    ui.label(RichText::new("Things").strong())
+        .on_hover_text("Tags semantic search suggests, by how many photos have them");
+    let all = app.sem.things_all;
+    for &(l, n) in tags.counts.iter().take(if all { usize::MAX } else { 12 }) {
+        let name = &tags.names[l as usize];
+        let sel = app.sem.tag == Some(l);
+        if ui.selectable_label(sel, format!("{name}  {n}")).clicked() {
+            chosen = Some(if sel { None } else { Some(l) });
+        }
+    }
+    if tags.counts.len() > 12
+        && ui
+            .link(if all {
+                "Show fewer".to_owned()
+            } else {
+                format!("Show all {}", tags.counts.len())
+            })
+            .clicked()
+    {
+        app.sem.things_all = !all;
+    }
+    match chosen {
+        Some(Some(l)) => app.show_tag(l),
+        Some(None) => app.clear_tag(),
+        None => {}
+    }
 }
 
 fn smart_filters(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
@@ -1037,6 +1095,22 @@ fn organise(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             }
         }
     });
+    if app.settings.semantic_search
+        && let Some(cur) = app.current
+    {
+        let suggested = app.suggested_tags(cur);
+        if !suggested.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Suggested").weak())
+                    .on_hover_text("Tags from semantic search; click to add as a keyword");
+                for t in suggested {
+                    if ui.small_button(format!("+ {t}")).clicked() {
+                        app.add_keyword(&t);
+                    }
+                }
+            });
+        }
+    }
     let edit = ui.add(
         egui::TextEdit::singleline(&mut app.keyword_input)
             .hint_text("Add keyword (⌘K), e.g. Places > Japan > Kyoto")

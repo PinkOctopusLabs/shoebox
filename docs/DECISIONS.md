@@ -3,6 +3,34 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-17 — M6 objects: suggested tags from SigLIP
+The spec says objects with YOLO. Ultralytics' YOLO is AGPL-3.0, which
+doesn't fit an MIT/Apache app, and a detector's ~80 classes cover less of
+what's in photos than tags do. Instead the SigLIP embeddings semantic search
+already computes are scored against a built-in list of ~290 labels
+(`shoebox-ml/src/labels.txt`: animals, places, weather, food, things,
+activities, kinds of photo), with no extra download. No boxes.
+
+- **The rule** (`embeddings::TagRule`): raw scores aren't comparable across
+  labels or photos (SigLIP scores "stars" or "tea" well on many things, and
+  some photos score well on every label), so a tag needs a *lift*: its
+  score minus the label's 25th percentile over the library minus the
+  photo's median over all labels. Tag if score ≥ 0.09, lift ≥ 0.045, lift
+  within 0.03 of the photo's best; at most 5. A per-label z-score was tried
+  first and dropped: it penalises common subjects (a library of mountains
+  would rarely tag "mountain"); the percentile baseline only does that for
+  subjects in over 3/4 of the library.
+- On 11 sample photos: street/road/truck/city, fireworks, bicycle/city
+  lights/alley/street, beach, cat (+ tiger), burger, mountain/snowy
+  mountain/hill, apple, sunflower, city skyline/skyscraper/city/tower — and
+  one dog photo that scores high on unrelated labels (dog + dancing,
+  chocolate, stars, blossom). Needs checking on a real library.
+- **Suggestions, not keywords:** the info panel shows them with a + that
+  adds the keyword (to the sidecar, as any keyword). **Things** in the left
+  panel lists tags by photo count; clicking one shows exactly those photos,
+  best first. Label vectors are computed once (2.5 s) and stored; tagging
+  re-runs when indexing ends and every 2,000 photos while it runs.
+
 ## 2026-10-17 — M6 semantic search
 The spec says CLIP embeddings through ONNX Runtime (`ort`), stored in
 sqlite-vec. What's built instead, and why:

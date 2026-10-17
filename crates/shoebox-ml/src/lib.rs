@@ -71,10 +71,64 @@ pub fn device() -> Device {
     candle_core::Device::Cpu
 }
 
+/// A tag Shoebox can suggest: its name and the text it's scored with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Label {
+    /// Shown, and the keyword it becomes ("dog").
+    pub name: &'static str,
+    /// What the text model embeds ("a photo of a dog.").
+    pub prompt: String,
+}
+
+/// The built-in tags (`labels.txt`).
+pub fn labels() -> Vec<Label> {
+    include_str!("labels.txt")
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| {
+            let name = ["a ", "an ", "the "]
+                .iter()
+                .find_map(|a| l.strip_prefix(a))
+                .unwrap_or(l);
+            let prompt = if l.ends_with(" photo") || l.starts_with("a close-up") {
+                format!("{l}.")
+            } else {
+                format!("a photo of {l}.")
+            };
+            Label { name, prompt }
+        })
+        .collect()
+}
+
 /// L2-normalise in place (a zero vector stays zero).
 pub fn normalize(v: &mut [f32]) {
     let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     if n > 0.0 {
         v.iter_mut().for_each(|x| *x /= n);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn labels_parse() {
+        let l = labels();
+        assert!(l.len() > 250, "{}", l.len());
+        let dog = l.iter().find(|l| l.name == "dog").unwrap();
+        assert_eq!(dog.prompt, "a photo of a dog.");
+        let bw = l
+            .iter()
+            .find(|l| l.name == "black and white photo")
+            .unwrap();
+        assert_eq!(bw.prompt, "a black and white photo.");
+        let sea = l.iter().find(|l| l.name == "sea").unwrap();
+        assert_eq!(sea.prompt, "a photo of the sea.");
+        let mut names: Vec<_> = l.iter().map(|l| l.name).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), l.len(), "no duplicate tags");
     }
 }
