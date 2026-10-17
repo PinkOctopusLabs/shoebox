@@ -17,14 +17,36 @@ const MONTH_H: f32 = 40.0;
 const CELL: f32 = 11.0;
 const CELL_GAP: f32 = 2.0;
 
+/// A value per stack index (a Vec, not a HashMap: built over every stack
+/// whenever the view changes).
+struct ByStack(Vec<usize>);
+
+impl ByStack {
+    const NONE: usize = usize::MAX;
+
+    fn new(stacks: usize) -> Self {
+        Self(vec![Self::NONE; stacks])
+    }
+
+    fn insert(&mut self, s: usize, v: usize) {
+        if let Some(slot) = self.0.get_mut(s) {
+            *slot = v;
+        }
+    }
+
+    fn get(&self, s: &usize) -> Option<&usize> {
+        self.0.get(*s).filter(|&&v| v != Self::NONE)
+    }
+}
+
 /// Built from `shown`; rebuilt when it changes.
 pub struct Layout {
     shown_gen: u64,
     pub timeline: Timeline,
     /// Position in `shown` of each stack's primary.
-    pos_of_stack: HashMap<usize, usize>,
+    pos_of_stack: ByStack,
     /// Day index of each stack.
-    day_of_stack: HashMap<usize, usize>,
+    day_of_stack: ByStack,
     /// Event names per day index.
     events: HashMap<usize, Vec<String>>,
     counts: BTreeMap<Date, usize>,
@@ -47,7 +69,7 @@ enum Row {
 
 fn build(app: &ShoeboxApp) -> Layout {
     let mut stacks = Vec::new();
-    let mut pos_of_stack = HashMap::new();
+    let mut pos_of_stack = ByStack::new(app.catalog.stacks.len());
     for (pos, &i) in app.shown.iter().enumerate() {
         let s = app.catalog.stack_of[i];
         if app.catalog.stacks[s].primary == i {
@@ -56,7 +78,7 @@ fn build(app: &ShoeboxApp) -> Layout {
         }
     }
     let timeline = Timeline::build(&app.catalog, &stacks);
-    let mut day_of_stack = HashMap::new();
+    let mut day_of_stack = ByStack::new(app.catalog.stacks.len());
     for (k, d) in timeline.days.iter().enumerate() {
         for &s in &d.stacks {
             day_of_stack.insert(s, k);

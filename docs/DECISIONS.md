@@ -3,6 +3,46 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-17 — 200,000-file performance check
+A synthetic library shaped like a camera library
+(`shoebox-fixtures --example big_library`: 200,000 files, 117,709 frames,
+82,291 NEF + JPG pairs, 2,391 day folders over 2015–2026, GPS on ~70% of
+shoot days, a rating sidecar on ~10% of frames; 3 GB). Measured by the
+ignored UI test `two_hundred_thousand_files` (CPU time per frame; GPU time
+isn't measured headlessly), on this Mac:
+
+| Measure | Target | Before | After |
+| --- | --- | --- | --- |
+| Open from cache: grid lists all | < 1 s | 1,698 ms | 815 ms |
+| … visible thumbnails in | | | 830 ms (rescan from disk ends 3.3 s, in the background) |
+| Grid scroll, 600 frames | 60 fps, none > 16 ms | p99 1.6 ms | p99 1.4 ms, max 1.8 ms |
+| Rate a photo (catalog republished) | none > 16 ms | ~200 ms stall | max 1.6 ms |
+| Search keystroke (first frame) | | 24–30 ms | 8.7 ms |
+| Switch to timeline | | 23 ms | 10 ms |
+| Masonry / map / filters / select all | | ≤ 9.6 ms | ≤ 9.6 ms |
+| Duplicates, hashes cached | (10k: < 5 s) | 6.6 s for 200k, UI frames ≤ 15 ms | |
+
+First open with no cache (scan, metadata, sidecars) took 9.8 s; the first
+duplicate search, which hashes everything, 25 s.
+
+Fixes:
+- `Catalog::sort` parsed capture times on every comparison; now once per
+  photo (from_cache 1.5 s → 0.82 s).
+- `stacks::build` hashed `PathBuf`s (component by component) several times
+  per photo; folders are now numbered and keys borrow `&str`
+  (384 → 168 ms). The `-N` suffix rule is shared with duplicate grouping
+  (`pipeline::sibling_stem`).
+- Everything the UI derives from a catalog (ids, index, folder tree,
+  keyword/camera/lens lists, changed files) is built on the library worker
+  (`jobs::Published`); the UI thread only swaps it in. This was the ~200 ms
+  stall on every rating, flag or label change at 200k.
+- Search compares ASCII case-insensitively without allocating.
+- The timeline's per-stack lookups are Vecs, not HashMaps.
+
+`examples/time_open.rs` (shoebox-core) times opening from a cache, stage by
+stage. Loading the 200,000 rows from SQLite (~270 ms) is now the largest
+single cost.
+
 ## 2026-10-17 — Updates with Sparkle
 - Not in the spec. Installed copies update themselves with
   [Sparkle](https://sparkle-project.org) 2 (the person's choice over a

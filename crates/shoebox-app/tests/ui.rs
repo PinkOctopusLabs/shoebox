@@ -220,6 +220,266 @@ fn ten_thousand_photos_scroll_smoothly() {
     );
 }
 
+/// Frame times (CPU, ms) over `n` steps, each after `before(h, i)`.
+fn time_frames(
+    h: &mut Harness<'_, ShoeboxApp>,
+    n: usize,
+    mut before: impl FnMut(&mut Harness<'_, ShoeboxApp>, usize),
+) -> Vec<f64> {
+    let mut frames = Vec::with_capacity(n);
+    for i in 0..n {
+        before(h, i);
+        let f = Instant::now();
+        h.step();
+        frames.push(f.elapsed().as_secs_f64() * 1e3);
+    }
+    frames.sort_by(f64::total_cmp);
+    frames
+}
+
+/// "p50 / p99 / max" of sorted frame times, and the p99.
+fn frame_stats(frames: &[f64]) -> (String, f64) {
+    let pct = |p: f64| frames[((frames.len() - 1) as f64 * p) as usize];
+    (
+        format!(
+            "p50 {:.2} ms, p99 {:.2} ms, max {:.2} ms",
+            pct(0.5),
+            pct(0.99),
+            frames[frames.len() - 1]
+        ),
+        pct(0.99),
+    )
+}
+
+fn wheel(h: &mut Harness<'_, ShoeboxApp>, dy: f32) {
+    h.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, dy),
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Unknown,
+        modifiers: egui::Modifiers::NONE,
+    });
+}
+
+/// The spec's 200,000-file targets, on a library from
+/// `cargo run --release -p shoebox-fixtures --example big_library -- <dir>`:
+/// `SHOEBOX_UI_BIG=<dir> cargo test --release -p shoebox-app --test ui
+/// two_hundred_thousand -- --ignored --nocapture`. Set `SHOEBOX_UI_BIG_DATA`
+/// to keep the cache between runs (then the first open is from cache too).
+#[test]
+#[ignore = "needs SHOEBOX_UI_BIG"]
+fn two_hundred_thousand_files() {
+    let Some(lib) = std::env::var_os("SHOEBOX_UI_BIG").map(PathBuf::from) else {
+        return;
+    };
+    let t = tempfile::tempdir().unwrap();
+    let data = std::env::var_os("SHOEBOX_UI_BIG_DATA")
+        .map_or_else(|| t.path().to_path_buf(), PathBuf::from);
+    let p = paths(&data, std::slice::from_ref(&lib));
+    let size = egui::vec2(1600.0, 1000.0);
+    let mut report: Vec<String> = Vec::new();
+    let mut note = |s: String| {
+        eprintln!("{s}");
+        report.push(s);
+    };
+
+    // First open: scan, read metadata, hash (unless the cache is kept).
+    let open = Instant::now();
+    let mut h = harness(p.clone(), size);
+    settle(&mut h, Duration::from_secs(3600));
+    let files = h.state().photo_count();
+    note(format!(
+        "first open: {files} files, {} shown, {:.1} s",
+        h.state().shown_count(),
+        open.elapsed().as_secs_f64()
+    ));
+    drop(h);
+
+    // Open again from the cache: until the grid lists everything, then until
+    // the visible thumbnails are in.
+    let open = Instant::now();
+    let mut h = harness(p.clone(), size);
+    let mut first_frame = None;
+    while h.state().photo_count() < files {
+        h.step();
+        first_frame.get_or_insert(open.elapsed());
+        assert!(open.elapsed() < Duration::from_secs(120), "never loaded");
+    }
+    let listed = open.elapsed();
+    // Thumbnails: until no image load is outstanding for a few frames (the
+    // rescan from disk carries on in the background).
+    let mut quiet = 0;
+    while quiet < 3 {
+        h.step();
+        quiet = if h.state().loading() == 0 {
+            quiet + 1
+        } else {
+            0
+        };
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let thumbs = open.elapsed();
+    settle(&mut h, Duration::from_secs(300));
+    note(format!(
+        "open from cache: first frame {:.0} ms, grid lists all {:.0} ms, visible thumbnails {:.0} ms, rescan done {:.0} ms",
+        first_frame.unwrap_or_default().as_secs_f64() * 1e3,
+        listed.as_secs_f64() * 1e3,
+        thumbs.as_secs_f64() * 1e3,
+        open.elapsed().as_secs_f64() * 1e3
+    ));
+    let listed_ms = listed.as_secs_f64() * 1e3;
+
+    h.event(egui::Event::PointerMoved(egui::pos2(800.0, 500.0)));
+    let scroll = time_frames(&mut h, 600, |h, _| wheel(h, -120.0));
+    let (s, scroll_p99) = frame_stats(&scroll);
+    note(format!("grid scroll (600 frames): {s}"));
+    // A long jump (End) and back (Home).
+    let jump = time_frames(&mut h, 20, |h, i| {
+        if i % 2 == 0 {
+            h.key_press(egui::Key::End);
+        } else {
+            h.key_press(egui::Key::Home);
+        }
+    });
+    note(format!("Home/End jumps: {}", frame_stats(&jump).0));
+    settle(&mut h, Duration::from_secs(120));
+    snapshot(&mut h, "big-1-grid");
+
+    // Views: the switch frame, then steady frames.
+    for (view, name) in [
+        (View::Masonry, "masonry"),
+        (View::Timeline, "timeline"),
+        (View::Map, "map"),
+        (View::Grid, "grid"),
+    ] {
+        let f = Instant::now();
+        h.state_mut().set_view(view);
+        h.step();
+        let switch = f.elapsed().as_secs_f64() * 1e3;
+        let steady = time_frames(&mut h, 60, |h, i| {
+            wheel(h, if i % 2 == 0 { -60.0 } else { 60.0 })
+        });
+        note(format!(
+            "{name}: switch {switch:.1} ms; then {}",
+            frame_stats(&steady).0
+        ));
+        settle(&mut h, Duration::from_secs(120));
+        snapshot(&mut h, &format!("big-2-{name}"));
+    }
+
+    // Filters: rating ≥ 3, a file-name search, then none.
+    for (filter, name) in [
+        (
+            shoebox_core::query::Filter {
+                min_rating: 3,
+                ..Default::default()
+            },
+            "rating ≥ 3",
+        ),
+        (
+            shoebox_core::query::Filter {
+                search: "DSC_12".into(),
+                ..Default::default()
+            },
+            "search DSC_12",
+        ),
+        (shoebox_core::query::Filter::default(), "no filter"),
+    ] {
+        let f = Instant::now();
+        h.state_mut().set_filter(filter);
+        h.step();
+        let ms = f.elapsed().as_secs_f64() * 1e3;
+        let steady = time_frames(&mut h, 30, |_, _| {});
+        note(format!(
+            "filter {name}: {} shown, first frame {ms:.1} ms; then {}",
+            h.state().shown_count(),
+            frame_stats(&steady).0
+        ));
+    }
+
+    // Select everything.
+    let f = Instant::now();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.step();
+    let ms = f.elapsed().as_secs_f64() * 1e3;
+    let steady = time_frames(&mut h, 60, |h, _| wheel(h, -120.0));
+    note(format!(
+        "select all ({}): {ms:.1} ms; scrolling then {}",
+        h.state().selected_count(),
+        frame_stats(&steady).0
+    ));
+    h.key_press(egui::Key::Escape);
+    h.step();
+
+    // Rate a photo: the catalog is republished, which must not stall a frame.
+    h.key_press(egui::Key::ArrowRight);
+    h.step();
+    let name = h.state().current_name().expect("a current photo");
+    let before = h.state().marks_of(&name).map_or(0, |m| m.rating);
+    let rating = if before == 4 { 2 } else { 4 };
+    h.key_press(if rating == 4 {
+        egui::Key::Num4
+    } else {
+        egui::Key::Num2
+    });
+    let f = Instant::now();
+    let mut rate_frames = Vec::new();
+    while rate_frames.len() < 30 || h.state().marks_of(&name).map_or(0, |m| m.rating) != rating {
+        let s = Instant::now();
+        h.step();
+        rate_frames.push(s.elapsed().as_secs_f64() * 1e3);
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(
+            f.elapsed() < Duration::from_secs(30),
+            "rating never applied"
+        );
+    }
+    rate_frames.sort_by(f64::total_cmp);
+    let (s, rate_p99) = frame_stats(&rate_frames);
+    note(format!("rate a photo: frames meanwhile {s}"));
+
+    // Duplicate search with every hash cached.
+    let f = Instant::now();
+    h.state_mut().find_duplicates();
+    let mut ui_frames = Vec::new();
+    while !h.state().dupes_idle() {
+        let s = Instant::now();
+        h.step();
+        ui_frames.push(s.elapsed().as_secs_f64() * 1e3);
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(
+            f.elapsed() < Duration::from_secs(600),
+            "duplicate search hung"
+        );
+    }
+    ui_frames.sort_by(f64::total_cmp);
+    note(format!(
+        "duplicates (hashes cached): {} groups in {:.1} s; UI meanwhile {}",
+        h.state().dupe_groups().unwrap_or(0),
+        f.elapsed().as_secs_f64(),
+        frame_stats(&ui_frames).0
+    ));
+    h.state_mut().set_view(View::Duplicates);
+    let steady = time_frames(&mut h, 60, |h, _| wheel(h, -120.0));
+    note(format!(
+        "duplicates list scroll: {}",
+        frame_stats(&steady).0
+    ));
+    settle(&mut h, Duration::from_secs(120));
+    snapshot(&mut h, "big-3-duplicates");
+
+    eprintln!("\n{}", report.join("\n"));
+    assert!(
+        listed_ms < 1000.0,
+        "grid took {listed_ms:.0} ms to list the library"
+    );
+    assert!(scroll_p99 < 16.0, "grid scroll p99 {scroll_p99:.2} ms");
+    assert!(
+        rate_p99 < 16.0,
+        "rating a photo: p99 frame {rate_p99:.2} ms"
+    );
+}
+
 /// Browse a real library read-only: `SHOEBOX_UI_LIBRARY=/path/to/copy
 /// cargo test --release -p shoebox-app --test ui real_library -- --ignored --nocapture`.
 /// Settings, cache and thumbnails go to a temp folder; the library is only read.

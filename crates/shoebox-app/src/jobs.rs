@@ -359,9 +359,62 @@ pub struct DupePreview {
     pub ignores: usize,
 }
 
+/// A catalog and what the UI derives from it, prepared on the library worker
+/// so that swapping in a 200,000-file catalog (after every rating, too)
+/// doesn't stall a frame.
+pub struct Published {
+    pub catalog: Arc<Catalog>,
+    pub ids: Vec<PhotoId>,
+    pub index_of: HashMap<PhotoId, usize>,
+    pub tree: Vec<crate::app::FolderNode>,
+    pub keywords: Vec<(String, usize)>,
+    pub cameras: Vec<String>,
+    pub lenses: Vec<String>,
+    /// Photos whose file changed since the last publish (they reload).
+    pub stale: HashSet<PhotoId>,
+}
+
+/// Builds [`Published`]s, remembering each photo's size and mtime to spot
+/// files that changed between publishes.
+#[derive(Default)]
+struct Publisher {
+    last: HashMap<PhotoId, (u64, i64)>,
+}
+
+impl Publisher {
+    fn prepare(&mut self, catalog: &Catalog) -> Published {
+        let ids: Vec<PhotoId> = catalog.photos.iter().map(|p| photo_id(&p.path)).collect();
+        let stale = ids
+            .iter()
+            .zip(&catalog.photos)
+            .filter(|(id, p)| {
+                self.last
+                    .get(id)
+                    .is_some_and(|&b| b != (p.size, p.mtime_ns))
+            })
+            .map(|(&id, _)| id)
+            .collect();
+        self.last = ids
+            .iter()
+            .zip(&catalog.photos)
+            .map(|(&id, p)| (id, (p.size, p.mtime_ns)))
+            .collect();
+        Published {
+            index_of: ids.iter().enumerate().map(|(i, &id)| (id, i)).collect(),
+            ids,
+            stale,
+            tree: crate::app::build_tree(catalog),
+            keywords: shoebox_core::query::keywords(catalog),
+            cameras: shoebox_core::query::distinct(catalog, |x| x.model.as_ref()),
+            lenses: shoebox_core::query::distinct(catalog, |x| x.lens.as_ref()),
+            catalog: Arc::new(catalog.clone()),
+        }
+    }
+}
+
 pub enum LibraryEvent {
     Catalog {
-        catalog: Arc<Catalog>,
+        published: Box<Published>,
         settings: Settings,
         /// False while a refresh from disk is still running.
         complete: bool,
@@ -540,9 +593,10 @@ fn library_worker(
     // Batches made in this session, for Cmd+Z / Cmd+Shift+Z.
     let (mut undo, mut redo): (Vec<i64>, Vec<i64>) = (Vec::new(), Vec::new());
 
+    let publisher = std::cell::RefCell::new(Publisher::default());
     let publish = |catalog: &Catalog, settings: &Settings, complete: bool| {
         emit(LibraryEvent::Catalog {
-            catalog: Arc::new(catalog.clone()),
+            published: Box::new(publisher.borrow_mut().prepare(catalog)),
             settings: settings.clone(),
             complete,
         });
@@ -607,7 +661,14 @@ fn library_worker(
                     }
                 }
                 if rescan {
-                    refresh_impl(&mut cache, &settings, &mut catalog, &mut index, &emit);
+                    refresh_impl(
+                        &mut cache,
+                        &settings,
+                        &mut catalog,
+                        &mut index,
+                        &publish,
+                        &emit,
+                    );
                 }
                 continue;
             }
@@ -736,7 +797,14 @@ fn library_worker(
                 history(&undo, &redo);
                 batches(&fileops);
                 if let Some(config) = dupes.as_ref().map(|r| r.config) {
-                    refresh_impl(&mut cache, &settings, &mut catalog, &mut index, &emit);
+                    refresh_impl(
+                        &mut cache,
+                        &settings,
+                        &mut catalog,
+                        &mut index,
+                        &publish,
+                        &emit,
+                    );
                     find_dupes(&mut cache, &settings, &catalog, config, &mut dupes, &emit);
                     (false, false)
                 } else {
@@ -920,7 +988,14 @@ fn library_worker(
                         }
                         emit(LibraryEvent::DupesApplied { batch, moved });
                         let config = r.config;
-                        refresh_impl(&mut cache, &settings, &mut catalog, &mut index, &emit);
+                        refresh_impl(
+                            &mut cache,
+                            &settings,
+                            &mut catalog,
+                            &mut index,
+                            &publish,
+                            &emit,
+                        );
                         find_dupes(&mut cache, &settings, &catalog, config, &mut dupes, &emit);
                     }
                     Err(e) => emit(LibraryEvent::DupePreview(Err(e))),
@@ -947,7 +1022,14 @@ fn library_worker(
             }
         }
         if rescan {
-            refresh_impl(&mut cache, &settings, &mut catalog, &mut index, &emit);
+            refresh_impl(
+                &mut cache,
+                &settings,
+                &mut catalog,
+                &mut index,
+                &publish,
+                &emit,
+            );
         }
     }
     drop(watcher);
@@ -958,6 +1040,7 @@ fn library_worker(
         settings: &Settings,
         catalog: &mut Catalog,
         index: &mut HashMap<PathBuf, usize>,
+        publish: &dyn Fn(&Catalog, &Settings, bool),
         emit: &(dyn Fn(LibraryEvent) + Sync),
     ) {
         let progress = |done: usize, total: usize| {
@@ -979,11 +1062,7 @@ fn library_worker(
                 emit(LibraryEvent::Collections(shoebox_core::collections::load(
                     &roots,
                 )));
-                emit(LibraryEvent::Catalog {
-                    catalog: Arc::new(catalog.clone()),
-                    settings: settings.clone(),
-                    complete: true,
-                });
+                publish(catalog, settings, true);
             }
             Err(e) => emit(LibraryEvent::Error(format!("scanning: {e}"))),
         }

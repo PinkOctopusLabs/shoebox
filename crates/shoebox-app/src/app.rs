@@ -156,6 +156,7 @@ impl DupeState {
 }
 
 /// Where the app keeps its state; tests point these at temp folders.
+#[derive(Clone)]
 pub struct AppPaths {
     pub settings: PathBuf,
     pub cache_db: PathBuf,
@@ -402,6 +403,11 @@ impl ShoeboxApp {
         !self.scanning && self.loader.busy() == 0
     }
 
+    /// Image loads outstanding (used by tests).
+    pub fn loading(&self) -> usize {
+        self.loader.busy()
+    }
+
     pub fn photo_count(&self) -> usize {
         self.catalog.photos.len()
     }
@@ -582,12 +588,12 @@ impl ShoeboxApp {
         while let Ok(ev) = self.library.events.try_recv() {
             match ev {
                 LibraryEvent::Catalog {
-                    catalog,
+                    published,
                     settings,
                     complete,
                 } => {
                     self.settings = settings;
-                    self.set_catalog(catalog);
+                    self.set_catalog(*published);
                     if complete {
                         self.scanning = false;
                         self.scan_progress = None;
@@ -719,50 +725,29 @@ impl ShoeboxApp {
         }
     }
 
-    fn set_catalog(&mut self, catalog: Arc<Catalog>) {
-        // Images that changed on disk: drop their textures so they reload.
-        let before: HashMap<&Path, (u64, i64)> = self
-            .catalog
-            .photos
-            .iter()
-            .map(|p| (p.path.as_path(), (p.size, p.mtime_ns)))
-            .collect();
-        let stale: HashSet<PhotoId> = catalog
-            .photos
-            .iter()
-            .filter(|p| {
-                before
-                    .get(p.path.as_path())
-                    .is_some_and(|&b| b != (p.size, p.mtime_ns))
-            })
-            .map(|p| photo_id(&p.path))
-            .collect();
-        self.ids = catalog.photos.iter().map(|p| photo_id(&p.path)).collect();
-        self.index_of = self
-            .ids
-            .iter()
-            .enumerate()
-            .map(|(i, &id)| (id, i))
-            .collect();
-        self.tree = build_tree(&catalog);
-        self.catalog = catalog;
-        let keep: HashSet<PhotoId> = self
-            .ids
-            .iter()
-            .copied()
-            .filter(|id| !stale.contains(id))
-            .collect();
-        self.textures.retain_photos(&keep);
-        self.histograms.retain(|id, _| keep.contains(id));
+    /// Swap in a catalog the library worker prepared (see `jobs::Published`;
+    /// everything proportional to the library size happens there).
+    fn set_catalog(&mut self, p: crate::jobs::Published) {
+        self.ids = p.ids;
+        self.index_of = p.index_of;
+        self.tree = p.tree;
+        self.catalog = p.catalog;
+        self.all_keywords = p.keywords;
+        self.cameras = p.cameras;
+        self.lenses = p.lenses;
+        // Drop what belongs to photos that are gone, and the images of
+        // files that changed on disk so they reload.
+        let stale = p.stale;
+        let index_of = &self.index_of;
+        let keep = |id: &PhotoId| index_of.contains_key(id) && !stale.contains(id);
+        self.textures.retain_photos(keep);
+        self.histograms.retain(|id, _| keep(id));
         self.textures.failed.clear();
-        self.selection.retain(|id| keep.contains(id));
-        if self.current.is_some_and(|c| !keep.contains(&c)) {
+        self.selection.retain(|id| keep(id));
+        if self.current.is_some_and(|c| !keep(&c)) {
             self.current = None;
         }
         self.siblings_of = None;
-        self.all_keywords = query::keywords(&self.catalog);
-        self.cameras = query::distinct(&self.catalog, |x| x.model.as_ref());
-        self.lenses = query::distinct(&self.catalog, |x| x.lens.as_ref());
         self.recompute_events();
         self.recompute_collections();
         self.refilter();
@@ -2055,7 +2040,7 @@ impl eframe::App for ShoeboxApp {
     }
 }
 
-fn build_tree(catalog: &Catalog) -> Vec<FolderNode> {
+pub(crate) fn build_tree(catalog: &Catalog) -> Vec<FolderNode> {
     catalog
         .roots
         .iter()

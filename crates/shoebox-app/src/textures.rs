@@ -1,6 +1,6 @@
 //! GPU textures for loaded images, under an LRU memory budget.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::jobs::{Key, Size};
 
@@ -99,11 +99,11 @@ impl Textures {
     }
 
     /// Forget everything about photos no longer in the catalog.
-    pub fn retain_photos(&mut self, keep: &HashSet<u64>) {
+    pub fn retain_photos(&mut self, keep: impl Fn(&u64) -> bool) {
         let gone: Vec<Key> = self
             .entries
             .keys()
-            .filter(|k| !keep.contains(&k.photo))
+            .filter(|k| !keep(&k.photo))
             .copied()
             .collect();
         for k in gone {
@@ -111,7 +111,7 @@ impl Textures {
                 self.used -= e.bytes;
             }
         }
-        self.failed.retain(|k, _| keep.contains(&k.photo));
+        self.failed.retain(|k, _| keep(&k.photo));
     }
 
     pub fn used_bytes(&self) -> usize {

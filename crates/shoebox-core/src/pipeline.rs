@@ -136,19 +136,29 @@ pub(crate) fn sibling_key(
     path: &std::path::Path,
     stems: &std::collections::HashSet<FolderStem>,
 ) -> Option<FolderStem> {
-    let (dir, mut stem) = folder_stem(path)?;
-    // Strip repeatedly, so `x-40-1` → `x-40` → `x` when each exists: every
-    // member of a chain lands on the same key.
+    let (dir, stem) = folder_stem(path)?;
+    let base = sibling_stem(&stem, |head| {
+        stems.contains(&(dir.clone(), head.to_owned()))
+    });
+    let base = base.to_owned();
+    Some((dir, base))
+}
+
+/// The base name `stem` (lower case) stacks under: a trailing `-N` is cut
+/// while the name without it is `present` in the folder. Stripped
+/// repeatedly, so `x-40-1` → `x-40` → `x` when each exists: every member of
+/// a chain lands on the same key.
+pub(crate) fn sibling_stem(mut stem: &str, present: impl Fn(&str) -> bool) -> &str {
     while let Some((head, tail)) = stem.rsplit_once('-')
         && !head.is_empty()
         && !tail.is_empty()
         && tail.len() <= 2
         && tail.chars().all(|c| c.is_ascii_digit())
-        && stems.contains(&(dir.clone(), head.to_owned()))
+        && present(head)
     {
-        stem = head.to_owned();
+        stem = head;
     }
-    Some((dir, stem))
+    stem
 }
 
 pub fn items(roots: &[Root], analyzed: &[Analyzed]) -> Vec<Item> {

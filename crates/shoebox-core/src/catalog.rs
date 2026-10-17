@@ -706,16 +706,21 @@ impl Catalog {
     }
 
     fn sort(&mut self) {
-        self.photos.sort_by(|a, b| {
-            let (ta, tb) = (a.meta.capture_seconds(), b.meta.capture_seconds());
+        // Parse each capture time once, not on every comparison.
+        let mut keyed: Vec<(Option<f64>, Photo)> = std::mem::take(&mut self.photos)
+            .into_iter()
+            .map(|p| (p.meta.capture_seconds(), p))
+            .collect();
+        keyed.sort_by(|(ta, a), (tb, b)| {
             match (ta, tb) {
-                (Some(x), Some(y)) => x.total_cmp(&y),
+                (Some(x), Some(y)) => x.total_cmp(y),
                 (Some(_), None) => std::cmp::Ordering::Less,
                 (None, Some(_)) => std::cmp::Ordering::Greater,
                 (None, None) => std::cmp::Ordering::Equal,
             }
             .then_with(|| a.path.cmp(&b.path))
         });
+        self.photos = keyed.into_iter().map(|(_, p)| p).collect();
     }
 }
 

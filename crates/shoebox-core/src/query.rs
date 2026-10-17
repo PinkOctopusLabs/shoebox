@@ -185,20 +185,33 @@ pub fn matches(c: &Catalog, s: usize, f: &Filter) -> bool {
     if f.unseen_changes && !st.all().any(|i| c.photos[i].change.is_some()) {
         return false;
     }
-    if !f.search.trim().is_empty() {
-        let q = f.search.trim().to_lowercase();
+    let q = f.search.trim();
+    if !q.is_empty() {
         let in_names = st.all().any(|i| {
             c.photos[i]
                 .path
                 .file_name()
-                .is_some_and(|n| n.to_string_lossy().to_lowercase().contains(&q))
+                .is_some_and(|n| contains_ci(&n.to_string_lossy(), q))
         });
-        let in_keywords = m.keywords.iter().any(|k| k.to_lowercase().contains(&q));
+        let in_keywords = m.keywords.iter().any(|k| contains_ci(k, q));
         if !in_names && !in_keywords {
             return false;
         }
     }
     true
+}
+
+/// Case-insensitive `haystack.contains(needle)`, without allocating when
+/// both are ASCII (file names nearly always are; this runs per keystroke
+/// over every stack).
+fn contains_ci(haystack: &str, needle: &str) -> bool {
+    if haystack.is_ascii() && needle.is_ascii() {
+        let (h, n) = (haystack.as_bytes(), needle.as_bytes());
+        n.is_empty()
+            || (n.len() <= h.len() && h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n)))
+    } else {
+        haystack.to_lowercase().contains(&needle.to_lowercase())
+    }
 }
 
 /// When any file of stack `s` (image or sidecar) last changed on disk (ns).
@@ -268,6 +281,16 @@ pub fn distinct(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn case_insensitive_contains() {
+        assert!(super::contains_ci("DSC_1234.NEF", "dsc_12"));
+        assert!(super::contains_ci("dsc_1234.nef", "SC_1"));
+        assert!(!super::contains_ci("DSC_1234.NEF", "dsc_13"));
+        assert!(!super::contains_ci("a", "abc"));
+        assert!(super::contains_ci("Ärger-Übung.jpg", "äRGER"));
+        assert!(super::contains_ci("Kyoto", ""));
+    }
     use crate::catalog::Photo;
     use crate::marks::Marks;
     use crate::meta::Meta;

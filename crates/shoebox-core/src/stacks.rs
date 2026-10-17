@@ -166,48 +166,60 @@ pub fn plan_save_links(
 pub fn build(photos: &[Photo], links: &[Link]) -> (Vec<Stack>, Vec<usize>) {
     let n = photos.len();
     let mut uf = UnionFind::new(n);
-    let at: HashMap<&Path, usize> = photos
-        .iter()
-        .enumerate()
-        .map(|(i, p)| (p.path.as_path(), i))
-        .collect();
     let mut linked: HashSet<usize> = HashSet::new();
-    for l in links {
-        if let (Some(&a), Some(&b)) = (at.get(l.file.as_path()), at.get(l.of.as_path()))
-            && a != b
-        {
-            uf.union(a, b);
-            linked.insert(a);
+    if !links.is_empty() {
+        let at: HashMap<&Path, usize> = photos
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.path.as_path(), i))
+            .collect();
+        for l in links {
+            if let (Some(&a), Some(&b)) = (at.get(l.file.as_path()), at.get(l.of.as_path()))
+                && a != b
+            {
+                uf.union(a, b);
+                linked.insert(a);
+            }
         }
     }
 
-    // Same folder, same base name (the rule duplicate detection uses).
-    let stems: HashSet<crate::pipeline::FolderStem> = photos
+    // Same folder, same base name (the rule duplicate detection uses, see
+    // `pipeline::sibling_key`). Folders are numbered by their path's bytes,
+    // which hash far faster than a `Path` (hashed component by component).
+    let mut folders: HashMap<&std::ffi::OsStr, u32> = HashMap::new();
+    let named: Vec<Option<(u32, String)>> = photos
         .iter()
-        .filter_map(|p| crate::pipeline::folder_stem(&p.path))
+        .map(|p| {
+            let dir = p.path.parent()?.as_os_str();
+            let next = folders.len() as u32;
+            let id = *folders.entry(dir).or_insert(next);
+            Some((id, p.path.file_stem()?.to_str()?.to_lowercase()))
+        })
         .collect();
-    let keys: Vec<Option<crate::pipeline::FolderStem>> = photos
+    let stems: HashSet<(u32, &str)> = named
         .iter()
-        .map(|p| crate::pipeline::sibling_key(&p.path, &stems))
+        .flatten()
+        .map(|(d, s)| (*d, s.as_str()))
         .collect();
-    let mut first: HashMap<&crate::pipeline::FolderStem, usize> = HashMap::new();
-    for (i, k) in keys.iter().enumerate() {
-        if let Some(k) = k {
-            match first.get(k) {
+    let mut first: HashMap<(u32, &str), usize> = HashMap::new();
+    for (i, k) in named.iter().enumerate() {
+        if let Some((dir, stem)) = k {
+            let base = crate::pipeline::sibling_stem(stem, |h| stems.contains(&(*dir, h)));
+            match first.get(&(*dir, base)) {
                 Some(&j) => uf.union(i, j),
                 None => {
-                    first.insert(k, i);
+                    first.insert((*dir, base), i);
                 }
             }
         }
     }
 
     // Same exact capture time (with sub-seconds) and camera serial.
-    let mut by_time: HashMap<(String, String, String), usize> = HashMap::new();
+    let mut by_time: HashMap<(&str, &str, &str), usize> = HashMap::new();
     for (i, p) in photos.iter().enumerate() {
         let x = &p.meta.exif;
         if let (Some(t), Some(ss), Some(serial)) = (&x.capture_time, &x.subsec, &x.serial) {
-            let key = (t.clone(), ss.trim().to_owned(), serial.clone());
+            let key = (t.as_str(), ss.trim(), serial.as_str());
             match by_time.get(&key) {
                 Some(&j) => uf.union(i, j),
                 None => {
