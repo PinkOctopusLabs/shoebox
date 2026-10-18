@@ -1547,6 +1547,101 @@ fn import_in_the_app_and_undo() {
     );
 }
 
+/// Import keeps the source's folder names: events nested as the folders
+/// are, a keyword where chosen, nothing for dates; ⌘Z takes it back.
+#[test]
+fn import_folder_names() {
+    let t = tempfile::tempdir().unwrap();
+    let base = t.path().canonicalize().unwrap();
+    let (src, lib) = (base.join("old"), base.join("library"));
+    let put = |rel: &str, n: u64| {
+        let shot = shoebox_fixtures::Shot {
+            datetime: Box::leak(format!("2019:07:14 10:00:{n:02}").into_boxed_str()),
+            subsec: "",
+            orientation: 1,
+            serial: "1",
+        };
+        let img = shoebox_fixtures::scene(n, 320, 240);
+        let p = src.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        let bytes = shoebox_fixtures::jpeg(&img, 85).unwrap();
+        std::fs::write(p, shoebox_fixtures::with_exif(&bytes, &shot)).unwrap();
+    };
+    put("Trips/Italy 2019/a.jpg", 1);
+    put("Trips/Italy 2019/Rome/b.jpg", 2);
+    put("Saved/c.jpg", 3);
+    put("2019/07/d.jpg", 4);
+    // A photo so the library isn't empty.
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::write(
+        lib.join("earlier.jpg"),
+        shoebox_fixtures::jpeg(&shoebox_fixtures::scene(9, 320, 240), 85).unwrap(),
+    )
+    .unwrap();
+    let p = paths(&base, std::slice::from_ref(&lib));
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+
+    h.get_by_label("Import…").click();
+    h.run_steps(2);
+    h.state_mut().set_import_source(src.clone());
+    h.run_steps(2);
+    h.get_by_label("Find photos").click();
+    wait_for(&mut h, Duration::from_secs(30), "import plan", |a| {
+        a.import_counts().is_some()
+    });
+    h.run_steps(2);
+    // Dates start as nothing, other names as events.
+    use shoebox_core::import::FolderUse::{Event, Ignore};
+    assert_eq!(
+        h.state().import_folders(),
+        [
+            ("2019".to_owned(), Ignore),
+            ("2019/07".to_owned(), Ignore),
+            ("Saved".to_owned(), Event),
+            ("Trips".to_owned(), Event),
+            ("Trips/Italy 2019".to_owned(), Event),
+            ("Trips/Italy 2019/Rome".to_owned(), Event),
+        ]
+    );
+    h.get_by_label("Trips: Nothing").click();
+    h.get_by_label("Saved: Keyword").click();
+    h.run_steps(2);
+    assert!(h.query_by_label("Event Italy 2019 › Rome").is_some());
+    snapshot(&mut h, "import-folder-names");
+    h.get_by_label("Import 4 files").click();
+    wait_for(&mut h, Duration::from_secs(30), "import", |a| {
+        a.import_message().is_some()
+    });
+    wait_for(&mut h, Duration::from_secs(30), "marks", |a| {
+        a.photo_count() == 5
+            && a.marks_of("20190714-100002.jpg")
+                .is_some_and(|m| !m.keywords.is_empty())
+    });
+    let kw = |h: &Harness<'_, ShoeboxApp>, f: &str| h.state().marks_of(f).unwrap().keywords;
+    assert_eq!(kw(&h, "20190714-100001.jpg"), ["Events|Italy 2019"]);
+    assert_eq!(kw(&h, "20190714-100002.jpg"), ["Events|Italy 2019|Rome"]);
+    assert_eq!(kw(&h, "20190714-100003.jpg"), ["Saved"]);
+    assert!(kw(&h, "20190714-100004.jpg").is_empty());
+    let mut events = h.state().event_names();
+    events.sort();
+    assert_eq!(events, ["Italy 2019", "Rome"]);
+    let dir = lib.join("2019/2019-07-14");
+    assert!(dir.join("20190714-100001.jpg.xmp").exists());
+
+    // One undo takes back the copies, their sidecars and the events.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    wait_for(&mut h, Duration::from_secs(30), "undo", |a| {
+        a.photo_count() == 1 && a.event_names().is_empty()
+    });
+    assert!(!dir.join("20190714-100001.jpg").exists());
+    assert!(!dir.join("20190714-100001.jpg.xmp").exists());
+    assert!(
+        src.join("Trips/Italy 2019/a.jpg").exists(),
+        "source untouched"
+    );
+}
+
 /// M5: rename, new folder + move, reject (Cmd+Backspace), a collection, and
 /// undo; each through the dry-run table.
 #[test]

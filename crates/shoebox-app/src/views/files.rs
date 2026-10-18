@@ -216,6 +216,7 @@ pub fn import(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             app.run_import();
         }
     });
+    folder_names(app, ui);
     let source = app.import.source.clone().unwrap_or_default();
     let rows: Vec<(String, String)> = plan
         .copies
@@ -251,6 +252,82 @@ pub fn import(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     for (p, e) in &plan.unreadable {
         ui.colored_label(ui.visuals().warn_fg_color, format!("{}: {e}", p.display()));
     }
+}
+
+/// Import's folder list: what each source folder's name becomes on the
+/// photos in it (an event, a keyword or nothing), renamable.
+fn folder_names(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    use shoebox_core::import::{FolderUse, names};
+    if app.import.folders.is_empty() {
+        return;
+    }
+    egui::CollapsingHeader::new(format!("Folder names ({})", app.import.folders.len()))
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.weak("What each folder's name becomes on the photos in it. Dates and camera folders start as nothing; the new folders come from the date.");
+            let before = app.import.folders.clone();
+            egui::ScrollArea::vertical()
+                .id_salt("import-folders")
+                .max_height(260.0)
+                .show(ui, |ui| {
+                    egui::Grid::new("import-folders-grid")
+                        .num_columns(4)
+                        .spacing(egui::vec2(12.0, 4.0))
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for f in &mut app.import.folders {
+                                let rel = f.rel.display().to_string();
+                                let depth = f.rel.components().count().saturating_sub(1);
+                                ui.horizontal(|ui| {
+                                    let indent = depth as f32 * 16.0;
+                                    ui.add_space(indent);
+                                    ui.add_sized(
+                                        [240.0 - indent.min(160.0), 20.0],
+                                        egui::TextEdit::singleline(&mut f.name),
+                                    )
+                                    .on_hover_text(&rel);
+                                });
+                                ui.weak(plural(f.photos, "photo"));
+                                ui.horizontal(|ui| {
+                                    for (kind, label) in [
+                                        (FolderUse::Event, "Event"),
+                                        (FolderUse::Keyword, "Keyword"),
+                                        (FolderUse::Ignore, "Nothing"),
+                                    ] {
+                                        let sel = f.kind == kind;
+                                        let r = ui.selectable_label(sel, label);
+                                        r.widget_info(|| {
+                                            egui::WidgetInfo::selected(
+                                                egui::Role::Button,
+                                                true,
+                                                sel,
+                                                format!("{rel}: {label}"),
+                                            )
+                                        });
+                                        if r.clicked() {
+                                            f.kind = kind;
+                                        }
+                                    }
+                                });
+                                let (path, keywords) = names(&before, &f.rel);
+                                let mut said = Vec::new();
+                                if !path.is_empty() {
+                                    said.push(format!("Event {}", path.join(" › ")));
+                                }
+                                if !keywords.is_empty() {
+                                    let k = if keywords.len() == 1 { "keyword" } else { "keywords" };
+                                    said.push(format!("{k} {}", keywords.join(", ")));
+                                }
+                                ui.label(if said.is_empty() {
+                                    "—".to_owned()
+                                } else {
+                                    said.join("; ")
+                                });
+                                ui.end_row();
+                            }
+                        });
+                });
+        });
 }
 
 /// Tasks → History: every batch, newest first; undo any that's still

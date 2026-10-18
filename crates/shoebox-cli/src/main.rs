@@ -60,6 +60,10 @@ enum Cmd {
         /// Naming template (see `template.rs` for tokens).
         #[arg(long, default_value = shoebox_core::template::DEFAULT_IMPORT)]
         template: String,
+        /// Make the source's folder names events on the photos in them
+        /// (nested as the folders are; dates and camera folders left out).
+        #[arg(long)]
+        folder_events: bool,
         /// Show what would be copied without copying.
         #[arg(long)]
         dry_run: bool,
@@ -155,9 +159,18 @@ fn main() -> Result<()> {
             source,
             into,
             template,
+            folder_events,
             dry_run,
             yes,
-        } => import_cmd(&data_dir, &source, &into, &template, dry_run, yes),
+        } => import_cmd(
+            &data_dir,
+            &source,
+            &into,
+            &template,
+            folder_events,
+            dry_run,
+            yes,
+        ),
         Cmd::Rename {
             folder,
             template,
@@ -235,6 +248,7 @@ fn import_cmd(
     source: &Path,
     into: &Path,
     template: &str,
+    folder_events: bool,
     dry_run: bool,
     yes: bool,
 ) -> Result<()> {
@@ -249,7 +263,21 @@ fn import_cmd(
     let mut cache = Cache::open(&paths::cache_db(data_dir))?;
     let (library, _) =
         shoebox_core::catalog::Catalog::refresh(&mut cache, vec![root.clone()], &|_, _| {})?;
-    let plan = shoebox_core::import::plan(&source, &root.path, &tpl, &library, &|_, _| {})?;
+    let mut plan = shoebox_core::import::plan(&source, &root.path, &tpl, &library, &|_, _| {})?;
+    let mut events = shoebox_core::events::load(std::slice::from_ref(&root.path));
+    let folders = if folder_events {
+        plan.folders.clone()
+    } else {
+        Vec::new()
+    };
+    let mut writes =
+        shoebox_core::import::folder_writes(&mut plan, &folders, &mut events, &library, false)?;
+    if writes.new_events > 0 {
+        writes.writes.extend(shoebox_core::events::plan_save(
+            std::slice::from_ref(&root.path),
+            &events,
+        )?);
+    }
     println!("{:<4} {:<50} DESTINATION", "#", "SOURCE");
     for (i, c) in plan.copies.iter().enumerate() {
         println!(
@@ -269,12 +297,23 @@ fn import_cmd(
     for (s, e) in &plan.unreadable {
         println!("unreadable {}: {e}", s.display());
     }
+    for f in &folders {
+        if f.kind == shoebox_core::import::FolderUse::Event {
+            println!("event {} ({} photos)", f.rel.display(), f.photos);
+        }
+    }
     println!(
         "\n{} to copy, {} already in the library, {} without a capture date (to _undated/).",
         plan.copies.len(),
         plan.skipped.len(),
         plan.undated
     );
+    if folder_events {
+        println!(
+            "{} photos join events from their folders ({} new events).",
+            writes.photos, writes.new_events
+        );
+    }
     if dry_run || plan.copies.is_empty() {
         println!("Nothing was copied.");
         return Ok(());
@@ -284,7 +323,11 @@ fn import_cmd(
         return Ok(());
     }
     let fo = open_fileops(data_dir, Vec::new())?;
-    let batch = fo.import(&format!("import {}", source.display()), &plan.copies)?;
+    let batch = fo.import(
+        &format!("import {}", source.display()),
+        &plan.copies,
+        writes.writes,
+    )?;
     println!(
         "Copied and verified {} files as batch {batch}. Undo (moves the copies to the Trash) with: shoebox undo {batch}",
         plan.copies.len()

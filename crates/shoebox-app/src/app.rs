@@ -97,6 +97,8 @@ pub struct ImportState {
     pub running: bool,
     pub progress: Option<(usize, usize)>,
     pub plan: Option<Result<Arc<shoebox_core::import::Plan>, String>>,
+    /// The plan's folders, with what each name becomes (edited here).
+    pub folders: Vec<shoebox_core::import::Folder>,
     pub message: Option<String>,
 }
 
@@ -799,12 +801,23 @@ impl ShoeboxApp {
                 LibraryEvent::ImportPlanned(p) => {
                     self.import.running = false;
                     self.import.progress = None;
+                    self.import.folders = p.as_ref().map(|p| p.folders.clone()).unwrap_or_default();
                     self.import.plan = Some(p);
                 }
-                LibraryEvent::Imported { batch, copied } => {
+                LibraryEvent::Imported {
+                    batch,
+                    copied,
+                    named,
+                } => {
                     self.import.plan = None;
+                    self.import.folders.clear();
+                    let names = if named > 0 {
+                        format!("; {named} given their folder's name")
+                    } else {
+                        String::new()
+                    };
                     let m = format!(
-                        "Imported {copied} files (batch {batch}). Undo moves the copies to the Trash."
+                        "Imported {copied} files (batch {batch}){names}. Undo moves the copies to the Trash."
                     );
                     self.import.message = Some(m.clone());
                     self.notice = Some(m);
@@ -2168,7 +2181,8 @@ impl ShoeboxApp {
     }
 
     pub fn run_import(&mut self) {
-        self.library.send(LibraryCommand::RunImport);
+        self.library
+            .send(LibraryCommand::RunImport(self.import.folders.clone()));
     }
 
     // --- history ---------------------------------------------------------------
@@ -2311,6 +2325,15 @@ impl ShoeboxApp {
             Some(Ok(p)) => Some((p.copies.len(), p.skipped.len())),
             _ => None,
         }
+    }
+
+    /// The import's folders and what each name becomes (tests).
+    pub fn import_folders(&self) -> Vec<(String, shoebox_core::import::FolderUse)> {
+        self.import
+            .folders
+            .iter()
+            .map(|f| (f.rel.display().to_string(), f.kind))
+            .collect()
     }
 
     pub fn import_message(&self) -> Option<&str> {

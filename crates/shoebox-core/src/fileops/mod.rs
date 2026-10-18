@@ -102,6 +102,10 @@ pub fn suffixed(path: &Path, n: u32) -> PathBuf {
     path.with_file_name(name)
 }
 
+fn is_xmp(p: &Path) -> bool {
+    p.extension().is_some_and(|e| e.eq_ignore_ascii_case("xmp"))
+}
+
 fn exists(p: &Path) -> bool {
     std::fs::symlink_metadata(p).is_ok()
 }
@@ -560,8 +564,15 @@ impl FileOps {
     }
 
     /// Import: copy each file, verify the copy's BLAKE3 against the source's,
-    /// and only then give it its name (never replacing anything). One batch.
-    pub fn import(&self, label: &str, copies: &[PlannedCopy]) -> Result<i64> {
+    /// and only then give it its name (never replacing anything). Then the
+    /// `writes`: sidecars (new ones beside the copies, or edits) and the
+    /// app's `.shoebox/*.json` files. One batch.
+    pub fn import(
+        &self,
+        label: &str,
+        copies: &[PlannedCopy],
+        writes: Vec<(PathBuf, Vec<u8>)>,
+    ) -> Result<i64> {
         let mut dsts = HashSet::new();
         for c in copies {
             self.check_unprotected(&c.dst)?;
@@ -579,6 +590,29 @@ impl FileOps {
                 )));
             }
         }
+        // A write goes beside a copy (its folder made by the copies) or to
+        // a sidecar or app file of the library.
+        let made: HashSet<&Path> = copies.iter().filter_map(|c| c.dst.parent()).collect();
+        for (path, _) in &writes {
+            if dsts.contains(path) {
+                return Err(CoreError::Refused(format!(
+                    "{} is both copied and written",
+                    path.display()
+                )));
+            }
+            match path.parent() {
+                Some(dir) if made.contains(dir) && !exists(path) => {
+                    self.check_unprotected(path)?;
+                    if !is_xmp(path) {
+                        return Err(CoreError::Refused(format!(
+                            "{} is not an .xmp sidecar; image files are never written",
+                            path.display()
+                        )));
+                    }
+                }
+                _ => self.check_sidecar_target(path)?,
+            }
+        }
         let ops: Vec<Planned> = copies
             .iter()
             .map(|c| Planned::Copy {
@@ -586,6 +620,11 @@ impl FileOps {
                 dst: c.dst.clone(),
                 hash: c.hash,
             })
+            .chain(
+                writes
+                    .into_iter()
+                    .map(|(path, bytes)| Planned::Sidecar { path, bytes }),
+            )
             .collect();
         self.run("import", label, None, &ops, |_| Ok(()))
     }
@@ -995,6 +1034,23 @@ impl FileOps {
                     if !happened {
                         continue;
                     }
+                    // A sidecar an import made beside its copy goes to the
+                    // Trash with the copy.
+                    if summary.kind == "import"
+                        && op.before.is_none()
+                        && is_xmp(&op.dst)
+                        && let Some(hash) = op
+                            .after_hash
+                            .as_deref()
+                            .and_then(|h| <[u8; 32]>::try_from(h).ok())
+                    {
+                        let back = Planned::Trash {
+                            path: op.dst.clone(),
+                            hash,
+                        };
+                        out.push((op, back));
+                        continue;
+                    }
                     // Restore the previous bytes. A file Shoebox created is
                     // emptied rather than deleted: a sidecar loses our
                     // properties, an app JSON file becomes `{}`.
@@ -1176,7 +1232,7 @@ mod tests {
             dst: root.join("lib/2026/b.nef"),
             hash: h(&src),
         }];
-        let batch = fo.import("import", &copies).unwrap();
+        let batch = fo.import("import", &copies, Vec::new()).unwrap();
         assert_eq!(
             std::fs::read(root.join("lib/2026/b.nef")).unwrap(),
             b"raw bytes"
@@ -1189,7 +1245,7 @@ mod tests {
             dst: root.join("lib/2026/a.nef"),
             ..copies[0].clone()
         }];
-        assert!(fo.import("again", &clash).is_err());
+        assert!(fo.import("again", &clash, Vec::new()).is_err());
         assert_eq!(
             std::fs::read(root.join("lib/2026/a.nef")).unwrap(),
             b"already here"
@@ -1200,7 +1256,7 @@ mod tests {
             hash: [0; 32],
             ..copies[0].clone()
         }];
-        assert!(fo.import("bad", &wrong).is_err());
+        assert!(fo.import("bad", &wrong, Vec::new()).is_err());
         assert!(!root.join("lib/2026/c.nef").exists());
         assert!(!root.join("lib/2026/.c.nef.shoebox-tmp").exists());
 

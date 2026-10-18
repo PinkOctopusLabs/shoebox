@@ -7,8 +7,16 @@
 //! `DSC_0001.JPG`) share one `-N` suffix on a collision, and sidecars on the
 //! card come along under the new name. The copies then run as one batch
 //! through [`crate::fileops::FileOps::import`], each verified by BLAKE3.
+//!
+//! The source's folder names can come along: each folder holding photos
+//! (at any depth) is listed in the plan with what its name becomes on the
+//! photos in it: an event (nested as the folders are), a keyword, or
+//! nothing. Names that say nothing (dates, camera folders such as
+//! `100NIKON`, `DCIM`) start as nothing. [`folder_writes`] turns the
+//! choices into sidecars for the copies (and edits for library photos found
+//! again in those folders), written in the import's batch.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
@@ -17,8 +25,35 @@ use walkdir::WalkDir;
 
 use crate::catalog::Catalog;
 use crate::error::{Result, io};
+use crate::events::{self, Event};
 use crate::fileops::{PlannedCopy, suffixed};
+use crate::marks::Marks;
+use crate::sidecar;
 use crate::template::{Fields, Template};
+use crate::xmp;
+
+/// What a source folder's name becomes on the photos imported from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FolderUse {
+    /// An event (inside the events of the folders around it).
+    Event,
+    /// A keyword.
+    Keyword,
+    /// Nothing.
+    Ignore,
+}
+
+/// A folder under the import source with photos in it (at any depth).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Folder {
+    /// Relative to the source.
+    pub rel: PathBuf,
+    /// What it's called on the photos (the folder's name to start with).
+    pub name: String,
+    pub kind: FolderUse,
+    /// Photos under it, at any depth (copied or already in the library).
+    pub photos: usize,
+}
 
 /// What an import will do.
 #[derive(Debug, Clone, Default)]
@@ -31,6 +66,108 @@ pub struct Plan {
     pub unreadable: Vec<(PathBuf, String)>,
     /// Imported images without a capture date (they go to `_undated/`).
     pub undated: usize,
+    /// Folders under the source with photos in them, parents first.
+    pub folders: Vec<Folder>,
+    /// Each photo to copy (by its new path), and each library photo the
+    /// source has again, with the source folders it was found in.
+    pub origins: Vec<(PathBuf, BTreeSet<PathBuf>)>,
+}
+
+/// Month names (and their short forms) that make a folder name a date.
+const MONTHS: [&str; 24] = [
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+    "jan",
+    "feb",
+    "mar",
+    "apr",
+    "jun",
+    "jul",
+    "aug",
+    "sep",
+    "sept",
+    "oct",
+    "nov",
+    "dec",
+];
+
+/// Folder names that say nothing about the photos in them.
+const GENERIC: [&str; 22] = [
+    "dcim",
+    "camera roll",
+    "camera uploads",
+    "photos",
+    "pictures",
+    "images",
+    "photo library",
+    "photos library",
+    "icloud photos",
+    "saved pictures",
+    "saved photos",
+    "import",
+    "imports",
+    "imported",
+    "export",
+    "exports",
+    "misc",
+    "new folder",
+    "untitled folder",
+    "jpg",
+    "raw",
+    "originals",
+];
+
+/// A date (`2019`, `2019-07-14`, `July 2019`, `14th Jul`), a camera's
+/// folder (`100NIKON`, `101APPLE`, `100NCZ_F`) or a generic name such as
+/// `DCIM` or `Photos`: the folder's name adds nothing.
+pub fn says_nothing(name: &str) -> bool {
+    let lower = name.trim().to_lowercase();
+    if lower.is_empty() || GENERIC.contains(&lower.as_str()) {
+        return true;
+    }
+    let camera = lower.len() == 8
+        && lower[..3].bytes().all(|b| b.is_ascii_digit())
+        && lower[3..]
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    if camera {
+        return true;
+    }
+    lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .all(|w| {
+            let digits = w.trim_end_matches(['s', 't', 'n', 'd', 'r', 'h']);
+            (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+                || MONTHS.contains(&w)
+        })
+}
+
+/// What a folder's name starts as: an event, unless it says nothing.
+fn default_use(name: &str) -> FolderUse {
+    if says_nothing(name) {
+        FolderUse::Ignore
+    } else {
+        FolderUse::Event
+    }
+}
+
+/// The folder holding `p`, relative to `source` (empty at the top).
+fn rel_dir(source: &Path, p: &Path) -> PathBuf {
+    p.parent()
+        .and_then(|d| d.strip_prefix(source).ok())
+        .map(Path::to_path_buf)
+        .unwrap_or_default()
 }
 
 fn hash_file(p: &Path) -> std::io::Result<[u8; 32]> {
@@ -133,6 +270,34 @@ pub fn plan(
             Err(e) => out.unreadable.push(e),
         }
     }
+    // The folders photos are in, with how many under each, and the folders
+    // each picture (by content) turns up in.
+    let mut counts: BTreeMap<PathBuf, usize> = BTreeMap::new();
+    let mut found_in: HashMap<[u8; 32], BTreeSet<PathBuf>> = HashMap::new();
+    for s in &sources {
+        let rel = rel_dir(source, &s.path);
+        for a in rel.ancestors().filter(|a| !a.as_os_str().is_empty()) {
+            *counts.entry(a.to_path_buf()).or_default() += 1;
+        }
+        if !rel.as_os_str().is_empty() {
+            found_in.entry(s.hash).or_default().insert(rel);
+        }
+    }
+    out.folders = counts
+        .into_iter()
+        .map(|(rel, photos)| {
+            let name = rel
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            Folder {
+                kind: default_use(&name),
+                name,
+                rel,
+                photos,
+            }
+        })
+        .collect();
 
     // Already in the library? Only same-size files can match, so only
     // those are hashed.
@@ -152,8 +317,14 @@ pub fn plan(
         .collect();
     let mut seen: HashMap<[u8; 32], PathBuf> = HashMap::new();
     let mut keep = Vec::new();
+    let mut found_again: Vec<(PathBuf, [u8; 32])> = Vec::new();
     for s in sources {
-        if let Some(existing) = library_hashes.get(&s.hash).or_else(|| seen.get(&s.hash)) {
+        if let Some(existing) = library_hashes.get(&s.hash) {
+            if !found_again.iter().any(|(p, _)| p == existing) {
+                found_again.push((existing.clone(), s.hash));
+            }
+            out.skipped.push((s.path, existing.clone()));
+        } else if let Some(existing) = seen.get(&s.hash) {
             out.skipped.push((s.path, existing.clone()));
         } else {
             seen.insert(s.hash, s.path.clone());
@@ -255,6 +426,16 @@ pub fn plan(
             sidecar_copies.push((car, dsts[0].with_extension("xmp")));
         }
     }
+    for c in &out.copies {
+        if let Some(rels) = found_in.get(&c.hash) {
+            out.origins.push((c.dst.clone(), rels.clone()));
+        }
+    }
+    for (existing, hash) in found_again {
+        if let Some(rels) = found_in.get(&hash) {
+            out.origins.push((existing, rels.clone()));
+        }
+    }
     for (car, dst) in sidecar_copies {
         if dst.exists() || taken.contains(&dst) {
             tracing::warn!(
@@ -272,4 +453,178 @@ pub fn plan(
         });
     }
     Ok(out)
+}
+
+/// What [`folder_writes`] will write.
+#[derive(Debug, Clone, Default)]
+pub struct FolderWrites {
+    /// Sidecars to write (new ones for copies, edits for library photos).
+    pub writes: Vec<(PathBuf, Vec<u8>)>,
+    /// Photos given a folder's name.
+    pub photos: usize,
+    /// Events made for folders (added to `events`).
+    pub new_events: usize,
+}
+
+/// The event path (names, outermost first) and keywords the folders put on
+/// a photo found in `rel`.
+fn names_for(folders: &HashMap<&Path, &Folder>, rel: &Path) -> (Vec<String>, Vec<String>) {
+    let mut chain: Vec<&Path> = rel
+        .ancestors()
+        .filter(|a| !a.as_os_str().is_empty())
+        .collect();
+    chain.reverse();
+    let (mut path, mut keywords) = (Vec::new(), Vec::new());
+    for a in chain {
+        let Some(f) = folders.get(a) else { continue };
+        // `|` separates the levels of a keyword.
+        let name = f.name.trim().replace('|', "-");
+        if name.is_empty() {
+            continue;
+        }
+        match f.kind {
+            FolderUse::Event => path.push(name),
+            FolderUse::Keyword => keywords.push(name),
+            FolderUse::Ignore => {}
+        }
+    }
+    (path, keywords)
+}
+
+/// The event path (names, outermost first) and keywords the folders, as
+/// chosen, put on a photo in `rel`.
+pub fn names(folders: &[Folder], rel: &Path) -> (Vec<String>, Vec<String>) {
+    let by_rel: HashMap<&Path, &Folder> = folders.iter().map(|f| (f.rel.as_path(), f)).collect();
+    names_for(&by_rel, rel)
+}
+
+/// Put the folders' names (as chosen in `folders`) on the photos of
+/// `plan`: new events go into `events`, and the sidecar writes are
+/// returned. A copy's sidecar is made from the source's own (the plain
+/// copy of it is dropped from `plan.copies`); a library photo found again
+/// in a folder gets an edit to its sidecar, unless it's in a reference
+/// root. `stem_for_raw`: also write `name.xmp` for a library NEF.
+pub fn folder_writes(
+    plan: &mut Plan,
+    folders: &[Folder],
+    events: &mut Vec<Event>,
+    library: &Catalog,
+    stem_for_raw: bool,
+) -> Result<FolderWrites> {
+    let mut out = FolderWrites::default();
+    let by_rel: HashMap<&Path, &Folder> = folders.iter().map(|f| (f.rel.as_path(), f)).collect();
+    let copied: HashMap<PathBuf, PathBuf> = plan
+        .copies
+        .iter()
+        .filter(|c| !is_xmp(&c.src))
+        .map(|c| (c.dst.clone(), c.src.clone()))
+        .collect();
+    let in_library: HashMap<&Path, usize> = library
+        .photos
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.path.as_path(), i))
+        .collect();
+    let before = events.len();
+    let origins = plan.origins.clone();
+    for (target, rels) in &origins {
+        let mut paths: BTreeSet<Vec<String>> = BTreeSet::new();
+        let mut keywords: BTreeSet<String> = BTreeSet::new();
+        for rel in rels {
+            let (path, k) = names_for(&by_rel, rel);
+            if !path.is_empty() {
+                paths.insert(path);
+            }
+            keywords.extend(k);
+        }
+        if paths.is_empty() && keywords.is_empty() {
+            continue;
+        }
+        let ids: Vec<String> = paths
+            .iter()
+            .filter_map(|p| events::ensure_path(events, p))
+            .collect();
+        let with = |old: &Marks| {
+            let mut m = events::join(old, &ids, events);
+            for k in &keywords {
+                if !m.keywords.contains(k) {
+                    m.keywords.push(k.clone());
+                }
+            }
+            m
+        };
+        if let Some(src) = copied.get(target) {
+            let Some(format) = Format::from_path(src) else {
+                continue;
+            };
+            let (stem, file) = sidecar::present(src, &|p| p.exists());
+            let old = sidecar::load(src, format, stem.as_deref(), file.as_deref())?.marks;
+            let new = with(&old);
+            let changes = new.changes_from(&old);
+            if changes.is_empty() {
+                continue;
+            }
+            // The copy's own sidecar, made from the source's (if it has one).
+            let path = sidecar::per_file(target);
+            let base = match plan.copies.iter().position(|c| c.dst == path) {
+                Some(at) => {
+                    let c = plan.copies.remove(at);
+                    Some(std::fs::read(&c.src).map_err(io(&c.src))?)
+                }
+                None => None,
+            };
+            out.writes
+                .push((path, xmp::edit(base.as_deref(), &changes)?));
+            out.photos += 1;
+        } else if let Some(&i) = in_library.get(target.as_path()) {
+            if library.is_reference(i) {
+                continue;
+            }
+            let p = &library.photos[i];
+            let new = with(&p.marks);
+            let also_stem = stem_for_raw && p.format == Format::Nef;
+            let w = sidecar::plan_write(&p.path, &p.marks, &new, also_stem)?;
+            if !w.is_empty() {
+                out.writes.extend(w);
+                out.photos += 1;
+            }
+        }
+    }
+    out.new_events = events.len() - before;
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_that_say_nothing() {
+        for n in [
+            "2019",
+            "2019-07-14",
+            "20190714",
+            "July 2019",
+            "14th Jul",
+            "2019_07",
+            "100NIKON",
+            "101APPLE",
+            "100NCZ_F",
+            "DCIM",
+            "Photos",
+            "iCloud Photos",
+            "",
+        ] {
+            assert!(says_nothing(n), "{n}");
+        }
+        for n in [
+            "Italy 2019",
+            "2025-photoshoot",
+            "Rome",
+            "Wedding",
+            "Mayfair",
+        ] {
+            assert!(!says_nothing(n), "{n}");
+        }
+    }
 }

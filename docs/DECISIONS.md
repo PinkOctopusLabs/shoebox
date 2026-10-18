@@ -780,3 +780,21 @@ folder's photos stayed in it until the next tagging pass (never, if no
 photos were left). Like People, it now counts the tagged photos in view
 (folder, events, collections, filters, search), before a chosen tag
 narrows them; tags with none are hidden unless chosen.
+
+## Import keeps folder names as events or keywords (2026-10-18)
+An unorganised library's folder names (`Italy 2019`, `2025-photoshoot`)
+are its only organisation, and filing by date throws them away. Import now
+lists the source's folders with what each name becomes on its photos:
+event (default), keyword or nothing (default for dates, camera folders and
+generic names; the new dated folders already say the date). Events nest as
+the folders do and reuse an existing event with the same path. A picture
+in two folders gets both; a library photo found again gets them too.
+- The copies' sidecars are written, not copied, when there are names to
+  add: made from the source's sidecar plus the names, so the copy is still
+  never an image write and the source is never touched.
+- All of it is one batch (`FileOps::import` takes writes after the
+  copies). Undo trashes a sidecar the import created (as it does the
+  copies) instead of emptying it; library sidecars get their old bytes.
+- A duplicate inside the source keeps the first file by path; a later
+  copy's own sidecar isn't merged (as before).
+- CLI: `shoebox import --folder-events` uses the defaults.

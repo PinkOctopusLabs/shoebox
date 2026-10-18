@@ -264,8 +264,9 @@ pub enum LibraryCommand {
         root: PathBuf,
         template: String,
     },
-    /// Run the last planned import: verified copies as one batch.
-    RunImport,
+    /// Run the last planned import: verified copies as one batch, with the
+    /// folders' names put on the photos as chosen.
+    RunImport(Vec<shoebox_core::import::Folder>),
     /// Work out a move, reject, rename or trash (the dry-run table).
     PreviewOrganise(OrgRequest),
     /// Run it as one batch (references to moved files updated with it).
@@ -444,6 +445,8 @@ pub enum LibraryEvent {
     Imported {
         batch: i64,
         copied: usize,
+        /// Photos given a folder's name.
+        named: usize,
     },
     /// The dry-run table for an organise request (or why it's refused).
     OrgPreview(Result<OrgPreview, String>),
@@ -929,11 +932,42 @@ fn library_worker(
                 }
                 (false, false)
             }
-            LibraryCommand::RunImport => {
-                let Some(p) = import_plan.take() else {
+            LibraryCommand::RunImport(folders) => {
+                let Some(mut p) = import_plan.take() else {
                     continue;
                 };
-                if p.copies.is_empty() {
+                if p.copies.is_empty() && p.origins.is_empty() {
+                    continue;
+                }
+                let writable: Vec<PathBuf> = settings
+                    .roots
+                    .iter()
+                    .filter(|r| !r.reference)
+                    .map(|r| r.path.clone())
+                    .collect();
+                let all: Vec<PathBuf> = settings.roots.iter().map(|r| r.path.clone()).collect();
+                let mut evs = events::load(&all);
+                let named = shoebox_core::import::folder_writes(
+                    &mut p,
+                    &folders,
+                    &mut evs,
+                    &catalog,
+                    settings.write_stem_sidecar_for_raw,
+                )
+                .and_then(|mut w| {
+                    if w.new_events > 0 {
+                        w.writes.extend(events::plan_save(&writable, &evs)?);
+                    }
+                    Ok(w)
+                });
+                let named = match named {
+                    Ok(w) => w,
+                    Err(e) => {
+                        emit(LibraryEvent::Error(format!("import: {e}")));
+                        continue;
+                    }
+                };
+                if p.copies.is_empty() && named.writes.is_empty() {
                     continue;
                 }
                 let source = p
@@ -942,7 +976,8 @@ fn library_worker(
                     .and_then(|c| c.src.parent())
                     .map(|d| d.display().to_string())
                     .unwrap_or_default();
-                match fileops.import(&format!("import from {source}"), &p.copies) {
+                let photos = named.photos;
+                match fileops.import(&format!("import from {source}"), &p.copies, named.writes) {
                     Ok(b) => {
                         undo.push(b);
                         redo.clear();
@@ -951,7 +986,11 @@ fn library_worker(
                         emit(LibraryEvent::Imported {
                             batch: b,
                             copied: p.copies.len(),
+                            named: photos,
                         });
+                        if named.new_events > 0 {
+                            emit(LibraryEvent::Events(evs));
+                        }
                     }
                     Err(e) => emit(LibraryEvent::Error(format!("import: {e}"))),
                 }

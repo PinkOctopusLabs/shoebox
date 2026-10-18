@@ -27,7 +27,7 @@ A Rust + egui photo library app for macOS. **`docs/SPEC.md` is the source of tru
   tiles (`AppPaths.tile_cache: None`); `SHOEBOX_UI_TILES=<dir>` opts in. Semantic search tests use a fake model;
   `SHOEBOX_ML_MODEL=<model dir> SHOEBOX_UI_PHOTOS=<folder>` runs the ignored real-model test;
   `SHOEBOX_FACES_MODEL=<dir>` the People one.
-- `crates/shoebox-cli`: the `shoebox` binary: `scan` (metadata), `dupes` (report only, never moves), `apply` (moves rows a person confirmed in the report), `import`, `rename`, `history`, `undo`. `SHOEBOX_TRASH_DIR` sends trashed files to a folder (tests).
+- `crates/shoebox-cli`: the `shoebox` binary: `scan` (metadata), `dupes` (report only, never moves), `apply` (moves rows a person confirmed in the report), `import` (`--folder-events`), `rename`, `history`, `undo`. `SHOEBOX_TRASH_DIR` sends trashed files to a folder (tests).
 - `crates/shoebox-fixtures`: synthetic test library generator (dev-only).
 - `tests/fixtures/`: synthetic fixtures (built per test by `shoebox-fixtures`; `cargo run -p shoebox-fixtures -- <empty dir>` writes them to disk). Real camera files go in the gitignored `tests/fixtures/real/`; tests that need them skip when it's absent.
 

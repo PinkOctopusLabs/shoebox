@@ -48,7 +48,7 @@ Everything in the app is one of these eight things, and all of them except colle
 | Variant | A stack member with different pixels from the primary, such as a Lightroom virtual-copy export (`-2`). Shown when the stack is expanded. |
 | Sidecar | `<filename>.<ext>.xmp` next to a file, holding ratings, flags, labels and keywords. |
 | Collection | A named virtual set of stacks. No files move. Stored in the cache and mirrored to `<root>/.shoebox/collections.json`, so collections survive a cache rebuild. |
-| Event | A named group of photos, such as Japan Trip, made without moving any files. Membership is marked on each photo (in its sidecar), never taken from dates or folders, so two events can share a day. Events can nest (Japan Trip › Kyoto) and overlap. The events themselves (names, nesting) are mirrored to \<root>/.shoebox/events.json so they survive a cache rebuild. |
+| Event | A named group of photos, such as Japan Trip, made without moving any files. Membership is marked on each photo (in its sidecar), never taken from dates or folders, so two events can share a day (an import can mark photos with their source folders' names; see Import). Events can nest (Japan Trip › Kyoto) and overlap. The events themselves (names, nesting) are mirrored to \<root>/.shoebox/events.json so they survive a cache rebuild. |
 | Smart filter | A saved query, such as rating ≥ 3, flag = pick, a date range, a camera, "NEF missing", or "undated". |
 
 Ratings, flags and labels set on a stack are written to the primary's sidecar. A setting copies them to every member's sidecar instead, so tools that look at the JPEG or TIFF also see them.
@@ -126,6 +126,7 @@ Culling marks go into XMP; file changes always move whole stacks, sidecars inclu
 - Verify every copy by BLAKE3 before reporting it imported.
 - Skip files whose exact hash is already in the library, and list them.
 - Show a dry-run table (source → destination) before anything runs.
+- **Folder names.** The source's folders are listed with what each name becomes on the photos in it: an **event** (nested as the folders are: `Italy 2019/Rome` → Italy 2019 › Rome, joining an existing event of that name), a **keyword**, or **nothing**. Names that say nothing start as nothing: dates (`2019`, `2019-07-14`, `July 2019`), camera folders (`100NIKON`, `DCIM`) and generic names (`Photos`, `iCloud Photos`); others start as events. Each name can be edited. A picture found in two folders gets both; one the library already has gets them too (in its sidecar, unless it's in a reference root). The names go into the copies' own sidecars (made from the source's sidecar, if any) and `events.json`, in the import's batch: undo moves those sidecars to the Trash with the copies. The source is never written.
 
 **Batch rename** uses the same template engine and dry-run table, inside or across folders.
 
