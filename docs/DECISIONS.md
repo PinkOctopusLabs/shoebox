@@ -822,3 +822,15 @@ hashes, embeddings, faces).
   which case the batch fails cleanly (journaled, nothing overwritten).
 - Tests can't make a real placeholder, so `cloud::pretend_cloud_only`
   marks a path as one (process-wide, cleared by `download`).
+
+## Folder pickers are sheets, not blocking dialogs (2026-10-18)
+
+- rfd's blocking `pick_folder` runs `NSOpenPanel.runModal` inside the frame,
+  a nested event loop inside winit's handler. A repaint asked for by a
+  background thread (loader, faces, search) while it's open aborts the app:
+  "tried to handle event while another event is currently being handled".
+- Every picker now goes through `picker::Picker`: rfd's `AsyncFileDialog`
+  (a sheet on the window, no nested loop) started in one frame and polled
+  in the next ones, with a waker that asks egui for a repaint. What the
+  folder is for (`FolderFor`) is acted on when it's picked.
+- Headless tests can't open a panel; checked by hand on a throwaway build.

@@ -139,11 +139,8 @@ fn library(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             }
         });
     ui.add_space(6.0);
-    if ui.button("Add Folder…").clicked()
-        && let Some(p) = crate::panels::pick_folder()
-    {
-        app.scanning = true;
-        app.command(LibraryCommand::AddRoot(p));
+    if ui.button("Add Folder…").clicked() {
+        crate::panels::add_folder(app);
     }
     ui.add_space(6.0);
     note(

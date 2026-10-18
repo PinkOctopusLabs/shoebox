@@ -448,13 +448,11 @@ pub fn photo_menu(app: &mut ShoeboxApp, resp: &egui::Response, pos: usize) {
                 .selected_paths()
                 .first()
                 .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
-            let mut dialog = rfd::FileDialog::new().set_title("Move to folder");
-            if let Some(d) = start {
-                dialog = dialog.set_directory(d);
-            }
-            if let Some(folder) = dialog.pick_folder() {
-                app.move_selection_to(folder.canonicalize().unwrap_or(folder));
-            }
+            app.picker.open(
+                crate::picker::FolderFor::MoveSelection,
+                "Move to folder",
+                start.as_deref(),
+            );
             ui.close();
         }
         if ui.button("Rename…").clicked() {

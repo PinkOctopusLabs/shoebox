@@ -356,6 +356,8 @@ pub struct ShoeboxApp {
     pub(crate) survey: Vec<PhotoId>,
     pub(crate) dupes: DupeState,
     pub(crate) import: ImportState,
+    /// The open folder picker, if any.
+    pub(crate) picker: crate::picker::Picker,
     pub(crate) org: OrgState,
     pub(crate) history: HistoryState,
     pub(crate) collections: Vec<Collection>,
@@ -486,6 +488,7 @@ impl ShoeboxApp {
             survey: Vec::new(),
             dupes: DupeState::default(),
             import: ImportState::default(),
+            picker: crate::picker::Picker::default(),
             org: OrgState::default(),
             history: HistoryState::default(),
             collections: Vec::new(),
@@ -2728,6 +2731,25 @@ impl ShoeboxApp {
         ));
     }
 
+    /// Act on a folder picked in the folder picker.
+    fn tick_picker(&mut self, ctx: &egui::Context) {
+        use crate::picker::FolderFor;
+        let Some((purpose, p)) = self.picker.poll(ctx) else {
+            return;
+        };
+        match purpose {
+            FolderFor::AddRoot => {
+                self.scanning = true;
+                self.command(LibraryCommand::AddRoot(p));
+            }
+            FolderFor::ImportSource => {
+                self.import.source = Some(p);
+                self.import.plan = None;
+            }
+            FolderFor::MoveSelection => self.move_selection_to(p.canonicalize().unwrap_or(p)),
+        }
+    }
+
     /// Ask for a preview of a photo an import will copy (not cached on
     /// disk: the source isn't in the library).
     pub(crate) fn want_preview(&mut self, p: &shoebox_core::import::PlannedPhoto) {
@@ -3086,6 +3108,7 @@ impl eframe::App for ShoeboxApp {
         self.apply_events(&ctx);
         self.tick_semantic(&ctx);
         self.tick_people();
+        self.tick_picker(&ctx);
         crate::updater::tick(&ctx, crate::jobs::working());
         self.handle_keys(&ctx);
         self.wanted.clear();

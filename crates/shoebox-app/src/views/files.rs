@@ -168,13 +168,12 @@ pub fn import(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                     .as_ref()
                     .map_or("No folder chosen".to_owned(), |p| p.display().to_string());
                 ui.label(text);
-                if ui.button("Choose…").clicked()
-                    && let Some(p) = rfd::FileDialog::new()
-                        .set_title("Import from (a card or folder)")
-                        .pick_folder()
-                {
-                    app.import.source = Some(p);
-                    app.import.plan = None;
+                if ui.button("Choose…").clicked() {
+                    app.picker.open(
+                        crate::picker::FolderFor::ImportSource,
+                        "Import from (a card or folder)",
+                        None,
+                    );
                 }
             });
             ui.end_row();

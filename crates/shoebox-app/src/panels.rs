@@ -763,10 +763,13 @@ pub fn status(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     });
 }
 
-pub(crate) fn pick_folder() -> Option<std::path::PathBuf> {
-    rfd::FileDialog::new()
-        .set_title("Add a folder to the library")
-        .pick_folder()
+/// Pick a folder to add to the library (added once picked).
+pub(crate) fn add_folder(app: &mut ShoeboxApp) {
+    app.picker.open(
+        crate::picker::FolderFor::AddRoot,
+        "Add a folder to the library",
+        None,
+    );
 }
 
 pub fn library(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
@@ -779,9 +782,8 @@ pub fn library(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
 
 fn library_contents(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     let (open, add) = section(app, ui, "Library", Some(("Add a folder", true)));
-    if add && let Some(p) = pick_folder() {
-        app.scanning = true;
-        app.command(LibraryCommand::AddRoot(p));
+    if add {
+        add_folder(app);
     }
     if open {
         let all_selected = app.folders.is_empty()
@@ -1956,11 +1958,8 @@ pub fn empty_library(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         ui.add_space(8.0);
         ui.label("Add a folder of photos. Shoebox only reads it; your files stay where they are.");
         ui.add_space(12.0);
-        if ui.button("Add folder…").clicked()
-            && let Some(p) = pick_folder()
-        {
-            app.scanning = true;
-            app.command(LibraryCommand::AddRoot(p));
+        if ui.button("Add folder…").clicked() {
+            add_folder(app);
         }
     });
 }
