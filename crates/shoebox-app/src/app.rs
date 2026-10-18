@@ -269,7 +269,8 @@ pub struct ShoeboxApp {
     index_of: HashMap<PhotoId, usize>,
     pub(crate) tree: Vec<FolderNode>,
     /// Folder filter from the left panel (None = whole library).
-    pub(crate) folder: Option<PathBuf>,
+    /// Folders the grid shows (any of them, and below); ⌘-click adds one.
+    pub(crate) folders: Vec<PathBuf>,
     /// Catalog indices shown in the centre, in display order.
     pub(crate) shown: Vec<usize>,
     /// Bumped whenever `shown` changes (layout caches key on it).
@@ -404,7 +405,7 @@ impl ShoeboxApp {
             ids: Vec::new(),
             index_of: HashMap::new(),
             tree: Vec::new(),
-            folder: None,
+            folders: Vec::new(),
             shown: Vec::new(),
             shown_gen: 0,
             selection: BTreeSet::new(),
@@ -612,6 +613,25 @@ impl ShoeboxApp {
         self.events.iter().map(|e| e.name.clone()).collect()
     }
 
+    /// What the grid shows: (folders, event name) (tests).
+    pub fn scope(&self) -> (usize, Option<String>) {
+        let event = self
+            .selected_event
+            .as_ref()
+            .and_then(|id| self.events.iter().find(|e| &e.id == id))
+            .map(|e| e.name.clone());
+        (self.folders.len(), event)
+    }
+
+    /// The left panel's photo count for an event (tests).
+    pub fn event_count(&self, name: &str) -> usize {
+        self.events
+            .iter()
+            .find(|e| e.name == name)
+            .and_then(|e| self.event_members.get(&e.id))
+            .map_or(0, |m| m.len())
+    }
+
     /// Replace the filter and rebuild the visible items.
     pub fn set_filter(&mut self, f: query::Filter) {
         self.filter = f;
@@ -659,7 +679,7 @@ impl ShoeboxApp {
 
     /// Whether any filter is set (tests).
     pub fn filtered(&self) -> bool {
-        !self.filter.is_empty() || self.folder.is_some()
+        !self.filter.is_empty() || !self.folders.is_empty()
     }
 
     pub fn shown_count(&self) -> usize {
@@ -1270,8 +1290,8 @@ impl ShoeboxApp {
     /// Stop showing a library folder (nothing on disk changes).
     pub(crate) fn remove_root(&mut self, path: PathBuf) {
         self.scanning = true;
-        if self.folder.as_ref().is_some_and(|f| f.starts_with(&path)) {
-            self.set_folder(None);
+        if self.folders.iter().any(|f| f.starts_with(&path)) {
+            self.set_folders(Vec::new());
         }
         self.command(LibraryCommand::RemoveRoot(path));
     }
@@ -1283,25 +1303,59 @@ impl ShoeboxApp {
         self.ppl.showing = None;
         self.sem.tag = None;
         self.sem.similar = None;
-        self.set_folder(None);
+        self.set_folders(Vec::new());
     }
 
-    pub(crate) fn set_folder(&mut self, folder: Option<PathBuf>) {
-        self.folder = folder;
+    /// Show these folders. The grid shows one source at a time: folders,
+    /// an event or a collection, so choosing folders clears the others.
+    pub(crate) fn set_folders(&mut self, folders: Vec<PathBuf>) {
+        if !folders.is_empty() {
+            self.selected_event = None;
+            self.selected_collection = None;
+        }
+        self.folders = folders;
         self.refilter();
         self.scroll_to_current = true;
+    }
+
+    /// A click on a folder: just this one (or none, if it was the only one
+    /// shown); with ⌘ or Shift, add it to the folders shown or take it out.
+    pub(crate) fn click_folder(&mut self, path: &Path, add: bool) {
+        let mut folders = self.folders.clone();
+        if add {
+            if let Some(k) = folders.iter().position(|f| f == path) {
+                folders.remove(k);
+            } else {
+                folders.push(path.to_path_buf());
+            }
+        } else if folders == [path] {
+            folders.clear();
+        } else {
+            folders = vec![path.to_path_buf()];
+        }
+        self.set_folders(folders);
     }
 
     /// Rebuild the visible items: one per stack passing the filter (its
     /// primary), followed by its other members when expanded.
     pub(crate) fn refilter(&mut self) {
         let mut f = self.filter.clone();
-        f.folder = self.folder.clone();
+        if let [one] = self.folders.as_slice() {
+            f.folder = Some(one.clone());
+        }
         let semantic = self.semantic_query().is_some();
         if semantic {
             f.search.clear(); // the text is a description, not a name
         }
         let mut stacks = query::run(&self.catalog, &f, self.sort, self.sort_desc);
+        if self.folders.len() > 1 {
+            stacks.retain(|&s| {
+                self.catalog.stacks[s].all().any(|i| {
+                    let p = &self.catalog.photos[i].path;
+                    self.folders.iter().any(|f| p.starts_with(f))
+                })
+            });
+        }
         if let Some(members) = self
             .selected_event
             .as_ref()
@@ -1381,6 +1435,23 @@ impl ShoeboxApp {
     /// Open the editor for a new event spanning the selection (Cmd+E).
     pub(crate) fn new_event_from_selection(&mut self, parent: Option<String>) {
         let stacks = self.selected_stacks();
+        self.new_event_from(&stacks, parent);
+    }
+
+    /// Every stack the grid shows (a folder's photos, say).
+    pub(crate) fn shown_stacks(&self) -> Vec<usize> {
+        let mut v: Vec<usize> = self
+            .shown
+            .iter()
+            .map(|&i| self.catalog.stack_of[i])
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// Open the editor for a new event spanning these stacks.
+    pub(crate) fn new_event_from(&mut self, stacks: &[usize], parent: Option<String>) {
         let times: Vec<String> = stacks
             .iter()
             .filter_map(|&s| {
@@ -1408,6 +1479,7 @@ impl ShoeboxApp {
             error: None,
         });
         self.left_open = true;
+        self.collapsed.remove("Events"); // the editor is in that section
     }
 
     pub(crate) fn edit_event(&mut self, id: &str) {
@@ -1473,10 +1545,15 @@ impl ShoeboxApp {
 
     /// Add the selection to an event by hand, or exclude it.
     pub(crate) fn event_include_selection(&mut self, id: &str, include: bool) {
-        let paths: Vec<PathBuf> = self
-            .selected_stacks()
-            .into_iter()
-            .map(|s| {
+        let stacks = self.selected_stacks();
+        self.event_include(id, &stacks, include);
+    }
+
+    /// Add stacks to an event by hand, or exclude them.
+    pub(crate) fn event_include(&mut self, id: &str, stacks: &[usize], include: bool) {
+        let paths: Vec<PathBuf> = stacks
+            .iter()
+            .map(|&s| {
                 self.catalog.photos[self.catalog.stacks[s].primary]
                     .path
                     .clone()
@@ -1524,6 +1601,10 @@ impl ShoeboxApp {
     }
 
     pub(crate) fn select_event(&mut self, id: Option<String>) {
+        if id.is_some() {
+            self.folders.clear();
+            self.selected_collection = None;
+        }
         self.selected_event = id;
         self.refilter();
         self.scroll_to_current = true;
@@ -1951,6 +2032,10 @@ impl ShoeboxApp {
     }
 
     pub(crate) fn select_collection(&mut self, id: Option<String>) {
+        if id.is_some() {
+            self.folders.clear();
+            self.selected_event = None;
+        }
         self.selected_collection = id;
         self.refilter();
         self.scroll_to_current = true;

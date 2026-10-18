@@ -3,6 +3,23 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-18 — One source at a time; several folders; adding to events
+- The grid shows **one source**: folders, an event or a collection.
+  Choosing one clears the others (a folder and an event together read as
+  "both", but filtered as "the overlap"). Smart filters, people, tags and
+  search still narrow whichever source is shown.
+- **Several folders:** ⌘- or Shift-click adds a folder or takes it out; a
+  plain click shows just that one (or everything, if it was the only one).
+  The chip reads "📁 3 folders".
+- **Adding to an event:** the photo menu has Add to Event (every event,
+  sub-events indented) and New Event from Selection (⌘E); a folder's menu
+  does the same for every photo in the folders shown; and photos can be
+  dropped on an event. A new event spans its photos' dates (events are date
+  ranges plus photos added by hand), so it can take in other photos from
+  those days too.
+- **Group by day** (Grid) and **Justified rows** (Masonry) are checkboxes at
+  the right of the filter bar, not toggles among the views.
+
 ## 2026-10-18 — Filters over the photos; loupe fit
 - The **filter bar** (scope chips, search, rating/flag/label, Filters) sits
   over the middle panel, like Lightroom's Library Filter, since it narrows

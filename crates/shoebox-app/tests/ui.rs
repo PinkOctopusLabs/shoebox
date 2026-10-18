@@ -708,6 +708,84 @@ fn organise_marks_stacks_and_filters() {
     assert_eq!(h.state().shown_count(), 1);
 }
 
+/// Several folders at once (⌘-click), photos added to an event from the
+/// photo menu, and one source at a time: an event replaces the folders.
+#[test]
+fn folders_and_events() {
+    let t = tempfile::tempdir().unwrap();
+    let lib = t.path().join("lib");
+    shoebox_fixtures::build_library(&lib).unwrap();
+    let p = paths(t.path(), &[lib.join("ref"), lib.join("scan")]);
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+    let all = h.state().shown_count();
+
+    let folder = |h: &Harness<'_, ShoeboxApp>, name: &str| {
+        format!("{name}  {}", h.state().folder_count(name))
+    };
+    let (blank, lightroom) = (folder(&h, "blank"), folder(&h, "lightroom"));
+    h.get_by_label(&blank).click();
+    h.run_steps(2);
+    let one = h.state().shown_count();
+    h.get_by_label(&lightroom)
+        .click_modifiers(egui::Modifiers::COMMAND);
+    h.run_steps(3);
+    let two = h.state().shown_count();
+    assert_eq!(h.state().scope().0, 2);
+    assert!(one < two && two < all, "{one} < {two} < {all}");
+    assert!(h.query_by_label("📁 2 folders  ✖").is_some());
+    snapshot(&mut h, "25-two-folders");
+    h.get_by_label("📁 2 folders  ✖").click();
+    h.run_steps(3);
+    assert_eq!(h.state().shown_count(), all);
+
+    // An event from one photo, then another added from the photo menu.
+    h.get_by_label("DSC_0001.NEF").click();
+    h.run_steps(2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::E);
+    h.run_steps(3);
+    h.event(egui::Event::Text("Trip".into()));
+    h.run_steps(1);
+    h.key_press(egui::Key::Enter);
+    let start = Instant::now();
+    while h.state().event_count("Trip") == 0 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(start.elapsed() < Duration::from_secs(10), "no event");
+    }
+    let before = h.state().event_count("Trip");
+    let other = h
+        .state()
+        .shown_names()
+        .into_iter()
+        .find(|n| n != "DSC_0001.NEF")
+        .unwrap();
+    h.get_by_label(&other).click_secondary();
+    h.run_steps(3);
+    h.get_by_label("Add to Event").click();
+    h.run_steps(3);
+    h.get_by_label("Trip").click();
+    let start = Instant::now();
+    while h.state().event_count("Trip") == before {
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(start.elapsed() < Duration::from_secs(10), "not added");
+    }
+    settle(&mut h, Duration::from_secs(30));
+
+    // Showing the event clears the folders.
+    let n = h.state().event_count("Trip");
+    h.get_by_label(&format!("Trip  {n}")).click();
+    h.run_steps(3);
+    assert_eq!(h.state().scope(), (0, Some("Trip".to_owned())));
+    assert_eq!(h.state().shown_count(), n);
+    // …and a folder clears the event.
+    let blank = folder(&h, "blank");
+    h.get_by_label(&blank).click();
+    h.run_steps(3);
+    assert_eq!(h.state().scope(), (1, None));
+}
+
 /// Cmd+E makes an event from the selection: events.json in every writable
 /// root, the event in members' sidecars, and one undo step.
 #[test]
@@ -2147,7 +2225,7 @@ fn analysis_real_library() {
     // (The data folder may be kept between runs: set, don't toggle.)
     let set = |h: &mut Harness<'_, ShoeboxApp>, label: &str, on: bool| {
         let current = |a: &ShoeboxApp| match label {
-            "Days" => a.settings().day_headers,
+            "Group by day" => a.settings().day_headers,
             _ => a.settings().justified_rows,
         };
         if current(h.state()) != on {
@@ -2156,15 +2234,15 @@ fn analysis_real_library() {
         }
         assert_eq!(current(h.state()), on);
     };
-    set(&mut h, "Days", true);
+    set(&mut h, "Group by day", true);
     snapshot(&mut h, "real-2-days");
-    set(&mut h, "Days", false);
+    set(&mut h, "Group by day", false);
     h.state_mut().set_view(View::Masonry);
     h.run_steps(4);
-    set(&mut h, "Rows", true);
+    set(&mut h, "Justified rows", true);
     h.run_steps(4);
     snapshot(&mut h, "real-3-rows");
-    set(&mut h, "Rows", false);
+    set(&mut h, "Justified rows", false);
     h.state_mut().set_view(View::Grid);
     h.run_steps(4);
     let things = h.state().things();

@@ -58,7 +58,6 @@ pub fn viewbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         {
             app.set_view(View::Map);
         }
-        layout_toggle(app, ui);
         // Sort and size at the right when there's room, else on a second line.
         if ui.available_width() >= 300.0 {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -182,6 +181,10 @@ fn filter_bar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         if !app.filter.is_empty() && ui.small_button("Clear").clicked() {
             app.filter = shoebox_core::query::Filter::default();
         }
+        // How this view lays the photos out (not a view of its own).
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            layout_toggle(app, ui);
+        });
     });
     if before
         != (
@@ -471,7 +474,7 @@ fn library_contents(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         app.command(LibraryCommand::AddRoot(p));
     }
     if open {
-        let all_selected = app.folder.is_none()
+        let all_selected = app.folders.is_empty()
             && app.selected_event.is_none()
             && app.selected_collection.is_none();
         if row(
@@ -708,10 +711,32 @@ fn event_node(
     let state =
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
     let header = state.show_header(ui, |ui| {
-        let r = row(ui, selected, e.name.as_str(), Some(members.len()))
-            .on_hover_text(format!("{} to {}", e.start, e.end));
+        let r = row(ui, selected, e.name.as_str(), Some(members.len())).on_hover_text(format!(
+            "{} to {}\nDrop photos here to add them",
+            e.start, e.end
+        ));
         if r.clicked() {
             app.select_event(if selected { None } else { Some(e.id.clone()) });
+        }
+        // Drop photos on an event to add them.
+        if r.dnd_hover_payload::<crate::views::DragPhotos>().is_some() {
+            ui.painter().rect_stroke(
+                r.rect.expand(1.0),
+                3.0,
+                egui::Stroke::new(1.5, ui.visuals().selection.stroke.color),
+                egui::StrokeKind::Outside,
+            );
+        }
+        if let Some(ids) = r.dnd_release_payload::<crate::views::DragPhotos>() {
+            let mut stacks: Vec<usize> = ids
+                .0
+                .iter()
+                .filter_map(|id| app.index(*id))
+                .map(|i| app.catalog.stack_of[i])
+                .collect();
+            stacks.sort_unstable();
+            stacks.dedup();
+            app.event_include(&e.id, &stacks, true);
         }
         r.context_menu(|ui| {
             if ui.button("Edit…").clicked() {
@@ -760,10 +785,9 @@ fn event_node(
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let sel = app.folder.as_deref() == Some(d.as_path());
+            let sel = app.folders == [d.as_path()];
             if ui.selectable_label(sel, format!("📁 {name}")).clicked() {
-                app.selected_event = None;
-                app.set_folder(Some(d.clone()));
+                app.set_folders(vec![d.clone()]);
             }
         }
     });
@@ -1002,7 +1026,7 @@ fn folder_node(
     root: Option<bool>,
     open: bool,
 ) {
-    let selected = app.folder.as_deref() == Some(node.path.as_path());
+    let selected = app.folders.contains(&node.path);
     let name = if root == Some(true) {
         format!("{}  🔒", node.name)
     } else {
@@ -1012,9 +1036,11 @@ fn folder_node(
     let state =
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, open);
     let header = state.show_header(ui, |ui| {
-        let r = row(ui, selected, name, Some(node.count));
+        let r = row(ui, selected, name, Some(node.count))
+            .on_hover_text("⌘-click to show several folders");
         if r.clicked() {
-            app.set_folder((!selected).then(|| node.path.clone()));
+            let add = ui.input(|i| i.modifiers.command || i.modifiers.shift);
+            app.click_folder(&node.path, add);
         }
         // Drop photos on a folder to move them there.
         if r.dnd_hover_payload::<crate::views::DragPhotos>().is_some() {
@@ -1041,6 +1067,27 @@ fn folder_node(
                 app.org.new_folder = Some((node.path.clone(), String::new()));
                 ui.close();
             }
+            ui.separator();
+            // The folders shown (this one, if it isn't among them).
+            let scope = |app: &mut ShoeboxApp| {
+                if !app.folders.contains(&node.path) {
+                    app.set_folders(vec![node.path.clone()]);
+                }
+                app.shown_stacks()
+            };
+            let what = if selected && app.folders.len() > 1 {
+                format!("Photos in these {} folders", app.folders.len())
+            } else {
+                "Photos in this folder".to_owned()
+            };
+            ui.weak(what);
+            if ui.button("New Event from These Photos…").clicked() {
+                let stacks = scope(app);
+                app.new_event_from(&stacks, None);
+                ui.close();
+            }
+            add_to_event_menu(app, ui, |app| scope(app));
+            ui.separator();
             if !app.selection.is_empty()
                 && ui
                     .button(format!(
@@ -1634,12 +1681,15 @@ fn section(
 /// each as a chip with a ✖ that clears it.
 fn scope_chips(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     let mut chips: Vec<(String, u8)> = Vec::new();
-    if let Some(f) = &app.folder {
-        let name = f
-            .file_name()
+    let name = |f: &std::path::Path| {
+        f.file_name()
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        chips.push((format!("📁 {name}"), 0));
+            .unwrap_or_default()
+    };
+    match app.folders.as_slice() {
+        [] => {}
+        [one] => chips.push((format!("📁 {}", name(one)), 0)),
+        many => chips.push((format!("📁 {} folders", many.len()), 0)),
     }
     if let Some(e) = app
         .selected_event
@@ -1673,7 +1723,7 @@ fn scope_chips(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             .on_hover_text("Clear");
         if r.clicked() {
             match kind {
-                0 => app.set_folder(None),
+                0 => app.set_folders(Vec::new()),
                 1 => app.select_event(None),
                 2 => app.select_collection(None),
                 _ => {
@@ -1691,12 +1741,12 @@ fn layout_toggle(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     let mut s = app.settings.clone();
     match app.view {
         View::Grid => {
-            ui.toggle_value(&mut s.day_headers, "Days")
+            ui.checkbox(&mut s.day_headers, "Group by day")
                 .on_hover_text("A heading for each day (when sorted by capture time)");
         }
         View::Masonry => {
-            ui.toggle_value(&mut s.justified_rows, "Rows")
-                .on_hover_text("Justified rows in date order, instead of columns");
+            ui.checkbox(&mut s.justified_rows, "Justified rows")
+                .on_hover_text("Rows of equal height in date order, instead of columns");
         }
         _ => {}
     }
@@ -1743,5 +1793,73 @@ fn panel_toggle(ui: &mut egui::Ui, open: &mut bool, left: bool) {
         *open = !*open;
         // Keep Tab for the panels, not for moving focus from this button.
         r.surrender_focus();
+    }
+}
+
+/// "Add to Event" with every event (sub-events indented); `stacks` gives
+/// the photos when one is chosen.
+pub(crate) fn add_to_event_menu(
+    app: &mut ShoeboxApp,
+    ui: &mut egui::Ui,
+    stacks: impl FnOnce(&mut ShoeboxApp) -> Vec<usize>,
+) {
+    let events = app.events.clone();
+    let mut chosen = None;
+    ui.add_enabled_ui(!events.is_empty(), |ui| {
+        ui.menu_button("Add to Event", |ui| {
+            fn level(
+                e: &shoebox_core::events::Event,
+                all: &[shoebox_core::events::Event],
+            ) -> usize {
+                let mut n = 0;
+                let mut p = e.parent.as_deref();
+                while let Some(id) = p.filter(|_| n < 8) {
+                    n += 1;
+                    p = all
+                        .iter()
+                        .find(|x| x.id == id)
+                        .and_then(|x| x.parent.as_deref());
+                }
+                n
+            }
+            // Newest first, each followed by its sub-events.
+            let mut order: Vec<&shoebox_core::events::Event> = Vec::new();
+            fn walk<'a>(
+                parent: Option<&str>,
+                all: &'a [shoebox_core::events::Event],
+                out: &mut Vec<&'a shoebox_core::events::Event>,
+            ) {
+                let ids: std::collections::HashSet<&str> =
+                    all.iter().map(|e| e.id.as_str()).collect();
+                let mut kids: Vec<&shoebox_core::events::Event> = all
+                    .iter()
+                    .filter(|e| match parent {
+                        Some(p) => e.parent.as_deref() == Some(p),
+                        None => e.parent.as_deref().is_none_or(|p| !ids.contains(p)),
+                    })
+                    .collect();
+                kids.sort_by(|a, b| b.start.cmp(&a.start));
+                for k in kids {
+                    out.push(k);
+                    if out.len() < all.len() {
+                        walk(Some(&k.id), all, out);
+                    }
+                }
+            }
+            walk(None, &events, &mut order);
+            for e in order {
+                let indent = "    ".repeat(level(e, &events));
+                if ui.button(format!("{indent}{}", e.name)).clicked() {
+                    chosen = Some(e.id.clone());
+                    ui.close();
+                }
+            }
+        })
+    })
+    .response
+    .on_disabled_hover_text("No events yet");
+    if let Some(id) = chosen {
+        let stacks = stacks(app);
+        app.event_include(&id, &stacks, true);
     }
 }
