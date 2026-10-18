@@ -360,10 +360,20 @@ impl Catalog {
         here.into_iter().filter(|&j| key(j) == mine).collect()
     }
 
+    /// Whether photo `i` is in a reference root (read-only: no sidecar
+    /// writes).
+    pub fn is_reference(&self, i: usize) -> bool {
+        self.roots
+            .get(self.photos[i].root)
+            .is_some_and(|r| r.role == Role::Reference)
+    }
+
     /// Write new marks for several photos as one journaled batch (one undo
     /// step), and update the catalog and cache. Returns the batch, or None if
     /// nothing changed. Raw files also get `name.xmp` when `stem_for_raw`.
     /// `extra` writes (such as `.shoebox/events.json`) join the same batch.
+    /// Photos in reference roots are skipped (see [`Self::is_reference`]), so
+    /// one read-only photo doesn't stop the rest.
     pub fn set_marks(
         &mut self,
         updates: &[(usize, Marks)],
@@ -373,8 +383,12 @@ impl Catalog {
         stem_for_raw: bool,
         label: &str,
     ) -> Result<Option<i64>> {
+        let updates: Vec<&(usize, Marks)> = updates
+            .iter()
+            .filter(|(i, _)| !self.is_reference(*i))
+            .collect();
         let mut writes = extra;
-        for (i, new) in updates {
+        for (i, new) in &updates {
             let p = &self.photos[*i];
             let also_stem = stem_for_raw && p.format == Format::Nef;
             writes.extend(sidecar::plan_write(&p.path, &p.marks, new, also_stem)?);

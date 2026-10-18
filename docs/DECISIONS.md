@@ -3,6 +3,20 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-18 — Events and collections both stay; reference photos skipped
+- Kept apart on purpose: events are written to the photos (shared with
+  other apps; things that happened); collections live only in Shoebox
+  (working sets such as picks or a print order, reference photos included).
+  The photo menu now has Add to / Remove from Collection and New Collection
+  from Selection, and a folder's menu Add to Collection, as for events.
+- Marks and events on a selection that includes reference photos used to
+  fail as a whole (a sidecar write anywhere in a reference root refuses the
+  batch). `Catalog::set_marks` now skips reference photos and the status bar
+  says how many were left as they are.
+- Taking a photo out of the collection being shown from its own menu
+  shrank the grid mid-frame and crashed (index out of bounds); cells and
+  clicks now ignore positions that are gone.
+
 ## 2026-10-18 — Events are marked on photos, not date ranges
 - Changed at the user's request (SPEC updated): an event is the photos
   marked with it. A date range took in other photos from the same days and

@@ -161,7 +161,15 @@ pub fn cell(
     pos: usize,
     fill: bool,
 ) -> egui::Response {
-    let idx = app.shown[pos];
+    // A menu action earlier this frame (say, taking a photo out of the
+    // collection being shown) can shrink `shown` under the loop drawing it.
+    let Some(&idx) = app.shown.get(pos) else {
+        return ui.interact(
+            rect,
+            ui.scope_id().with(("gone", pos)),
+            egui::Sense::hover(),
+        );
+    };
     let id = app.ids[idx];
     let resp = ui.interact(
         rect,
@@ -391,6 +399,14 @@ pub fn photo_menu(app: &mut ShoeboxApp, resp: &egui::Response, pos: usize) {
         crate::panels::remove_from_event_menu(app, ui);
         if ui.button("New Event from Selection…  (⌘E)").clicked() {
             app.new_event_from_selection(None);
+            ui.close();
+        }
+        crate::panels::add_to_collection_menu(app, ui, |app| app.selected_stacks());
+        crate::panels::remove_from_collection_menu(app, ui);
+        if ui.button("New Collection from Selection…").clicked() {
+            app.collection_edit = Some((None, String::new()));
+            app.left_open = true;
+            app.collapsed.remove("Collections");
             ui.close();
         }
         ui.separator();

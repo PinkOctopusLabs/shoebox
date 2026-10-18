@@ -938,6 +938,63 @@ fn events_from_selection_and_undo() {
     assert_eq!(h.state().event_count("Wedding"), 1);
 }
 
+/// Marks and events on a selection that includes reference photos: the
+/// others are changed, the reference ones are left alone (read-only), and
+/// the status bar says so; nothing fails.
+#[test]
+fn marks_skip_reference_photos() {
+    let t = tempfile::tempdir().unwrap();
+    let lib = t.path().join("lib");
+    shoebox_fixtures::build_library(&lib).unwrap();
+    let p = paths(t.path(), &[lib.join("ref"), lib.join("scan")]);
+    let mut s = Settings::load(&p.settings).unwrap();
+    s.set_reference(&lib.join("ref").canonicalize().unwrap(), true);
+    s.save(&p.settings).unwrap();
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+
+    h.get_by_label("DSC_0001.NEF").click(); // in the reference root
+    h.run_steps(2);
+    h.get_by_label("f0005.jpg")
+        .click_modifiers(egui::Modifiers::COMMAND);
+    h.run_steps(2);
+    assert_eq!(h.state().selected_count(), 2);
+    let read = |p: &Path| -> shoebox_core::marks::Marks {
+        let props = std::fs::read(p)
+            .ok()
+            .and_then(|b| shoebox_core::xmp::read(&b).ok())
+            .unwrap_or_default();
+        shoebox_core::marks::Marks::from_props(&props)
+    };
+    let side = lib.join("scan/recovered/f0005.jpg.xmp");
+    h.key_press(egui::Key::Num3);
+    wait_for(&mut h, Duration::from_secs(10), "rated", |_| {
+        read(&side).rating == 3
+    });
+    settle(&mut h, Duration::from_secs(30));
+    assert_eq!(h.state().error_message(), None);
+    assert!(
+        h.state().notice().is_some_and(|n| n.contains("reference")),
+        "{:?}",
+        h.state().notice()
+    );
+    assert!(!lib.join("ref/2026/2026-04-24/DSC_0001.NEF.xmp").exists());
+
+    // An event from the same selection takes the writable photo only.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::E);
+    h.run_steps(3);
+    h.event(egui::Event::Text("Trip".into()));
+    h.run_steps(1);
+    h.key_press(egui::Key::Enter);
+    wait_for(&mut h, Duration::from_secs(10), "event", |a| {
+        a.event_count("Trip") == 1
+    });
+    settle(&mut h, Duration::from_secs(30));
+    assert_eq!(h.state().error_message(), None);
+    assert_eq!(read(&side).keywords, vec!["Events|Trip"]);
+    assert!(!lib.join("ref/2026/2026-04-24/DSC_0001.NEF.xmp").exists());
+}
+
 /// Step until `cond` holds (or fail after `timeout`).
 fn wait_for(
     h: &mut Harness<'_, ShoeboxApp>,
@@ -1545,6 +1602,28 @@ fn organise_files_in_the_app() {
     h.run_steps(2);
     assert_eq!(h.state().shown_count(), 2);
     snapshot(&mut h, "21-collection");
+    // Out of it, and another in, from the photo menu.
+    h.get_by_label("f0005.jpg").click_secondary();
+    h.run_steps(3);
+    h.get_by_label("Remove from Collection").click();
+    h.run_steps(3);
+    h.get_by_label("Best").click();
+    wait_for(&mut h, Duration::from_secs(10), "removed", |a| {
+        a.collection_count("Best") == 1
+    });
+    h.run_steps(2);
+    assert_eq!(h.state().shown_count(), 1);
+    h.get_by_label("Best  1").click(); // back to every photo
+    h.run_steps(2);
+    h.get_by_label("f0003.jpg").click_secondary();
+    h.run_steps(3);
+    h.get_by_label("Add to Collection").click();
+    h.run_steps(3);
+    h.get_by_label("Best").click();
+    h.run_steps(2);
+    wait_for(&mut h, Duration::from_secs(10), "added", |a| {
+        a.collection_count("Best") == 2
+    });
 
     // Undo the reject and the rename from History; the move with ⌘Z order.
     wait_for(&mut h, Duration::from_secs(10), "batches", |a| {

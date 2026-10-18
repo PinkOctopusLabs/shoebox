@@ -154,21 +154,43 @@ fn marks_round_trip_through_sidecars_and_rescans() {
     // Our batch can't be undone over the other app's change.
     assert!(fo.undo(batch).is_err());
 
-    // Reference roots are read-only: no sidecar is written.
+    // Reference roots are read-only: their photos are skipped, the others
+    // still written.
     let r = c
         .photos
         .iter()
         .position(|p| p.rel.ends_with("DSC_0001.JPG"))
         .unwrap();
+    let w = c
+        .photos
+        .iter()
+        .position(|p| p.rel == "recovered/f0004.jpg")
+        .unwrap();
+    assert!(c.is_reference(r) && !c.is_reference(w));
     let rated = Marks {
         rating: 5,
         ..Marks::default()
     };
-    assert!(
-        c.set_marks(&[(r, rated)], vec![], &fo, &cache, false, "test")
-            .is_err()
+    assert_eq!(
+        c.set_marks(&[(r, rated.clone())], vec![], &fo, &cache, false, "test")
+            .unwrap(),
+        None
     );
     assert!(!lib.join("ref/2026/2026-04-24/DSC_0001.JPG.xmp").exists());
+    assert!(
+        c.set_marks(
+            &[(r, rated.clone()), (w, rated)],
+            vec![],
+            &fo,
+            &cache,
+            false,
+            "test"
+        )
+        .unwrap()
+        .is_some()
+    );
+    assert!(!lib.join("ref/2026/2026-04-24/DSC_0001.JPG.xmp").exists());
+    assert_eq!(c.photos[w].marks.rating, 5, "the writable photo still is");
 }
 
 /// Changes made by other apps are noticed by a rescan or a targeted re-read,

@@ -452,6 +452,8 @@ pub enum LibraryEvent {
         verb: &'static str,
     },
     Collections(Vec<Collection>),
+    /// Something for the status bar.
+    Notice(String),
     /// Every journal batch, oldest first.
     Batches(Vec<BatchRow>),
     /// One batch's operations: (op, source, destination, done).
@@ -770,6 +772,14 @@ fn library_worker(
                     change.as_ref(),
                     settings.marks_to_all_stack_members,
                 );
+                // Reference photos are skipped (read-only); say so.
+                let skipped = updates
+                    .iter()
+                    .filter(|&&(i, _)| catalog.is_reference(i))
+                    .count();
+                if skipped > 0 {
+                    emit(LibraryEvent::Notice(crate::app::reference_notice(skipped)));
+                }
                 let result = events::plan_save(&writable, &new).and_then(|files| {
                     catalog.set_marks(
                         &updates,

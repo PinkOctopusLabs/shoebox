@@ -804,6 +804,7 @@ impl ShoeboxApp {
                     self.notice = Some(m);
                 }
                 LibraryEvent::OrgPreview(p) => self.org.preview = Some(p),
+                LibraryEvent::Notice(n) => self.notice = Some(n),
                 LibraryEvent::Organised { batch, files, verb } => {
                     self.org.preview = None;
                     self.notice = Some(format!(
@@ -2061,6 +2062,11 @@ impl ShoeboxApp {
     /// Add the selection to a collection (or take it out).
     pub(crate) fn collection_add_selection(&mut self, id: &str, add: bool) {
         let stacks = self.selected_stacks();
+        self.collection_add(id, &stacks, add);
+    }
+
+    /// Add stacks to a collection (or take them out).
+    pub(crate) fn collection_add(&mut self, id: &str, stacks: &[usize], add: bool) {
         let mut list = self.collections.clone();
         let Some(c) = list.iter_mut().find(|c| c.id == id) else {
             return;
@@ -2157,6 +2163,11 @@ impl ShoeboxApp {
         self.notice.as_deref()
     }
 
+    /// The error shown in the status bar, if any (tests).
+    pub fn error_message(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
     /// Journal batches: (id, label, status), oldest first.
     pub fn batches(&self) -> Vec<(i64, String, String)> {
         self.history
@@ -2206,6 +2217,15 @@ impl ShoeboxApp {
     }
 
     /// Collection names (tests).
+    /// How many photos (stacks) a collection holds (tests).
+    pub fn collection_count(&self, name: &str) -> usize {
+        self.collections
+            .iter()
+            .find(|c| c.name == name)
+            .and_then(|c| self.collection_members.get(&c.id))
+            .map_or(0, |m| m.len())
+    }
+
     pub fn collection_names(&self) -> Vec<String> {
         self.collections.iter().map(|c| c.name.clone()).collect()
     }
@@ -2310,6 +2330,13 @@ impl ShoeboxApp {
         let targets = self.mark_targets();
         if targets.is_empty() {
             return;
+        }
+        // Reference folders are read-only: mark the rest, and say so.
+        let (targets, skipped): (Vec<usize>, Vec<usize>) = targets
+            .into_iter()
+            .partition(|&i| !self.catalog.is_reference(i));
+        if !skipped.is_empty() {
+            self.notice = Some(reference_notice(skipped.len()));
         }
         let catalog = Arc::make_mut(&mut self.catalog);
         let mut updates = Vec::new();
@@ -2429,7 +2456,10 @@ impl ShoeboxApp {
     /// Click with modifiers, as in Lightroom: plain = select one,
     /// Cmd = toggle, Shift = range from the anchor.
     pub(crate) fn click(&mut self, pos_in_shown: usize, modifiers: egui::Modifiers) {
-        let id = self.ids[self.shown[pos_in_shown]];
+        let Some(&i) = self.shown.get(pos_in_shown) else {
+            return;
+        };
+        let id = self.ids[i];
         if modifiers.command {
             if !self.selection.remove(&id) {
                 self.selection.insert(id);
@@ -2487,7 +2517,10 @@ impl ShoeboxApp {
     /// Right-click on a photo: like Finder, a click outside the selection
     /// selects just that photo first.
     pub(crate) fn secondary_click(&mut self, pos_in_shown: usize) {
-        let id = self.ids[self.shown[pos_in_shown]];
+        let Some(&i) = self.shown.get(pos_in_shown) else {
+            return;
+        };
+        let id = self.ids[i];
         if !self.selection.contains(&id) {
             self.click(pos_in_shown, egui::Modifiers::NONE);
         }
@@ -2914,6 +2947,16 @@ pub struct EventEdit {
     /// Photos a new event starts with.
     pub photos: Vec<PathBuf>,
     pub error: Option<String>,
+}
+
+/// What the status bar says when photos in reference folders were left
+/// unchanged.
+pub(crate) fn reference_notice(n: usize) -> String {
+    if n == 1 {
+        "1 photo is in a reference folder (read-only), so it was left as it is".to_owned()
+    } else {
+        format!("{n} photos are in reference folders (read-only), so they were left as they are")
+    }
 }
 
 /// Local date and time, `16 Oct 2026 14:02`.

@@ -1367,6 +1367,7 @@ fn folder_node(
                 ui.close();
             }
             add_to_event_menu(app, ui, |app| scope(app));
+            add_to_collection_menu(app, ui, |app| scope(app));
             ui.separator();
             if !app.selection.is_empty()
                 && ui
@@ -2180,5 +2181,69 @@ pub(crate) fn remove_from_event_menu(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     });
     if let Some(id) = chosen {
         app.event_include(&id, &stacks, false);
+    }
+}
+
+/// "Add to Collection" with every collection, by name; `stacks` gives the
+/// photos when one is chosen.
+pub(crate) fn add_to_collection_menu(
+    app: &mut ShoeboxApp,
+    ui: &mut egui::Ui,
+    stacks: impl FnOnce(&mut ShoeboxApp) -> Vec<usize>,
+) {
+    let mut list: Vec<(String, String)> = app
+        .collections
+        .iter()
+        .map(|c| (c.name.clone(), c.id.clone()))
+        .collect();
+    list.sort();
+    let mut chosen = None;
+    ui.add_enabled_ui(!list.is_empty(), |ui| {
+        ui.menu_button("Add to Collection", |ui| {
+            for (name, id) in &list {
+                if ui.button(name).clicked() {
+                    chosen = Some(id.clone());
+                    ui.close();
+                }
+            }
+        })
+    })
+    .response
+    .on_disabled_hover_text("No collections yet");
+    if let Some(id) = chosen {
+        let stacks = stacks(app);
+        app.collection_add(&id, &stacks, true);
+    }
+}
+
+/// "Remove from Collection" with the collections the selected photos are
+/// in (shown only when they're in one).
+pub(crate) fn remove_from_collection_menu(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    let stacks = app.selected_stacks();
+    let mut list: Vec<(String, String)> = app
+        .collections
+        .iter()
+        .filter(|c| {
+            app.collection_members
+                .get(&c.id)
+                .is_some_and(|m| stacks.iter().any(|s| m.contains(s)))
+        })
+        .map(|c| (c.name.clone(), c.id.clone()))
+        .collect();
+    if list.is_empty() {
+        return;
+    }
+    list.sort();
+    let mut chosen = None;
+    ui.menu_button("Remove from Collection", |ui| {
+        for (name, id) in &list {
+            if ui.button(name).clicked() {
+                chosen = Some(id.clone());
+                ui.close();
+            }
+        }
+    });
+    if let Some(id) = chosen {
+        app.collection_add(&id, &stacks, false);
     }
 }
