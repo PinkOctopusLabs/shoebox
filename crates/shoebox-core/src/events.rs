@@ -360,6 +360,7 @@ mod tests {
                     sidecar: None,
                     sidecar_sig: String::new(),
                     change: None,
+                    cloud: false,
                 };
                 p.meta.exif.capture_time = Some(format!("2026:04:24 1{n}:00:00"));
                 p.marks.keywords = kw.iter().map(|k| (*k).to_owned()).collect();

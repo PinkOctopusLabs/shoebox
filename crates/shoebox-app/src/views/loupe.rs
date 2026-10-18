@@ -13,8 +13,9 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         ui.centered_and_justified(|ui| ui.weak("Select a photo"));
         return;
     };
-    app.want(idx, Size::Large, Priority::Visible);
-    app.want(idx, Size::Full, Priority::Visible);
+    // A photo in the cloud only is downloaded as it opens.
+    app.want_open(idx, Size::Large);
+    app.want_open(idx, Size::Full);
     if let Some(pos) = app.current_pos() {
         for n in [pos + 1, pos.wrapping_sub(1)] {
             if let Some(&j) = app.shown.get(n) {
@@ -105,9 +106,14 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 .failed
                 .iter()
                 .find(|(k, _)| k.photo == id)
-                .map_or("Loading…".to_owned(), |(_, e)| {
-                    format!("Can't display: {e}")
-                });
+                .map_or(
+                    if photo.cloud {
+                        "Downloading from the cloud…".to_owned()
+                    } else {
+                        "Loading…".to_owned()
+                    },
+                    |(_, e)| format!("Can't display: {e}"),
+                );
             painter.text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,

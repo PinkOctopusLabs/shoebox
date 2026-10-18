@@ -67,7 +67,12 @@ pub struct Job {
     pub mtime_ns: i64,
     pub orientation: u16,
     pub target: shoebox_decode::Target,
+    /// In the cloud only and not to be downloaded: cached thumbnails only.
+    pub cloud: bool,
 }
+
+/// A load's error for a cloud-only photo with no cached thumbnail.
+pub const IN_CLOUD: &str = "in the cloud only";
 
 pub struct Loaded {
     pub key: Key,
@@ -201,6 +206,13 @@ fn worker(q: &Queue, tx: &Sender<Loaded>, thumbs: &ThumbCache, repaint: &(dyn Fn
             target: job.target,
         };
         let result = match key.size {
+            // Reading the file would download it.
+            _ if job.cloud => match key.size {
+                Size::Small => thumbs.cached(&src, thumbs::SMALL),
+                Size::Large => thumbs.cached(&src, thumbs::LARGE),
+                Size::Full => None,
+            }
+            .ok_or_else(|| IN_CLOUD.to_owned()),
             Size::Small => thumbs.get(&src, thumbs::SMALL).map_err(|e| e.to_string()),
             Size::Large => thumbs.get(&src, thumbs::LARGE).map_err(|e| e.to_string()),
             Size::Full => shoebox_decode::render_path(
@@ -293,6 +305,9 @@ pub enum LibraryCommand {
     /// Apply them: moves to `_duplicates/` and stack links as one undoable
     /// batch, and remember dismissed pairs.
     ApplyDuplicates(HashMap<PathBuf, Decision>),
+    /// Download cloud-only files (by reading them; nothing is written) and
+    /// read them as photos.
+    Download(Vec<PathBuf>),
 }
 
 /// A move, reject, rename or trash of stacks, by the paths of their files.
@@ -436,6 +451,11 @@ pub enum LibraryEvent {
     /// than republishing the catalog on every keystroke).
     Changes(Vec<(PathBuf, Option<shoebox_core::changes::Change>)>),
     ImportProgress {
+        done: usize,
+        total: usize,
+    },
+    /// Downloading from the cloud; `done == total` when finished.
+    Downloading {
         done: usize,
         total: usize,
     },
@@ -996,6 +1016,38 @@ fn library_worker(
                 }
                 batches(&fileops);
                 (false, true)
+            }
+            LibraryCommand::Download(paths) => {
+                let total = paths.len();
+                let mut failed = 0;
+                for (n, p) in paths.iter().enumerate() {
+                    if let Err(e) = shoebox_core::cloud::download(p) {
+                        tracing::warn!("downloading {}: {e}", p.display());
+                        failed += 1;
+                    }
+                    emit(LibraryEvent::Downloading { done: n, total });
+                }
+                let photos: Vec<usize> =
+                    paths.iter().filter_map(|p| index.get(p).copied()).collect();
+                match catalog.reread(&photos, &By::Other, &mut cache) {
+                    Ok(r) if !r.changed.is_empty() => {
+                        index = reindex(&catalog);
+                        publish(&catalog, &settings, true);
+                    }
+                    Ok(_) => {}
+                    Err(e) => emit(LibraryEvent::Error(format!("re-reading: {e}"))),
+                }
+                emit(LibraryEvent::Downloading { done: total, total });
+                if failed > 0 {
+                    emit(LibraryEvent::Error(format!(
+                        "{failed} of {total} couldn't be downloaded (offline?)"
+                    )));
+                } else if total > 1 {
+                    emit(LibraryEvent::Notice(format!(
+                        "Downloaded {total} photos from the cloud."
+                    )));
+                }
+                (false, false)
             }
             LibraryCommand::PreviewOrganise(req) => {
                 let r = plan_organise(&catalog, &req).map(|(plan, notes)| OrgPreview {

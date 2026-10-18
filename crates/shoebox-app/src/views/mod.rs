@@ -232,7 +232,15 @@ pub fn cell(
                 fit(cell_inner, photo.meta.aspect().unwrap_or(1.5))
             };
             painter.rect_filled(target, 2.0, visuals.extreme_bg_color);
-            if app.textures.failed.keys().any(|k| k.photo == id) {
+            if photo.cloud {
+                painter.text(
+                    target.center(),
+                    egui::Align2::CENTER_CENTER,
+                    crate::icons::CLOUD,
+                    egui::FontId::proportional(24.0),
+                    visuals.weak_text_color(),
+                );
+            } else if app.textures.failed.keys().any(|k| k.photo == id) {
                 painter.text(
                     target.center(),
                     egui::Align2::CENTER_CENTER,
@@ -262,6 +270,12 @@ pub fn cell(
         format!("▶ {}", photo.format.label())
     } else {
         photo.format.label().to_owned()
+    };
+    // In the cloud only (the whole stack, as it's what opening fetches).
+    let label = if st.all().any(|i| app.catalog.photos[i].cloud) {
+        format!("{} {label}", crate::icons::CLOUD)
+    } else {
+        label
     };
     let marks = photo.marks.clone();
     let font = egui::FontId::monospace(9.5);
@@ -370,6 +384,23 @@ pub fn photo_menu(app: &mut ShoeboxApp, resp: &egui::Response, pos: usize) {
         if ui.button(label).clicked() {
             app.reveal_selection();
             ui.close();
+        }
+        let ids: Vec<crate::jobs::PhotoId> = app.selection.iter().copied().collect();
+        let cloud = app.cloud_in(&ids);
+        if cloud > 0 {
+            let label = if cloud > 1 {
+                format!("Download from Cloud ({cloud} photos)")
+            } else {
+                "Download from Cloud".to_owned()
+            };
+            if ui
+                .button(label)
+                .on_hover_text("Fetch the files from the cloud drive so Shoebox can read them")
+                .clicked()
+            {
+                app.download(&ids);
+                ui.close();
+            }
         }
         if app.settings.semantic_search
             && ui

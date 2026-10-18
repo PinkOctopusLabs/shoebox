@@ -33,6 +33,9 @@ pub struct Photo {
     pub sidecar_sig: String,
     /// A change since you last viewed this photo.
     pub change: Option<Change>,
+    /// Its contents are in the cloud only (see [`crate::cloud`]): not read,
+    /// so no metadata unless it was here before.
+    pub cloud: bool,
 }
 
 impl Photo {
@@ -99,6 +102,8 @@ pub struct RefreshStats {
     pub forgotten: usize,
     /// Known files that changed on disk since the last scan.
     pub changed: usize,
+    /// Files in the cloud only (listed, not read).
+    pub cloud: usize,
 }
 
 /// A file to read during a refresh.
@@ -143,6 +148,7 @@ impl Catalog {
                     sidecar: marks.sidecar,
                     sidecar_sig: marks.sig,
                     change: k.change,
+                    cloud: false,
                 });
             }
         }
@@ -199,6 +205,7 @@ impl Catalog {
                             sidecar: cm.sidecar.clone(),
                             sidecar_sig: sig,
                             change: k.change.clone(),
+                            cloud: f.cloud,
                         });
                     }
                     // Image unchanged, sidecar changed: re-read marks only.
@@ -237,8 +244,11 @@ impl Catalog {
                 .par_iter()
                 .map(|t| {
                     let f = &t.f;
+                    // A cloud-only file isn't read (that would download it),
+                    // nor cached, so it's read once it's here.
                     let (m, ok) = match &t.meta {
-                        Some(m) => (m.clone(), true),
+                        Some(m) => (m.clone(), !f.cloud),
+                        None if f.cloud => (Meta::default(), false),
                         None => match meta::read(&f.path, f.format) {
                             Ok(m) => (m, true),
                             Err(e) => {
@@ -248,7 +258,8 @@ impl Catalog {
                         },
                     };
                     let (stem, file) = sidecar::present(&f.path, &|p| sidecars.contains_key(p));
-                    let loaded = sidecar::load(&f.path, f.format, stem.as_deref(), file.as_deref())
+                    let image = (!f.cloud).then_some(f.path.as_path());
+                    let loaded = sidecar::load(image, f.format, stem.as_deref(), file.as_deref())
                         .unwrap_or_else(|e| {
                             tracing::warn!("marks: {e}");
                             sidecar::Loaded::default()
@@ -266,6 +277,7 @@ impl Catalog {
                         marks: loaded.marks,
                         sidecar: loaded.sidecar,
                         sidecar_sig: signature(&f.path, &sidecars),
+                        cloud: f.cloud,
                         change: match t.what {
                             // Noticed now, made by something other than Shoebox
                             // (Shoebox's own writes update the cache as they go).
@@ -315,8 +327,10 @@ impl Catalog {
                     stats.changed += 1;
                 }
             }
+            let cloud = read.iter().filter(|(p, _)| p.cloud).count();
             stats.read += entries.len();
-            stats.failed += read.len() - entries.len();
+            stats.cloud += cloud;
+            stats.failed += read.len() - entries.len() - cloud;
             photos.extend(read.into_iter().map(|(p, _)| p));
         }
 
@@ -548,8 +562,9 @@ impl Catalog {
         out
     }
 
-    /// Re-read these photos from disk (image metadata if the image changed,
-    /// marks if a sidecar changed), recording each change as made `by`.
+    /// Re-read these photos from disk (image metadata if the image changed
+    /// or was just downloaded from the cloud, marks if a sidecar changed),
+    /// recording each change as made `by` (a download isn't a change).
     pub fn reread(&mut self, photos: &[usize], by: &By, cache: &mut Cache) -> Result<Reread> {
         let mut out = Reread::default();
         let mut entries: Vec<(usize, bool)> = Vec::new();
@@ -563,15 +578,18 @@ impl Catalog {
             let found = sidecars_of(&path);
             let sig = signature(&path, &found);
             let p = &self.photos[i];
+            let cloud = crate::cloud::is_cloud_only(&path, &md);
+            let fetched = p.cloud && !cloud;
             let what = What {
                 image: size != p.size || mtime_ns != p.mtime_ns,
                 sidecar: sig != p.sidecar_sig,
             };
-            if !what.any() {
+            if !what.any() && cloud == p.cloud {
                 continue;
             }
-            let mut ok = true;
-            if what.image {
+            // A cloud-only file isn't read, nor cached (see `refresh`).
+            let mut ok = !cloud;
+            if (what.image || fetched) && !cloud {
                 match meta::read(&path, p.format) {
                     Ok(m) => self.photos[i].meta = m,
                     Err(e) => {
@@ -583,7 +601,8 @@ impl Catalog {
             }
             let p = &self.photos[i];
             let (stem, file) = sidecar::present(&path, &|q| found.contains_key(q));
-            let loaded = sidecar::load(&path, p.format, stem.as_deref(), file.as_deref())
+            let image = (!cloud).then_some(path.as_path());
+            let loaded = sidecar::load(image, p.format, stem.as_deref(), file.as_deref())
                 .unwrap_or_else(|e| {
                     tracing::warn!("marks: {e}");
                     sidecar::Loaded::default()
@@ -594,10 +613,13 @@ impl Catalog {
             p.marks = loaded.marks;
             p.sidecar = loaded.sidecar;
             p.sidecar_sig = sig;
-            p.change = Some(Change::merge(
-                p.change.as_ref(),
-                Change::now(what, by.clone()),
-            ));
+            p.cloud = cloud;
+            if what.any() {
+                p.change = Some(Change::merge(
+                    p.change.as_ref(),
+                    Change::now(what, by.clone()),
+                ));
+            }
             entries.push((i, ok));
             out.changed.push(path);
         }

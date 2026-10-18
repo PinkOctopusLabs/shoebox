@@ -66,6 +66,9 @@ pub struct Plan {
     pub unreadable: Vec<(PathBuf, String)>,
     /// Imported images without a capture date (they go to `_undated/`).
     pub undated: usize,
+    /// Source images that were in the cloud only (planning reads every
+    /// file, which downloaded them).
+    pub downloaded: usize,
     /// Folders under the source with photos in them, parents first.
     pub folders: Vec<Folder>,
     /// Each photo to copy (by its new path), and each library photo the
@@ -227,6 +230,10 @@ pub fn plan(
         }
     }
     images.sort();
+    let downloaded = images
+        .iter()
+        .filter(|p| crate::cloud::path_is_cloud_only(p))
+        .count();
 
     let total = images.len();
     let done = std::sync::atomic::AtomicUsize::new(0);
@@ -262,7 +269,10 @@ pub fn plan(
         })
         .collect();
 
-    let mut out = Plan::default();
+    let mut out = Plan {
+        downloaded,
+        ..Plan::default()
+    };
     let mut sources = Vec::new();
     for r in read {
         match r {
@@ -558,7 +568,7 @@ pub fn folder_writes(
                 continue;
             };
             let (stem, file) = sidecar::present(src, &|p| p.exists());
-            let old = sidecar::load(src, format, stem.as_deref(), file.as_deref())?.marks;
+            let old = sidecar::load(Some(src), format, stem.as_deref(), file.as_deref())?.marks;
             let new = with(&old);
             let changes = new.changes_from(&old);
             if changes.is_empty() {

@@ -1547,6 +1547,60 @@ fn import_in_the_app_and_undo() {
     );
 }
 
+/// Photos in the cloud only (Google Drive streaming and the like) are
+/// listed without being read or downloaded; Download from Cloud, or opening
+/// one in the loupe, fetches and reads it.
+#[test]
+fn cloud_only_photos() {
+    let t = tempfile::tempdir().unwrap();
+    let base = t.path().canonicalize().unwrap();
+    let lib = base.join("drive");
+    std::fs::create_dir_all(&lib).unwrap();
+    for (name, n) in [("a.jpg", 1u64), ("b.jpg", 2), ("c.jpg", 3)] {
+        let shot = shoebox_fixtures::Shot {
+            datetime: Box::leak(format!("2025:06:01 10:00:{n:02}").into_boxed_str()),
+            subsec: "",
+            orientation: 1,
+            serial: "1",
+        };
+        let img = shoebox_fixtures::jpeg(&shoebox_fixtures::scene(n, 320, 240), 85).unwrap();
+        std::fs::write(lib.join(name), shoebox_fixtures::with_exif(&img, &shot)).unwrap();
+    }
+    for name in ["b.jpg", "c.jpg"] {
+        shoebox_core::cloud::pretend_cloud_only(&lib.join(name));
+    }
+    let p = paths(&base, std::slice::from_ref(&lib));
+    let mut h = harness(p, egui::vec2(1200.0, 800.0));
+    settle(&mut h, Duration::from_secs(60));
+    assert_eq!(h.state().photo_count(), 3);
+    assert_eq!(h.state().cloud_state("a.jpg"), Some((false, true)));
+    assert_eq!(h.state().cloud_state("b.jpg"), Some((true, false)));
+    assert!(h.query_by_label_contains("2 in the cloud only").is_some());
+    snapshot(&mut h, "cloud-1-grid");
+
+    // Download from Cloud in the photo's menu.
+    h.get_by_label("b.jpg").click();
+    h.run_steps(2);
+    h.get_by_label("b.jpg").click_secondary();
+    h.run_steps(3);
+    h.get_by_label("Download from Cloud").click();
+    wait_for(&mut h, Duration::from_secs(30), "downloaded", |a| {
+        a.cloud_state("b.jpg") == Some((false, true))
+    });
+    assert!(h.query_by_label_contains("1 in the cloud only").is_some());
+
+    // Opening one in the loupe downloads it.
+    h.get_by_label("c.jpg").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::E);
+    wait_for(&mut h, Duration::from_secs(30), "opened", |a| {
+        a.cloud_state("c.jpg") == Some((false, true))
+    });
+    assert_eq!(h.state().view_name(), View::Loupe);
+    h.run_steps(3);
+    assert!(h.query_by_label_contains("in the cloud only").is_none());
+}
+
 /// Import keeps the source's folder names: events nested as the folders
 /// are, a keyword where chosen, nothing for dates; ⌘Z takes it back.
 #[test]

@@ -26,9 +26,10 @@ pub const PICK: &str = "\u{E244}";
 pub const REJECT: &str = "\u{E4F8}";
 pub const FACES: &str = "\u{E6FC}";
 pub const ALPHABETICAL: &str = "\u{E6EE}";
+pub const CLOUD: &str = "\u{E1AA}";
 
 /// Every icon (the glyph test checks each is in the font).
-pub const ALL: [&str; 21] = [
+pub const ALL: [&str; 22] = [
     SIDEBAR,
     UNDO,
     REDO,
@@ -50,6 +51,7 @@ pub const ALL: [&str; 21] = [
     REJECT,
     FACES,
     ALPHABETICAL,
+    CLOUD,
 ];
 
 /// Add the icon font after the text font, so ordinary text keeps its own

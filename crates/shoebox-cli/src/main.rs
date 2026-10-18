@@ -621,8 +621,8 @@ fn dupes_cmd(data_dir: &Path, a: DupesArgs) -> Result<()> {
     }
 
     println!(
-        "{} files ({} cached, {} analysed, {} unreadable, {} undecodable)",
-        stats.files, stats.cached, stats.analyzed, stats.unreadable, stats.undecodable
+        "{} files ({} cached, {} analysed, {} unreadable, {} undecodable, {} in the cloud only and left out)",
+        stats.files, stats.cached, stats.analyzed, stats.unreadable, stats.undecodable, stats.cloud
     );
     println!(
         "{} duplicate groups ({} with a reference file): {suggested} suggested duplicates, {review} to review",

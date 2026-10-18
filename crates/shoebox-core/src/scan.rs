@@ -45,6 +45,8 @@ pub struct ScannedFile {
     pub format: Format,
     pub size: u64,
     pub mtime_ns: i64,
+    /// In the cloud only (see [`crate::cloud`]).
+    pub cloud: bool,
 }
 
 /// Folders the scanner never descends into: the app's own output folders and
@@ -124,6 +126,7 @@ pub fn scan_with_sidecars(
                 format,
                 size: meta.len(),
                 mtime_ns,
+                cloud: crate::cloud::is_cloud_only(entry.path(), &meta),
             });
         }
     }

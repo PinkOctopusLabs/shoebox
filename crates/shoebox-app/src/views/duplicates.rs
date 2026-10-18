@@ -293,6 +293,13 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         }
     });
     ui.separator();
+    let cloud = app.dupes.review.as_ref().map_or(0, |r| r.stats.cloud);
+    if cloud > 0 {
+        ui.weak(format!(
+            "{} in the cloud only were left out (checking them would download them). Download them first to include them.",
+            plural(cloud, "photo")
+        ));
+    }
     let visible = app.dupes.visible();
     if visible.is_empty() {
         ui.add_space(20.0);

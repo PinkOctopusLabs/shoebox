@@ -301,6 +301,12 @@ pub struct ShoeboxApp {
     /// Loads wanted this frame, sent to the loader at the end of the frame.
     wanted: Vec<(Key, Priority, Job)>,
     pub(crate) scan_progress: Option<(usize, usize)>,
+    /// Download from Cloud running: (done, total).
+    pub(crate) download_progress: Option<(usize, usize)>,
+    /// Cloud-only photos opened in the loupe, downloading.
+    fetching: HashSet<PhotoId>,
+    /// Photos in the cloud only.
+    pub(crate) cloud_count: usize,
     pub(crate) scanning: bool,
     pub(crate) error: Option<String>,
     /// When set, the centre view scrolls so this photo is visible.
@@ -445,6 +451,9 @@ impl ShoeboxApp {
             grid: views::grid::Layout::default(),
             wanted: Vec::new(),
             scan_progress: None,
+            download_progress: None,
+            fetching: HashSet::new(),
+            cloud_count: 0,
             scanning: true,
             error: None,
             scroll_to_current: false,
@@ -778,6 +787,9 @@ impl ShoeboxApp {
                         self.scan_progress = None;
                     }
                 }
+                LibraryEvent::Downloading { done, total } => {
+                    self.download_progress = (done < total).then_some((done, total));
+                }
                 LibraryEvent::Progress { done, total } => {
                     self.scanning = true;
                     self.scan_progress = Some((done, total));
@@ -908,6 +920,7 @@ impl ShoeboxApp {
                 }
             }
         }
+        let mut fetched = Vec::new();
         for loaded in self.loader.drain() {
             match loaded.result {
                 Ok(img) => {
@@ -915,12 +928,25 @@ impl ShoeboxApp {
                         self.histograms.insert(loaded.key.photo, h);
                     }
                     self.textures.insert(ctx, loaded.key, &img);
+                    // Opening a cloud-only photo downloaded it: read it now.
+                    if loaded.key.size == Size::Full
+                        && self.fetching.remove(&loaded.key.photo)
+                        && let Some(p) = self.photo(loaded.key.photo)
+                    {
+                        fetched.push(p.path.clone());
+                    }
                 }
                 Err(e) => {
-                    tracing::warn!("{e}");
+                    if e != crate::jobs::IN_CLOUD {
+                        tracing::warn!("{e}");
+                    }
+                    self.fetching.remove(&loaded.key.photo);
                     self.textures.failed.insert(loaded.key, e);
                 }
             }
+        }
+        if !fetched.is_empty() {
+            self.library.send(LibraryCommand::Download(fetched));
         }
     }
 
@@ -942,6 +968,7 @@ impl ShoeboxApp {
         self.textures.retain_photos(keep);
         self.histograms.retain(|id, _| keep(id));
         self.textures.failed.clear();
+        self.cloud_count = self.catalog.photos.iter().filter(|p| p.cloud).count();
         self.selection.retain(|id| keep(id));
         if self.current.is_some_and(|c| !keep(&c)) {
             self.current = None;
@@ -2327,6 +2354,16 @@ impl ShoeboxApp {
         }
     }
 
+    /// Is this photo in the cloud only, and has its metadata been read
+    /// (tests)?
+    pub fn cloud_state(&self, file_name: &str) -> Option<(bool, bool)> {
+        self.catalog
+            .photos
+            .iter()
+            .find(|p| p.path.file_name().is_some_and(|n| n == file_name))
+            .map(|p| (p.cloud, p.meta.exif.capture_time.is_some()))
+    }
+
     /// The import's folders and what each name becomes (tests).
     pub fn import_folders(&self) -> Vec<(String, shoebox_core::import::FolderUse)> {
         self.import
@@ -2634,6 +2671,16 @@ impl ShoeboxApp {
 
     /// Ask for an image this frame (no-op if loaded or failed).
     pub(crate) fn want(&mut self, idx: usize, size: Size, priority: Priority) {
+        self.want_job(idx, size, priority, false);
+    }
+
+    /// Like [`Self::want`] for the photo being opened: one in the cloud only
+    /// is downloaded (elsewhere only its cached thumbnails show).
+    pub(crate) fn want_open(&mut self, idx: usize, size: Size) {
+        self.want_job(idx, size, Priority::Visible, true);
+    }
+
+    fn want_job(&mut self, idx: usize, size: Size, priority: Priority, open: bool) {
         let key = Key {
             photo: self.ids[idx],
             size,
@@ -2642,6 +2689,9 @@ impl ShoeboxApp {
             return;
         }
         let p = &self.catalog.photos[idx];
+        if p.cloud && open {
+            self.fetching.insert(key.photo);
+        }
         self.wanted.push((
             key,
             priority,
@@ -2652,8 +2702,35 @@ impl ShoeboxApp {
                 mtime_ns: p.mtime_ns,
                 orientation: p.meta.orientation(),
                 target: self.target,
+                cloud: p.cloud && !open,
             },
         ));
+    }
+
+    /// Download these photos' cloud-only files (all of each stack).
+    pub(crate) fn download(&mut self, ids: &[PhotoId]) {
+        let mut paths = Vec::new();
+        for &id in ids {
+            let Some(i) = self.index(id) else { continue };
+            for j in self.stack_of(i).all() {
+                let p = &self.catalog.photos[j];
+                if p.cloud && !paths.contains(&p.path) {
+                    paths.push(p.path.clone());
+                }
+            }
+        }
+        if !paths.is_empty() {
+            self.download_progress = Some((0, paths.len()));
+            self.library.send(LibraryCommand::Download(paths));
+        }
+    }
+
+    /// How many of these photos (with their stacks) are in the cloud only.
+    pub(crate) fn cloud_in(&self, ids: &[PhotoId]) -> usize {
+        ids.iter()
+            .filter_map(|&id| self.index(id))
+            .filter(|&i| self.stack_of(i).all().any(|j| self.catalog.photos[j].cloud))
+            .count()
     }
 
     // --- selection ---------------------------------------------------------

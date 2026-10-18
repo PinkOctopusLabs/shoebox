@@ -798,3 +798,27 @@ in two folders gets both; a library photo found again gets them too.
 - A duplicate inside the source keeps the first file by path; a later
   copy's own sidecar isn't merged (as before).
 - CLI: `shoebox import --folder-events` uses the defaults.
+
+## Cloud-only files (2026-10-18)
+Google Drive's streaming mode (and iCloud/Dropbox/OneDrive equivalents)
+leaves dataless placeholders; any read downloads the file. A first scan of a
+streamed folder would have downloaded everything (metadata, thumbnails,
+hashes, embeddings, faces).
+- Detection: `st_flags & SF_DATALESS` from `lstat`, which never downloads
+  (`shoebox_core::cloud`). Linux has no equivalent: always false. Checked on
+  a real Google Drive mount: the flag is set on streamed files.
+- Not read means not cached: a cloud-only photo has no metadata row, so the
+  scan after it's downloaded reads it. A photo read earlier and evicted
+  later keeps its cached metadata, thumbnails and embeddings.
+- Marks come from sidecars alone (the image's embedded XMP/EXIF rating
+  would need the file).
+- Downloads happen only when asked: opening in the loupe, or Download from
+  Cloud (reading the file through; no write). Grid thumbnails of
+  cloud-only photos come from the thumbnail cache or show a cloud.
+- Semantic search and faces keep cloud-only photos' existing rows but don't
+  compute new ones; their totals leave them out so indexing finishes.
+- Moves and renames on a File Provider volume (`~/Library/CloudStorage`)
+  aren't verified yet: `renamex_np(RENAME_EXCL)` there may be refused, in
+  which case the batch fails cleanly (journaled, nothing overwritten).
+- Tests can't make a real placeholder, so `cloud::pretend_cloud_only`
+  marks a path as one (process-wide, cleared by `download`).

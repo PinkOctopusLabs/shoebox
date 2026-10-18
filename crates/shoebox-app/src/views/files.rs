@@ -199,6 +199,12 @@ pub fn import(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 plan.undated
             ));
         }
+        if plan.downloaded > 0 {
+            ui.label(format!(
+                "· {} downloaded from the cloud to read them",
+                plural(plan.downloaded, "file")
+            ));
+        }
         if !plan.unreadable.is_empty() {
             ui.colored_label(
                 ui.visuals().warn_fg_color,

@@ -269,3 +269,67 @@ fn changes_are_tracked_until_seen() {
     ]);
     assert!(a.rescan && a.events && a.photos.is_empty());
 }
+
+/// A file in the cloud only is listed without being read (its marks come
+/// from its sidecar alone), and read once it's downloaded; the download
+/// isn't recorded as a change.
+#[test]
+fn cloud_only_files_are_listed_not_read() {
+    use shoebox_core::marks::Marks;
+    let t = tempfile::tempdir().unwrap();
+    let base = t.path().canonicalize().unwrap();
+    let lib = base.join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    let shot = shoebox_fixtures::Shot {
+        datetime: "2024:12:24 18:00:00",
+        subsec: "",
+        orientation: 1,
+        serial: "1",
+    };
+    let jpg = shoebox_fixtures::with_exif(
+        &shoebox_fixtures::jpeg(&shoebox_fixtures::scene(1, 320, 240), 85).unwrap(),
+        &shot,
+    );
+    std::fs::write(lib.join("here.jpg"), &jpg).unwrap();
+    let away = lib.join("away.jpg");
+    std::fs::write(&away, &jpg[..jpg.len() - 1]).unwrap(); // different bytes
+    let rated = Marks {
+        rating: 4,
+        ..Marks::default()
+    };
+    std::fs::write(
+        lib.join("away.jpg.xmp"),
+        shoebox_core::xmp::edit(None, &rated.changes_from(&Marks::default())).unwrap(),
+    )
+    .unwrap();
+    shoebox_core::cloud::pretend_cloud_only(&away);
+
+    let roots = || vec![Root::new(&lib, Role::Scan).unwrap()];
+    let mut cache = Cache::open(&base.join("cache.sqlite")).unwrap();
+    let (mut c, s) = Catalog::refresh(&mut cache, roots(), &|_, _| {}).unwrap();
+    assert_eq!((s.files, s.read, s.cloud, s.failed), (2, 1, 1, 0));
+    let i = c.photos.iter().position(|p| p.path == away).unwrap();
+    let p = &c.photos[i];
+    assert!(p.cloud);
+    assert_eq!(p.meta.exif.capture_time, None, "not read");
+    assert_eq!(p.marks.rating, 4, "marks from its sidecar");
+    // Not cached, so a later scan reads it if it's here by then.
+    let (_, s) = Catalog::refresh(&mut cache, roots(), &|_, _| {}).unwrap();
+    assert_eq!((s.cached, s.cloud), (1, 1));
+
+    shoebox_core::cloud::download(&away).unwrap();
+    let by = shoebox_core::changes::By::Other;
+    let r = c.reread(&[i], &by, &mut cache).unwrap();
+    assert_eq!(r.changed, std::slice::from_ref(&away));
+    let i = c.photos.iter().position(|p| p.path == away).unwrap();
+    let p = &c.photos[i];
+    assert!(!p.cloud);
+    assert_eq!(
+        p.meta.exif.capture_time.as_deref(),
+        Some("2024:12:24 18:00:00")
+    );
+    assert_eq!(p.marks.rating, 4);
+    assert!(p.change.is_none(), "a download isn't a change");
+    let (_, s) = Catalog::refresh(&mut cache, roots(), &|_, _| {}).unwrap();
+    assert_eq!((s.cached, s.cloud), (2, 0));
+}

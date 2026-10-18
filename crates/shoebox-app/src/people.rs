@@ -231,6 +231,8 @@ struct Worker<F: Fn(Event)> {
     /// Faces by file.
     faces: HashMap<PathBuf, Vec<Face>>,
     keys: Vec<FileKey>,
+    /// Of those, how many could be read (not in the cloud only).
+    readable: usize,
     pending: VecDeque<Item>,
     catalog: Option<(Arc<Catalog>, bool)>,
     people: People,
@@ -259,6 +261,7 @@ impl<F: Fn(Event)> Worker<F> {
             download: None,
             faces: HashMap::new(),
             keys: Vec::new(),
+            readable: 0,
             pending: VecDeque::new(),
             catalog: None,
             people: People::default(),
@@ -501,8 +504,9 @@ impl<F: Fn(Event)> Worker<F> {
             return;
         };
         let (keys, formats) = primaries(&catalog);
-        self.status.total = keys.len();
-        if keys == self.keys {
+        // Marks and other changes republish the catalog; only the files
+        // (and which are here, not in the cloud only) matter.
+        if keys == self.keys && formats.len() == self.readable {
             return;
         }
         let Some(store) = &mut self.store else {
@@ -536,7 +540,10 @@ impl<F: Fn(Event)> Worker<F> {
                     .collect();
                 self.pending.make_contiguous().reverse();
                 self.status.indexed = self.faces.len();
+                // Cloud-only photos not scanned yet wait for their download.
+                self.status.total = self.faces.len() + self.pending.len();
                 self.status.skipped = 0;
+                self.readable = formats.len();
                 self.keys = keys;
                 self.grouped = None;
             }

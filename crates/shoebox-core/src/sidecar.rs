@@ -80,14 +80,15 @@ pub struct Loaded {
     pub sidecar: Option<PathBuf>,
 }
 
-/// Merge the layers and interpret them as marks.
+/// Merge the layers and interpret them as marks. `image`: None leaves out
+/// what's in the image itself (a cloud-only file isn't read).
 pub fn load(
-    image: &Path,
+    image: Option<&Path>,
     format: Format,
     stem: Option<&Path>,
     file: Option<&Path>,
 ) -> Result<Loaded> {
-    let mut props = image_props(image, format);
+    let mut props = image.map(|i| image_props(i, format)).unwrap_or_default();
     for side in [stem, file].into_iter().flatten() {
         let bytes = std::fs::read(side).map_err(io(side))?;
         match xmp::read(&bytes) {
@@ -170,7 +171,7 @@ mod tests {
         std::fs::write(&stem, &lr).unwrap();
 
         let (s, f) = present(&img, &|p| p.exists());
-        let before = load(&img, Format::Jpeg, s.as_deref(), f.as_deref()).unwrap();
+        let before = load(Some(&img), Format::Jpeg, s.as_deref(), f.as_deref()).unwrap();
         assert_eq!(before.marks.rating, 2);
         assert_eq!(before.marks.keywords, vec!["Places|Rome"]);
 
@@ -191,7 +192,7 @@ mod tests {
         );
         std::fs::write(&writes[0].0, &writes[0].1).unwrap();
         let (s, f) = present(&img, &|p| p.exists());
-        let after = load(&img, Format::Jpeg, s.as_deref(), f.as_deref()).unwrap();
+        let after = load(Some(&img), Format::Jpeg, s.as_deref(), f.as_deref()).unwrap();
         assert_eq!(after.marks, new);
         assert_eq!(std::fs::read(&stem).unwrap(), lr, "name.xmp untouched");
     }

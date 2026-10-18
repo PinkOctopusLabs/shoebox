@@ -244,7 +244,9 @@ impl Item {
     }
 }
 
-/// Each stack's primary: what's analysed. Also its format and orientation.
+/// Each stack's primary: what's analysed. Also the format and orientation
+/// of those that can be read now (not in the cloud only: reading one would
+/// download it; its row, if any, is kept).
 pub(crate) fn primaries(
     catalog: &Catalog,
 ) -> (
@@ -260,7 +262,9 @@ pub(crate) fn primaries(
             size: p.size,
             mtime_ns: p.mtime_ns,
         });
-        formats.insert(p.path.clone(), (p.format, p.meta.orientation()));
+        if !p.cloud {
+            formats.insert(p.path.clone(), (p.format, p.meta.orientation()));
+        }
     }
     (keys, formats)
 }
@@ -299,6 +303,8 @@ struct Worker<F: Fn(Event)> {
     index: Index,
     /// The library's primaries as last synced.
     keys: Vec<FileKey>,
+    /// Of those, how many could be read (not in the cloud only).
+    readable: usize,
     formats: std::collections::HashMap<PathBuf, (Format, u16)>,
     pending: std::collections::VecDeque<Item>,
     /// Latest catalog not yet synced (synced once the model is ready).
@@ -324,6 +330,7 @@ impl<F: Fn(Event)> Worker<F> {
             download: None,
             index: Index::default(),
             keys: Vec::new(),
+            readable: 0,
             formats: Default::default(),
             pending: Default::default(),
             catalog: None,
@@ -515,9 +522,9 @@ impl<F: Fn(Event)> Worker<F> {
             return;
         };
         let (keys, formats) = primaries(&catalog);
-        self.status.total = keys.len();
-        // Marks and other changes republish the catalog; only the files matter.
-        if keys == self.keys {
+        // Marks and other changes republish the catalog; only the files
+        // (and which are here, not in the cloud only) matter.
+        if keys == self.keys && formats.len() == self.readable {
             return;
         }
         let Some(store) = &mut self.store else {
@@ -550,7 +557,10 @@ impl<F: Fn(Event)> Worker<F> {
                 // Newest first: most likely what you'll search for.
                 self.pending.make_contiguous().reverse();
                 self.status.indexed = self.index.len();
+                // Cloud-only photos not indexed yet wait for their download.
+                self.status.total = self.index.len() + self.pending.len();
                 self.status.skipped = 0;
+                self.readable = formats.len();
                 self.keys = keys;
                 self.formats = formats;
                 self.tagged = None;

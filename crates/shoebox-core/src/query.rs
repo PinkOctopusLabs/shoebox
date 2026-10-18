@@ -321,6 +321,7 @@ mod tests {
             sidecar: None,
             sidecar_sig: String::new(),
             change: None,
+            cloud: false,
         }
     }
 

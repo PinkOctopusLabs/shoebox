@@ -3,6 +3,7 @@
 pub mod cache;
 pub mod catalog;
 pub mod changes;
+pub mod cloud;
 pub mod collections;
 pub mod dupes;
 pub mod embeddings;

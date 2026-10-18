@@ -383,7 +383,10 @@ fn zoom_menu(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
 /// Background work (laid out right to left).
 fn work(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     let busy = app.loader.busy();
-    if let Some((done, total)) = app.scan_progress {
+    if let Some((done, total)) = app.download_progress {
+        ui.label(format!("Downloading {done}/{total} from the cloud"));
+        ui.add(egui::Spinner::new());
+    } else if let Some((done, total)) = app.scan_progress {
         ui.label(format!("Reading {done}/{total}"));
         ui.add(egui::Spinner::new());
     } else if app.scanning {
@@ -714,6 +717,18 @@ pub fn status(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             app.shown.len(),
             app.catalog.photos.len()
         ));
+        if app.cloud_count > 0 {
+            ui.separator();
+            ui.label(
+                RichText::new(format!(
+                    "{} {} in the cloud only",
+                    icons::CLOUD,
+                    app.cloud_count
+                ))
+                .weak(),
+            )
+            .on_hover_text("Shown from their names and cached thumbnails. Open one, or choose Download from Cloud, to get the file.");
+        }
         if let Some(p) = app.current.and_then(|c| app.photo(c)) {
             ui.separator();
             ui.label(RichText::new(short_path(&p.path)).weak())

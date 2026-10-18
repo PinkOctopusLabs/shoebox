@@ -15,6 +15,9 @@ pub struct Stats {
     pub analyzed: usize,
     pub unreadable: usize,
     pub undecodable: usize,
+    /// In the cloud only and not analysed before: left out (reading them
+    /// would download them).
+    pub cloud: usize,
 }
 
 /// A scanned file with its analysis.
@@ -62,6 +65,7 @@ pub fn analyze_all_progress(
                     analysis: a,
                 });
             }
+            None if f.cloud => stats.cloud += 1,
             None => todo.push(f),
         }
     }

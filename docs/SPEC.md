@@ -19,7 +19,7 @@ Shoebox is a fast, local-first macOS app, written in Rust with egui, for browsin
 
 - RAW development or pixel editing. DxO PhotoLab does this.
 - A proprietary catalog. The SQLite database is a cache that can be rebuilt from files and sidecars at any time.
-- Cloud sync, sharing, multi-user access, or library roots on network shares.
+- Cloud sync, sharing, multi-user access, or library roots on network shares. (A folder a cloud drive keeps on the Mac, such as Google Drive's, can be a root; files that are in the cloud only are handled as below.)
 - Video playback beyond a poster frame.
 - Windows and Linux builds. Keep the code portable, but only ship and test on macOS.
 
@@ -129,6 +129,15 @@ Culling marks go into XMP; file changes always move whole stacks, sidecars inclu
 - **Folder names.** The source's folders are listed with what each name becomes on the photos in it: an **event** (nested as the folders are: `Italy 2019/Rome` → Italy 2019 › Rome, joining an existing event of that name), a **keyword**, or **nothing**. Names that say nothing start as nothing: dates (`2019`, `2019-07-14`, `July 2019`), camera folders (`100NIKON`, `DCIM`) and generic names (`Photos`, `iCloud Photos`); others start as events. Each name can be edited. A picture found in two folders gets both; one the library already has gets them too (in its sidecar, unless it's in a reference root). The names go into the copies' own sidecars (made from the source's sidecar, if any) and `events.json`, in the import's batch: undo moves those sidecars to the Trash with the copies. The source is never written.
 
 **Batch rename** uses the same template engine and dry-run table, inside or across folders.
+
+**Cloud drives**
+
+Google Drive (streaming), iCloud Drive (Optimise Mac Storage), Dropbox and OneDrive (online-only) leave placeholders for files that are in the cloud only; macOS marks them `SF_DATALESS`, and reading one downloads it. Shoebox never reads one by itself:
+
+- The scan lists it from its name, size and sidecars (which are small, so they're read), with a cloud badge, and caches nothing for it; the status bar counts them.
+- Thumbnails show only if they were cached before; semantic search, faces and duplicates leave it out (Duplicates says how many) until it's here.
+- Opening it in the loupe, or **Download from Cloud** in a photo's menu (for the selection, whole stacks), downloads it by reading it through (nothing is written); then it's read like any other photo. A download isn't recorded as a change.
+- Import reads every source file, so importing from a cloud folder downloads it; the plan says how many.
 
 ## Duplicate detection
 
