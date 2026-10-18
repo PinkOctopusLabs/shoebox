@@ -1826,6 +1826,23 @@ impl ShoeboxApp {
         self.scroll_to_current = true;
     }
 
+    /// An open stack folds once the current photo is somewhere else (moving
+    /// between its own files keeps it open).
+    fn fold_stacks_left(&mut self) {
+        if self.expanded.is_empty() {
+            return;
+        }
+        let here = self
+            .current
+            .and_then(|c| self.index(c))
+            .map(|i| self.ids[self.stack_of(i).primary]);
+        let before = self.expanded.len();
+        self.expanded.retain(|p| Some(*p) == here);
+        if self.expanded.len() != before {
+            self.refilter();
+        }
+    }
+
     fn toggle_stack(&mut self) {
         let Some(idx) = self.current.and_then(|c| self.index(c)) else {
             return;
@@ -2905,6 +2922,7 @@ impl eframe::App for ShoeboxApp {
         self.handle_keys(&ctx);
         self.wanted.clear();
         self.ppl.hovered = None; // set again by the info panel while pointed at
+        self.fold_stacks_left();
 
         let mut bars = self.bars_open;
         egui::Panel::top("topbar")
