@@ -244,10 +244,8 @@ pub fn cell(
             target
         }
     };
-    // The person being shown: their face outlined.
-    if app.ppl.showing.is_some() {
-        face_boxes(app, &painter, id, inner, false);
-    }
+    // Faces outlined (the view bar's toggle), the person chosen in amber.
+    face_boxes(app, &painter, id, inner, false);
     // Badges. Bottom left: file type, or the stack's formats and size.
     let st = app.stack_of(idx);
     let expanded = app.expanded.contains(&app.ids[st.primary]);
@@ -536,18 +534,18 @@ pub fn describe_change(c: &shoebox_core::changes::Change) -> String {
 }
 
 /// The faces to outline on a photo: (x, y, width, height as fractions of
-/// the upright image, name, is the person being shown or hovered). That
-/// person only, or with `everyone` all recognised faces; none with the view
-/// bar's face toggle off.
+/// the upright image, name, is the person chosen in People or pointed at
+/// in the info panel). Every recognised face while the view bar's face
+/// toggle is on, whatever People shows; with it off, only a face whose name
+/// is pointed at.
 pub(crate) fn faces_to_draw(
     app: &ShoeboxApp,
     id: crate::jobs::PhotoId,
-    everyone: bool,
 ) -> Vec<([f32; 4], String, bool)> {
-    let view = match app.ppl.view.as_ref() {
-        Some(v) if !app.ppl.hide_faces => v,
-        _ => return Vec::new(),
+    let Some(view) = app.ppl.view.as_ref() else {
+        return Vec::new();
     };
+    let all = !app.settings.hide_face_boxes;
     let shown = app.ppl.shown_indices();
     let hovered = app.ppl.hovered.as_ref().and_then(|k| view.find(k));
     let me = |g| shown.contains(&g) || hovered == Some(g);
@@ -555,7 +553,7 @@ pub(crate) fn faces_to_draw(
         .get(&id)
         .into_iter()
         .flatten()
-        .filter(|&&(_, g)| everyone || me(g))
+        .filter(|&&(_, g)| all || hovered == Some(g))
         .map(|&(r, g)| (r, app.ppl.label(&view.groups[g]), me(g)))
         .collect()
 }
@@ -565,22 +563,25 @@ pub(crate) fn faces_to_draw(
 const FACE_HIGHLIGHT: Color32 = Color32::from_rgb(255, 190, 40);
 
 /// Faces on a photo drawn at `target` (see [`faces_to_draw`]): the person
-/// being shown outlined in amber, others faintly; with `everyone`, names
-/// under them.
+/// chosen outlined in amber, others faintly; with `names` (the loupe),
+/// names under them.
 pub fn face_boxes(
     app: &ShoeboxApp,
     painter: &egui::Painter,
     id: crate::jobs::PhotoId,
     target: Rect,
-    everyone: bool,
+    names: bool,
 ) {
-    for ([x, y, w, h], name, me) in faces_to_draw(app, id, everyone) {
+    for ([x, y, w, h], name, me) in faces_to_draw(app, id) {
         // Detector boxes hug the face; give it a little room.
         let r = Rect::from_min_size(
             target.min + vec2(x, y) * target.size(),
             vec2(w, h) * target.size(),
         )
         .expand2(vec2(w, h) * target.size() * 0.12);
+        if r.width() < 6.0 {
+            continue; // a face too small on a tile to box usefully
+        }
         let (stroke, fill, text) = if me {
             (
                 Stroke::new(2.0, FACE_HIGHLIGHT),
@@ -604,7 +605,7 @@ pub fn face_boxes(
             );
         }
         painter.rect_stroke(r, 4.0, stroke, StrokeKind::Outside);
-        if everyone && r.width() >= 24.0 {
+        if names && r.width() >= 24.0 {
             let galley = painter.layout_no_wrap(name, egui::FontId::proportional(11.0), text);
             // Under the face, or inside its box when there's no room below.
             let size = galley.size() + vec2(8.0, 2.0);

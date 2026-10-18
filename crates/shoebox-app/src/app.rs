@@ -1050,20 +1050,29 @@ impl ShoeboxApp {
     /// Undo the newest change, whether to files or to names (⌘Z).
     pub fn undo(&mut self) {
         let (l, p) = (self.undo_at.library.0, self.undo_at.people.0);
+        // Until the stack reports back, what was just undone is the next to
+        // redo (so a quick ⇧⌘Z goes to the right stack).
+        let now = Some(events::now_ms());
         if p.is_some() && p >= l {
             self.people.send(crate::people::Command::Undo);
+            self.undo_at.people.1 = now;
         } else if l.is_some() {
             self.library.send(LibraryCommand::Undo);
+            self.undo_at.library.1 = now;
         }
     }
 
     /// Redo the change undone most recently (⇧⌘Z).
     pub fn redo(&mut self) {
         let (l, p) = (self.undo_at.library.1, self.undo_at.people.1);
+        // …and what was just redone is the next to undo.
+        let now = Some(events::now_ms());
         if p.is_some() && p >= l {
             self.people.send(crate::people::Command::Redo);
+            self.undo_at.people.0 = now;
         } else if l.is_some() {
             self.library.send(LibraryCommand::Redo);
+            self.undo_at.library.0 = now;
         }
     }
 
@@ -2271,16 +2280,18 @@ impl ShoeboxApp {
     }
 
     /// The faces outlined on a photo, by file name: (name, is the person
-    /// shown), as the loupe (`everyone`) or a tile draws them (tests).
-    pub fn faces_drawn(&self, file: &str, everyone: bool) -> Vec<(String, bool)> {
+    /// chosen), sorted (tests).
+    pub fn faces_drawn(&self, file: &str) -> Vec<(String, bool)> {
         self.catalog
             .photos
             .iter()
             .position(|p| p.path.file_name().is_some_and(|n| n == file))
-            .map(|i| crate::views::faces_to_draw(self, self.ids[i], everyone))
+            .map(|i| crate::views::faces_to_draw(self, self.ids[i]))
             .unwrap_or_default()
             .into_iter()
             .map(|(_, name, me)| (name, me))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
             .collect()
     }
 

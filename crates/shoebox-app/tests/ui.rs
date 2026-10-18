@@ -2218,6 +2218,12 @@ fn people_in_the_app() {
         [("Unnamed 1".to_owned(), 4), ("Unnamed 2".to_owned(), 3)]
     );
     h.run_steps(3);
+    // Faces are outlined with nobody chosen (the view bar's toggle).
+    let face = |n: &str, chosen| (n.to_owned(), chosen);
+    assert_eq!(
+        h.state().faces_drawn("b2.jpg"),
+        [face("Unnamed 1", false), face("Unnamed 2", false)]
+    );
 
     // Show the first group and name it.
     h.get_by_label("Unnamed 1  4").click();
@@ -2240,13 +2246,13 @@ fn people_in_the_app() {
     assert_eq!(h.state().shown_count(), 4, "still showing Ann");
     snapshot(&mut h, "people-1-ann");
 
-    // Her face is outlined: in the tiles hers alone; in the loupe everyone,
-    // named, hers marked. The view bar's toggle turns them off.
+    // Everyone's face is outlined, hers marked (amber). The view bar's
+    // toggle turns them off.
     let ann = |shown| ("Ann".to_owned(), shown);
-    assert_eq!(h.state().faces_drawn("b2.jpg", false), vec![ann(true)]);
-    let mut loupe = h.state().faces_drawn("b2.jpg", true);
-    loupe.sort();
-    assert_eq!(loupe, vec![ann(true), ("Unnamed 1".to_owned(), false)]);
+    assert_eq!(
+        h.state().faces_drawn("b2.jpg"),
+        [ann(true), face("Unnamed 1", false)]
+    );
     h.get_by_label("b2.jpg").click();
     h.run_steps(2);
     h.key_press(egui::Key::Enter);
@@ -2255,12 +2261,14 @@ fn people_in_the_app() {
     // Pointing at a name in the info panel outlines that face too.
     h.get_by_label("Unnamed 1").hover();
     h.run_steps(2);
-    let mut both = h.state().faces_drawn("b2.jpg", false);
-    both.sort();
-    assert_eq!(both, vec![ann(true), ("Unnamed 1".to_owned(), true)]);
+    assert_eq!(
+        h.state().faces_drawn("b2.jpg"),
+        [ann(true), face("Unnamed 1", true)]
+    );
     h.get_by_label("Face boxes").click();
     h.run_steps(2);
-    assert!(h.state().faces_drawn("b2.jpg", true).is_empty());
+    assert!(h.state().settings().hide_face_boxes, "remembered");
+    assert!(h.state().faces_drawn("b2.jpg").is_empty());
     h.get_by_label("Face boxes").click();
     h.key_press(egui::Key::Escape);
     h.run_steps(3);
@@ -2272,7 +2280,10 @@ fn people_in_the_app() {
             .iter()
             .all(|f| a.marks_of(f).is_some_and(|m| m.keywords == ["People|Ann"]))
     });
-    assert!(lib.join("a3.jpg.xmp").exists());
+    // (The app shows marks at once; the sidecar follows in the background.)
+    wait_for(&mut h, Duration::from_secs(10), "a3 sidecar", |_| {
+        lib.join("a3.jpg.xmp").exists()
+    });
     assert!(
         h.state()
             .marks_of("b1.jpg")

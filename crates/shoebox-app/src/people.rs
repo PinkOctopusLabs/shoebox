@@ -743,8 +743,6 @@ pub struct PeopleState {
     pub name_input: String,
     /// People lists every group, not just the first few.
     pub all: bool,
-    /// Face boxes off (the view bar's toggle; on by default).
-    pub hide_faces: bool,
     /// The person whose name the pointer is on (info panel), this frame:
     /// their face is outlined in the loupe.
     pub hovered: Option<GroupKey>,

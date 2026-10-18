@@ -56,6 +56,9 @@ pub struct Settings {
     /// columns.
     #[serde(default)]
     pub justified_rows: bool,
+    /// Don't outline faces on photos (People; the view bar's toggle).
+    #[serde(default)]
+    pub hide_face_boxes: bool,
 }
 
 /// Default for [`Settings::image_memory_mb`].

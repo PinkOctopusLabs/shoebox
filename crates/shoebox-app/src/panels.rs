@@ -229,25 +229,27 @@ pub fn viewbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         .scope_builder(
             row(bar, egui::Layout::right_to_left(egui::Align::Center)),
             |ui| {
-                // Face boxes (with People on): the shown person in the
-                // tiles, everyone in the loupe.
+                // Face boxes (with People on), wherever photos are shown.
                 if app.ppl.view.is_some()
                     && matches!(
                         app.view,
                         View::Grid | View::Masonry | View::Loupe | View::Timeline
                     )
                 {
-                    let on = !app.ppl.hide_faces;
+                    let on = !app.settings.hide_face_boxes;
                     if icons::button(
                         ui,
                         icons::FACES,
                         "Face boxes",
-                        "Outline faces: the person shown, and everyone in Loupe",
+                        "Outline the faces found (named in Loupe); the person \
+                         chosen in People in amber",
                         on,
                     )
                     .clicked()
                     {
-                        app.ppl.hide_faces = on;
+                        let mut s = app.settings.clone();
+                        s.hide_face_boxes = on;
+                        app.save_settings(s);
                     }
                 }
                 match app.view {

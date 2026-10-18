@@ -95,10 +95,9 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
                 Color32::WHITE,
             );
-            // Showing a person: everyone recognised, named, theirs standing
-            // out. Otherwise just a face whose name is hovered in the info
-            // panel.
-            super::face_boxes(app, &painter, id, target, app.ppl.showing.is_some());
+            // Faces outlined and named (the view bar's toggle), the person
+            // chosen in People standing out.
+            super::face_boxes(app, &painter, id, target, true);
         }
         None => {
             let msg = app

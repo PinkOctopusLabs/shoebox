@@ -29,15 +29,19 @@ deliberately differ and why.
   glasses, angles), so the more groups you merged, the worse each matched.
 
 ## 2026-10-18 — Face boxes
-- Showing a person outlines their face in amber on every tile; the loupe
-  also outlines everyone else recognised, faintly, with names (amber, not
-  the selection blue, which is near white on a dark theme). Without a
-  person shown the loupe stays clean, except that pointing at a name in
-  the info panel's People row outlines that face.
-- One view-bar toggle (Face boxes, on by default) turns them all off.
+- The view bar's Face boxes toggle (remembered in settings, on by default)
+  alone decides whether faces are outlined: every recognised face, on
+  tiles and in the loupe (named there), whatever People shows. The person
+  chosen in People is amber (the selection blue is near white on a dark
+  theme), everyone else faint white; faces too small on a tile to box are
+  skipped. With the toggle off, pointing at a name in the info panel's
+  People row still outlines that face.
 - Boxes come from the face rows already stored (fractions of the upright
   image), sent to the UI with the groups; padded 12% as detector boxes hug
   the face.
+- ⌘Z/⇧⌘Z note what they sent at once (the next redo is what was just
+  undone, and vice versa), so a quick ⇧⌘Z after ⌘Z goes to the right stack
+  before the workers report back.
 
 ## 2026-10-18 — Events and collections both stay; reference photos skipped
 - Kept apart on purpose: events are written to the photos (shared with
