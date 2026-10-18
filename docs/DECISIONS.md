@@ -3,6 +3,18 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-18 — One undo for files and names; People counts what's shown
+- Names (naming, merging, "Not …", Forget) are undoable. They live in
+  `people.json`, not the journal, so the People worker keeps snapshots of
+  its own. The two stacks report when their next undo was made and next
+  redo was undone; ⌘Z (and the Undo button) undoes the newer of the two,
+  ⇧⌘Z redoes the one undone last, and a new action of either kind clears
+  both redo stacks.
+- The People list counts each person's photos among those shown (folders,
+  event, collection, filters, search), before the people chosen narrow the
+  grid; people with none there are left out (unless chosen), and the hover
+  text gives their total.
+
 ## 2026-10-18 — Same person: merging groups, and learning from it
 - ⌘-click people in the sidebar to show several groups' photos at once;
   the bar then names them as one person ("Same person: name them") or

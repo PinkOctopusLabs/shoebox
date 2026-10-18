@@ -2301,6 +2301,47 @@ fn people_in_the_app() {
         a.people_groups() == [("Ann".to_owned(), 5)]
     });
     assert_eq!(h.state().shown_count(), 5, "still showing them, now one");
+
+    // ⌘Z steps back through names and file changes in the order they were
+    // made: the merge, "Not Ann", then (the library's) Ann's keyword.
+    let groups = |a: &ShoeboxApp| a.people_groups();
+    let ann = |n: usize| ("Ann".to_owned(), n);
+    let undo = |h: &mut Harness<'_, ShoeboxApp>, shift: bool| {
+        let m = if shift {
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT
+        } else {
+            egui::Modifiers::COMMAND
+        };
+        h.key_press_modifiers(m, egui::Key::Z);
+        h.run_steps(2);
+    };
+    undo(&mut h, false);
+    wait_for(&mut h, Duration::from_secs(10), "merge undone", |a| {
+        groups(a) == [ann(3), ("Unnamed 1".to_owned(), 3)]
+    });
+    undo(&mut h, false);
+    wait_for(&mut h, Duration::from_secs(10), "not Ann undone", |a| {
+        groups(a)[0] == ann(4)
+    });
+    undo(&mut h, false);
+    wait_for(&mut h, Duration::from_secs(10), "keyword undone", |a| {
+        a.marks_of("a1.jpg").is_some_and(|m| m.keywords.is_empty())
+    });
+    assert_eq!(groups(h.state())[0], ann(4), "names untouched by that");
+    // …and ⇧⌘Z forward again.
+    undo(&mut h, true);
+    wait_for(&mut h, Duration::from_secs(10), "keyword redone", |a| {
+        a.marks_of("a1.jpg")
+            .is_some_and(|m| m.keywords == ["People|Ann"])
+    });
+    undo(&mut h, true);
+    wait_for(&mut h, Duration::from_secs(10), "not Ann redone", |a| {
+        groups(a)[0] == ann(3)
+    });
+    undo(&mut h, true);
+    wait_for(&mut h, Duration::from_secs(10), "merge redone", |a| {
+        groups(a) == [ann(5)]
+    });
     h.get_by_label("✖").click();
     h.run_steps(2);
     drop(h);
@@ -2313,6 +2354,21 @@ fn people_in_the_app() {
         !a.people_groups().is_empty()
     });
     assert_eq!(h.state().people_groups(), [("Ann".to_owned(), 5)]);
+
+    // The People list counts the photos shown (here, a search), not all.
+    h.state_mut().set_filter(shoebox_core::query::Filter {
+        search: "b".into(),
+        ..Default::default()
+    });
+    h.run_steps(2);
+    assert_eq!(h.state().shown_count(), 3, "b1, b2, b3");
+    assert_eq!(h.state().people_listed(), [("Ann".to_owned(), 3)]);
+    h.state_mut().set_filter(shoebox_core::query::Filter {
+        search: "none".into(),
+        ..Default::default()
+    });
+    h.run_steps(2);
+    assert!(h.state().people_listed().is_empty(), "nobody in none.jpg");
     assert_eq!(FACE_RUNS.load(std::sync::atomic::Ordering::Relaxed), 8);
 }
 

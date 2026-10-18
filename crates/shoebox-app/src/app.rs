@@ -310,6 +310,11 @@ pub struct ShoeboxApp {
     pub(crate) expanded: HashSet<PhotoId>,
     pub(crate) can_undo: bool,
     pub(crate) can_redo: bool,
+    /// One undo history over two stacks: the library's (files, sidecars)
+    /// and People's (names). When each one's next undo was made and next
+    /// redo was undone; ⌘Z takes the newer of the two, ⌘⇧Z the more
+    /// recently undone.
+    undo_at: UndoTimes,
     /// Auto-advance after marking (also on while Caps Lock is down, macOS).
     pub(crate) auto_advance: bool,
     pub(crate) keyword_input: String,
@@ -454,6 +459,7 @@ impl ShoeboxApp {
             expanded: HashSet::new(),
             can_undo: false,
             can_redo: false,
+            undo_at: UndoTimes::default(),
             auto_advance: false,
             keyword_input: String::new(),
             focus_keywords: false,
@@ -871,9 +877,17 @@ impl ShoeboxApp {
                         }
                     }
                 }
-                LibraryEvent::History { can_undo, can_redo } => {
-                    self.can_undo = can_undo;
-                    self.can_redo = can_redo;
+                LibraryEvent::History {
+                    undo_at,
+                    redo_at,
+                    fresh,
+                } => {
+                    self.undo_at.library = (undo_at, redo_at);
+                    if fresh {
+                        // A new action: nothing of People's to redo either.
+                        self.people.send(crate::people::Command::ClearRedo);
+                    }
+                    self.update_can_undo();
                 }
                 LibraryEvent::Error(e) => {
                     self.scanning = false;
@@ -993,14 +1007,19 @@ impl ShoeboxApp {
                         .filter(|k| Some(k) != showing.as_ref())
                         .collect();
                     also.dedup();
-                    let was = showing.is_some() || !also.is_empty();
                     self.ppl.showing =
                         showing.or_else(|| (!also.is_empty()).then(|| also.remove(0)));
                     self.ppl.also = also;
                     self.ppl.view = Some(v);
-                    changed |= was;
+                    // New groups: the People list's counts are worked out
+                    // again with the photos shown.
+                    changed = true;
                 }
                 E::Error(e) => self.error = Some(e),
+                E::History { undo_at, redo_at } => {
+                    self.undo_at.people = (undo_at, redo_at);
+                    self.update_can_undo();
+                }
             }
         }
         if changed {
@@ -1020,6 +1039,38 @@ impl ShoeboxApp {
         }
         self.refilter();
         self.scroll_to_current = true;
+    }
+
+    fn update_can_undo(&mut self) {
+        let (l, p) = (self.undo_at.library, self.undo_at.people);
+        self.can_undo = l.0.is_some() || p.0.is_some();
+        self.can_redo = l.1.is_some() || p.1.is_some();
+    }
+
+    /// Undo the newest change, whether to files or to names (⌘Z).
+    pub fn undo(&mut self) {
+        let (l, p) = (self.undo_at.library.0, self.undo_at.people.0);
+        if p.is_some() && p >= l {
+            self.people.send(crate::people::Command::Undo);
+        } else if l.is_some() {
+            self.library.send(LibraryCommand::Undo);
+        }
+    }
+
+    /// Redo the change undone most recently (⇧⌘Z).
+    pub fn redo(&mut self) {
+        let (l, p) = (self.undo_at.library.1, self.undo_at.people.1);
+        if p.is_some() && p >= l {
+            self.people.send(crate::people::Command::Redo);
+        } else if l.is_some() {
+            self.library.send(LibraryCommand::Redo);
+        }
+    }
+
+    /// A change to names: the library's redo goes (a new action).
+    fn people_command(&mut self, c: crate::people::Command) {
+        self.people.send(c);
+        self.library.send(LibraryCommand::ClearRedo);
     }
 
     pub(crate) fn clear_person(&mut self) {
@@ -1048,8 +1099,7 @@ impl ShoeboxApp {
     /// already has merges into them). Taught to the face matching: their
     /// faces become that person's examples.
     pub(crate) fn name_person(&mut self, groups: Vec<crate::people::GroupKey>, name: String) {
-        self.people
-            .send(crate::people::Command::Name { groups, name });
+        self.people_command(crate::people::Command::Name { groups, name });
     }
 
     /// The faces of `photo` in the group shown aren't that person.
@@ -1064,14 +1114,12 @@ impl ShoeboxApp {
             return;
         };
         let faces: Vec<_> = g.faces.iter().filter(|f| f.path == path).cloned().collect();
-        self.people.send(crate::people::Command::NotPerson {
-            person: person.clone(),
-            faces,
-        });
+        let person = person.clone();
+        self.people_command(crate::people::Command::NotPerson { person, faces });
     }
 
     pub(crate) fn forget_person(&mut self, person: String) {
-        self.people.send(crate::people::Command::Forget { person });
+        self.people_command(crate::people::Command::Forget { person });
         self.ppl.showing = None;
         self.refilter();
     }
@@ -1114,6 +1162,23 @@ impl ShoeboxApp {
     }
 
     /// Groups as (label, photo count), in the order listed (tests).
+    /// The People list as shown: groups with photos among those shown, and
+    /// how many (tests).
+    pub fn people_listed(&self) -> Vec<(String, usize)> {
+        self.ppl
+            .view
+            .as_ref()
+            .map(|v| {
+                v.groups
+                    .iter()
+                    .zip(&self.ppl.counts)
+                    .filter(|(_, n)| **n > 0)
+                    .map(|(g, n)| (self.ppl.label(g), *n))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn people_groups(&self) -> Vec<(String, usize)> {
         self.ppl
             .view
@@ -1440,14 +1505,6 @@ impl ShoeboxApp {
         {
             stacks.retain(|s| members.contains(s));
         }
-        let people = self.ppl.shown_groups();
-        if !people.is_empty() {
-            let photos: HashSet<PhotoId> = people
-                .iter()
-                .flat_map(|g| g.photos.iter().copied())
-                .collect();
-            stacks.retain(|&s| photos.contains(&self.ids[self.catalog.stacks[s].primary]));
-        }
         if semantic {
             // Best match first; nothing until the first results are in.
             let empty = HashMap::new();
@@ -1459,6 +1516,27 @@ impl ShoeboxApp {
             };
             stacks.retain(|&s| score(s).is_some());
             stacks.sort_by(|&a, &b| score(b).unwrap_or(0.0).total_cmp(&score(a).unwrap_or(0.0)));
+        }
+        // Each person's photos among these (the People list's counts), then
+        // the people chosen narrow them further.
+        if let Some(view) = self.ppl.view.as_ref() {
+            let here: HashSet<PhotoId> = stacks
+                .iter()
+                .map(|&s| self.ids[self.catalog.stacks[s].primary])
+                .collect();
+            self.ppl.counts = view
+                .groups
+                .iter()
+                .map(|g| g.photos.iter().filter(|p| here.contains(p)).count())
+                .collect();
+        }
+        let people = self.ppl.shown_groups();
+        if !people.is_empty() {
+            let photos: HashSet<PhotoId> = people
+                .iter()
+                .flat_map(|g| g.photos.iter().copied())
+                .collect();
+            stacks.retain(|&s| photos.contains(&self.ids[self.catalog.stacks[s].primary]));
         }
         self.shown.clear();
         for s in stacks {
@@ -2614,11 +2692,11 @@ impl ShoeboxApp {
         }
         if m.command {
             if pressed(egui::Key::Z) {
-                self.library.send(if m.shift {
-                    LibraryCommand::Redo
+                if m.shift {
+                    self.redo();
                 } else {
-                    LibraryCommand::Undo
-                });
+                    self.undo();
+                }
             }
             if pressed(egui::Key::E) {
                 self.new_event_from_selection(None);
@@ -2982,6 +3060,13 @@ pub(crate) fn normalise_keyword(k: &str) -> String {
 }
 
 /// The event editor's fields.
+/// See `ShoeboxApp::undo_at`: (next undo made at, next redo undone at).
+#[derive(Debug, Default, Clone, Copy)]
+struct UndoTimes {
+    library: (Option<i64>, Option<i64>),
+    people: (Option<i64>, Option<i64>),
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct EventEdit {
     /// None for a new event.

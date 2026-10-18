@@ -17,6 +17,7 @@ use crossbeam_channel::{Receiver, Sender, select};
 use rayon::prelude::*;
 use shoebox_core::catalog::Catalog;
 use shoebox_core::embeddings::{FileKey, Store, Vector};
+use shoebox_core::events::now_ms;
 use shoebox_core::people::{self, Face, FaceRef, People};
 use shoebox_decode::{Format, Rgb8};
 
@@ -163,12 +164,24 @@ pub enum Command {
     Forget {
         person: String,
     },
+    /// Undo or redo the last change to names (naming, merging, "not",
+    /// forgetting).
+    Undo,
+    Redo,
+    /// A newer action elsewhere (the library's): nothing to redo here.
+    ClearRedo,
 }
 
 pub enum Event {
     Status(Status),
     People(Arc<PeopleView>),
     Error(String),
+    /// When the change ⌘Z would undo was made, and when the one ⌘⇧Z would
+    /// redo was undone (ms since the epoch).
+    History {
+        undo_at: Option<i64>,
+        redo_at: Option<i64>,
+    },
 }
 
 pub struct PeopleWorker {
@@ -221,6 +234,10 @@ struct Worker<F: Fn(Event)> {
     pending: VecDeque<Item>,
     catalog: Option<(Arc<Catalog>, bool)>,
     people: People,
+    /// Names before each change, and when it was made (undo); names before
+    /// each undo, and when it was undone (redo).
+    undo: Vec<(People, i64)>,
+    redo: Vec<(People, i64)>,
     /// The last grouping: each group's faces (for naming).
     groups: Vec<(GroupKey, Vec<FaceRef>)>,
     /// Files scanned when last grouped (None: needs grouping).
@@ -245,6 +262,8 @@ impl<F: Fn(Event)> Worker<F> {
             pending: VecDeque::new(),
             catalog: None,
             people: People::default(),
+            undo: Vec::new(),
+            redo: Vec::new(),
             groups: Vec::new(),
             grouped: None,
             pool: rayon::ThreadPoolBuilder::new()
@@ -348,13 +367,14 @@ impl<F: Fn(Event)> Worker<F> {
                         }
                     }
                 }
+                let before = self.people.clone();
                 let mut named = std::mem::take(&mut self.people);
                 named.merge(&name, &people, &faces);
                 self.people = named;
-                self.save_names();
-                self.regroup();
+                self.changed(before);
             }
             Command::NotPerson { person, faces } => {
+                let before = self.people.clone();
                 if let Some(p) = self.people.people.iter_mut().find(|p| p.id == person) {
                     for f in faces {
                         if !p.not.contains(&f) {
@@ -362,15 +382,54 @@ impl<F: Fn(Event)> Worker<F> {
                         }
                     }
                 }
-                self.save_names();
-                self.regroup();
+                self.changed(before);
             }
             Command::Forget { person } => {
+                let before = self.people.clone();
                 self.people.people.retain(|p| p.id != person);
+                self.changed(before);
+            }
+            Command::Undo | Command::Redo => {
+                let undo = matches!(c, Command::Undo);
+                let (from, to) = if undo {
+                    (&mut self.undo, &mut self.redo)
+                } else {
+                    (&mut self.redo, &mut self.undo)
+                };
+                let Some((names, _)) = from.pop() else {
+                    return;
+                };
+                to.push((std::mem::replace(&mut self.people, names), now_ms()));
                 self.save_names();
+                self.history();
                 self.regroup();
             }
+            Command::ClearRedo => {
+                if !self.redo.is_empty() {
+                    self.redo.clear();
+                    self.history();
+                }
+            }
         }
+    }
+
+    /// After a change to names: undoable, saved, and regrouped.
+    fn changed(&mut self, before: People) {
+        if before == self.people {
+            return;
+        }
+        self.undo.push((before, now_ms()));
+        self.redo.clear();
+        self.save_names();
+        self.history();
+        self.regroup();
+    }
+
+    fn history(&self) {
+        (self.notify)(Event::History {
+            undo_at: self.undo.last().map(|u| u.1),
+            redo_at: self.redo.last().map(|r| r.1),
+        });
     }
 
     fn save_names(&self) {
@@ -677,6 +736,9 @@ pub struct PeopleState {
     pub showing: Option<GroupKey>,
     /// …and these groups' too (⌘-click), say to check they're one person.
     pub also: Vec<GroupKey>,
+    /// Each group's photos among those shown (before the people chosen
+    /// narrow them), by index into the view's groups.
+    pub counts: Vec<usize>,
     /// The name being typed for the group shown.
     pub name_input: String,
     /// People lists every group, not just the first few.

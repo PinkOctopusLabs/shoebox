@@ -43,13 +43,13 @@ pub fn topbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 ui.add_space(6.0);
                 ui.add_enabled_ui(app.can_undo, |ui| {
                     if icons::button(ui, icons::UNDO, "Undo", "Undo (⌘Z)", false).clicked() {
-                        app.command(LibraryCommand::Undo);
+                        app.undo();
                     }
                 });
                 ui.add_enabled_ui(app.can_redo, |ui| {
                     if icons::button(ui, icons::REDO, "Redo", "Redo (Shift+⌘Z)", false).clicked()
                     {
-                        app.command(LibraryCommand::Redo);
+                        app.redo();
                     }
                 });
             },
@@ -1179,17 +1179,34 @@ fn people_panel(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         .iter()
         .filter_map(|g| Some((g.name.clone()?, g.key.clone())))
         .collect();
-    for g in view.groups.iter().take(if all { usize::MAX } else { 8 }) {
+    // Counts are of the photos shown (a folder, an event…), so a person not
+    // in them is left out, unless chosen.
+    let listed: Vec<(usize, &crate::people::Group)> = view
+        .groups
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (app.ppl.counts.get(i).copied().unwrap_or(g.photos.len()), g))
+        .filter(|(n, g)| {
+            *n > 0 || app.ppl.showing.as_ref() == Some(&g.key) || app.ppl.also.contains(&g.key)
+        })
+        .collect();
+    for &(n, g) in listed.iter().take(if all { usize::MAX } else { 8 }) {
         let sel = app.ppl.showing.as_ref() == Some(&g.key) || app.ppl.also.contains(&g.key);
         let text = if g.name.is_some() {
             RichText::new(app.ppl.label(g))
         } else {
             RichText::new(app.ppl.label(g)).italics()
         };
-        let r = row(ui, sel, text, Some(g.photos.len())).on_hover_text(
-            "Click to see their photos and name them; ⌘-click to add others \
-             (to mark them as the same person)",
-        );
+        let total = g.photos.len();
+        let tip = if n == total {
+            String::new()
+        } else {
+            format!("{n} of their {total} photos are here\n")
+        };
+        let r = row(ui, sel, text, Some(n)).on_hover_text(format!(
+            "{tip}Click to see their photos and name them; ⌘-click to add others \
+             (to mark them as the same person)"
+        ));
         if r.clicked() {
             if ui.input(|i| i.modifiers.command || i.modifiers.shift) {
                 toggled = Some(g.key.clone());
@@ -1218,12 +1235,12 @@ fn people_panel(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             .on_disabled_hover_text("Name someone first");
         });
     }
-    if view.groups.len() > 8
+    if listed.len() > 8
         && ui
             .link(if all {
                 "Show fewer".to_owned()
             } else {
-                format!("Show all {}", view.groups.len())
+                format!("Show all {}", listed.len())
             })
             .clicked()
     {

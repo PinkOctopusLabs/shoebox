@@ -252,6 +252,8 @@ pub enum LibraryCommand {
     },
     Undo,
     Redo,
+    /// A newer action elsewhere (People's names): nothing to redo here.
+    ClearRedo,
     /// Replace settings other than roots (options, smart filters).
     SaveSettings(Box<Settings>),
     /// Clear the unseen changes of these photos.
@@ -475,10 +477,14 @@ pub enum LibraryEvent {
         batch: Option<i64>,
         moved: usize,
     },
-    /// Undo/redo availability changed.
+    /// Undo/redo changed: when the step ⌘Z would undo was made, and when
+    /// the step ⌘⇧Z would redo was undone (ms since the epoch), so the app
+    /// can interleave these with People's own undo; `fresh` when a new
+    /// action cleared redo.
     History {
-        can_undo: bool,
-        can_redo: bool,
+        undo_at: Option<i64>,
+        redo_at: Option<i64>,
+        fresh: bool,
     },
     Error(String),
 }
@@ -607,10 +613,18 @@ fn library_worker(
             complete,
         });
     };
+    // When each batch went onto the undo or redo stack (it's the top when
+    // `history` runs right after, so "now" is close enough).
+    let pushed_at = std::cell::RefCell::new(HashMap::<i64, i64>::new());
+    let fresh = std::cell::Cell::new(false);
     let history = |undo: &[i64], redo: &[i64]| {
+        let mut at = pushed_at.borrow_mut();
+        let mut time =
+            |b: Option<&i64>| b.map(|&b| *at.entry(b).or_insert_with(shoebox_core::events::now_ms));
         emit(LibraryEvent::History {
-            can_undo: !undo.is_empty(),
-            can_redo: !redo.is_empty(),
+            undo_at: time(undo.last()),
+            redo_at: time(redo.last()),
+            fresh: fresh.replace(false),
         });
     };
 
@@ -733,6 +747,7 @@ fn library_worker(
                     Ok(Some(batch)) => {
                         undo.push(batch);
                         redo.clear();
+                        fresh.set(true);
                         history(&undo, &redo);
                         emit(LibraryEvent::Changes(
                             resolved
@@ -795,6 +810,7 @@ fn library_worker(
                         if let Some(b) = batch {
                             undo.push(b);
                             redo.clear();
+                            fresh.set(true);
                             history(&undo, &redo);
                         }
                         emit(LibraryEvent::Events(new));
@@ -836,6 +852,13 @@ fn library_worker(
                     (false, true)
                 }
             }
+            LibraryCommand::ClearRedo => {
+                if !redo.is_empty() {
+                    redo.clear();
+                    history(&undo, &redo);
+                }
+                (false, false)
+            }
             LibraryCommand::UndoBatch(batch) => {
                 let r = undo_batch(batch, &fileops, &mut catalog, &mut cache);
                 if r.is_ok() {
@@ -851,6 +874,7 @@ fn library_worker(
                 if r.is_ok() {
                     undo.push(batch);
                     redo.clear();
+                    fresh.set(true);
                     history(&undo, &redo);
                 }
                 emit(LibraryEvent::BatchResumed(r));
@@ -922,6 +946,7 @@ fn library_worker(
                     Ok(b) => {
                         undo.push(b);
                         redo.clear();
+                        fresh.set(true);
                         history(&undo, &redo);
                         emit(LibraryEvent::Imported {
                             batch: b,
@@ -947,6 +972,7 @@ fn library_worker(
                     Ok((b, files)) => {
                         undo.push(b);
                         redo.clear();
+                        fresh.set(true);
                         history(&undo, &redo);
                         emit(LibraryEvent::Organised {
                             batch: b,
@@ -973,6 +999,7 @@ fn library_worker(
                     Ok(b) => {
                         undo.push(b);
                         redo.clear();
+                        fresh.set(true);
                         history(&undo, &redo);
                         emit(LibraryEvent::Collections(list));
                     }
@@ -1009,6 +1036,7 @@ fn library_worker(
                         if let Some(b) = batch {
                             undo.push(b);
                             redo.clear();
+                            fresh.set(true);
                             history(&undo, &redo);
                         }
                         emit(LibraryEvent::DupesApplied { batch, moved });
