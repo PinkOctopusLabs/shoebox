@@ -734,6 +734,7 @@ fn folders_and_events() {
     assert_eq!(h.state().scope().0, 2);
     assert!(one < two && two < all, "{one} < {two} < {all}");
     assert!(h.query_by_label("📁 2 folders  ✖").is_some());
+    assert!(h.query_by_label(&format!("{two} photos")).is_some());
     snapshot(&mut h, "25-two-folders");
     h.get_by_label("📁 2 folders  ✖").click();
     h.run_steps(3);

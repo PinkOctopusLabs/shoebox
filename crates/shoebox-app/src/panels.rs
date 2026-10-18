@@ -1717,6 +1717,7 @@ fn scope_chips(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     if let Some(name) = smart {
         chips.push((name, 3));
     }
+    let scoped = !chips.is_empty();
     for (text, kind) in chips {
         let r = ui
             .add(egui::Button::new(format!("{text}  ✖")).selected(true))
@@ -1733,6 +1734,11 @@ fn scope_chips(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 }
             }
         }
+    }
+    // How many photos the chosen folders, event or filter hold.
+    if scoped {
+        let n = app.shown.len();
+        ui.label(RichText::new(format!("{n} photo{}", if n == 1 { "" } else { "s" })).weak());
     }
 }
 
