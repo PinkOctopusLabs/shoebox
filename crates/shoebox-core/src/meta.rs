@@ -10,7 +10,7 @@ use crate::error::{Result, io};
 use crate::exif::{self, ExifInfo};
 
 /// Bump when metadata extraction changes, so cached rows are re-read.
-pub const META_VERSION: i64 = 2;
+pub const META_VERSION: i64 = 3;
 
 /// Real NEFs and Lightroom TIFFs keep IFD0, the Exif IFD, XMP and the ICC
 /// profile in their first ~40 KB; JPEG EXIF lives in APP1 at the start.
@@ -84,6 +84,8 @@ fn from_bytes(format: Format, data: &[u8]) -> (Meta, bool) {
 
 /// A movie's metadata from its header: display size and creation time
 /// (Apple's local creation date, else the UTC header time in local time).
+/// A movie with neither (an editor's export often has none) is dated by
+/// its modified time: unlike a photo's, that's usually when it was made.
 fn movie(path: &Path) -> Result<Meta> {
     let mut f = std::fs::File::open(path).map_err(io(path))?;
     let info = shoebox_decode::mov::info(&mut f).map_err(|e| crate::error::CoreError::Decode {
@@ -91,7 +93,11 @@ fn movie(path: &Path) -> Result<Meta> {
         source: e,
     })?;
     let mut exif = ExifInfo::default();
-    let local = movie_time(&info);
+    let local = movie_time(&info).or_else(|| {
+        let modified = f.metadata().ok()?.modified().ok()?;
+        let t = jiff::Timestamp::try_from(modified).ok()?;
+        Some(t.to_zoned(jiff::tz::TimeZone::system()))
+    });
     if let Some(z) = local {
         exif.capture_time = Some(z.strftime("%Y:%m:%d %H:%M:%S").to_string());
         exif.offset = Some(z.strftime("%:z").to_string());
@@ -178,5 +184,33 @@ mod tests {
             1_777_000_000
         );
         assert!(movie_time(&Default::default()).is_none());
+    }
+
+    #[test]
+    fn undated_movie_uses_its_modified_time() {
+        fn bx(kind: &[u8], body: &[u8]) -> Vec<u8> {
+            let mut b = (8 + body.len() as u32).to_be_bytes().to_vec();
+            b.extend_from_slice(kind);
+            b.extend_from_slice(body);
+            b
+        }
+        let mut file = bx(b"ftyp", b"qt  \0\0\0\0");
+        file.extend(bx(b"moov", &bx(b"mvhd", &[0; 100]))); // created: 0
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path().join("export.mov");
+        std::fs::write(&p, &file).unwrap();
+        let when = jiff::Timestamp::from_second(1_733_033_644).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_modified(std::time::SystemTime::from(when))
+            .unwrap();
+        let m = read(&p, Format::Mov).unwrap();
+        let local = when.to_zoned(jiff::tz::TimeZone::system());
+        assert_eq!(
+            m.exif.capture_time.as_deref(),
+            Some(local.strftime("%Y:%m:%d %H:%M:%S").to_string().as_str())
+        );
     }
 }

@@ -122,7 +122,7 @@ Culling marks go into XMP; file changes always move whole stacks, sidecars inclu
 **Import**
 
 - From a card or any folder, **copy** (never move) into a library root using a template. Default: `{YYYY}/{YYYY-MM-DD}/{YYYYMMDD}-{HHMMSS}-{subsec}.{ext}`, with a `-N` suffix on collisions.
-- Fallbacks: no sub-seconds → leave them out of the name; no capture date → `_undated/{width}x{height}/{original name}`.
+- Fallbacks: no sub-seconds → leave them out of the name; no capture date → `_undated/{width}x{height}/{original name}`. A movie with no recording date in its header (an editor's export often has none) is dated by its modified time instead; photos aren't (their modified time is often when they were copied).
 - Verify every copy by BLAKE3 before reporting it imported.
 - Skip files whose exact hash is already in the library, and list them. A file repeated within the source is copied once; the repeats are listed apart ("repeated in the source"), not as already in the library.
 - Show a dry-run table (source → destination) before anything runs, or the photos to copy as thumbnails (the default; source and new name on hover). Previews are rendered from the source and not kept in the thumbnail cache.

@@ -834,3 +834,14 @@ hashes, embeddings, faces).
   in the next ones, with a waker that asks egui for a repaint. What the
   folder is for (`FolderFor`) is acted on when it's picked.
 - Headless tests can't open a panel; checked by hand on a throwaway build.
+
+## Undated movies take their modified time (2026-10-19)
+
+- Movies exported from an editor often have no date in their header (`mvhd`
+  creation time 0, no Apple creation date), so they went to `_undated/`.
+  Their modified time is usually when they were made, so a movie with no
+  header date is now dated by it: its capture time everywhere (grid,
+  timeline, import and rename names). Photos aren't: a photo's modified time
+  is often when it was downloaded or copied. Chosen by the user.
+- `META_VERSION` 3, so cached movie rows are read again (every file's
+  metadata is re-read once).
