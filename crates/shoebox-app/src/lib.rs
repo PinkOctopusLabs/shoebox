@@ -2,6 +2,7 @@
 
 pub mod app;
 mod display;
+pub mod icons;
 pub mod jobs;
 pub mod menu;
 mod panels;

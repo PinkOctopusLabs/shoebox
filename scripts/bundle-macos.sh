@@ -43,6 +43,8 @@ cp target/release/shoebox-app "$APP/Contents/MacOS/Shoebox"
 # file system is case-insensitive, so `shoebox` would replace `Shoebox`):
 #   ln -s /Applications/Shoebox.app/Contents/Helpers/shoebox ~/bin/shoebox
 cp target/release/shoebox "$APP/Contents/Helpers/shoebox"
+# The icon font is compiled in; its licence ships beside it.
+cp crates/shoebox-app/assets/Phosphor-LICENSE.txt "$APP/Contents/Resources/Phosphor-LICENSE.txt"
 
 # Sparkle, the updater (loaded at runtime by src/updater.rs).
 if [ -n "$PUBLIC_KEY" ]; then

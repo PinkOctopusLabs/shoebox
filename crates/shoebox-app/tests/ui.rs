@@ -129,10 +129,10 @@ fn browse_views_render() {
     snapshot(&mut h, "1a-folder-chip");
     h.get_by_label("📁 scan  ✖").click();
     h.run_steps(2);
-    // The side panels fold away from buttons at the view bar's ends; Tab
+    // The side panels fold away from buttons at the top bar's ends; Tab
     // hides both, then shows both.
     assert!(h.query_by_label("Recently changed").is_some());
-    h.get_by_label("◀").click(); // the left one (the right one shows ▶)
+    h.get_by_label("Library panel").click();
     h.run_steps(3);
     assert!(
         h.query_by_label("Recently changed").is_none(),
@@ -145,12 +145,22 @@ fn browse_views_render() {
     assert!(h.query_by_label("Recently changed").is_some(), "left back");
     assert!(!h.state().filtered(), "the chip clears it");
     assert_eq!(h.state().shown_count(), photos);
+    // The funnel in the top bar shows the rating, flag and label filters.
+    assert!(h.query_by_label("More ⏷").is_none());
+    h.get_by_label("Filters").click();
+    h.run_steps(2);
+    assert!(h.query_by_label("More ⏷").is_some());
+    h.get_by_label("Filters").click();
+    h.run_steps(2);
+    assert!(h.query_by_label("More ⏷").is_none());
 
     // Right-click a photo: it becomes the selection and the menu offers
     // Reveal in Finder. (The item isn't clicked, so Finder doesn't open.)
     h.get_by_label("f0005.jpg").click_secondary();
     h.run_steps(3);
     assert_eq!(h.state().selected_count(), 1);
+    // The view bar offers its marks (not clicked: the library stays as is).
+    assert!(h.query_by_label("Rate 3").is_some() && h.query_by_label("Pick").is_some());
     // The menu's item, and the info panel's button beside the path.
     assert_eq!(
         h.query_all_by_label(REVEAL).count(),

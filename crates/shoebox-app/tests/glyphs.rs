@@ -45,6 +45,7 @@ fn literal_chars(src: &str) -> Vec<char> {
 #[test]
 fn every_ui_glyph_is_in_the_fonts() {
     let ctx = egui::Context::default();
+    shoebox_app::icons::install(&ctx);
     let mut out = ctx.run_ui(Default::default(), |_| {}); // load fonts
     out.textures_delta.clear();
     let mut missing = Vec::new();
@@ -69,4 +70,22 @@ fn every_ui_glyph_is_in_the_fonts() {
         "glyphs missing from egui's fonts:\n{}",
         missing.join("\n")
     );
+}
+
+/// The bars' icons are in the bundled icon font.
+#[test]
+fn every_icon_is_in_the_font() {
+    let ctx = egui::Context::default();
+    shoebox_app::icons::install(&ctx);
+    let mut out = ctx.run_ui(Default::default(), |_| {});
+    out.textures_delta.clear();
+    for icon in shoebox_app::icons::ALL {
+        for ch in icon.chars() {
+            assert!(
+                ctx.fonts_mut(|f| f.has_glyph(&egui::FontId::proportional(12.0), ch)),
+                "U+{:04X} missing",
+                ch as u32
+            );
+        }
+    }
 }

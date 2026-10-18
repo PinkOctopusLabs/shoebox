@@ -81,6 +81,15 @@ fn main() -> anyhow::Result<()> {
         .with_app_id("com.crankyunicorn.shoebox")
         .with_inner_size([1400.0, 900.0])
         .with_min_inner_size([800.0, 500.0]);
+    // The top bar is the title bar (its search sits beside the window
+    // buttons), as in Apple's own apps.
+    #[cfg(target_os = "macos")]
+    {
+        viewport = viewport
+            .with_fullsize_content_view(true)
+            .with_titlebar_shown(false)
+            .with_title_shown(false);
+    }
     if let Some(i) = icon() {
         viewport = viewport.with_icon(i);
     }

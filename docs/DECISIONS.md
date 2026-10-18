@@ -3,6 +3,24 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-18 — Top bar and icon view bar (after Lightcraft)
+- **Top bar** across the window: library-panel toggle, Undo, Redo at the
+  left; search centred (up to 560 pt) with the Content switch inside it and
+  a funnel that opens the rating, flag and label filters; Settings and the
+  info-panel toggle at the right. On macOS it is the title bar (full-size
+  content view, transparent title bar): it leaves room for the window
+  buttons, drags the window, and double-click zooms.
+- **Filter strip** over the photos only when it has something: the scope
+  chip and photo count, the filters (funnel open or any set), and Grid's
+  "Group by day" / Masonry's "Justified rows".
+- **View bar** under the photos: icons for the seven views and a sort menu
+  at the left; stars, pick, reject and labels for the photo or selection in
+  the middle (when there's room); thumbnail size, or the loupe's zoom, at
+  the right.
+- Icons are Phosphor (regular, MIT), bundled as a font
+  (`crates/shoebox-app/assets`): egui-phosphor targets an older egui. Icon
+  buttons carry names for VoiceOver (and the UI tests), not just glyphs.
+
 ## 2026-10-18 — Escape leaves the loupe; a new source starts afresh
 - Escape in the loupe goes back to the view it was opened from (Grid,
   Masonry, Timeline…); an open menu or full screen takes the first Escape.

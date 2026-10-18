@@ -92,7 +92,8 @@ Dual-licensed under either of [MIT](LICENSE-MIT) or
 
 Map tiles © [OpenStreetMap](https://www.openstreetmap.org/copyright)
 contributors. Updates use [Sparkle](https://github.com/sparkle-project/Sparkle)
-(MIT; its licence ships in the app).
+(MIT; its licence ships in the app), and icons are
+[Phosphor](https://phosphoricons.com) (MIT; likewise).
 Semantic search uses Google's
 [SigLIP 2](https://huggingface.co/google/siglip2-base-patch16-224) model
 (Apache-2.0; downloaded, not distributed), and faces OpenCV Zoo's

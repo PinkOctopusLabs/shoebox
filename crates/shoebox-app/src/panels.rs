@@ -1,76 +1,247 @@
-//! Toolbar, status bar, library tree and info panel.
+//! Top bar, filter strip, view bar, status bar, library tree and info panel.
 
 use eframe::egui::{self, Color32, RichText, pos2, vec2};
 
 use shoebox_core::marks::{Label, Pick};
 
 use crate::app::{FolderNode, ShoeboxApp, View, reveal};
+use crate::icons;
 use crate::jobs::LibraryCommand;
 
-/// The bar over the photos (as Lightroom's Library Filter): what's shown
-/// (scope, search, filters).
+/// The bar across the top (as in Lightcraft): the library panel and
+/// undo at the left, search and filters in the middle, settings and the info
+/// panel at the right. On macOS it is the title bar too: drag it to move the
+/// window, double-click to zoom.
+pub fn topbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    let bar = ui.max_rect();
+    let drag = ui.interact(
+        bar,
+        ui.make_persistent_id("topbar-drag"),
+        egui::Sense::click_and_drag(),
+    );
+    if drag.drag_started() {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+    }
+    if drag.double_clicked() {
+        let zoomed = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::Maximized(!zoomed));
+    }
+    let inset = app.titlebar_inset(ui.ctx());
+    let row = |r: egui::Rect, layout| egui::UiBuilder::new().max_rect(r).layout(layout);
+    let left = ui
+        .scope_builder(
+            row(
+                bar.with_min_x(bar.min.x + inset),
+                egui::Layout::left_to_right(egui::Align::Center),
+            ),
+            |ui| {
+                let r = icons::button(
+                    ui,
+                    icons::SIDEBAR,
+                    "Library panel",
+                    "Show or hide the library (Tab: both panels)",
+                    app.left_open,
+                );
+                if r.clicked() {
+                    app.left_open = !app.left_open;
+                    // Keep Tab for the panels, not for moving focus from here.
+                    r.surrender_focus();
+                }
+                ui.add_space(6.0);
+                ui.add_enabled_ui(app.can_undo, |ui| {
+                    if icons::button(ui, icons::UNDO, "Undo", "Undo (⌘Z)", false).clicked() {
+                        app.command(LibraryCommand::Undo);
+                    }
+                });
+                ui.add_enabled_ui(app.can_redo, |ui| {
+                    if icons::button(ui, icons::REDO, "Redo", "Redo (Shift+⌘Z)", false).clicked()
+                    {
+                        app.command(LibraryCommand::Redo);
+                    }
+                });
+            },
+        )
+        .response
+        .rect;
+    let right = ui
+        .scope_builder(
+            row(bar, egui::Layout::right_to_left(egui::Align::Center)),
+            |ui| {
+                ui.add_space(4.0);
+                let r = icons::button(
+                    ui,
+                    icons::INFO,
+                    "Info panel",
+                    "Show or hide the photo's details (Tab: both panels)",
+                    app.right_open,
+                );
+                if r.clicked() {
+                    app.right_open = !app.right_open;
+                    r.surrender_focus();
+                }
+                if icons::button(ui, icons::SETTINGS, "Settings", "Settings (⌘,)", false).clicked()
+                {
+                    app.open_settings();
+                }
+            },
+        )
+        .response
+        .rect;
+    // Search in the middle of the window, as wide as fits (up to 560).
+    let side = (bar.center().x - left.max.x).min(right.min.x - bar.center().x) - 12.0;
+    let width = (2.0 * side).min(560.0);
+    if width < 160.0 {
+        return;
+    }
+    let centre = egui::Rect::from_center_size(bar.center(), vec2(width, bar.height()));
+    ui.scope_builder(
+        row(centre, egui::Layout::left_to_right(egui::Align::Center)),
+        |ui| {
+            if !app.view.has_filters() {
+                ui.with_layout(
+                    egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                    |ui| ui.weak(view_title(app.view)),
+                );
+                return;
+            }
+            let before = (app.filter.clone(), app.sem.by_content);
+            let field = ui.available_width() - 44.0;
+            egui::Frame::new()
+                .fill(ui.visuals().extreme_bg_color)
+                .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+                .corner_radius(6.0)
+                .inner_margin(egui::Margin::symmetric(8, 2))
+                .show(ui, |ui| {
+                    ui.set_width(field - 16.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(icons::SEARCH).weak());
+                        search_box(app, ui);
+                    });
+                });
+            let n = active_filters(&app.filter);
+            let hint = if n == 0 {
+                "Filter by rating, flag, label and more".to_owned()
+            } else {
+                format!("{n} filter{} on", if n == 1 { "" } else { "s" })
+            };
+            let r = icons::button(
+                ui,
+                icons::FILTER,
+                "Filters",
+                &hint,
+                app.filters_open || n > 0,
+            );
+            if r.clicked() {
+                app.filters_open = !app.filters_open;
+            }
+            if before != (app.filter.clone(), app.sem.by_content) {
+                app.refilter();
+                app.scroll_to_current = true;
+            }
+        },
+    );
+}
+
+fn view_title(v: View) -> &'static str {
+    match v {
+        View::Duplicates => "Duplicates",
+        View::Import => "Import",
+        View::History => "History",
+        _ => "",
+    }
+}
+
+/// The bar over the photos: what's shown (folders, event, filters) and how
+/// this view lays them out.
 pub fn filter_strip(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     ui.add_space(2.0);
     filter_bar(app, ui);
     ui.add_space(2.0);
 }
 
-/// The bar under the photos (as in Lightroom): views, layout, then sort and
-/// thumbnail size at the right.
+/// Whether the bar over the photos has anything to show.
+pub fn filter_strip_shown(app: &ShoeboxApp) -> bool {
+    app.view.has_filters()
+        && (app.filters_open
+            || !app.filter.is_empty()
+            || !scope_chip_list(app).is_empty()
+            || matches!(app.view, View::Grid | View::Masonry))
+}
+
+const VIEWS: [(View, &str, &str, &str); 7] = [
+    (View::Grid, icons::GRID, "Grid", "Grid (G)"),
+    (View::Masonry, icons::MASONRY, "Masonry", "Masonry (M)"),
+    (View::Loupe, icons::LOUPE, "Loupe", "Loupe: one photo (E)"),
+    (View::Compare, icons::COMPARE, "Compare", "Compare two (C)"),
+    (
+        View::Survey,
+        icons::SURVEY,
+        "Survey",
+        "Survey the selection (N)",
+    ),
+    (View::Timeline, icons::TIMELINE, "Timeline", "Timeline (T)"),
+    (View::Map, icons::MAP, "Map", "Photos with a location"),
+];
+
+/// The bar under the photos (as in Lightcraft): views and sort at the
+/// left, rating, flags and label in the middle, size or zoom at the right.
 pub fn viewbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     let before = (app.sort, app.sort_desc);
-    // Size for the thumbnail views; sort wherever photos are in order.
-    let sized = matches!(app.view, View::Grid | View::Masonry | View::Timeline);
-    let sorted = !matches!(app.view, View::Duplicates | View::Import | View::History);
-    let right = |app: &mut ShoeboxApp, ui: &mut egui::Ui| {
-        panel_toggle(ui, &mut app.right_open, false);
-        if sized {
-            ui.spacing_mut().slider_width = 80.0;
-            ui.add(egui::Slider::new(&mut app.thumb_size, 96.0..=512.0).show_value(false))
-                .on_hover_text("Thumbnail size");
+    let bar = ui.max_rect();
+    let row = |r: egui::Rect, layout| egui::UiBuilder::new().max_rect(r).layout(layout);
+    let left = ui
+        .scope_builder(
+            row(bar, egui::Layout::left_to_right(egui::Align::Center)),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                for (v, icon, name, hint) in VIEWS {
+                    if icons::button(ui, icon, name, hint, app.view == v).clicked() {
+                        app.set_view(v);
+                    }
+                }
+                if !matches!(app.view, View::Duplicates | View::Import | View::History) {
+                    ui.add_space(4.0);
+                    ui.separator();
+                    sort_menu(app, ui);
+                }
+            },
+        )
+        .response
+        .rect;
+    let right = ui
+        .scope_builder(
+            row(bar, egui::Layout::right_to_left(egui::Align::Center)),
+            |ui| match app.view {
+                View::Grid | View::Masonry | View::Timeline => {
+                    ui.spacing_mut().slider_width = 90.0;
+                    ui.add(egui::Slider::new(&mut app.thumb_size, 96.0..=512.0).show_value(false))
+                        .on_hover_text("Thumbnail size");
+                }
+                View::Loupe => zoom_menu(app, ui),
+                _ => {}
+            },
+        )
+        .response
+        .rect;
+    // Marks for the photo (or selection) in the middle, when there's room.
+    if app.view.has_filters()
+        && let Some(m) = app.current_marks()
+    {
+        let id = ui.make_persistent_id("marks-width");
+        let w = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(300.0);
+        let x = (bar.center().x - w / 2.0).max(left.max.x + 12.0);
+        if x + w <= right.min.x - 12.0 {
+            let r = egui::Rect::from_min_max(pos2(x, bar.min.y), pos2(x + w, bar.max.y));
+            let used = ui
+                .scope_builder(
+                    row(r, egui::Layout::left_to_right(egui::Align::Center)),
+                    |ui| mark_controls(app, ui, &m),
+                )
+                .response
+                .rect;
+            ui.data_mut(|d| d.insert_temp(id, used.width()));
         }
-        if sized && sorted {
-            ui.separator();
-        }
-        if sorted && app.semantic_query().is_some() {
-            ui.weak("Best match first");
-        } else if sorted {
-            sort_controls(app, ui);
-        }
-    };
-    let mut wrap = false;
-    ui.horizontal(|ui| {
-        panel_toggle(ui, &mut app.left_open, true);
-        for (v, name, key) in View::ALL {
-            let hint = format!("{name} ({})", key.name());
-            if ui
-                .selectable_label(app.view == v, name)
-                .on_hover_text(hint)
-                .clicked()
-            {
-                app.set_view(v);
-            }
-        }
-        if ui
-            .selectable_label(app.view == View::Map, "Map")
-            .on_hover_text("Photos with a location")
-            .clicked()
-        {
-            app.set_view(View::Map);
-        }
-        // Sort and size at the right when there's room, else on a second line.
-        if ui.available_width() >= 300.0 {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                right(app, ui)
-            });
-        } else {
-            wrap = true;
-        }
-    });
-    if wrap {
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            right(app, ui)
-        });
     }
     if before != (app.sort, app.sort_desc) {
         app.refilter();
@@ -78,23 +249,96 @@ pub fn viewbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     }
 }
 
-/// Background work and undo/redo (laid out right to left).
-fn work_and_undo(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
-    if ui
-        .add_enabled(app.can_redo, egui::Button::new("Redo"))
-        .on_hover_text("Redo (Shift+⌘Z)")
-        .clicked()
-    {
-        app.command(LibraryCommand::Redo);
+/// Stars, pick and reject, and colour labels, for the photo or selection.
+fn mark_controls(app: &mut ShoeboxApp, ui: &mut egui::Ui, m: &shoebox_core::marks::Marks) {
+    ui.spacing_mut().item_spacing.x = 2.0;
+    for r in 1..=5u8 {
+        let colour = if m.rating >= r {
+            Color32::from_rgb(240, 190, 60)
+        } else {
+            ui.visuals().weak_text_color()
+        };
+        let b = ui
+            .add(egui::Button::new(RichText::new("★").size(15.0).color(colour)).frame(false))
+            .on_hover_text(format!("{r} star{} ({r})", if r == 1 { "" } else { "s" }));
+        b.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Rate {r}")));
+        if b.clicked() {
+            app.set_rating(if m.rating == r { 0 } else { r });
+        }
     }
-    if ui
-        .add_enabled(app.can_undo, egui::Button::new("Undo"))
-        .on_hover_text("Undo (⌘Z)")
-        .clicked()
-    {
-        app.command(LibraryCommand::Undo);
+    ui.add_space(6.0);
+    for (pick, icon, name, key) in [
+        (Pick::Pick, icons::PICK, "Pick", "P"),
+        (Pick::Reject, icons::REJECT, "Reject", "X"),
+    ] {
+        let on = m.pick == Some(pick);
+        if icons::button(ui, icon, name, &format!("{name} ({key})"), on).clicked() {
+            app.set_pick(if on { None } else { Some(pick) });
+        }
     }
-    ui.separator();
+    ui.add_space(6.0);
+    label_swatches(app, ui, m);
+}
+
+/// Sort order and direction, from a menu on the sort icon.
+fn sort_menu(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    if app.semantic_query().is_some() {
+        ui.weak("Best match first");
+        return;
+    }
+    use shoebox_core::query::Sort;
+    let name = Sort::ALL
+        .iter()
+        .find(|(s, _)| *s == app.sort)
+        .map_or("", |(_, n)| *n);
+    let (icon, dir) = if app.sort_desc {
+        (icons::SORT_DOWN, "descending")
+    } else {
+        (icons::SORT_UP, "ascending")
+    };
+    let r = icons::button(ui, icon, "Sort", &format!("Sorted by {name}, {dir}"), false);
+    let r =
+        r.union(ui.add(egui::Label::new(RichText::new(name).weak()).sense(egui::Sense::click())));
+    egui::Popup::menu(&r).show(|ui| {
+        for (s, n) in Sort::ALL {
+            ui.selectable_value(&mut app.sort, s, n);
+        }
+        ui.separator();
+        ui.selectable_value(&mut app.sort_desc, false, "Ascending");
+        ui.selectable_value(&mut app.sort_desc, true, "Descending");
+    });
+}
+
+/// The loupe's zoom: Fit, or a fixed scale.
+fn zoom_menu(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    use crate::app::Zoom;
+    let text = match app.loupe.zoom {
+        Zoom::Fit => "Fit".to_owned(),
+        Zoom::Scale(s) => format!("{:.0}%", s * 100.0),
+    };
+    let before = app.loupe.zoom;
+    egui::ComboBox::from_id_salt("zoom")
+        .selected_text(text)
+        .width(70.0)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut app.loupe.zoom, Zoom::Fit, "Fit");
+            for s in [0.5, 1.0, 2.0] {
+                ui.selectable_value(
+                    &mut app.loupe.zoom,
+                    Zoom::Scale(s),
+                    format!("{:.0}%", s * 100.0),
+                );
+            }
+        })
+        .response
+        .on_hover_text("Zoom (Space: Fit or 100%)");
+    if app.loupe.zoom != before {
+        app.loupe.pan = egui::Vec2::ZERO;
+    }
+}
+
+/// Background work (laid out right to left).
+fn work(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     let busy = app.loader.busy();
     if let Some((done, total)) = app.scan_progress {
         ui.label(format!("Reading {done}/{total}"));
@@ -125,7 +369,12 @@ fn filter_bar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     );
     ui.horizontal_wrapped(|ui| {
         scope_chips(app, ui);
-        search_box(app, ui);
+        if !(app.filters_open || !app.filter.is_empty()) {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                layout_toggle(app, ui);
+            });
+            return;
+        }
         egui::ComboBox::from_id_salt("f-rating")
             .selected_text(if app.filter.min_rating == 0 {
                 "Any rating".to_owned()
@@ -245,29 +494,46 @@ fn search_box(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         }
         return;
     }
-    if app.settings.semantic_search {
-        let ready = app.sem.status.ready();
-        ui.add_enabled_ui(ready, |ui| {
-            ui.toggle_value(&mut app.sem.by_content, "Content")
-                .on_hover_text("Search by what's in the photos: describe it, in any language")
-                .on_disabled_hover_text(
-                    "Semantic search is getting ready (see Search in Settings)",
-                );
-        });
-    }
     let hint = if app.sem.by_content {
         "Describe the photo, e.g. dog on a beach (/)"
     } else {
-        "Search names and keywords (/)"
+        "Search photos (/)"
     };
     let search = ui.add(
         egui::TextEdit::singleline(&mut app.filter.search)
             .hint_text(hint)
-            .desired_width(if app.sem.by_content { 260.0 } else { 200.0 }),
+            .frame(egui::Frame::NONE)
+            .desired_width(
+                ui.available_width()
+                    - if app.settings.semantic_search {
+                        70.0
+                    } else {
+                        40.0
+                    },
+            ),
     );
     if app.focus_search {
         search.request_focus();
         app.focus_search = false;
+    }
+    if app.settings.semantic_search {
+        let ready = app.sem.status.ready();
+        ui.add_enabled_ui(ready, |ui| {
+            let r = icons::button(
+                ui,
+                icons::CONTENT,
+                "Content",
+                if ready {
+                    "Search by what's in the photos: describe it, in any language"
+                } else {
+                    "Semantic search is getting ready (see Search in Settings)"
+                },
+                app.sem.by_content,
+            );
+            if r.clicked() {
+                app.sem.by_content = !app.sem.by_content;
+            }
+        });
     }
     if app.semantic_query().is_some() {
         if app.sem.searching {
@@ -276,34 +542,6 @@ fn search_box(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             ui.colored_label(ui.visuals().warn_fg_color, e);
         }
     }
-}
-
-/// Sort order and direction (laid out right to left).
-fn sort_controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
-    if ui
-        .small_button(if app.sort_desc { "⏷" } else { "⏶" })
-        .on_hover_text(if app.sort_desc {
-            "Descending (click to reverse)"
-        } else {
-            "Ascending (click to reverse)"
-        })
-        .clicked()
-    {
-        app.sort_desc = !app.sort_desc;
-    }
-    egui::ComboBox::from_id_salt("sort")
-        .selected_text(
-            shoebox_core::query::Sort::ALL
-                .iter()
-                .find(|(s, _)| *s == app.sort)
-                .map_or("", |(_, n)| *n),
-        )
-        .show_ui(ui, |ui| {
-            for (s, n) in shoebox_core::query::Sort::ALL {
-                ui.selectable_value(&mut app.sort, s, n);
-            }
-        });
-    ui.weak("Sort");
 }
 
 /// How many of the less-used filters (in the Filters pop-over) are set.
@@ -322,13 +560,22 @@ fn extra_filters(f: &shoebox_core::query::Filter) -> usize {
     .count()
 }
 
-/// "Filters ▾": file type, camera, lens, NEF missing, undated, changed.
+/// How many filters are set (rating, flag and label, and the rest).
+fn active_filters(f: &shoebox_core::query::Filter) -> usize {
+    use shoebox_core::query::{FlagFilter, LabelFilter};
+    usize::from(f.min_rating > 0)
+        + usize::from(f.flag != FlagFilter::Any)
+        + usize::from(f.label != LabelFilter::Any)
+        + extra_filters(f)
+}
+
+/// "More ▾": file type, camera, lens, NEF missing, undated, changed.
 fn filters_button(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     let n = extra_filters(&app.filter);
     let text = if n == 0 {
-        "Filters ⏷".to_owned()
+        "More ⏷".to_owned()
     } else {
-        format!("Filters ({n}) ⏷")
+        format!("More ({n}) ⏷")
     };
     let btn = ui.add(egui::Button::new(text).selected(n > 0));
     egui::Popup::from_toggle_button_response(&btn)
@@ -442,7 +689,7 @@ pub fn status(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             ui.label(RichText::new(n).color(Color32::from_rgb(80, 200, 120)));
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            work_and_undo(app, ui);
+            work(app, ui);
             if let Some(e) = app.error.clone() {
                 if ui.small_button("×").clicked() {
                     app.error = None;
@@ -1362,33 +1609,7 @@ fn organise(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     });
     ui.horizontal(|ui| {
         ui.label(RichText::new("Label").weak());
-        for (l, key) in [
-            (Label::Red, "6"),
-            (Label::Yellow, "7"),
-            (Label::Green, "8"),
-            (Label::Blue, "9"),
-            (Label::Purple, ""),
-        ] {
-            let (r, painter) = ui.allocate_painter(vec2(18.0, 18.0), egui::Sense::click());
-            let c = crate::views::label_colour(l);
-            painter.rect_filled(r.rect.shrink(2.0), 3.0, c);
-            if m.label == Some(l) {
-                painter.rect_stroke(
-                    r.rect,
-                    3.0,
-                    egui::Stroke::new(2.0, ui.visuals().strong_text_color()),
-                    egui::StrokeKind::Inside,
-                );
-            }
-            let hint = if key.is_empty() {
-                l.name().to_owned()
-            } else {
-                format!("{} ({key})", l.name())
-            };
-            if r.on_hover_text(hint).clicked() {
-                app.toggle_label(l);
-            }
-        }
+        label_swatches(app, ui, &m);
     });
     ui.add_space(4.0);
     ui.label(RichText::new("Keywords").weak());
@@ -1680,7 +1901,40 @@ fn section(
 
 /// What's narrowing the grid (a folder, event, collection or smart filter),
 /// each as a chip with a ✖ that clears it.
-fn scope_chips(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+/// The five colour labels; clicking one sets it (or clears it).
+fn label_swatches(app: &mut ShoeboxApp, ui: &mut egui::Ui, m: &shoebox_core::marks::Marks) {
+    for (l, key) in [
+        (Label::Red, "6"),
+        (Label::Yellow, "7"),
+        (Label::Green, "8"),
+        (Label::Blue, "9"),
+        (Label::Purple, ""),
+    ] {
+        let (r, painter) = ui.allocate_painter(vec2(18.0, 18.0), egui::Sense::click());
+        let c = crate::views::label_colour(l);
+        painter.rect_filled(r.rect.shrink(2.0), 3.0, c);
+        if m.label == Some(l) {
+            painter.rect_stroke(
+                r.rect,
+                3.0,
+                egui::Stroke::new(2.0, ui.visuals().strong_text_color()),
+                egui::StrokeKind::Inside,
+            );
+        }
+        let hint = if key.is_empty() {
+            l.name().to_owned()
+        } else {
+            format!("{} ({key})", l.name())
+        };
+        if r.on_hover_text(hint).clicked() {
+            app.toggle_label(l);
+        }
+    }
+}
+
+/// What the grid is limited to: (text, kind) with kind 0 folders,
+/// 1 event, 2 collection, 3 smart filter.
+fn scope_chip_list(app: &ShoeboxApp) -> Vec<(String, u8)> {
     let mut chips: Vec<(String, u8)> = Vec::new();
     let name = |f: &std::path::Path| {
         f.file_name()
@@ -1718,6 +1972,11 @@ fn scope_chips(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     if let Some(name) = smart {
         chips.push((name, 3));
     }
+    chips
+}
+
+fn scope_chips(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    let chips = scope_chip_list(app);
     let scoped = !chips.is_empty();
     for (text, kind) in chips {
         let r = ui
@@ -1782,24 +2041,6 @@ pub(crate) fn short_path(path: &std::path::Path) -> String {
     match home.as_deref().and_then(|h| path.strip_prefix(h).ok()) {
         Some(rest) => format!("~/{}", rest.display()),
         None => path.display().to_string(),
-    }
-}
-
-/// A button that folds a side panel away or back (Tab does both).
-fn panel_toggle(ui: &mut egui::Ui, open: &mut bool, left: bool) {
-    let (glyph, side) = match (left, *open) {
-        (true, true) => ("◀", "Hide the library panel"),
-        (true, false) => ("▶", "Show the library panel"),
-        (false, true) => ("▶", "Hide the info panel"),
-        (false, false) => ("◀", "Show the info panel"),
-    };
-    let r = ui
-        .add(egui::Button::new(RichText::new(glyph).size(10.0)).frame(false))
-        .on_hover_text(format!("{side} (Tab: both)"));
-    if r.clicked() {
-        *open = !*open;
-        // Keep Tab for the panels, not for moving focus from this button.
-        r.surrender_focus();
     }
 }
 

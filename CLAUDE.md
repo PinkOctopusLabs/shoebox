@@ -16,7 +16,7 @@ A Rust + egui photo library app for macOS. **`docs/SPEC.md` is the source of tru
   (semantic search thread: model download, indexing, queries, tags; the `Model`
   trait lets tests use a fake model), `people.rs` (faces thread: grouping, names in
   `people.json`; `FaceModel` trait for tests), `updater.rs`
-  (Sparkle, loaded at runtime from bundled builds only), `textures.rs` (LRU budget), `panels.rs` (filter bar over the photos, view bar under them, side panels, status bar with undo/redo), `views/` (grid, masonry, loupe,
+  (Sparkle, loaded at runtime from bundled builds only), `textures.rs` (LRU budget), `panels.rs` (top bar with search and undo/redo, filter strip over the photos, icon view bar under them, side panels, status bar), `icons.rs` (bundled Phosphor icon font, icon buttons), `views/` (grid, masonry, loupe,
   filmstrip, compare, survey, duplicates, timeline, map, settings, files = import/history/dialogs), `menu.rs` (Settings… in the macOS app menu). Headless UI tests in `tests/ui.rs` render PNGs
   (`SHOEBOX_UI_SNAPSHOTS=<dir>`); `--ignored` runs the 10k scroll test,
   with `SHOEBOX_UI_BIG=<dir>` the 200k performance test (library from

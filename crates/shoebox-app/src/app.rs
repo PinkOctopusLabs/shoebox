@@ -287,6 +287,8 @@ pub struct ShoeboxApp {
     pub(crate) left_open: bool,
     pub(crate) right_open: bool,
     pub(crate) bars_open: bool,
+    /// The rating, flag and label filters over the photos (the funnel).
+    pub(crate) filters_open: bool,
     fullscreen: bool,
     pub(crate) loupe: LoupeState,
     pub(crate) textures: Textures,
@@ -361,6 +363,7 @@ pub struct ShoeboxApp {
 impl ShoeboxApp {
     pub fn new(cc: &eframe::CreationContext<'_>, paths: AppPaths) -> Self {
         let ctx = &cc.egui_ctx;
+        crate::icons::install(ctx);
         // egui's small text (9 pt) is too small for paths and captions.
         ctx.all_styles_mut(|s| {
             if let Some(f) = s.text_styles.get_mut(&egui::TextStyle::Small) {
@@ -420,6 +423,7 @@ impl ShoeboxApp {
             left_open: true,
             right_open: true,
             bars_open: true,
+            filters_open: false,
             fullscreen: false,
             loupe: LoupeState::default(),
             // 768 MB: ~3,000 small thumbnails plus a few full-size images.
@@ -1300,6 +1304,17 @@ impl ShoeboxApp {
             self.set_folders(Vec::new());
         }
         self.command(LibraryCommand::RemoveRoot(path));
+    }
+
+    /// Room at the left of the top bar for the window buttons: on macOS
+    /// the bar is the title bar (except in full screen).
+    pub(crate) fn titlebar_inset(&self, ctx: &egui::Context) -> f32 {
+        let full = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        if cfg!(target_os = "macos") && self.display.is_some() && !full {
+            76.0
+        } else {
+            6.0
+        }
     }
 
     /// A new source picked in the sidebar: nothing selected, and back to
@@ -2673,6 +2688,9 @@ impl eframe::App for ShoeboxApp {
         self.wanted.clear();
 
         let mut bars = self.bars_open;
+        egui::Panel::top("topbar")
+            .exact_size(38.0)
+            .show_collapsible(ui, &mut bars, |ui| panels::topbar(self, ui));
         egui::Panel::bottom("status")
             .show_collapsible(ui, &mut bars, |ui| panels::status(self, ui));
         self.bars_open = bars;
@@ -2698,11 +2716,12 @@ impl eframe::App for ShoeboxApp {
         self.right_open = right;
         // Over and under the photos only (added after the side panels):
         // the filters narrow what's in the middle.
-        let mut filters = self.bars_open && self.view.has_filters();
+        let mut filters = self.bars_open && panels::filter_strip_shown(self);
         egui::Panel::top("filterbar")
             .show_collapsible(ui, &mut filters, |ui| panels::filter_strip(self, ui));
         let mut bars = self.bars_open;
         egui::Panel::bottom("viewbar")
+            .exact_size(34.0)
             .show_collapsible(ui, &mut bars, |ui| panels::viewbar(self, ui));
 
         // Viewing a stack in the loupe clears its change badge.
