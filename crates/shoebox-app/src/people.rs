@@ -130,6 +130,9 @@ pub struct PeopleView {
     pub groups: Vec<Group>,
     /// Groups in each primary photo (indices into `groups`).
     pub by_photo: HashMap<PhotoId, Vec<usize>>,
+    /// Where each grouped face is in its photo: (x, y, width, height as
+    /// fractions of the upright image, group index).
+    pub boxes: HashMap<PhotoId, Vec<([f32; 4], usize)>>,
     /// Faces found.
     pub faces: usize,
 }
@@ -626,6 +629,9 @@ impl<F: Fn(Event)> Worker<F> {
             let face_refs: Vec<FaceRef> = faces.iter().map(|&i| refs[i].clone()).collect();
             for r in &face_refs {
                 let id = crate::jobs::photo_id(&r.path);
+                if let Some(f) = self.faces.get(&r.path).and_then(|v| v.get(r.index)) {
+                    view.boxes.entry(id).or_default().push((f.rect, gi));
+                }
                 if !photos.contains(&id) {
                     photos.push(id);
                     view.by_photo.entry(id).or_default().push(gi);
@@ -669,6 +675,11 @@ pub struct PeopleState {
     pub name_input: String,
     /// People lists every group, not just the first few.
     pub all: bool,
+    /// Face boxes off (the view bar's toggle; on by default).
+    pub hide_faces: bool,
+    /// The person whose name the pointer is on (info panel), this frame:
+    /// their face is outlined in the loupe.
+    pub hovered: Option<GroupKey>,
     enabled_sent: Option<bool>,
 }
 

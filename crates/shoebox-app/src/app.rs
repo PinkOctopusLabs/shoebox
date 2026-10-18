@@ -2163,6 +2163,20 @@ impl ShoeboxApp {
         self.notice.as_deref()
     }
 
+    /// The faces outlined on a photo, by file name: (name, is the person
+    /// shown), as the loupe (`everyone`) or a tile draws them (tests).
+    pub fn faces_drawn(&self, file: &str, everyone: bool) -> Vec<(String, bool)> {
+        self.catalog
+            .photos
+            .iter()
+            .position(|p| p.path.file_name().is_some_and(|n| n == file))
+            .map(|i| crate::views::faces_to_draw(self, self.ids[i], everyone))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(_, name, me)| (name, me))
+            .collect()
+    }
+
     /// The error shown in the status bar, if any (tests).
     pub fn error_message(&self) -> Option<&str> {
         self.error.as_deref()
@@ -2760,6 +2774,7 @@ impl eframe::App for ShoeboxApp {
         crate::updater::tick(&ctx, crate::jobs::working());
         self.handle_keys(&ctx);
         self.wanted.clear();
+        self.ppl.hovered = None; // set again by the info panel while pointed at
 
         let mut bars = self.bars_open;
         egui::Panel::top("topbar")

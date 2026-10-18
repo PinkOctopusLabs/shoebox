@@ -2169,7 +2169,9 @@ impl shoebox_app::people::FaceModel for HalvesModel {
             let m = (sum[0] + sum[1] + sum[2]) / 3.0;
             let v = [sum[0] - m, sum[1] - m, sum[2] - m];
             if v.iter().map(|x| x.abs()).fold(0.0, f32::max) / n > 30.0 {
-                out.push(([half as f32 * 0.5, 0.0, 0.5, 1.0], 0.95, unit(v)));
+                // A face-sized box in the middle of the half.
+                let x = half as f32 * 0.5 + 0.15;
+                out.push(([x, 0.3, 0.2, 0.3], 0.95, unit(v)));
             }
         }
         Ok(out)
@@ -2237,6 +2239,31 @@ fn people_in_the_app() {
     assert!(t.path().join("data/people.json").exists());
     assert_eq!(h.state().shown_count(), 4, "still showing Ann");
     snapshot(&mut h, "people-1-ann");
+
+    // Her face is outlined: in the tiles hers alone; in the loupe everyone,
+    // named, hers marked. The view bar's toggle turns them off.
+    let ann = |shown| ("Ann".to_owned(), shown);
+    assert_eq!(h.state().faces_drawn("b2.jpg", false), vec![ann(true)]);
+    let mut loupe = h.state().faces_drawn("b2.jpg", true);
+    loupe.sort();
+    assert_eq!(loupe, vec![ann(true), ("Unnamed 1".to_owned(), false)]);
+    h.get_by_label("b2.jpg").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    settle(&mut h, Duration::from_secs(30));
+    snapshot(&mut h, "people-2-loupe-faces");
+    // Pointing at a name in the info panel outlines that face too.
+    h.get_by_label("Unnamed 1").hover();
+    h.run_steps(2);
+    let mut both = h.state().faces_drawn("b2.jpg", false);
+    both.sort();
+    assert_eq!(both, vec![ann(true), ("Unnamed 1".to_owned(), true)]);
+    h.get_by_label("Face boxes").click();
+    h.run_steps(2);
+    assert!(h.state().faces_drawn("b2.jpg", true).is_empty());
+    h.get_by_label("Face boxes").click();
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
 
     // Her keyword, on all four (sidecars).
     h.get_by_label("Add keyword to 4 photos").click();

@@ -3,6 +3,17 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-18 — Face boxes
+- Showing a person outlines their face in amber on every tile; the loupe
+  also outlines everyone else recognised, faintly, with names (amber, not
+  the selection blue, which is near white on a dark theme). Without a
+  person shown the loupe stays clean, except that pointing at a name in
+  the info panel's People row outlines that face.
+- One view-bar toggle (Face boxes, on by default) turns them all off.
+- Boxes come from the face rows already stored (fractions of the upright
+  image), sent to the UI with the groups; padded 12% as detector boxes hug
+  the face.
+
 ## 2026-10-18 — Events and collections both stay; reference photos skipped
 - Kept apart on purpose: events are written to the photos (shared with
   other apps; things that happened); collections live only in Shoebox

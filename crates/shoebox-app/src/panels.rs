@@ -228,14 +228,39 @@ pub fn viewbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     let right = ui
         .scope_builder(
             row(bar, egui::Layout::right_to_left(egui::Align::Center)),
-            |ui| match app.view {
-                View::Grid | View::Masonry | View::Timeline => {
-                    ui.spacing_mut().slider_width = 90.0;
-                    ui.add(egui::Slider::new(&mut app.thumb_size, 96.0..=512.0).show_value(false))
-                        .on_hover_text("Thumbnail size");
+            |ui| {
+                // Face boxes (with People on): the shown person in the
+                // tiles, everyone in the loupe.
+                if app.ppl.view.is_some()
+                    && matches!(
+                        app.view,
+                        View::Grid | View::Masonry | View::Loupe | View::Timeline
+                    )
+                {
+                    let on = !app.ppl.hide_faces;
+                    if icons::button(
+                        ui,
+                        icons::FACES,
+                        "Face boxes",
+                        "Outline faces: the person shown, and everyone in Loupe",
+                        on,
+                    )
+                    .clicked()
+                    {
+                        app.ppl.hide_faces = on;
+                    }
                 }
-                View::Loupe => zoom_menu(app, ui),
-                _ => {}
+                match app.view {
+                    View::Grid | View::Masonry | View::Timeline => {
+                        ui.spacing_mut().slider_width = 90.0;
+                        ui.add(
+                            egui::Slider::new(&mut app.thumb_size, 96.0..=512.0).show_value(false),
+                        )
+                        .on_hover_text("Thumbnail size");
+                    }
+                    View::Loupe => zoom_menu(app, ui),
+                    _ => {}
+                }
             },
         )
         .response
@@ -1666,11 +1691,12 @@ fn organise(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("People").weak());
                 for (key, label) in people {
-                    if ui
-                        .small_button(label)
-                        .on_hover_text("Show their photos")
-                        .clicked()
-                    {
+                    let r = ui.small_button(label).on_hover_text("Show their photos");
+                    // Pointing at a name outlines their face in the loupe.
+                    if r.hovered() {
+                        app.ppl.hovered = Some(key.clone());
+                    }
+                    if r.clicked() {
                         app.show_person(key);
                     }
                 }

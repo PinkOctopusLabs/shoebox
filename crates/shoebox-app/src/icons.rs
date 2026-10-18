@@ -24,11 +24,12 @@ pub const SORT_UP: &str = "\u{E444}";
 pub const SORT_DOWN: &str = "\u{E446}";
 pub const PICK: &str = "\u{E244}";
 pub const REJECT: &str = "\u{E4F8}";
+pub const FACES: &str = "\u{E6FC}";
 
 /// Every icon (the glyph test checks each is in the font).
-pub const ALL: [&str; 19] = [
+pub const ALL: [&str; 20] = [
     SIDEBAR, UNDO, REDO, SEARCH, FILTER, CONTENT, INFO, SETTINGS, GRID, MASONRY, LOUPE, COMPARE,
-    SURVEY, TIMELINE, MAP, SORT_UP, SORT_DOWN, PICK, REJECT,
+    SURVEY, TIMELINE, MAP, SORT_UP, SORT_DOWN, PICK, REJECT, FACES,
 ];
 
 /// Add the icon font after the text font, so ordinary text keeps its own

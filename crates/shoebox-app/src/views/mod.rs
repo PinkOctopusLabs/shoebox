@@ -244,6 +244,10 @@ pub fn cell(
             target
         }
     };
+    // The person being shown: their face outlined.
+    if app.ppl.showing.is_some() {
+        face_boxes(app, &painter, id, inner, false);
+    }
     // Badges. Bottom left: file type, or the stack's formats and size.
     let st = app.stack_of(idx);
     let expanded = app.expanded.contains(&app.ids[st.primary]);
@@ -529,4 +533,90 @@ pub fn describe_change(c: &shoebox_core::changes::Change) -> String {
         c.what.describe(),
         crate::app::local_time_ms(c.at_ms)
     )
+}
+
+/// The faces to outline on a photo: (x, y, width, height as fractions of
+/// the upright image, name, is the person being shown or hovered). That
+/// person only, or with `everyone` all recognised faces; none with the view
+/// bar's face toggle off.
+pub(crate) fn faces_to_draw(
+    app: &ShoeboxApp,
+    id: crate::jobs::PhotoId,
+    everyone: bool,
+) -> Vec<([f32; 4], String, bool)> {
+    let view = match app.ppl.view.as_ref() {
+        Some(v) if !app.ppl.hide_faces => v,
+        _ => return Vec::new(),
+    };
+    let find = |k: &Option<crate::people::GroupKey>| k.as_ref().and_then(|k| view.find(k));
+    let (shown, hovered) = (find(&app.ppl.showing), find(&app.ppl.hovered));
+    let me = |g| shown == Some(g) || hovered == Some(g);
+    view.boxes
+        .get(&id)
+        .into_iter()
+        .flatten()
+        .filter(|&&(_, g)| everyone || me(g))
+        .map(|&(r, g)| (r, app.ppl.label(&view.groups[g]), me(g)))
+        .collect()
+}
+
+/// The person being shown: amber, which stands out on most photos (the
+/// selection blue is close to white on a dark theme).
+const FACE_HIGHLIGHT: Color32 = Color32::from_rgb(255, 190, 40);
+
+/// Faces on a photo drawn at `target` (see [`faces_to_draw`]): the person
+/// being shown outlined in amber, others faintly; with `everyone`, names
+/// under them.
+pub fn face_boxes(
+    app: &ShoeboxApp,
+    painter: &egui::Painter,
+    id: crate::jobs::PhotoId,
+    target: Rect,
+    everyone: bool,
+) {
+    for ([x, y, w, h], name, me) in faces_to_draw(app, id, everyone) {
+        // Detector boxes hug the face; give it a little room.
+        let r = Rect::from_min_size(
+            target.min + vec2(x, y) * target.size(),
+            vec2(w, h) * target.size(),
+        )
+        .expand2(vec2(w, h) * target.size() * 0.12);
+        let (stroke, fill, text) = if me {
+            (
+                Stroke::new(2.0, FACE_HIGHLIGHT),
+                FACE_HIGHLIGHT,
+                Color32::BLACK,
+            )
+        } else {
+            (
+                Stroke::new(1.0, Color32::from_white_alpha(150)),
+                Color32::from_black_alpha(160),
+                Color32::WHITE,
+            )
+        };
+        if me {
+            // A dark edge keeps it visible on light photos.
+            painter.rect_stroke(
+                r,
+                4.0,
+                Stroke::new(3.5, Color32::from_black_alpha(140)),
+                StrokeKind::Outside,
+            );
+        }
+        painter.rect_stroke(r, 4.0, stroke, StrokeKind::Outside);
+        if everyone && r.width() >= 24.0 {
+            let galley = painter.layout_no_wrap(name, egui::FontId::proportional(11.0), text);
+            // Under the face, or inside its box when there's no room below.
+            let size = galley.size() + vec2(8.0, 2.0);
+            let below = r.bottom() + 4.0;
+            let y = if below + size.y <= target.bottom() {
+                below
+            } else {
+                r.bottom() - size.y - 4.0
+            };
+            let tag = Rect::from_min_size(pos2(r.center().x - size.x / 2.0, y), size);
+            painter.rect_filled(tag, 3.0, fill);
+            painter.galley(tag.min + vec2(4.0, 1.0), galley, text);
+        }
+    }
 }
