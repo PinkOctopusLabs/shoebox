@@ -2027,6 +2027,30 @@ fn semantic_search_in_the_app() {
     });
     assert_eq!(h.state().tags_of("blue.jpg"), ["blue"]);
     h.run_steps(3); // the toolbar's height changed with the chip gone
+    // A to Z, not by count: blue (1 photo) above red (2).
+    let things: Vec<(String, usize)> = h.state().things();
+    assert_eq!(
+        things.first().map(|t| t.0.as_str()),
+        Some("red"),
+        "{things:?}"
+    );
+    let y = |h: &Harness<'_, ShoeboxApp>, (name, n): &(String, usize)| {
+        h.get_by_label(&format!("{name}  {n}")).rect().min.y
+    };
+    let mut listed = things.clone();
+    listed.sort_by_key(|t| y(&h, t) as i32);
+    let mut az = things.clone();
+    az.sort_by_key(|t| t.0.to_lowercase());
+    assert_eq!(listed, az);
+    // The heading's button sorts by count instead (remembered), and back.
+    h.get_by_label("Sort Things").click();
+    h.run_steps(2);
+    assert!(h.state().settings().things_by_count);
+    let mut listed = things.clone();
+    listed.sort_by_key(|t| y(&h, t) as i32);
+    assert_eq!(listed, things, "most photos first");
+    h.get_by_label("Sort Things").click();
+    h.run_steps(2);
     h.get_by_label("red  2").click();
     wait_for(&mut h, Duration::from_secs(10), "tagged red", |a| {
         a.shown_count() == 2
@@ -2043,7 +2067,9 @@ fn semantic_search_in_the_app() {
             .is_some_and(|m| m.keywords == ["red"])
     });
     assert!(h.state().tags_of("reddish.jpg").is_empty());
-    assert!(lib.join("reddish.jpg.xmp").exists());
+    wait_for(&mut h, Duration::from_secs(10), "sidecar", |_| {
+        lib.join("reddish.jpg.xmp").exists()
+    });
     h.get_by_label("✖").click();
     wait_for(&mut h, Duration::from_secs(10), "all photos", |a| {
         a.shown_count() == 5

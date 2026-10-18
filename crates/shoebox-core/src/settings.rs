@@ -59,6 +59,9 @@ pub struct Settings {
     /// Don't outline faces on photos (People; the view bar's toggle).
     #[serde(default)]
     pub hide_face_boxes: bool,
+    /// Things listed most photos first (else A to Z).
+    #[serde(default)]
+    pub things_by_count: bool,
 }
 
 /// Default for [`Settings::image_memory_mb`].

@@ -1310,12 +1310,34 @@ fn things_panel(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         return;
     }
     let mut chosen = None;
-    let (open, _) = section(app, ui, "Things", None);
+    // Its button switches the order: A to Z, or most photos first.
+    let by_count = app.settings.things_by_count;
+    let (icon, hint) = if by_count {
+        (icons::SORT_DOWN, "Most photos first: click for A to Z")
+    } else {
+        (icons::ALPHABETICAL, "A to Z: click for most photos first")
+    };
+    let (open, flip) = section_with(app, ui, "Things", Some((icon, "Sort Things", hint, true)));
+    if flip {
+        let mut s = app.settings.clone();
+        s.things_by_count = !by_count;
+        app.save_settings(s);
+    }
     if !open {
         return;
     }
+    // Every tag, or (folded) the eight with the most photos, in that order.
     let all = app.sem.things_all;
-    for &(l, n) in tags.counts.iter().take(if all { usize::MAX } else { 8 }) {
+    let mut listed: Vec<(u16, usize)> = tags
+        .counts
+        .iter()
+        .take(if all { usize::MAX } else { 8 })
+        .copied()
+        .collect();
+    if !app.settings.things_by_count {
+        listed.sort_by_cached_key(|&(l, _)| tags.names[l as usize].to_lowercase());
+    }
+    for (l, n) in listed {
         let name = tags.names[l as usize].as_str();
         let sel = app.sem.tag == Some(l);
         if row(ui, sel, name, Some(n))
@@ -2025,6 +2047,17 @@ fn section(
     title: &'static str,
     add: Option<(&str, bool)>,
 ) -> (bool, bool) {
+    section_with(app, ui, title, add.map(|(hint, on)| ("+", "+", hint, on)))
+}
+
+/// A section heading with a button of its own at the right: (text, name
+/// for VoiceOver, hint, enabled). Returns (open, button clicked).
+fn section_with(
+    app: &mut ShoeboxApp,
+    ui: &mut egui::Ui,
+    title: &'static str,
+    add: Option<(&str, &str, &str, bool)>,
+) -> (bool, bool) {
     let open = !app.collapsed.contains(title);
     let mut added = false;
     ui.add_space(6.0);
@@ -2045,12 +2078,13 @@ fn section(
                 app.collapsed.remove(title);
             }
         }
-        if let Some((hint, enabled)) = add {
+        if let Some((text, name, hint, enabled)) = add {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                added = ui
-                    .add_enabled(enabled, egui::Button::new("+").small().frame(false))
-                    .on_hover_text(hint)
-                    .clicked();
+                let r = ui
+                    .add_enabled(enabled, egui::Button::new(text).small().frame(false))
+                    .on_hover_text(hint);
+                r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, name));
+                added = r.clicked();
             });
         }
     });

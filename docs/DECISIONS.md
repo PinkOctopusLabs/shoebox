@@ -3,6 +3,11 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-18 — Things: A to Z, or by count
+- The Things heading has a sort button: A to Z (the default) or most
+  photos first, remembered in settings. Folded, the list keeps the eight
+  tags with the most photos (A to Z would show only the a's and b's).
+
 ## 2026-10-18 — One undo for files and names; People counts what's shown
 - Names (naming, merging, "Not …", Forget) are undoable. They live in
   `people.json`, not the journal, so the People worker keeps snapshots of
