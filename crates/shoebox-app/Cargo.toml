@@ -24,7 +24,7 @@ eframe.workspace = true
 egui.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-shoebox-decode = { version = "0.1.0", path = "../shoebox-decode" }
+shoebox-decode = { workspace = true }
 rfd = "0.17.2"
 crossbeam-channel = "0.5.17"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
