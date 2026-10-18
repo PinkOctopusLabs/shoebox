@@ -2,7 +2,7 @@
 //! root, naming files with a template.
 //!
 //! Planning reads each source image's metadata and BLAKE3, skips files whose
-//! exact content is already in the library (or earlier in the same import),
+//! exact content is already in the library or earlier in the same import,
 //! and works out every destination: the frame's files (`DSC_0001.NEF`,
 //! `DSC_0001.JPG`) share one `-N` suffix on a collision, and sidecars on the
 //! card come along under the new name. The copies then run as one batch
@@ -62,6 +62,9 @@ pub struct Plan {
     pub copies: Vec<PlannedCopy>,
     /// Source files already in the library: (source, the library file).
     pub skipped: Vec<(PathBuf, PathBuf)>,
+    /// Source files with the same content as another source file that's
+    /// copied: (source, the source file copied instead).
+    pub repeats: Vec<(PathBuf, PathBuf)>,
     /// Source files that couldn't be read: (source, why).
     pub unreadable: Vec<(PathBuf, String)>,
     /// Imported images without a capture date (they go to `_undated/`).
@@ -335,7 +338,7 @@ pub fn plan(
             }
             out.skipped.push((s.path, existing.clone()));
         } else if let Some(existing) = seen.get(&s.hash) {
-            out.skipped.push((s.path, existing.clone()));
+            out.repeats.push((s.path, existing.clone()));
         } else {
             seen.insert(s.hash, s.path.clone());
             keep.push(s);

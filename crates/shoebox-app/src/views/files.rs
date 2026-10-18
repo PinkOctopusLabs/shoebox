@@ -193,6 +193,12 @@ pub fn import(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 plural(plan.skipped.len(), "file")
             ));
         }
+        if !plan.repeats.is_empty() {
+            ui.label(format!(
+                "· {} repeated in the source",
+                plural(plan.repeats.len(), "file")
+            ));
+        }
         if plan.undated > 0 {
             ui.label(format!(
                 "· {} without a capture date (to _undated)",
@@ -254,6 +260,19 @@ pub fn import(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                     .collect();
                 table(ui, "import-skipped", &rows, 200.0);
             });
+    }
+    if !plan.repeats.is_empty() {
+        egui::CollapsingHeader::new(format!(
+            "Repeated in the source, copied once ({})",
+            plan.repeats.len()
+        ))
+        .show(ui, |ui| {
+            let rel =
+                |p: &std::path::PathBuf| p.strip_prefix(&source).unwrap_or(p).display().to_string();
+            let rows: Vec<(String, String)> =
+                plan.repeats.iter().map(|(s, e)| (rel(s), rel(e))).collect();
+            table(ui, "import-repeats", &rows, 200.0);
+        });
     }
     for (p, e) in &plan.unreadable {
         ui.colored_label(ui.visuals().warn_fg_color, format!("{}: {e}", p.display()));

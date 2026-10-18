@@ -294,6 +294,13 @@ fn import_cmd(
             e.display()
         );
     }
+    for (s, e) in &plan.repeats {
+        println!(
+            "skip {} (the same as {}, copied once)",
+            s.display(),
+            e.display()
+        );
+    }
     for (s, e) in &plan.unreadable {
         println!("unreadable {}: {e}", s.display());
     }
@@ -303,9 +310,10 @@ fn import_cmd(
         }
     }
     println!(
-        "\n{} to copy, {} already in the library, {} without a capture date (to _undated/).",
+        "\n{} to copy, {} already in the library, {} repeated in the source, {} without a capture date (to _undated/).",
         plan.copies.len(),
         plan.skipped.len(),
+        plan.repeats.len(),
         plan.undated
     );
     if folder_events {

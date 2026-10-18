@@ -159,16 +159,23 @@ fn import_names_skips_and_undo() {
         .collect();
     assert_eq!(
         skipped,
-        vec![
-            (
-                "DCIM/100NIKON/DSC_0004.JPG".to_owned(),
-                "known.jpg".to_owned()
-            ),
-            (
-                "DCIM/100NIKON/DSC_0005.JPG".to_owned(),
-                "DSC_0003.JPG".to_owned()
-            ),
-        ]
+        vec![(
+            "DCIM/100NIKON/DSC_0004.JPG".to_owned(),
+            "known.jpg".to_owned()
+        ),]
+    );
+    // A repeat on the card isn't in the library: it's listed apart.
+    let repeats: Vec<(&Path, &Path)> = plan
+        .repeats
+        .iter()
+        .map(|(s, e)| (s.strip_prefix(&src).unwrap(), e.strip_prefix(&src).unwrap()))
+        .collect();
+    assert_eq!(
+        repeats,
+        vec![(
+            Path::new("DCIM/100NIKON/DSC_0005.JPG"),
+            Path::new("DCIM/100NIKON/DSC_0003.JPG")
+        )]
     );
     assert_eq!(plan.undated, 1);
 
