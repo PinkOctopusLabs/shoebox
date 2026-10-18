@@ -69,6 +69,9 @@ pub struct Job {
     pub target: shoebox_decode::Target,
     /// In the cloud only and not to be downloaded: cached thumbnails only.
     pub cloud: bool,
+    /// Keep thumbnails in the on-disk cache (not for import previews,
+    /// whose sources aren't in the library).
+    pub keep: bool,
 }
 
 /// A load's error for a cloud-only photo with no cached thumbnail.
@@ -213,6 +216,18 @@ fn worker(q: &Queue, tx: &Sender<Loaded>, thumbs: &ThumbCache, repaint: &(dyn Fn
                 Size::Full => None,
             }
             .ok_or_else(|| IN_CLOUD.to_owned()),
+            Size::Small | Size::Large if !job.keep => shoebox_decode::render_path(
+                job.format,
+                &job.path,
+                Some(if key.size == Size::Small {
+                    thumbs::SMALL
+                } else {
+                    thumbs::LARGE
+                }),
+                job.orientation,
+                job.target,
+            )
+            .map_err(|e| format!("{}: {e}", job.path.display())),
             Size::Small => thumbs.get(&src, thumbs::SMALL).map_err(|e| e.to_string()),
             Size::Large => thumbs.get(&src, thumbs::LARGE).map_err(|e| e.to_string()),
             Size::Full => shoebox_decode::render_path(
@@ -225,7 +240,7 @@ fn worker(q: &Queue, tx: &Sender<Loaded>, thumbs: &ThumbCache, repaint: &(dyn Fn
             .map_err(|e| format!("{}: {e}", job.path.display())),
         };
         let histogram = match (&result, key.size) {
-            (Ok(img), Size::Small) => Some(Box::new(img.histogram())),
+            (Ok(img), Size::Small) if job.keep => Some(Box::new(img.histogram())),
             _ => None,
         };
         let _ = tx.send(Loaded {

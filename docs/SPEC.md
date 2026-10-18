@@ -125,7 +125,7 @@ Culling marks go into XMP; file changes always move whole stacks, sidecars inclu
 - Fallbacks: no sub-seconds → leave them out of the name; no capture date → `_undated/{width}x{height}/{original name}`.
 - Verify every copy by BLAKE3 before reporting it imported.
 - Skip files whose exact hash is already in the library, and list them. A file repeated within the source is copied once; the repeats are listed apart ("repeated in the source"), not as already in the library.
-- Show a dry-run table (source → destination) before anything runs.
+- Show a dry-run table (source → destination) before anything runs, or the photos to copy as thumbnails (the default; source and new name on hover). Previews are rendered from the source and not kept in the thumbnail cache.
 - **Folder names.** The source's folders are listed with what each name becomes on the photos in it: an **event** (nested as the folders are: `Italy 2019/Rome` → Italy 2019 › Rome, joining an existing event of that name), a **keyword**, or **nothing**. Names that say nothing start as nothing: dates (`2019`, `2019-07-14`, `July 2019`), camera folders (`100NIKON`, `DCIM`) and generic names (`Photos`, `iCloud Photos`); others start as events. Each name can be edited. A picture found in two folders gets both; one the library already has gets them too (in its sidecar, unless it's in a reference root). The names go into the copies' own sidecars (made from the source's sidecar, if any) and `events.json`, in the import's batch: undo moves those sidecars to the Trash with the copies. The source is never written.
 
 **Batch rename** uses the same template engine and dry-run table, inside or across folders.

@@ -99,6 +99,9 @@ pub struct ImportState {
     pub plan: Option<Result<Arc<shoebox_core::import::Plan>, String>>,
     /// The plan's folders, with what each name becomes (edited here).
     pub folders: Vec<shoebox_core::import::Folder>,
+    /// Show the photos to copy as a source → destination list, not
+    /// thumbnails.
+    pub list: bool,
     pub message: Option<String>,
 }
 
@@ -2354,6 +2357,23 @@ impl ShoeboxApp {
         }
     }
 
+    /// How many of the import plan's photos have their previews loaded
+    /// (tests).
+    pub fn import_previews(&self) -> usize {
+        let Some(Ok(plan)) = &self.import.plan else {
+            return 0;
+        };
+        plan.photos
+            .iter()
+            .filter(|p| {
+                self.textures.contains(&Key {
+                    photo: crate::jobs::photo_id(&p.src),
+                    size: Size::Small,
+                })
+            })
+            .count()
+    }
+
     /// Is this photo in the cloud only, and has its metadata been read
     /// (tests)?
     pub fn cloud_state(&self, file_name: &str) -> Option<(bool, bool)> {
@@ -2703,6 +2723,33 @@ impl ShoeboxApp {
                 orientation: p.meta.orientation(),
                 target: self.target,
                 cloud: p.cloud && !open,
+                keep: true,
+            },
+        ));
+    }
+
+    /// Ask for a preview of a photo an import will copy (not cached on
+    /// disk: the source isn't in the library).
+    pub(crate) fn want_preview(&mut self, p: &shoebox_core::import::PlannedPhoto) {
+        let key = Key {
+            photo: crate::jobs::photo_id(&p.src),
+            size: Size::Small,
+        };
+        if self.textures.contains(&key) || self.textures.failed.contains_key(&key) {
+            return;
+        }
+        self.wanted.push((
+            key,
+            Priority::Visible,
+            Job {
+                path: p.src.clone(),
+                format: p.format,
+                size: p.size,
+                mtime_ns: p.mtime_ns,
+                orientation: p.orientation,
+                target: self.target,
+                cloud: false,
+                keep: false,
             },
         ));
     }

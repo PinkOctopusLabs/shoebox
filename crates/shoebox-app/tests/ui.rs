@@ -1658,11 +1658,33 @@ fn import_folder_names() {
             ("Trips/Italy 2019/Rome".to_owned(), Event),
         ]
     );
+    // Each photo to copy shows as a thumbnail, rendered from the source
+    // but not kept in the thumbnail cache.
+    wait_for(&mut h, Duration::from_secs(30), "previews", |a| {
+        a.import_previews() == 4
+    });
+    assert!(h.query_by_label("Trips/Italy 2019/Rome/b.jpg").is_some());
+    fn cached(d: &Path) -> usize {
+        std::fs::read_dir(d).map_or(0, |rd| {
+            rd.filter_map(Result::ok)
+                .map(|e| match e.file_type() {
+                    Ok(t) if t.is_dir() => cached(&e.path()),
+                    _ => 1,
+                })
+                .sum()
+        })
+    }
+    let thumbs = cached(&base.join("cache/thumbs"));
     h.get_by_label("Trips: Nothing").click();
     h.get_by_label("Saved: Keyword").click();
     h.run_steps(2);
     assert!(h.query_by_label("Event Italy 2019 › Rome").is_some());
     snapshot(&mut h, "import-folder-names");
+    assert_eq!(
+        cached(&base.join("cache/thumbs")),
+        thumbs,
+        "no previews cached"
+    );
     h.get_by_label("Import 4 files").click();
     wait_for(&mut h, Duration::from_secs(30), "import", |a| {
         a.import_message().is_some()

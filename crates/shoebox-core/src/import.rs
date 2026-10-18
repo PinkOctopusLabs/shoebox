@@ -72,11 +72,25 @@ pub struct Plan {
     /// Source images that were in the cloud only (planning reads every
     /// file, which downloaded them).
     pub downloaded: usize,
+    /// Each photo to copy, in the order of `copies` (for previews).
+    pub photos: Vec<PlannedPhoto>,
     /// Folders under the source with photos in them, parents first.
     pub folders: Vec<Folder>,
     /// Each photo to copy (by its new path), and each library photo the
     /// source has again, with the source folders it was found in.
     pub origins: Vec<(PathBuf, BTreeSet<PathBuf>)>,
+}
+
+/// A photo an import will copy: enough to preview it without reading the
+/// source again.
+#[derive(Debug, Clone)]
+pub struct PlannedPhoto {
+    pub src: PathBuf,
+    pub dst: PathBuf,
+    pub format: Format,
+    pub size: u64,
+    pub mtime_ns: i64,
+    pub orientation: u16,
 }
 
 /// Month names (and their short forms) that make a folder name a date.
@@ -196,6 +210,9 @@ struct Source {
     path: PathBuf,
     fields: Fields,
     size: u64,
+    mtime_ns: i64,
+    format: Format,
+    orientation: u16,
     hash: [u8; 32],
 }
 
@@ -245,7 +262,7 @@ pub fn plan(
         .map(|p| {
             let r = (|| {
                 let format = Format::from_path(p).ok_or("not an image")?;
-                let size = std::fs::metadata(p).map_err(|e| e.to_string())?.len();
+                let md = std::fs::metadata(p).map_err(|e| e.to_string())?;
                 let meta = crate::meta::read(p, format).map_err(|e| e.to_string())?;
                 let hash = hash_file(p).map_err(|e| e.to_string())?;
                 Ok::<_, String>(Source {
@@ -262,7 +279,10 @@ pub fn plan(
                         height: meta.height,
                         seq: 0,
                     },
-                    size,
+                    size: md.len(),
+                    mtime_ns: crate::scan::mtime_of(&md),
+                    format,
+                    orientation: meta.orientation(),
                     hash,
                 })
             })();
@@ -420,6 +440,14 @@ pub fn plan(
                 src: s.path.clone(),
                 dst: dst.clone(),
                 hash: s.hash,
+            });
+            out.photos.push(PlannedPhoto {
+                src: s.path.clone(),
+                dst: dst.clone(),
+                format: s.format,
+                size: s.size,
+                mtime_ns: s.mtime_ns,
+                orientation: s.orientation,
             });
             // `DSC_0001.NEF.xmp` → `<new name>.nef.xmp`.
             let mut name = s.path.file_name().unwrap_or_default().to_os_string();

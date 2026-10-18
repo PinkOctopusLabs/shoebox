@@ -66,6 +66,84 @@ fn table(ui: &mut egui::Ui, id: &str, rows: &[(String, String)], height: f32) {
         });
 }
 
+/// The photos an import will copy, as thumbnails (each with its source and
+/// new name on hover).
+fn previews(
+    app: &mut ShoeboxApp,
+    ui: &mut egui::Ui,
+    photos: &[shoebox_core::import::PlannedPhoto],
+    source: &Path,
+) {
+    const CELL: f32 = 112.0;
+    const GAP: f32 = 4.0;
+    let cols = (((ui.available_width() + GAP) / (CELL + GAP)).floor() as usize).max(1);
+    let rows = photos.len().div_ceil(cols);
+    egui::ScrollArea::vertical()
+        .id_salt("import-previews")
+        .max_height(ui.available_height() * 0.7)
+        .auto_shrink([false, true])
+        .show_rows(ui, CELL + GAP, rows, |ui, range| {
+            for row in range {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = GAP;
+                    for p in photos.iter().skip(row * cols).take(cols) {
+                        preview_cell(app, ui, p, source, CELL);
+                    }
+                });
+                ui.add_space(GAP);
+            }
+        });
+}
+
+fn preview_cell(
+    app: &mut ShoeboxApp,
+    ui: &mut egui::Ui,
+    p: &shoebox_core::import::PlannedPhoto,
+    source: &Path,
+    cell: f32,
+) {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(cell, cell), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 3.0, ui.visuals().faint_bg_color);
+    app.want_preview(p);
+    let id = crate::jobs::photo_id(&p.src);
+    match app.textures.best(id, crate::jobs::Size::Small) {
+        Some(t) => {
+            let [w, h] = t.size();
+            painter.image(
+                t.id(),
+                super::fit(rect.shrink(3.0), w as f32 / h as f32),
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+        None => {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                p.format.label(),
+                egui::FontId::proportional(11.0),
+                ui.visuals().weak_text_color(),
+            );
+        }
+    }
+    let src = p
+        .src
+        .strip_prefix(source)
+        .unwrap_or(&p.src)
+        .display()
+        .to_string();
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Image, true, &src));
+    resp.on_hover_ui(|ui| {
+        ui.label(RichText::new(&src).monospace().small());
+        ui.label(
+            RichText::new(format!("▶ {}", short(app, &p.dst)))
+                .monospace()
+                .small(),
+        );
+    });
+}
+
 /// Tasks → Import.
 pub fn import(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     ui.heading("Import");
@@ -230,21 +308,29 @@ pub fn import(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     });
     folder_names(app, ui);
     let source = app.import.source.clone().unwrap_or_default();
-    let rows: Vec<(String, String)> = plan
-        .copies
-        .iter()
-        .map(|c| {
-            (
-                c.src
-                    .strip_prefix(&source)
-                    .unwrap_or(&c.src)
-                    .display()
-                    .to_string(),
-                short(app, &c.dst),
-            )
-        })
-        .collect();
-    table(ui, "import-table", &rows, ui.available_height() * 0.7);
+    ui.horizontal(|ui| {
+        ui.selectable_value(&mut app.import.list, false, "Thumbnails");
+        ui.selectable_value(&mut app.import.list, true, "List");
+    });
+    if app.import.list {
+        let rows: Vec<(String, String)> = plan
+            .copies
+            .iter()
+            .map(|c| {
+                (
+                    c.src
+                        .strip_prefix(&source)
+                        .unwrap_or(&c.src)
+                        .display()
+                        .to_string(),
+                    short(app, &c.dst),
+                )
+            })
+            .collect();
+        table(ui, "import-table", &rows, ui.available_height() * 0.7);
+    } else {
+        previews(app, ui, &plan.photos, &source);
+    }
     if !plan.skipped.is_empty() {
         egui::CollapsingHeader::new(format!("Already in the library ({})", plan.skipped.len()))
             .show(ui, |ui| {
