@@ -903,6 +903,39 @@ fn events_from_selection_and_undo() {
     let m = read(&nef_side);
     assert_eq!((m.event, m.keywords.len()), (None, 0));
     assert!(h.state().event_names().is_empty());
+
+    // Membership is marked on each photo, not taken from dates or folders:
+    // two events from photos taken a second apart in the same folder.
+    let new_event = |h: &mut Harness<'_, ShoeboxApp>, photo: &str, name: &str| {
+        h.get_by_label(photo).click();
+        h.run_steps(2);
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::E);
+        h.run_steps(3);
+        h.event(egui::Event::Text(name.into()));
+        h.run_steps(1);
+        h.key_press(egui::Key::Enter);
+        wait_for(h, Duration::from_secs(10), name, |a| {
+            a.event_count(name) == 1
+        });
+    };
+    new_event(&mut h, "f0001.jpg", "Wedding");
+    new_event(&mut h, "f0010.jpg", "Party");
+    assert_eq!(h.state().event_count("Wedding"), 1, "Party took nothing");
+    let burst = lib.join("scan/recovered/f0010.jpg.xmp");
+    assert_eq!(read(&burst).keywords, vec!["Events|Party"]);
+
+    // Taken out again from the photo menu.
+    h.get_by_label("f0010.jpg").click_secondary();
+    h.run_steps(3);
+    h.get_by_label("Remove from Event").click();
+    h.run_steps(3);
+    h.get_by_label("Party").click();
+    wait_for(&mut h, Duration::from_secs(10), "removed", |a| {
+        a.event_count("Party") == 0
+    });
+    settle(&mut h, Duration::from_secs(30));
+    assert_eq!((read(&burst).event, read(&burst).keywords.len()), (None, 0));
+    assert_eq!(h.state().event_count("Wedding"), 1);
 }
 
 /// Step until `cond` holds (or fail after `timeout`).

@@ -242,10 +242,12 @@ pub enum LibraryCommand {
         updates: Vec<(PathBuf, Marks)>,
         label: String,
     },
-    /// Replace the events: writes `.shoebox/events.json` in every writable
-    /// root and the affected sidecars, as one undoable batch.
+    /// Replace the events and, optionally, add photos to one or take them
+    /// out: writes `.shoebox/events.json` in every writable root and the
+    /// affected sidecars (where membership lives), as one undoable batch.
     SaveEvents {
         events: Vec<Event>,
+        change: Option<events::EventChange>,
         label: String,
     },
     Undo,
@@ -748,15 +750,26 @@ fn library_worker(
                 }
                 (false, false)
             }
-            LibraryCommand::SaveEvents { events: new, label } => {
+            LibraryCommand::SaveEvents {
+                events: new,
+                change,
+                label,
+            } => {
                 let writable: Vec<PathBuf> = settings
                     .roots
                     .iter()
                     .filter(|r| !r.reference)
                     .map(|r| r.path.clone())
                     .collect();
-                let updates =
-                    events::mark_updates(&catalog, &new, settings.marks_to_all_stack_members);
+                let all: Vec<PathBuf> = settings.roots.iter().map(|r| r.path.clone()).collect();
+                let old = events::load(&all);
+                let updates = events::mark_updates(
+                    &catalog,
+                    &old,
+                    &new,
+                    change.as_ref(),
+                    settings.marks_to_all_stack_members,
+                );
                 let result = events::plan_save(&writable, &new).and_then(|files| {
                     catalog.set_marks(
                         &updates,

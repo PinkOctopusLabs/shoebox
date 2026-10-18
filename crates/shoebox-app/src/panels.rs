@@ -889,7 +889,7 @@ fn events_panel(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         ui,
         "Events",
         Some((
-            "New event from the selection (⌘E), or type a date range",
+            "New event from the selected photos (⌘E)",
             app.event_edit.is_none(),
         )),
     );
@@ -903,23 +903,28 @@ fn events_panel(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     let events = app.events.clone();
     let ids: std::collections::HashSet<&str> = events.iter().map(|e| e.id.as_str()).collect();
     // Top-level events (no parent, or a parent that no longer exists), by year.
-    let mut years: std::collections::BTreeMap<String, Vec<&shoebox_core::events::Event>> =
+    // (by when their photos were taken).
+    let mut years: std::collections::BTreeMap<String, Vec<(String, &shoebox_core::events::Event)>> =
         Default::default();
     for e in events
         .iter()
         .filter(|e| e.parent.as_deref().is_none_or(|p| !ids.contains(p)))
     {
+        let key = app.event_key(e);
         years
-            .entry(e.start.get(..4).unwrap_or("Undated").to_owned())
+            .entry(key.get(..4).unwrap_or("Undated").to_owned())
             .or_default()
-            .push(e);
+            .push((key, e));
+    }
+    for list in years.values_mut() {
+        list.sort_by(|a, b| (&a.0, &a.1.name).cmp(&(&b.0, &b.1.name)));
     }
     for (year, list) in years.iter().rev() {
         egui::CollapsingHeader::new(year)
             .id_salt(("event-year", year))
             .default_open(true)
             .show(ui, |ui| {
-                for e in list {
+                for (_, e) in list {
                     event_node(app, ui, e, &events);
                 }
             });
@@ -943,8 +948,14 @@ fn event_editor(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         if ed.name.is_empty() && !name.has_focus() {
             name.request_focus();
         }
-        ui.add(egui::TextEdit::singleline(&mut ed.start).hint_text("Start YYYY-MM-DD [HH:MM]"));
-        ui.add(egui::TextEdit::singleline(&mut ed.end).hint_text("End YYYY-MM-DD [HH:MM]"));
+        let n = ed.photos.len();
+        if ed.id.is_none() {
+            ui.weak(match n {
+                0 => "No photos yet: drop some on it later".to_owned(),
+                1 => "With the selected photo".to_owned(),
+                n => format!("With the {n} selected photos"),
+            });
+        }
         if let Some(err) = &ed.error {
             ui.colored_label(ui.visuals().warn_fg_color, err);
         }
@@ -974,10 +985,11 @@ fn event_node(
     let state =
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
     let header = state.show_header(ui, |ui| {
-        let r = row(ui, selected, e.name.as_str(), Some(members.len())).on_hover_text(format!(
-            "{} to {}\nDrop photos here to add them",
-            e.start, e.end
-        ));
+        let dates = app
+            .event_dates(&e.id)
+            .map_or_else(String::new, |d| format!("{d}\n"));
+        let r = row(ui, selected, e.name.as_str(), Some(members.len()))
+            .on_hover_text(format!("{dates}Drop photos here to add them"));
         if r.clicked() {
             app.select_event(if selected { None } else { Some(e.id.clone()) });
         }
@@ -1002,7 +1014,7 @@ fn event_node(
             app.event_include(&e.id, &stacks, true);
         }
         r.context_menu(|ui| {
-            if ui.button("Edit…").clicked() {
+            if ui.button("Rename…").clicked() {
                 app.edit_event(&e.id);
                 ui.close();
             }
@@ -1010,7 +1022,7 @@ fn event_node(
                 app.event_include_selection(&e.id, true);
                 ui.close();
             }
-            if ui.button("Exclude selected photos").clicked() {
+            if ui.button("Remove selected photos").clicked() {
                 app.event_include_selection(&e.id, false);
                 ui.close();
             }
@@ -1018,7 +1030,11 @@ fn event_node(
                 app.new_event_from_selection(Some(e.id.clone()));
                 ui.close();
             }
-            if ui.button("Delete event (photos untouched)").clicked() {
+            if ui
+                .button("Delete event")
+                .on_hover_text("The photos stay where they are; only the event goes")
+                .clicked()
+            {
                 app.delete_event(&e.id);
                 ui.close();
             }
@@ -2091,6 +2107,7 @@ pub(crate) fn add_to_event_menu(
             fn walk<'a>(
                 parent: Option<&str>,
                 all: &'a [shoebox_core::events::Event],
+                key: &dyn Fn(&shoebox_core::events::Event) -> String,
                 out: &mut Vec<&'a shoebox_core::events::Event>,
             ) {
                 let ids: std::collections::HashSet<&str> =
@@ -2102,15 +2119,16 @@ pub(crate) fn add_to_event_menu(
                         None => e.parent.as_deref().is_none_or(|p| !ids.contains(p)),
                     })
                     .collect();
-                kids.sort_by(|a, b| b.start.cmp(&a.start));
+                kids.sort_by_cached_key(|e| std::cmp::Reverse(key(e)));
                 for k in kids {
                     out.push(k);
                     if out.len() < all.len() {
-                        walk(Some(&k.id), all, out);
+                        walk(Some(&k.id), all, key, out);
                     }
                 }
             }
-            walk(None, &events, &mut order);
+            let key = |e: &shoebox_core::events::Event| app.event_key(e);
+            walk(None, &events, &key, &mut order);
             for e in order {
                 let indent = "    ".repeat(level(e, &events));
                 if ui.button(format!("{indent}{}", e.name)).clicked() {
@@ -2125,5 +2143,42 @@ pub(crate) fn add_to_event_menu(
     if let Some(id) = chosen {
         let stacks = stacks(app);
         app.event_include(&id, &stacks, true);
+    }
+}
+
+/// "Remove from Event" with the events the selected photos are in (shown
+/// only when they're in one).
+pub(crate) fn remove_from_event_menu(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    let stacks = app.selected_stacks();
+    let mut events: Vec<(String, String)> = app
+        .events
+        .iter()
+        .filter(|e| {
+            app.event_members
+                .get(&e.id)
+                .is_some_and(|m| stacks.iter().any(|s| m.contains(s)))
+        })
+        .map(|e| {
+            (
+                shoebox_core::events::path_of(&app.events, &e.id).replace('|', " › "),
+                e.id.clone(),
+            )
+        })
+        .collect();
+    if events.is_empty() {
+        return;
+    }
+    events.sort();
+    let mut chosen = None;
+    ui.menu_button("Remove from Event", |ui| {
+        for (name, id) in &events {
+            if ui.button(name).clicked() {
+                chosen = Some(id.clone());
+                ui.close();
+            }
+        }
+    });
+    if let Some(id) = chosen {
+        app.event_include(&id, &stacks, false);
     }
 }

@@ -48,7 +48,7 @@ Everything in the app is one of these eight things, and all of them except colle
 | Variant | A stack member with different pixels from the primary, such as a Lightroom virtual-copy export (`-2`). Shown when the stack is expanded. |
 | Sidecar | `<filename>.<ext>.xmp` next to a file, holding ratings, flags, labels and keywords. |
 | Collection | A named virtual set of stacks. No files move. Stored in the cache and mirrored to `<root>/.shoebox/collections.json`, so collections survive a cache rebuild. |
-| Event | A named span of time, such as Japan Trip, that groups the dated folders it covers without moving any files. Defined by a start and end date-time, plus stacks added or excluded by hand. Events can nest (Japan Trip › Kyoto) and overlap. Written to each member's sidecar, and mirrored to \<root>/.shoebox/events.json so events survive a cache rebuild. |
+| Event | A named group of photos, such as Japan Trip, made without moving any files. Membership is marked on each photo (in its sidecar), never taken from dates or folders, so two events can share a day. Events can nest (Japan Trip › Kyoto) and overlap. The events themselves (names, nesting) are mirrored to \<root>/.shoebox/events.json so they survive a cache rebuild. |
 | Smart filter | A saved query, such as rating ≥ 3, flag = pick, a date range, a camera, "NEF missing", or "undated". |
 
 Ratings, flags and labels set on a stack are written to the primary's sidecar. A setting copies them to every member's sidecar instead, so tools that look at the JPEG or TIFF also see them.
@@ -107,10 +107,9 @@ Culling marks go into XMP; file changes always move whole stacks, sidecars inclu
 
 **Events**
 
-- The dated folders stay as they are; an event names a span of them. In the left panel, each event sits under its year and expands to its day folders, so Japan Trip shows as one group.
-- Create an event by selecting days or stacks and choosing New Event (Cmd+E), by typing a date range, or during import.
-- Membership is the date-time range plus manual additions and exclusions, so an event can also be part of a day, such as a wedding afternoon.
-- Written to sidecars as `Iptc4xmpExt:Event` and as a keyword under `Events|<name>`, so digiKam can show and search it.
+- An event is the photos marked with it; folders and dates have no bearing on it, so two events can share a day (a wedding and the party after it). In the left panel, each event sits under the year of its photos and expands to the folders they're in, for browsing only.
+- Create an event from the selected photos (Cmd+E) or empty, then add photos from the photo menu (Add to Event), a folder's menu, or by dropping them on it; Remove from Event takes them out. A sub-event's photos are in its parent too.
+- Written to sidecars as `Iptc4xmpExt:Event` (the innermost event) and as a keyword under `Events|<name>` (`Events|Japan Trip|Kyoto`), so digiKam can show and search it; that keyword is the membership.
 - Optional, off by default: rename the day folders to carry the event (`2026-04-24 Japan Trip`), as one journaled, undoable batch.
 
 **File operations**
@@ -230,7 +229,7 @@ Only the core touches the library on disk; both caches can be deleted and rebuil
 | `marks` | file\_id, rating, pick, label, keywords, sidecar\_mtime |
 | `phash` | file\_id, dhash, phash |
 | `collections`, `collection_items` | collection\_id, stack\_id |
-| events, event\_members | event\_id, name, parent\_id, start, end; event\_id, stack\_id, included (manual add or exclude) |
+| events | event\_id, name, parent\_id (membership is read from each photo's sidecar keywords) |
 | `journal` | id, batch\_id, ts, op, src, dst, undone |
 | `dupe_ignores` | hash\_a, hash\_b |
 

@@ -168,8 +168,8 @@ pub fn plan_rename(c: &Catalog, stacks: &[usize], template: &Template) -> Result
     Ok(out)
 }
 
-/// After moves, the app's own files that name moved files (events,
-/// collections, stack links) rewritten for every writable root. Empty when
+/// After moves, the app's own files that name moved files (collections,
+/// stack links) rewritten for every writable root. Empty when
 /// nothing refers to a moved file. Join these to the move batch.
 pub fn reference_writes(
     all_roots: &[PathBuf],
@@ -189,17 +189,9 @@ pub fn reference_writes(
             None => false,
         }
     };
+    // Events need nothing: their members are marked in sidecars, which move
+    // with their files.
     let mut out = Vec::new();
-    let mut events = crate::events::load(all_roots);
-    let mut changed = false;
-    for e in &mut events {
-        for p in e.include.iter_mut().chain(e.exclude.iter_mut()) {
-            changed |= fix(p);
-        }
-    }
-    if changed {
-        out.extend(crate::events::plan_save(writable_roots, &events)?);
-    }
     let mut cols = crate::collections::load(all_roots);
     let mut changed = false;
     for col in &mut cols {

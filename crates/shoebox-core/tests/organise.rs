@@ -34,18 +34,15 @@ fn rename_move_reject_and_undo() {
     let nef = find(&c, "2026/2026-04-24/DSC_0001.NEF");
     let s = c.stack_of[nef];
 
-    // An event names the NEF by path (added by hand).
-    let ev = shoebox_core::events::Event {
-        id: "e1".into(),
-        name: "Trip".into(),
-        parent: None,
-        start: "2000-01-01 00:00:00".into(),
-        end: "2000-01-01 00:00:00".into(),
-        include: vec![c.photos[nef].path.clone()],
-        exclude: vec![],
+    // A collection names the NEF by path.
+    let col = shoebox_core::collections::Collection {
+        id: "c1".into(),
+        name: "Best".into(),
+        members: vec![c.photos[nef].path.clone()],
         updated: 1,
     };
-    for (p, b) in shoebox_core::events::plan_save(std::slice::from_ref(&root), &[ev]).unwrap() {
+    for (p, b) in shoebox_core::collections::plan_save(std::slice::from_ref(&root), &[col]).unwrap()
+    {
         put(&p, &b);
     }
 
@@ -86,11 +83,15 @@ fn rename_move_reject_and_undo() {
     let fo = FileOps::new(Journal::open(&base.join("j.sqlite")).unwrap(), vec![]);
     let all = vec![root.clone()];
     let refs = shoebox_core::organise::reference_writes(&all, &all, &r.plan.moves).unwrap();
-    assert_eq!(refs.len(), 1, "events.json is rewritten in the same batch");
-    let batch = fo.execute_with_writes("rename", &r.plan, refs).unwrap();
-    let ev = shoebox_core::events::load(std::slice::from_ref(&root));
     assert_eq!(
-        ev[0].include,
+        refs.len(),
+        1,
+        "collections.json is rewritten in the same batch"
+    );
+    let batch = fo.execute_with_writes("rename", &r.plan, refs).unwrap();
+    let cols = shoebox_core::collections::load(std::slice::from_ref(&root));
+    assert_eq!(
+        cols[0].members,
         vec![root.join(format!("{d}/20260424-140311-42.nef"))]
     );
 
@@ -115,8 +116,11 @@ fn rename_move_reject_and_undo() {
     fo.undo(batch).unwrap();
     assert!(root.join(format!("{d}/DSC_0001.NEF")).exists());
     assert!(root.join(format!("{d}/DSC_0001.xmp")).exists());
-    let ev = shoebox_core::events::load(std::slice::from_ref(&root));
-    assert_eq!(ev[0].include, vec![root.join(format!("{d}/DSC_0001.NEF"))]);
+    let cols = shoebox_core::collections::load(std::slice::from_ref(&root));
+    assert_eq!(
+        cols[0].members,
+        vec![root.join(format!("{d}/DSC_0001.NEF"))]
+    );
 
     // Reference roots are refused up front.
     let ref_roots = vec![Root::new(&root, Role::Reference).unwrap()];

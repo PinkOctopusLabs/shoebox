@@ -3,6 +3,22 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-18 — Events are marked on photos, not date ranges
+- Changed at the user's request (SPEC updated): an event is the photos
+  marked with it. A date range took in other photos from the same days and
+  folders, and couldn't hold two events in one day.
+- The membership is the sidecar keyword `Events|Japan Trip|Kyoto` (with
+  `Iptc4xmpExt:Event`), which Shoebox already wrote for every member, so
+  existing events keep their photos; version-1 fields (start, end, include,
+  exclude) in `events.json` are ignored. A sub-event's photos count for its
+  parent. Renaming, nesting or deleting an event rewrites its members'
+  sidecars in the same batch; leaving an event leaves its sub-events too.
+- Sidecars move with their files, so moves and renames need no rewrite of
+  `events.json` (collections still do).
+- No more typed date ranges: an event's dates (the panel's year, hover
+  text, order) come from its photos; one without dated photos sorts by when
+  it was made.
+
 ## 2026-10-18 — Top bar and icon view bar (after Lightcraft)
 - **Top bar** across the window: library-panel toggle, Undo, Redo at the
   left; search centred (up to 560 pt) with the Content switch inside it and

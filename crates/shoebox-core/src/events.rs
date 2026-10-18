@@ -1,15 +1,20 @@
-//! Events: a named span of time (Japan Trip, a wedding afternoon) that
-//! groups the photos it covers without moving any files.
+//! Events: a named group of photos (Japan Trip, a wedding afternoon)
+//! that moves no files.
 //!
-//! Membership is the start–end range of capture times, plus stacks added or
-//! excluded by hand. Events can nest (Japan Trip › Kyoto) and overlap. Each
-//! member's sidecar gets `Iptc4xmpExt:Event` (the innermost event's name) and
-//! a keyword per event under `Events|…` (`Events|Japan Trip|Kyoto`), so
-//! digiKam can show and search them. Events are mirrored to
+//! Membership is marked on each photo, not worked out from dates or
+//! folders, so two events can share a day: a member's sidecar has a keyword
+//! `Events|Japan Trip` (`Events|Japan Trip|Kyoto` for a sub-event, which
+//! makes it a member of both) and `Iptc4xmpExt:Event` with the innermost
+//! event's name, so digiKam can show and search them. Events can nest and
+//! overlap. The events themselves (names, nesting) are mirrored to
 //! `<root>/.shoebox/events.json` in every writable root and merged on load
 //! (newest edit of each event wins), so they survive a cache rebuild.
+//!
+//! Events files from before (version 1) also held a date range and paths
+//! added or excluded by hand; those fields are ignored. Saving an event
+//! always wrote its members' keywords, so they stay members.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -26,17 +31,18 @@ pub struct Event {
     pub name: String,
     #[serde(default)]
     pub parent: Option<String>,
-    /// Inclusive range, `YYYY-MM-DD HH:MM:SS` (camera local time).
-    pub start: String,
-    pub end: String,
-    /// Stacks added or excluded by hand, by their primary's absolute path.
-    #[serde(default)]
-    pub include: Vec<PathBuf>,
-    #[serde(default)]
-    pub exclude: Vec<PathBuf>,
     /// Milliseconds since the epoch of the last edit (merge tiebreak).
     #[serde(default)]
     pub updated: i64,
+}
+
+/// Photos joining or leaving an event, by their paths (any file of a stack
+/// stands for the stack).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventChange {
+    pub event: String,
+    pub photos: Vec<PathBuf>,
+    pub add: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -88,14 +94,14 @@ pub fn load(roots: &[PathBuf]) -> Vec<Event> {
         }
     }
     let mut v: Vec<Event> = by_id.into_values().collect();
-    v.sort_by(|a, b| (&a.start, &a.name).cmp(&(&b.start, &b.name)));
+    v.sort_by(|a, b| (&a.name, &a.id).cmp(&(&b.name, &b.id)));
     v
 }
 
 /// The bytes of `events.json` for every writable root.
 pub fn plan_save(writable_roots: &[PathBuf], events: &[Event]) -> Result<Vec<(PathBuf, Vec<u8>)>> {
     let body = serde_json::to_vec_pretty(&EventsFile {
-        version: 1,
+        version: 2,
         events: events.to_vec(),
     })
     .map_err(|e| CoreError::Invalid(format!("events: {e}")))?;
@@ -107,11 +113,6 @@ pub fn plan_save(writable_roots: &[PathBuf], events: &[Event]) -> Result<Vec<(Pa
             Ok((file_for(r), body.clone()))
         })
         .collect()
-}
-
-/// `YYYY:MM:DD HH:MM:SS` (EXIF) → `YYYY-MM-DD HH:MM:SS`.
-pub fn exif_to_event_time(t: &str) -> String {
-    t.replacen(':', "-", 2)
 }
 
 /// The event path for keywords: `Japan Trip|Kyoto` for a nested event.
@@ -132,67 +133,159 @@ pub fn path_of(events: &[Event], id: &str) -> String {
     parts.join("|")
 }
 
-/// Stack indices in the event.
-pub fn members(c: &Catalog, e: &Event) -> HashSet<usize> {
-    let include: HashSet<&Path> = e.include.iter().map(PathBuf::as_path).collect();
-    let exclude: HashSet<&Path> = e.exclude.iter().map(PathBuf::as_path).collect();
-    (0..c.stacks.len())
-        .filter(|&s| {
-            let p = &c.photos[c.stacks[s].primary];
-            if exclude.contains(p.path.as_path()) {
-                return false;
-            }
-            if include.contains(p.path.as_path()) {
-                return true;
-            }
-            p.meta
-                .exif
-                .capture_time
-                .as_deref()
-                .map(exif_to_event_time)
-                .is_some_and(|t| t.as_str() >= e.start.as_str() && t.as_str() <= e.end.as_str())
-        })
+/// Event ids by their keyword path (`Japan Trip|Kyoto`).
+fn by_path(events: &[Event]) -> HashMap<String, &str> {
+    events
+        .iter()
+        .map(|e| (path_of(events, &e.id), e.id.as_str()))
         .collect()
 }
 
-/// Marks after applying the event set: `Events|…` keywords replaced by one
-/// per containing event, and the innermost (latest-starting) event's name.
-pub fn apply(marks: &Marks, containing: &[&Event], events: &[Event]) -> Marks {
-    let mut m = marks.clone();
-    m.keywords
-        .retain(|k| k != KEYWORD_ROOT && !k.starts_with(&format!("{KEYWORD_ROOT}|")));
-    let mut sorted: Vec<&&Event> = containing.iter().collect();
-    sorted.sort_by(|a, b| (&a.start, &a.name).cmp(&(&b.start, &b.name)));
-    for e in &sorted {
-        m.keywords
-            .push(format!("{KEYWORD_ROOT}|{}", path_of(events, &e.id)));
+/// The events a photo is marked with (ids of known events; keywords under
+/// `Events|` that name no event are left alone).
+fn marked(marks: &Marks, paths: &HashMap<String, &str>) -> BTreeSet<String> {
+    marks
+        .keywords
+        .iter()
+        .filter_map(|k| k.strip_prefix(KEYWORD_ROOT)?.strip_prefix('|'))
+        .filter_map(|p| paths.get(p).map(|id| (*id).to_owned()))
+        .collect()
+}
+
+/// `id` and its ancestors (a sub-event's photos are in its parents too).
+fn with_ancestors<'a>(events: &'a [Event], id: &'a str) -> Vec<&'a str> {
+    let mut out = vec![id];
+    let mut cur = id;
+    while let Some(p) = events
+        .iter()
+        .find(|e| e.id == cur)
+        .and_then(|e| e.parent.as_deref())
+    {
+        if out.contains(&p) || out.len() > 32 {
+            break; // a parent cycle in a hand-edited file
+        }
+        out.push(p);
+        cur = p;
     }
-    m.event = sorted.last().map(|e| e.name.clone());
+    out
+}
+
+/// Each event's stacks: those with a photo marked with it or one of its
+/// sub-events.
+pub fn memberships(c: &Catalog, events: &[Event]) -> HashMap<String, HashSet<usize>> {
+    let paths = by_path(events);
+    let mut out: HashMap<String, HashSet<usize>> = events
+        .iter()
+        .map(|e| (e.id.clone(), HashSet::new()))
+        .collect();
+    for (s, st) in c.stacks.iter().enumerate() {
+        for i in st.all() {
+            for id in marked(&c.photos[i].marks, &paths) {
+                for a in with_ancestors(events, &id) {
+                    if let Some(m) = out.get_mut(a) {
+                        m.insert(s);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Marks with these events: `Events|…` keywords of known events kept in
+/// place (renamed if need be) or dropped, new ones added at the end, and
+/// the innermost event's name.
+fn apply(marks: &Marks, ids: &BTreeSet<String>, old: &[Event], new: &[Event]) -> Marks {
+    let old_paths = by_path(old);
+    let mut m = marks.clone();
+    let mut done: HashSet<&str> = HashSet::new();
+    m.keywords = marks
+        .keywords
+        .iter()
+        .filter_map(|k| {
+            let Some(id) = k
+                .strip_prefix(KEYWORD_ROOT)
+                .and_then(|r| r.strip_prefix('|'))
+                .and_then(|p| old_paths.get(p))
+            else {
+                return Some(k.clone()); // not an event keyword we know
+            };
+            (ids.contains(*id) && done.insert(id))
+                .then(|| format!("{KEYWORD_ROOT}|{}", path_of(new, id)))
+        })
+        .collect();
+    let mut added: Vec<String> = ids
+        .iter()
+        .filter(|id| !done.contains(id.as_str()))
+        .map(|id| format!("{KEYWORD_ROOT}|{}", path_of(new, id)))
+        .collect();
+    added.sort();
+    m.keywords.extend(added);
+    // Innermost: the deepest path (the last, alphabetically, among equals).
+    let innermost = ids
+        .iter()
+        .map(|id| path_of(new, id))
+        .max_by_key(|p| (p.matches('|').count(), p.clone()))
+        .and_then(|p| p.rsplit('|').next().map(str::to_owned));
+    if innermost.is_some() || !marked(marks, &old_paths).is_empty() {
+        m.event = innermost;
+    }
     m
 }
 
-/// Mark changes for every photo whose event-derived marks differ, given the
-/// new event list. `all_members` writes to every stack member, else to the
-/// primary only (like other marks).
-pub fn mark_updates(c: &Catalog, events: &[Event], all_members: bool) -> Vec<(usize, Marks)> {
-    let mut containing: Vec<Vec<&Event>> = vec![Vec::new(); c.stacks.len()];
-    for e in events {
-        for s in members(c, e) {
-            containing[s].push(e);
+/// Mark changes for moving from the `old` events to `new` (renamed, moved
+/// under another event, deleted) and for `change` (photos joining or
+/// leaving one). Joining marks the primary, or every stack member when
+/// `all_members`; leaving unmarks every member, and leaves the event's
+/// sub-events too.
+pub fn mark_updates(
+    c: &Catalog,
+    old: &[Event],
+    new: &[Event],
+    change: Option<&EventChange>,
+    all_members: bool,
+) -> Vec<(usize, Marks)> {
+    let paths = by_path(old);
+    let known: HashSet<&str> = new.iter().map(|e| e.id.as_str()).collect();
+    // The stacks the change is about (by any of their files).
+    let mut changed: HashSet<usize> = HashSet::new();
+    if let Some(ch) = change {
+        let wanted: HashSet<&Path> = ch.photos.iter().map(PathBuf::as_path).collect();
+        for (i, p) in c.photos.iter().enumerate() {
+            if wanted.contains(p.path.as_path()) {
+                changed.insert(c.stack_of[i]);
+            }
         }
     }
+    // Leaving an event leaves its sub-events too.
+    let leaving: HashSet<&str> = match change {
+        Some(ch) if !ch.add => new
+            .iter()
+            .chain(old)
+            .filter(|e| with_ancestors(new, &e.id).contains(&ch.event.as_str()))
+            .map(|e| e.id.as_str())
+            .chain([ch.event.as_str()])
+            .collect(),
+        _ => HashSet::new(),
+    };
     let mut out = Vec::new();
-    for (s, evs) in containing.iter().enumerate() {
-        let st = &c.stacks[s];
-        let targets: Vec<usize> = if all_members {
-            st.all().collect()
-        } else {
-            vec![st.primary]
-        };
-        for i in targets {
-            let new = apply(&c.photos[i].marks, evs, events);
-            if new != c.photos[i].marks {
-                out.push((i, new));
+    for (s, st) in c.stacks.iter().enumerate() {
+        for i in st.all() {
+            let marks = &c.photos[i].marks;
+            let mut ids = marked(marks, &paths);
+            if changed.contains(&s)
+                && let Some(ch) = change
+            {
+                if !ch.add {
+                    ids.retain(|id| !leaving.contains(id.as_str()));
+                } else if all_members || i == st.primary {
+                    ids.insert(ch.event.clone());
+                }
+            }
+            ids.retain(|id| known.contains(id.as_str()));
+            let updated = apply(marks, &ids, old, new);
+            if updated != *marks {
+                out.push((i, updated));
             }
         }
     }
@@ -202,65 +295,138 @@ pub fn mark_updates(c: &Catalog, events: &[Event], all_members: bool) -> Vec<(us
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::Photo;
+    use shoebox_decode::Format;
 
-    fn ev(id: &str, name: &str, parent: Option<&str>, start: &str, end: &str) -> Event {
+    fn ev(id: &str, name: &str, parent: Option<&str>) -> Event {
         Event {
             id: id.into(),
             name: name.into(),
             parent: parent.map(Into::into),
-            start: start.into(),
-            end: end.into(),
-            include: Vec::new(),
-            exclude: Vec::new(),
             updated: 0,
         }
     }
 
-    #[test]
-    fn nested_keywords_and_innermost_name() {
-        let events = vec![
-            ev(
-                "a",
-                "Japan Trip",
-                None,
-                "2026-04-20 00:00:00",
-                "2026-05-10 23:59:59",
-            ),
-            ev(
-                "b",
-                "Kyoto",
-                Some("a"),
-                "2026-04-24 00:00:00",
-                "2026-04-26 23:59:59",
-            ),
-        ];
-        assert_eq!(path_of(&events, "b"), "Japan Trip|Kyoto");
-        let base = Marks {
-            keywords: vec!["temple".into(), "Events|Old".into()],
+    /// Photos taken the same day, in the same folder.
+    fn catalog(keywords: &[&[&str]]) -> Catalog {
+        let photos: Vec<Photo> = keywords
+            .iter()
+            .enumerate()
+            .map(|(n, kw)| {
+                let path = PathBuf::from(format!("/lib/2026-04-24/p{n}.jpg"));
+                let mut p = Photo {
+                    root: 0,
+                    rel: format!("2026-04-24/p{n}.jpg"),
+                    format: Format::Jpeg,
+                    path,
+                    size: 0,
+                    mtime_ns: 0,
+                    meta: Default::default(),
+                    marks: Default::default(),
+                    sidecar: None,
+                    sidecar_sig: String::new(),
+                    change: None,
+                };
+                p.meta.exif.capture_time = Some(format!("2026:04:24 1{n}:00:00"));
+                p.marks.keywords = kw.iter().map(|k| (*k).to_owned()).collect();
+                // As Shoebox writes them: the innermost event's name too.
+                p.marks.event = kw
+                    .iter()
+                    .find_map(|k| k.strip_prefix("Events|"))
+                    .and_then(|e| e.rsplit('|').next())
+                    .map(str::to_owned);
+                p
+            })
+            .collect();
+        let (stacks, stack_of) = crate::stacks::build(&photos, &[]);
+        Catalog {
+            photos,
+            stacks,
+            stack_of,
             ..Default::default()
+        }
+    }
+
+    fn set<const N: usize>(v: [usize; N]) -> HashSet<usize> {
+        v.into_iter().collect()
+    }
+
+    /// Membership is what each photo is marked with: two events on one day
+    /// in one folder stay apart, and a sub-event's photos are in its parent.
+    #[test]
+    fn members_are_marked_on_photos() {
+        let events = vec![
+            ev("a", "Japan Trip", None),
+            ev("b", "Kyoto", Some("a")),
+            ev("w", "Wedding", None),
+        ];
+        let c = catalog(&[
+            &["Events|Japan Trip|Kyoto", "temple"],
+            &["Events|Wedding"],
+            &["Events|Japan Trip"],
+            &["Events|Gone"], // an event that no longer exists
+        ]);
+        let m = memberships(&c, &events);
+        assert_eq!(m["a"], set([0, 2]));
+        assert_eq!(m["b"], set([0]));
+        assert_eq!(m["w"], set([1]));
+    }
+
+    #[test]
+    fn joining_leaving_renaming_and_deleting() {
+        let old = vec![ev("a", "Japan Trip", None), ev("b", "Kyoto", Some("a"))];
+        let c = catalog(&[&["Events|Japan Trip|Kyoto", "temple"], &[], &["Events|Old"]]);
+        let path = |i: usize| c.photos[i].path.clone();
+        let updates = |new: &[Event], ch: Option<EventChange>| -> HashMap<usize, Marks> {
+            mark_updates(&c, &old, new, ch.as_ref(), false)
+                .into_iter()
+                .collect()
         };
-        let m = apply(&base, &[&events[1], &events[0]], &events);
-        assert_eq!(
-            m.keywords,
-            vec!["temple", "Events|Japan Trip", "Events|Japan Trip|Kyoto"]
+
+        // Joining Kyoto: the keyword and the IPTC event name.
+        let u = updates(
+            &old,
+            Some(EventChange {
+                event: "b".into(),
+                photos: vec![path(1)],
+                add: true,
+            }),
         );
-        assert_eq!(m.event.as_deref(), Some("Kyoto"));
-        let cleared = apply(&m, &[], &events);
-        assert_eq!(cleared.keywords, vec!["temple"]);
-        assert_eq!(cleared.event, None);
+        assert_eq!(u.len(), 1);
+        assert_eq!(u[&1].keywords, vec!["Events|Japan Trip|Kyoto"]);
+        assert_eq!(u[&1].event.as_deref(), Some("Kyoto"));
+
+        // Leaving Japan Trip leaves Kyoto too; other keywords stay, and so
+        // do keywords naming no event.
+        let u = updates(
+            &old,
+            Some(EventChange {
+                event: "a".into(),
+                photos: vec![path(0), path(2)],
+                add: false,
+            }),
+        );
+        assert_eq!(u.len(), 1);
+        assert_eq!(u[&0].keywords, vec!["temple"]);
+        assert_eq!(u[&0].event, None);
+
+        // Renaming the parent rewrites the sub-event's keyword.
+        let mut renamed = old.clone();
+        renamed[0].name = "Japan 2026".into();
+        let u = updates(&renamed, None);
+        assert_eq!(u[&0].keywords, vec!["Events|Japan 2026|Kyoto", "temple"]);
+
+        // Deleting Kyoto (nothing else changes) unmarks its photos.
+        let u = updates(&old[..1], None);
+        assert_eq!(u[&0].keywords, vec!["temple"]);
+        assert_eq!(u[&0].event, None);
     }
 
     #[test]
     fn files_merge_newest_wins() {
         let t = tempfile::tempdir().unwrap();
         let (r1, r2) = (t.path().join("r1"), t.path().join("r2"));
-        let mut a = ev(
-            "x",
-            "Old name",
-            None,
-            "2026-01-01 00:00:00",
-            "2026-01-02 00:00:00",
-        );
+        let mut a = ev("x", "Old name", None);
         for (path, bytes) in plan_save(std::slice::from_ref(&r1), &[a.clone()]).unwrap() {
             std::fs::write(path, bytes).unwrap();
         }
@@ -271,5 +437,26 @@ mod tests {
         }
         let loaded = load(&[r1, r2]);
         assert_eq!(loaded, vec![a]);
+    }
+
+    /// Version 1 files (a date range, paths added or excluded) still load.
+    #[test]
+    fn old_files_load() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(t.path().join(".shoebox")).unwrap();
+        std::fs::write(
+            file_for(t.path()),
+            r#"{"version":1,"events":[{"id":"x","name":"Trip","parent":null,
+                "start":"2026-04-24 00:00:00","end":"2026-04-25 23:59:59",
+                "include":["/a.jpg"],"exclude":[],"updated":3}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            load(&[t.path().to_path_buf()]),
+            vec![Event {
+                updated: 3,
+                ..ev("x", "Trip", None)
+            }]
+        );
     }
 }

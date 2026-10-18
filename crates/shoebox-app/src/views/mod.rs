@@ -388,6 +388,7 @@ pub fn photo_menu(app: &mut ShoeboxApp, resp: &egui::Response, pos: usize) {
         }
         ui.separator();
         crate::panels::add_to_event_menu(app, ui, |app| app.selected_stacks());
+        crate::panels::remove_from_event_menu(app, ui);
         if ui.button("New Event from Selection…  (⌘E)").clicked() {
             app.new_event_from_selection(None);
             ui.close();
