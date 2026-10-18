@@ -9,7 +9,11 @@ deliberately differ and why.
   a funnel that opens the rating, flag and label filters; Settings and the
   info-panel toggle at the right. On macOS it is the title bar (full-size
   content view, transparent title bar): it leaves room for the window
-  buttons, drags the window, and double-click zooms.
+  buttons, drags the window, and double-click zooms (or minimises, per the
+  system setting). AppKit would treat the whole strip as title bar, so a
+  quick double-click on a button zoomed the window: winit's view now says
+  `mouseDownCanMoveWindow` NO, and only the bar's empty space moves or
+  zooms (checked with synthetic clicks on a throwaway build).
 - **Filter strip** over the photos only when it has something: the scope
   chip and photo count, the filters (funnel open or any set), and Grid's
   "Group by day" / Masonry's "Justified rows".

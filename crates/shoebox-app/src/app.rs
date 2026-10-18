@@ -364,6 +364,7 @@ impl ShoeboxApp {
     pub fn new(cc: &eframe::CreationContext<'_>, paths: AppPaths) -> Self {
         let ctx = &cc.egui_ctx;
         crate::icons::install(ctx);
+        crate::platform::own_titlebar_clicks(cc);
         // egui's small text (9 pt) is too small for paths and captions.
         ctx.all_styles_mut(|s| {
             if let Some(f) = s.text_styles.get_mut(&egui::TextStyle::Small) {

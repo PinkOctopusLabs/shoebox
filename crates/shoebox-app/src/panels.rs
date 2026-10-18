@@ -19,14 +19,6 @@ pub fn topbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         ui.make_persistent_id("topbar-drag"),
         egui::Sense::click_and_drag(),
     );
-    if drag.drag_started() {
-        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-    }
-    if drag.double_clicked() {
-        let zoomed = ui.input(|i| i.viewport().maximized.unwrap_or(false));
-        ui.ctx()
-            .send_viewport_cmd(egui::ViewportCommand::Maximized(!zoomed));
-    }
     let inset = app.titlebar_inset(ui.ctx());
     let row = |r: egui::Rect, layout| egui::UiBuilder::new().max_rect(r).layout(layout);
     let left = ui
@@ -91,10 +83,34 @@ pub fn topbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     // Search in the middle of the window, as wide as fits (up to 560).
     let side = (bar.center().x - left.max.x).min(right.min.x - bar.center().x) - 12.0;
     let width = (2.0 * side).min(560.0);
+    let centre = egui::Rect::from_center_size(bar.center(), vec2(width.max(0.0), bar.height()));
+    // Only the bar's empty space moves or zooms the window: clicks on its
+    // buttons (a quick double-click on one, say) must not.
+    let on_control = ui
+        .input(|i| i.pointer.interact_pos())
+        .is_some_and(|p| left.contains(p) || right.contains(p) || centre.contains(p));
+    if !on_control {
+        if drag.drag_started() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+        if drag.double_clicked() {
+            use crate::platform::TitlebarDoubleClick;
+            let cmd = match crate::platform::titlebar_double_click() {
+                TitlebarDoubleClick::Zoom => {
+                    let zoomed = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+                    Some(egui::ViewportCommand::Maximized(!zoomed))
+                }
+                TitlebarDoubleClick::Minimize => Some(egui::ViewportCommand::Minimized(true)),
+                TitlebarDoubleClick::Nothing => None,
+            };
+            if let Some(cmd) = cmd {
+                ui.ctx().send_viewport_cmd(cmd);
+            }
+        }
+    }
     if width < 160.0 {
         return;
     }
-    let centre = egui::Rect::from_center_size(bar.center(), vec2(width, bar.height()));
     ui.scope_builder(
         row(centre, egui::Layout::left_to_right(egui::Align::Center)),
         |ui| {

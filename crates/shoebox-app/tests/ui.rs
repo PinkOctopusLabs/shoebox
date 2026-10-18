@@ -143,6 +143,21 @@ fn browse_views_render() {
         h.run_steps(3);
     }
     assert!(h.query_by_label("Recently changed").is_some(), "left back");
+    // A quick double-click on a top-bar button toggles it twice; it never
+    // zooms the window (only the bar's empty space does; AppKit's own
+    // title-bar handling is turned off in `platform::own_titlebar_clicks`).
+    let mut zoomed = false;
+    for _ in 0..2 {
+        h.get_by_label("Info panel").click();
+        h.step();
+        zoomed |= h.output().viewport_output.values().any(|v| {
+            v.commands
+                .iter()
+                .any(|c| matches!(c, egui::ViewportCommand::Maximized(_)))
+        });
+    }
+    h.run_steps(2);
+    assert!(!zoomed, "double-clicking a button zoomed the window");
     assert!(!h.state().filtered(), "the chip clears it");
     assert_eq!(h.state().shown_count(), photos);
     // The funnel in the top bar shows the rating, flag and label filters.
