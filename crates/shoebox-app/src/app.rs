@@ -1292,7 +1292,8 @@ impl ShoeboxApp {
             .tags
             .as_ref()
             .map(|t| {
-                t.counts
+                self.sem
+                    .counts
                     .iter()
                     .map(|&(l, n)| (t.names[l as usize].clone(), n))
                     .collect()
@@ -1367,8 +1368,8 @@ impl ShoeboxApp {
                     self.sem.tags = Some(t);
                     if self.sem.tag.is_some() {
                         self.sem.results = None; // recount
-                        changed = true;
                     }
+                    changed = true; // Things counts the photos in view
                 }
             }
         }
@@ -1513,6 +1514,26 @@ impl ShoeboxApp {
             .and_then(|id| self.collection_members.get(id))
         {
             stacks.retain(|s| members.contains(s));
+        }
+        // Each tag's photos among these (the Things list's counts).
+        if let Some(tags) = &self.sem.tags {
+            let mut n = vec![0usize; tags.names.len()];
+            for &s in &stacks {
+                let id = self.ids[self.catalog.stacks[s].primary];
+                for &(l, _) in tags.by_photo.get(&id).map_or(&[][..], Vec::as_slice) {
+                    if let Some(c) = n.get_mut(l as usize) {
+                        *c += 1;
+                    }
+                }
+            }
+            let mut counts: Vec<(u16, usize)> = n
+                .into_iter()
+                .enumerate()
+                .filter(|&(_, c)| c > 0)
+                .map(|(l, c)| (l as u16, c))
+                .collect();
+            counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            self.sem.counts = counts;
         }
         if semantic {
             // Best match first; nothing until the first results are in.

@@ -2067,11 +2067,31 @@ fn semantic_search_in_the_app() {
     assert_eq!(listed, things, "most photos first");
     h.get_by_label("Sort Things").click();
     h.run_steps(2);
+    // Counts follow the photos in view: a name search for "green" leaves
+    // only green.
+    h.get_all_by_role(egui::accesskit::Role::TextInput)
+        .next()
+        .unwrap()
+        .click();
+    h.run_steps(1);
+    h.event(egui::Event::Text("green".into()));
+    wait_for(&mut h, Duration::from_secs(10), "green by name", |a| {
+        a.shown_count() == 2
+    });
+    assert_eq!(h.state().things(), [("green".to_owned(), 2)]);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.key_press(egui::Key::Backspace);
+    wait_for(&mut h, Duration::from_secs(10), "all photos", |a| {
+        a.shown_count() == 5
+    });
+    assert_eq!(h.state().things(), things);
     h.get_by_label("red  2").click();
     wait_for(&mut h, Duration::from_secs(10), "tagged red", |a| {
         a.shown_count() == 2
     });
     assert_eq!(h.state().shown_names(), ["red.jpg", "reddish.jpg"]);
+    // Choosing a tag doesn't recount the others.
+    assert_eq!(h.state().things(), things);
     snapshot(&mut h, "semantic-3-things");
     // Accepting a suggestion makes it a keyword (in the sidecar) and it's
     // no longer suggested.

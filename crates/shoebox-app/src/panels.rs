@@ -1306,7 +1306,14 @@ fn things_panel(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     let Some(tags) = app.sem.tags.clone() else {
         return;
     };
-    if tags.counts.is_empty() {
+    // Photos per tag among those in view; a chosen tag stays listed.
+    let mut counts = app.sem.counts.clone();
+    if let Some(l) = app.sem.tag
+        && !counts.iter().any(|&(c, _)| c == l)
+    {
+        counts.insert(0, (l, 0));
+    }
+    if counts.is_empty() {
         return;
     }
     let mut chosen = None;
@@ -1328,8 +1335,7 @@ fn things_panel(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     }
     // Every tag, or (folded) the eight with the most photos, in that order.
     let all = app.sem.things_all;
-    let mut listed: Vec<(u16, usize)> = tags
-        .counts
+    let mut listed: Vec<(u16, usize)> = counts
         .iter()
         .take(if all { usize::MAX } else { 8 })
         .copied()
@@ -1347,12 +1353,12 @@ fn things_panel(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             chosen = Some(if sel { None } else { Some(l) });
         }
     }
-    if tags.counts.len() > 8
+    if counts.len() > 8
         && ui
             .link(if all {
                 "Show fewer".to_owned()
             } else {
-                format!("Show all {}", tags.counts.len())
+                format!("Show all {}", counts.len())
             })
             .clicked()
     {

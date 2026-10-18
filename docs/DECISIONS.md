@@ -773,3 +773,10 @@ and refusing to empty a group. The M4 review UI will follow the same rule.
 - zune-jpeg kept over turbojpeg (1.84× gap on a 24 MP decode to 256 px,
   below the 2× bar; avoids a C dependency).
 - Decodes capped at 200 MP to bound memory on hostile/corrupt headers.
+
+## Things counts follow the photos in view (2026-10-18)
+Things counted every photo the search index last tagged, so a removed
+folder's photos stayed in it until the next tagging pass (never, if no
+photos were left). Like People, it now counts the tagged photos in view
+(folder, events, collections, filters, search), before a chosen tag
+narrows them; tags with none are hidden unless chosen.

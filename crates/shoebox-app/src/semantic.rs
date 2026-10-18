@@ -768,6 +768,9 @@ pub struct SearchState {
     pub tag: Option<u16>,
     /// The library's suggested tags, once computed.
     pub tags: Option<Arc<Tags>>,
+    /// Photos per tag among those in view (before a tag narrows them), most
+    /// first: the Things list's counts.
+    pub counts: Vec<(u16, usize)>,
     /// Things lists every tag, not just the most common.
     pub things_all: bool,
     /// The latest results: score per primary photo.
