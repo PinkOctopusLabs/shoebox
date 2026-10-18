@@ -279,6 +279,8 @@ pub struct ShoeboxApp {
     pub(crate) current: Option<PhotoId>,
     anchor: Option<PhotoId>,
     pub(crate) view: View,
+    /// Where Escape takes the loupe back to (the view it was opened from).
+    back_view: View,
     pub(crate) thumb_size: f32,
     /// Columns in the grid as last drawn (for Up/Down).
     pub(crate) grid_cols: usize,
@@ -412,6 +414,7 @@ impl ShoeboxApp {
             current: None,
             anchor: None,
             view: View::Grid,
+            back_view: View::Grid,
             thumb_size: 180.0,
             grid_cols: 1,
             left_open: true,
@@ -711,6 +714,9 @@ impl ShoeboxApp {
         }
         if !matches!(v, View::Compare | View::Survey | View::Duplicates) {
             self.dupes.open = None;
+        }
+        if v == View::Loupe && self.view != View::Loupe {
+            self.back_view = self.view;
         }
         self.view = v;
         self.loupe = LoupeState::default();
@@ -1296,8 +1302,25 @@ impl ShoeboxApp {
         self.command(LibraryCommand::RemoveRoot(path));
     }
 
+    /// A new source picked in the sidebar: nothing selected, and back to
+    /// the grid (or the browsing view the loupe was opened from).
+    pub(crate) fn new_source(&mut self) {
+        self.selection.clear();
+        self.current = None;
+        self.anchor = None;
+        let browsing = |v| matches!(v, View::Grid | View::Masonry | View::Timeline | View::Map);
+        if !browsing(self.view) {
+            self.set_view(if browsing(self.back_view) {
+                self.back_view
+            } else {
+                View::Grid
+            });
+        }
+    }
+
     /// "All photos": no folder, event, collection, person, tag or similar.
     pub(crate) fn show_everything(&mut self) {
+        self.new_source();
         self.selected_event = None;
         self.selected_collection = None;
         self.ppl.showing = None;
@@ -1321,6 +1344,7 @@ impl ShoeboxApp {
     /// A click on a folder: just this one (or none, if it was the only one
     /// shown); with ⌘ or Shift, add it to the folders shown or take it out.
     pub(crate) fn click_folder(&mut self, path: &Path, add: bool) {
+        self.new_source();
         let mut folders = self.folders.clone();
         if add {
             if let Some(k) = folders.iter().position(|f| f == path) {
@@ -1602,6 +1626,7 @@ impl ShoeboxApp {
 
     pub(crate) fn select_event(&mut self, id: Option<String>) {
         if id.is_some() {
+            self.new_source();
             self.folders.clear();
             self.selected_collection = None;
         }
@@ -2033,6 +2058,7 @@ impl ShoeboxApp {
 
     pub(crate) fn select_collection(&mut self, id: Option<String>) {
         if id.is_some() {
+            self.new_source();
             self.folders.clear();
             self.selected_event = None;
         }
@@ -2538,6 +2564,10 @@ impl ShoeboxApp {
         if pressed(egui::Key::Escape) && self.fullscreen {
             self.fullscreen = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        } else if pressed(egui::Key::Escape) && self.view == View::Loupe && !ctx.any_popup_open() {
+            // Back to the grid (or wherever the loupe was opened from);
+            // an open menu takes the first Escape.
+            self.set_view(self.back_view);
         }
         if pressed(egui::Key::Enter) && self.current.is_some() {
             self.set_view(View::Loupe);

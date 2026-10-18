@@ -207,6 +207,20 @@ fn browse_views_render() {
     h.step();
     assert!(!h.state().loupe_zoomed());
 
+    // Escape goes back to the grid it was opened from.
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert_eq!(h.state().view_name(), View::Grid);
+    // And to Masonry, when opened from there with Enter.
+    h.state_mut().set_view(View::Masonry);
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    h.run_steps(2);
+    assert_eq!(h.state().view_name(), View::Loupe);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert_eq!(h.state().view_name(), View::Masonry);
+
     // The app never writes into the library.
     assert_eq!(
         std::fs::read_dir(lib.join("scan/recovered"))
@@ -785,6 +799,20 @@ fn folders_and_events() {
     h.get_by_label(&blank).click();
     h.run_steps(3);
     assert_eq!(h.state().scope(), (1, None));
+
+    // Picking a folder from the loupe goes back to the grid, nothing selected.
+    let name = h.state().shown_names()[0].clone();
+    h.get_by_label(&name).click();
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    h.run_steps(2);
+    assert_eq!(h.state().view_name(), View::Loupe);
+    let lightroom = folder(&h, "lightroom");
+    h.get_by_label(&lightroom).click();
+    h.run_steps(3);
+    assert_eq!(h.state().view_name(), View::Grid);
+    assert_eq!(h.state().selected_count(), 0);
+    assert_eq!(h.state().current_name(), None);
 }
 
 /// Cmd+E makes an event from the selection: events.json in every writable

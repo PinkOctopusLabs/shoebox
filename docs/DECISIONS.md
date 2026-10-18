@@ -3,6 +3,13 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-18 — Escape leaves the loupe; a new source starts afresh
+- Escape in the loupe goes back to the view it was opened from (Grid,
+  Masonry, Timeline…); an open menu or full screen takes the first Escape.
+- Choosing a folder, event, collection or All photos in the sidebar clears
+  the selection and the current photo and goes back to browsing (the view
+  the loupe came from, else Grid): the old photo isn't in the new source.
+
 ## 2026-10-18 — One source at a time; several folders; adding to events
 - The grid shows **one source**: folders, an event or a collection.
   Choosing one clears the others (a folder and an event together read as

@@ -787,6 +787,7 @@ fn event_node(
                 .unwrap_or_default();
             let sel = app.folders == [d.as_path()];
             if ui.selectable_label(sel, format!("📁 {name}")).clicked() {
+                app.new_source();
                 app.set_folders(vec![d.clone()]);
             }
         }
