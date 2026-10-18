@@ -2287,17 +2287,32 @@ fn people_in_the_app() {
         a.shown_count() == 3
     });
     assert_eq!(h.state().people_groups()[0], ("Ann".to_owned(), 3));
+
+    // ⌘-click another group: both shown, then marked as the same person.
+    h.get_by_label("Unnamed 1  3")
+        .click_modifiers(egui::Modifiers::COMMAND);
+    wait_for(&mut h, Duration::from_secs(10), "both shown", |a| {
+        a.shown_count() == 5 // a1, a2, b2 (Ann's) and b1, b2, b3
+    });
+    h.run_steps(2);
+    snapshot(&mut h, "people-3-two-shown");
+    h.get_by_label("All Ann").click();
+    wait_for(&mut h, Duration::from_secs(10), "merged", |a| {
+        a.people_groups() == [("Ann".to_owned(), 5)]
+    });
+    assert_eq!(h.state().shown_count(), 5, "still showing them, now one");
     h.get_by_label("✖").click();
     h.run_steps(2);
     drop(h);
 
-    // A restart keeps the name and the correction, without finding faces again.
+    // A restart keeps the names, the merge and the correction, without
+    // finding faces again: the blue faces are Ann now (her examples).
     let mut h = harness(p, egui::vec2(1400.0, 900.0));
     settle(&mut h, Duration::from_secs(60));
     wait_for(&mut h, Duration::from_secs(30), "people again", |a| {
-        a.people_groups().len() == 2
+        !a.people_groups().is_empty()
     });
-    assert_eq!(h.state().people_groups()[0], ("Ann".to_owned(), 3));
+    assert_eq!(h.state().people_groups(), [("Ann".to_owned(), 5)]);
     assert_eq!(FACE_RUNS.load(std::sync::atomic::Ordering::Relaxed), 8);
 }
 

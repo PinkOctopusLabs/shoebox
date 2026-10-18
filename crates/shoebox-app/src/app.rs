@@ -976,25 +976,29 @@ impl ShoeboxApp {
             match ev {
                 E::Status(s) => self.ppl.status = s,
                 E::People(v) => {
-                    // An unnamed group shown may have been named or regrouped:
-                    // follow its face.
-                    if let Some(key) = self.ppl.showing.clone()
-                        && let crate::people::GroupKey::Unnamed(face) = &key
-                        && v.find(&key).is_none()
-                    {
-                        self.ppl.showing = v
+                    // An unnamed group shown may have been named, merged or
+                    // regrouped: follow its face (merged ones become one).
+                    let follow = |key: crate::people::GroupKey| match &key {
+                        crate::people::GroupKey::Unnamed(face) if v.find(&key).is_none() => v
                             .groups
                             .iter()
                             .find(|g| g.faces.contains(face))
-                            .map(|g| g.key.clone());
-                    }
+                            .map(|g| g.key.clone()),
+                        _ => v.find(&key).map(|_| key),
+                    };
+                    let showing = self.ppl.showing.take().and_then(follow);
+                    let mut also: Vec<_> = std::mem::take(&mut self.ppl.also)
+                        .into_iter()
+                        .filter_map(follow)
+                        .filter(|k| Some(k) != showing.as_ref())
+                        .collect();
+                    also.dedup();
+                    let was = showing.is_some() || !also.is_empty();
+                    self.ppl.showing =
+                        showing.or_else(|| (!also.is_empty()).then(|| also.remove(0)));
+                    self.ppl.also = also;
                     self.ppl.view = Some(v);
-                    if self.ppl.showing.is_some() {
-                        if self.ppl.shown_group().is_none() {
-                            self.ppl.showing = None;
-                        }
-                        changed = true;
-                    }
+                    changed |= was;
                 }
                 E::Error(e) => self.error = Some(e),
             }
@@ -1007,6 +1011,7 @@ impl ShoeboxApp {
     /// Show the photos of this person (or unnamed group).
     pub(crate) fn show_person(&mut self, key: crate::people::GroupKey) {
         self.ppl.showing = Some(key);
+        self.ppl.also.clear();
         self.ppl.name_input.clear();
         self.sem.similar = None;
         self.sem.tag = None;
@@ -1019,12 +1024,32 @@ impl ShoeboxApp {
 
     pub(crate) fn clear_person(&mut self) {
         self.ppl.showing = None;
+        self.ppl.also.clear();
         self.refilter();
     }
 
-    pub(crate) fn name_person(&mut self, key: crate::people::GroupKey, name: String) {
+    /// ⌘-click on a person: show their photos too, or stop.
+    pub(crate) fn toggle_person(&mut self, key: crate::people::GroupKey) {
+        if self.ppl.showing.is_none() {
+            return self.show_person(key);
+        }
+        if self.ppl.showing.as_ref() == Some(&key) {
+            self.ppl.showing = (!self.ppl.also.is_empty()).then(|| self.ppl.also.remove(0));
+        } else if let Some(k) = self.ppl.also.iter().position(|k| k == &key) {
+            self.ppl.also.remove(k);
+        } else {
+            self.ppl.also.push(key);
+        }
+        self.ppl.name_input.clear();
+        self.refilter();
+    }
+
+    /// Name these groups as one person (merging them; a name someone
+    /// already has merges into them). Taught to the face matching: their
+    /// faces become that person's examples.
+    pub(crate) fn name_person(&mut self, groups: Vec<crate::people::GroupKey>, name: String) {
         self.people
-            .send(crate::people::Command::Name { group: key, name });
+            .send(crate::people::Command::Name { groups, name });
     }
 
     /// The faces of `photo` in the group shown aren't that person.
@@ -1415,8 +1440,12 @@ impl ShoeboxApp {
         {
             stacks.retain(|s| members.contains(s));
         }
-        if let Some(g) = self.ppl.shown_group() {
-            let photos: HashSet<PhotoId> = g.photos.iter().copied().collect();
+        let people = self.ppl.shown_groups();
+        if !people.is_empty() {
+            let photos: HashSet<PhotoId> = people
+                .iter()
+                .flat_map(|g| g.photos.iter().copied())
+                .collect();
             stacks.retain(|&s| photos.contains(&self.ids[self.catalog.stacks[s].primary]));
         }
         if semantic {

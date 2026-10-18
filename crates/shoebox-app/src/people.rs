@@ -147,9 +147,11 @@ pub enum Command {
     Enable(bool),
     Catalog(Arc<Catalog>, bool),
     CancelDownload,
-    /// Name (or rename) a group.
+    /// Name (or rename) these groups as one person: several groups are
+    /// merged, their faces becoming that person's examples. A name someone
+    /// already has merges into them.
     Name {
-        group: GroupKey,
+        groups: Vec<GroupKey>,
         name: String,
     },
     /// These faces aren't this person.
@@ -324,29 +326,31 @@ impl<F: Fn(Event)> Worker<F> {
                     d.cancel.store(true, Ordering::Relaxed);
                 }
             }
-            Command::Name { group, name } => {
+            Command::Name { groups, name } => {
                 let name = name.trim().to_owned();
-                if name.is_empty() {
+                if name.is_empty() || groups.is_empty() {
                     return;
                 }
-                match &group {
-                    GroupKey::Person(id) => {
-                        if let Some(p) = self.people.people.iter_mut().find(|p| &p.id == id) {
-                            p.name = name;
+                let mut people: Vec<String> = Vec::new();
+                let mut faces: Vec<Vec<&Vector>> = Vec::new();
+                for g in &groups {
+                    match g {
+                        GroupKey::Person(id) => people.push(id.clone()),
+                        GroupKey::Unnamed(_) => {
+                            if let Some((_, refs)) = self.groups.iter().find(|(k, _)| k == g) {
+                                faces.push(
+                                    refs.iter()
+                                        .filter_map(|r| self.faces.get(&r.path)?.get(r.index))
+                                        .map(|f| &f.vec)
+                                        .collect(),
+                                );
+                            }
                         }
                     }
-                    GroupKey::Unnamed(_) => {
-                        let Some((_, refs)) = self.groups.iter().find(|(k, _)| k == &group) else {
-                            return;
-                        };
-                        let vecs: Vec<&Vector> = refs
-                            .iter()
-                            .filter_map(|r| self.faces.get(&r.path)?.get(r.index))
-                            .map(|f| &f.vec)
-                            .collect();
-                        self.people.name(&name, &vecs);
-                    }
                 }
+                let mut named = std::mem::take(&mut self.people);
+                named.merge(&name, &people, &faces);
+                self.people = named;
                 self.save_names();
                 self.regroup();
             }
@@ -671,6 +675,8 @@ pub struct PeopleState {
     pub view: Option<Arc<PeopleView>>,
     /// Showing this group's photos.
     pub showing: Option<GroupKey>,
+    /// …and these groups' too (⌘-click), say to check they're one person.
+    pub also: Vec<GroupKey>,
     /// The name being typed for the group shown.
     pub name_input: String,
     /// People lists every group, not just the first few.
@@ -700,10 +706,40 @@ impl PeopleState {
         self.enabled_sent = Some(true);
     }
 
-    /// The group shown, if it still exists.
+    /// The group shown, if it still exists and is the only one.
     pub fn shown_group(&self) -> Option<&Group> {
+        if !self.also.is_empty() {
+            return None;
+        }
         let v = self.view.as_ref()?;
         v.find(self.showing.as_ref()?).map(|i| &v.groups[i])
+    }
+
+    /// Every group shown (one, or several with ⌘-click), by index.
+    pub fn shown_indices(&self) -> Vec<usize> {
+        let Some(v) = self.view.as_ref() else {
+            return Vec::new();
+        };
+        let mut out: Vec<usize> = self
+            .showing
+            .iter()
+            .chain(&self.also)
+            .filter_map(|k| v.find(k))
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Every group shown.
+    pub fn shown_groups(&self) -> Vec<&Group> {
+        let Some(v) = self.view.as_ref() else {
+            return Vec::new();
+        };
+        self.shown_indices()
+            .into_iter()
+            .map(|i| &v.groups[i])
+            .collect()
     }
 
     /// A group's display name.

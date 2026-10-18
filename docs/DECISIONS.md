@@ -3,6 +3,19 @@
 Newest first. SPEC.md stays the source of truth; this records where we
 deliberately differ and why.
 
+## 2026-10-18 — Same person: merging groups, and learning from it
+- ⌘-click people in the sidebar to show several groups' photos at once;
+  the bar then names them as one person ("Same person: name them") or
+  merges them into someone named among them ("All Ann"). A person's menu
+  has Same Person As. Typing a name someone already has merges into them.
+- The face model isn't retrained (SFace embeddings are fixed); Shoebox
+  learns through each person's example faces, which every regroup matches
+  against. A merge makes the groups' faces that person's examples, each
+  source an even share of 48 (was 24, and `spread` under-filled its share).
+- Matching compares a face with a person's 3 closest examples, not the
+  average of all: averaging diluted people with several looks (ages,
+  glasses, angles), so the more groups you merged, the worse each matched.
+
 ## 2026-10-18 — Face boxes
 - Showing a person outlines their face in amber on every tile; the loupe
   also outlines everyone else recognised, faintly, with names (amber, not

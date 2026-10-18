@@ -179,8 +179,11 @@ impl From<&StoredVector> for Vector {
     }
 }
 
-/// Example faces kept per person.
-pub const MAX_EXAMPLES: usize = 24;
+/// Example faces kept per person (shared evenly between the groups merged
+/// into them, so each look of a person is kept).
+pub const MAX_EXAMPLES: usize = 48;
+/// A face is compared with this many of a person's closest examples.
+const CLOSEST: usize = 3;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct People {
@@ -213,39 +216,83 @@ impl People {
     /// Name a group: a new person with examples from its faces, or more
     /// examples for an existing person with that name.
     pub fn name(&mut self, name: &str, faces: &[&Vector]) -> String {
-        let examples = spread(faces, MAX_EXAMPLES);
-        if let Some(p) = self
+        self.merge(name, &[], &[faces.to_vec()])
+    }
+
+    /// Make one person, called `name`, of these named people and unnamed
+    /// groups (their faces): someone already called that (any case), else
+    /// the first of `people` (renamed), else someone new. The others' example
+    /// faces and "not them" corrections move to that person, each source
+    /// getting an even share of the examples; the others are removed.
+    /// Returns the person's id.
+    pub fn merge(&mut self, name: &str, people: &[String], groups: &[Vec<&Vector>]) -> String {
+        let name = name.trim();
+        let target = self
             .people
-            .iter_mut()
+            .iter()
             .find(|p| p.name.eq_ignore_ascii_case(name))
-        {
-            p.examples.extend(examples);
-            let all: Vec<Vector> = p.examples.iter().map(Vector::from).collect();
-            p.examples = spread(&all.iter().collect::<Vec<_>>(), MAX_EXAMPLES);
-            return p.id.clone();
-        }
-        let id = crate::events::new_id().replacen("ev-", "person-", 1);
-        self.people.push(Person {
-            id: id.clone(),
-            name: name.trim().to_owned(),
-            examples,
-            not: Vec::new(),
+            .or_else(|| {
+                people
+                    .iter()
+                    .find_map(|id| self.people.iter().find(|p| &p.id == id))
+            })
+            .map(|p| p.id.clone());
+        let id = target.unwrap_or_else(|| {
+            let id = crate::events::new_id().replacen("ev-", "person-", 1);
+            self.people.push(Person {
+                id: id.clone(),
+                name: String::new(),
+                examples: Vec::new(),
+                not: Vec::new(),
+            });
+            id
         });
+        // The others, taken out.
+        let (gone, kept): (Vec<Person>, Vec<Person>) = std::mem::take(&mut self.people)
+            .into_iter()
+            .partition(|p| p.id != id && people.contains(&p.id));
+        self.people = kept;
+        let Some(person) = self.people.iter_mut().find(|p| p.id == id) else {
+            return id;
+        };
+        person.name = name.to_owned();
+        let mut sources: Vec<Vec<Vector>> =
+            vec![person.examples.iter().map(Vector::from).collect()];
+        for p in gone {
+            sources.push(p.examples.iter().map(Vector::from).collect());
+            for f in p.not {
+                if !person.not.contains(&f) {
+                    person.not.push(f);
+                }
+            }
+        }
+        sources.extend(
+            groups
+                .iter()
+                .map(|g| g.iter().map(|v| (*v).clone()).collect()),
+        );
+        sources.retain(|s| !s.is_empty());
+        let share = (MAX_EXAMPLES / sources.len().max(1)).max(1);
+        person.examples = sources
+            .iter()
+            .flat_map(|s| spread(&s.iter().collect::<Vec<_>>(), share))
+            .collect();
         id
     }
 }
 
 /// Up to `n` of these vectors, evenly through the list.
 fn spread(v: &[&Vector], n: usize) -> Vec<StoredVector> {
-    let step = v.len().div_ceil(n.max(1)).max(1);
-    v.iter()
-        .step_by(step)
-        .map(|v| StoredVector::from(*v))
+    let k = v.len().min(n);
+    (0..k)
+        .map(|i| StoredVector::from(v[i * v.len() / k]))
         .collect()
 }
 
-/// Which named person each group is, if any: the person whose examples the
-/// group's faces resemble most on average, if that's at least `min`.
+/// Which named person each group is, if any: the person the group's faces
+/// resemble most on average, if that's at least `min`. A face is compared
+/// with the person's few closest examples, not all of them, so a person
+/// with several looks (ages, glasses, angles) matches each of them.
 /// `groups[g]` lists group g's face vectors.
 pub fn assign(groups: &[Vec<&Vector>], people: &People, min: f32) -> Vec<Option<usize>> {
     let examples: Vec<Vec<Vector>> = people
@@ -266,7 +313,12 @@ pub fn assign(groups: &[Vec<&Vector>], people: &People, min: f32) -> Vec<Option<
                 .map(|(p, ex)| {
                     let total: f32 = faces
                         .iter()
-                        .map(|f| ex.iter().map(|e| e.dot(f)).sum::<f32>() / ex.len() as f32)
+                        .map(|f| {
+                            let mut sims: Vec<f32> = ex.iter().map(|e| e.dot(f)).collect();
+                            sims.sort_by(|a, b| b.total_cmp(a));
+                            let k = sims.len().min(CLOSEST);
+                            sims[..k].iter().sum::<f32>() / k as f32
+                        })
                         .sum();
                     (p, total / faces.len() as f32)
                 })
@@ -344,9 +396,59 @@ mod tests {
 
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("people.json");
+        let people = people;
         assert_eq!(People::load(&path)?, People::default());
         people.save(&path)?;
         assert_eq!(People::load(&path)?, people);
         Ok(())
+    }
+
+    /// Four groups of one person (two looks), marked as the same person:
+    /// one person with examples from each, so new faces of either look are
+    /// recognised.
+    #[test]
+    fn merging_groups_keeps_every_look() {
+        let young: Vec<Vector> = (0..30)
+            .map(|i| unit(&[1.0, 0.02 * i as f32, 0.0, 0.0]))
+            .collect();
+        let older: Vec<Vector> = (0..30)
+            .map(|i| unit(&[0.6, 0.0, 0.8, 0.01 * i as f32]))
+            .collect();
+        let bob = [unit(&[0.0, 0.0, 0.0, 1.0])];
+        let mut people = People::default();
+        people.name("Bob", &bob.iter().collect::<Vec<_>>());
+        let first = people.name("Ann", &young[..15].iter().collect::<Vec<_>>());
+        // Another named group, and two unnamed ones, are all Ann.
+        let second = people.name("Annie", &older[..15].iter().collect::<Vec<_>>());
+        let id = people.merge(
+            "Ann",
+            std::slice::from_ref(&second),
+            &[young[15..].iter().collect(), older[15..].iter().collect()],
+        );
+        assert_eq!(id, first, "the person already called Ann");
+        let names: Vec<&str> = people.people.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Bob", "Ann"], "Annie merged in");
+        let ann = &people.people[1];
+        assert!(ann.examples.len() <= MAX_EXAMPLES);
+        // Each of the four sources kept its share.
+        assert_eq!(ann.examples.len(), 4 * (MAX_EXAMPLES / 4));
+
+        // New faces of either look are Ann; Bob's are Bob.
+        let new_young = [unit(&[1.0, 0.3, 0.0, 0.05])];
+        let new_older = [unit(&[0.6, 0.05, 0.8, 0.0])];
+        let groups = vec![
+            new_young.iter().collect::<Vec<_>>(),
+            new_older.iter().collect(),
+            bob.iter().collect(),
+        ];
+        assert_eq!(assign(&groups, &people, 0.9), [Some(1), Some(1), Some(0)]);
+
+        // Merging unnamed groups alone makes someone new.
+        let c = [unit(&[0.0, 1.0, 0.0, 0.0])];
+        let id = people.merge("Cat", &[], &[c.iter().collect(), c.iter().collect()]);
+        assert_eq!(
+            people.people.last().map(|p| (&p.id, p.name.as_str())),
+            Some((&id, "Cat"))
+        );
     }
 }

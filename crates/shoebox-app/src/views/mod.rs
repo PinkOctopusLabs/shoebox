@@ -548,9 +548,9 @@ pub(crate) fn faces_to_draw(
         Some(v) if !app.ppl.hide_faces => v,
         _ => return Vec::new(),
     };
-    let find = |k: &Option<crate::people::GroupKey>| k.as_ref().and_then(|k| view.find(k));
-    let (shown, hovered) = (find(&app.ppl.showing), find(&app.ppl.hovered));
-    let me = |g| shown == Some(g) || hovered == Some(g);
+    let shown = app.ppl.shown_indices();
+    let hovered = app.ppl.hovered.as_ref().and_then(|k| view.find(k));
+    let me = |g| shown.contains(&g) || hovered == Some(g);
     view.boxes
         .get(&id)
         .into_iter()

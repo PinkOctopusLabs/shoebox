@@ -514,8 +514,13 @@ fn search_box(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         }
         return;
     }
-    if let Some(g) = app.ppl.shown_group().cloned() {
-        person_bar(app, ui, &g);
+    let people: Vec<crate::people::Group> = app.ppl.shown_groups().into_iter().cloned().collect();
+    if let [g] = people.as_slice() {
+        person_bar(app, ui, g);
+        return;
+    }
+    if people.len() > 1 {
+        people_bar(app, ui, &people);
         return;
     }
     if let Some(l) = app.sem.tag {
@@ -1119,7 +1124,7 @@ fn person_bar(app: &mut ShoeboxApp, ui: &mut egui::Ui, g: &crate::people::Group)
         && !app.ppl.name_input.trim().is_empty()
     {
         let name = std::mem::take(&mut app.ppl.name_input);
-        app.name_person(g.key.clone(), name);
+        app.name_person(vec![g.key.clone()], name);
     }
     if let (Some(name), GroupKey::Person(id)) = (&g.name, &g.key) {
         let keyword = format!("People|{name}");
@@ -1167,19 +1172,51 @@ fn people_panel(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     }
     let all = app.ppl.all;
     let mut chosen = None;
+    let mut toggled = None;
+    let mut same_as = None;
+    let named: Vec<(String, crate::people::GroupKey)> = view
+        .groups
+        .iter()
+        .filter_map(|g| Some((g.name.clone()?, g.key.clone())))
+        .collect();
     for g in view.groups.iter().take(if all { usize::MAX } else { 8 }) {
-        let sel = app.ppl.showing.as_ref() == Some(&g.key);
+        let sel = app.ppl.showing.as_ref() == Some(&g.key) || app.ppl.also.contains(&g.key);
         let text = if g.name.is_some() {
             RichText::new(app.ppl.label(g))
         } else {
             RichText::new(app.ppl.label(g)).italics()
         };
-        if row(ui, sel, text, Some(g.photos.len()))
-            .on_hover_text("Click to see their photos and name them")
-            .clicked()
-        {
-            chosen = Some(if sel { None } else { Some(g.key.clone()) });
+        let r = row(ui, sel, text, Some(g.photos.len())).on_hover_text(
+            "Click to see their photos and name them; ⌘-click to add others \
+             (to mark them as the same person)",
+        );
+        if r.clicked() {
+            if ui.input(|i| i.modifiers.command || i.modifiers.shift) {
+                toggled = Some(g.key.clone());
+            } else {
+                chosen = Some(if sel && app.ppl.also.is_empty() {
+                    None
+                } else {
+                    Some(g.key.clone())
+                });
+            }
         }
+        r.context_menu(|ui| {
+            let others: Vec<&(String, crate::people::GroupKey)> =
+                named.iter().filter(|(_, k)| k != &g.key).collect();
+            ui.add_enabled_ui(!others.is_empty(), |ui| {
+                ui.menu_button("Same Person As", |ui| {
+                    for (name, _) in others {
+                        if ui.button(name).clicked() {
+                            same_as = Some((g.key.clone(), name.clone()));
+                            ui.close();
+                        }
+                    }
+                })
+            })
+            .response
+            .on_disabled_hover_text("Name someone first");
+        });
     }
     if view.groups.len() > 8
         && ui
@@ -1196,6 +1233,49 @@ fn people_panel(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         Some(Some(k)) => app.show_person(k),
         Some(None) => app.clear_person(),
         None => {}
+    }
+    if let Some(k) = toggled {
+        app.toggle_person(k);
+    }
+    if let Some((k, name)) = same_as {
+        app.name_person(vec![k], name);
+    }
+}
+
+/// The search bar while several people's photos are shown (⌘-click): name
+/// them as one person, or merge them into someone named among them.
+fn people_bar(app: &mut ShoeboxApp, ui: &mut egui::Ui, groups: &[crate::people::Group]) {
+    ui.label(format!("{} people", groups.len()));
+    let keys: Vec<crate::people::GroupKey> = groups.iter().map(|g| g.key.clone()).collect();
+    let edit = ui.add(
+        egui::TextEdit::singleline(&mut app.ppl.name_input)
+            .hint_text("Same person: name them")
+            .desired_width(170.0),
+    );
+    if edit.lost_focus()
+        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+        && !app.ppl.name_input.trim().is_empty()
+    {
+        let name = std::mem::take(&mut app.ppl.name_input);
+        app.name_person(keys.clone(), name);
+    }
+    for name in groups.iter().filter_map(|g| g.name.clone()) {
+        if ui
+            .button(format!("All {name}"))
+            .on_hover_text(format!(
+                "These are all {name}: their faces teach Shoebox what {name} looks like"
+            ))
+            .clicked()
+        {
+            app.name_person(keys.clone(), name);
+        }
+    }
+    if ui
+        .small_button("✖")
+        .on_hover_text("Show all photos")
+        .clicked()
+    {
+        app.clear_person();
     }
 }
 
