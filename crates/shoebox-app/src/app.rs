@@ -1814,6 +1814,18 @@ impl ShoeboxApp {
     }
 
     /// Toggle the current photo's stack open/closed (S).
+    /// Show one file of a stack (the info panel's list): its stack opens,
+    /// so the file has its own tile, and it becomes the current photo (the
+    /// one the loupe and info panel show).
+    pub(crate) fn show_member(&mut self, idx: usize) {
+        let primary = self.ids[self.stack_of(idx).primary];
+        if self.expanded.insert(primary) {
+            self.refilter();
+        }
+        self.activate(self.ids[idx]);
+        self.scroll_to_current = true;
+    }
+
     fn toggle_stack(&mut self) {
         let Some(idx) = self.current.and_then(|c| self.index(c)) else {
             return;
@@ -2348,7 +2360,6 @@ impl ShoeboxApp {
         self.current.and_then(|c| self.name_of(c))
     }
 
-    /// Collection names (tests).
     /// How many photos (stacks) a collection holds (tests).
     pub fn collection_count(&self, name: &str) -> usize {
         self.collections
@@ -2358,6 +2369,7 @@ impl ShoeboxApp {
             .map_or(0, |m| m.len())
     }
 
+    /// Collection names (tests).
     pub fn collection_names(&self) -> Vec<String> {
         self.collections.iter().map(|c| c.name.clone()).collect()
     }

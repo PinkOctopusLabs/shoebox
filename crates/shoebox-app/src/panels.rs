@@ -1726,7 +1726,9 @@ fn details(app: &mut ShoeboxApp, ui: &mut egui::Ui, id: crate::jobs::PhotoId, id
     };
     if siblings.len() > 1 {
         ui.add_space(6.0);
-        ui.label(RichText::new("Stack members").weak());
+        ui.label(RichText::new("Stack members").weak())
+            .on_hover_text("Click one to see it; S opens the stack in the grid");
+        let mut show = None;
         for j in siblings {
             let p = &app.catalog.photos[j];
             let name = p
@@ -1734,11 +1736,14 @@ fn details(app: &mut ShoeboxApp, ui: &mut egui::Ui, id: crate::jobs::PhotoId, id
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            ui.label(if j == idx {
-                RichText::new(name).strong()
-            } else {
-                RichText::new(name)
-            });
+            // The file shown is highlighted; click another to see it.
+            let r = ui.selectable_label(j == idx, name);
+            if j != idx && r.on_hover_text("Show this file").clicked() {
+                show = Some(j);
+            }
+        }
+        if let Some(j) = show {
+            app.show_member(j);
         }
     }
 }

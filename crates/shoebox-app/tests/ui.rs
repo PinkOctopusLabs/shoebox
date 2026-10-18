@@ -678,6 +678,17 @@ fn organise_marks_stacks_and_filters() {
     assert_eq!(h.state().photo_count(), 17);
     assert_eq!(h.state().shown_count(), 14);
     snapshot(&mut h, "5-stacks");
+    // The info panel lists the stack's files; clicking the JPG shows it
+    // (the stack opens so it has a tile of its own). S folds it again.
+    h.get_by_label("DSC_0001.NEF").click();
+    h.run_steps(2);
+    h.get_by_label("DSC_0001.JPG").click();
+    h.run_steps(3);
+    assert_eq!(h.state().current_name().as_deref(), Some("DSC_0001.JPG"));
+    assert!(h.state().shown_count() > 14, "the stack is open");
+    h.key_press(egui::Key::S);
+    h.run_steps(2);
+    assert_eq!(h.state().shown_count(), 14);
 
     let side = lib.join("scan/recovered/f0003.jpg.xmp");
     h.get_by_label("f0003.jpg").click();
