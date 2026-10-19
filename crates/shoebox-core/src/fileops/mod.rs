@@ -10,6 +10,7 @@ mod sys;
 use std::collections::HashSet;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use journal::{BatchSummary, Journal, Op, OpRecord, OpStatus};
 
@@ -573,6 +574,21 @@ impl FileOps {
         copies: &[PlannedCopy],
         writes: Vec<(PathBuf, Vec<u8>)>,
     ) -> Result<i64> {
+        self.import_until(label, copies, writes, &|_, _| {}, &AtomicBool::new(false))
+    }
+
+    /// [`Self::import`], calling `progress(done, total)` as copies finish.
+    /// Setting `stop` ends the batch before its next step: what ran stays
+    /// journaled (and can be undone), the rest is marked not run, and the
+    /// result is [`CoreError::BatchCancelled`].
+    pub fn import_until(
+        &self,
+        label: &str,
+        copies: &[PlannedCopy],
+        writes: Vec<(PathBuf, Vec<u8>)>,
+        progress: &dyn Fn(usize, usize),
+        stop: &AtomicBool,
+    ) -> Result<i64> {
         let mut dsts = HashSet::new();
         for c in copies {
             self.check_unprotected(&c.dst)?;
@@ -626,7 +642,15 @@ impl FileOps {
                     .map(|(path, bytes)| Planned::Sidecar { path, bytes }),
             )
             .collect();
-        self.run("import", label, None, &ops, |_| Ok(()))
+        let total = copies.len();
+        let mut done = 0;
+        self.run_until("import", label, None, &ops, Some(stop), |i| {
+            if i < total {
+                done += 1;
+                progress(done, total);
+            }
+            Ok(())
+        })
     }
 
     /// Move files to the Trash (an explicit command), each only if it still
@@ -705,6 +729,19 @@ impl FileOps {
         label: &str,
         undo_of: Option<i64>,
         ops: &[Planned],
+        after_each: impl FnMut(usize) -> Result<()>,
+    ) -> Result<i64> {
+        self.run_until(kind, label, undo_of, ops, None, after_each)
+    }
+
+    /// [`Self::run`], stopping before the next step once `stop` is set.
+    fn run_until(
+        &self,
+        kind: &str,
+        label: &str,
+        undo_of: Option<i64>,
+        ops: &[Planned],
+        stop: Option<&AtomicBool>,
         mut after_each: impl FnMut(usize) -> Result<()>,
     ) -> Result<i64> {
         let j = &self.journal;
@@ -719,6 +756,15 @@ impl FileOps {
         let steps = j.ops(batch)?;
         let mut done = 0;
         for (op, owner) in steps.iter().zip(&owners) {
+            if stop.is_some_and(|s| s.load(Ordering::Relaxed)) {
+                j.fail_pending(batch, "not run: cancelled")?;
+                j.set_batch_status(batch, "cancelled")?;
+                return Err(CoreError::BatchCancelled {
+                    batch,
+                    done,
+                    total: ops.len(),
+                });
+            }
             if let Err(e) = self.perform(op) {
                 j.fail(op.id, &e)?;
                 j.fail_pending(batch, "not run: the batch stopped at an earlier error")?;
@@ -1268,6 +1314,61 @@ mod tests {
             b"raw bytes"
         );
         assert!(src.exists());
+    }
+
+    #[test]
+    fn a_cancelled_import_keeps_what_ran_and_undoes() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        let fo = ops(&root, vec![]).with_trash(TrashMode::Folder(root.join("trash")));
+        let copies: Vec<PlannedCopy> = ["a", "b", "c"]
+            .iter()
+            .map(|n| {
+                let src = root.join(format!("card/{n}.jpg"));
+                touch(&src, n);
+                PlannedCopy {
+                    hash: h(&src),
+                    src,
+                    dst: root.join(format!("lib/{n}.jpg")),
+                }
+            })
+            .collect();
+        let sidecar = (root.join("lib/a.jpg.xmp"), b"<x/>".to_vec());
+        // Cancelled once the first copy is done.
+        let stop = AtomicBool::new(false);
+        let seen = std::cell::RefCell::new(Vec::new());
+        let err = fo
+            .import_until(
+                "import",
+                &copies,
+                vec![sidecar],
+                &|done, total| {
+                    seen.borrow_mut().push((done, total));
+                    stop.store(true, Ordering::Relaxed);
+                },
+                &stop,
+            )
+            .unwrap_err();
+        let CoreError::BatchCancelled { batch, .. } = err else {
+            panic!("{err}");
+        };
+        assert_eq!(seen.into_inner(), [(1, 3)]);
+        assert!(root.join("lib/a.jpg").exists());
+        assert!(!root.join("lib/b.jpg").exists());
+        assert!(!root.join("lib/a.jpg.xmp").exists(), "writes come last");
+        let b = fo.journal().batches().unwrap().pop().unwrap();
+        assert_eq!(b.status, "cancelled");
+        assert!(
+            fo.journal()
+                .ops(batch)
+                .unwrap()
+                .iter()
+                .all(|o| o.status != OpStatus::Pending),
+            "nothing left pending (no crash recovery)"
+        );
+        fo.undo(batch).unwrap();
+        assert!(!root.join("lib/a.jpg").exists());
+        assert!(root.join("trash/a.jpg").exists());
     }
 
     #[test]

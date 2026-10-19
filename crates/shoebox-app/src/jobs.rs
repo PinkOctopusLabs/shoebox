@@ -291,6 +291,9 @@ pub enum LibraryCommand {
         root: PathBuf,
         template: String,
     },
+    /// Plan the last import again (without reading the source again),
+    /// copying these left-out source files anyway.
+    ReplanImport(std::collections::HashSet<PathBuf>),
     /// Run the last planned import: verified copies as one batch, with the
     /// folders' names put on the photos as chosen.
     RunImport(Vec<shoebox_core::import::Folder>),
@@ -474,8 +477,20 @@ pub enum LibraryEvent {
         done: usize,
         total: usize,
     },
-    /// The import plan (or why it couldn't be made).
-    ImportPlanned(Result<Arc<shoebox_core::import::Plan>, String>),
+    /// The import plan (or why it couldn't be made; `None`: cancelled).
+    ImportPlanned(Option<Result<Arc<shoebox_core::import::Plan>, String>>),
+    /// The import planned again with files forced in (folders unchanged).
+    ImportReplanned(Arc<shoebox_core::import::Plan>),
+    /// Copying: `done` of `total` copies.
+    ImportCopying {
+        done: usize,
+        total: usize,
+    },
+    /// The import was cancelled part-way: `copied` files stay, as `batch`.
+    ImportCancelled {
+        batch: i64,
+        copied: usize,
+    },
     /// Import done as this batch.
     Imported {
         batch: i64,
@@ -530,6 +545,9 @@ pub enum LibraryEvent {
 pub struct Library {
     commands: Sender<LibraryCommand>,
     pub events: Receiver<LibraryEvent>,
+    /// Set to stop an import's planning or copying (the worker is busy with
+    /// it, so this can't wait in the command queue).
+    import_stop: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub struct LibraryPaths {
@@ -544,20 +562,38 @@ impl Library {
     pub fn new(paths: LibraryPaths, repaint: impl Fn() + Send + Sync + 'static) -> Self {
         let (ctx_tx, ctx_rx) = crossbeam_channel::unbounded::<LibraryCommand>();
         let (ev_tx, ev_rx) = crossbeam_channel::unbounded();
+        let import_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop = import_stop.clone();
         let spawned = std::thread::Builder::new()
             .name("library".into())
-            .spawn(move || library_worker(&paths, &ctx_rx, &ev_tx, &repaint));
+            .spawn(move || library_worker(&paths, &ctx_rx, &ev_tx, &repaint, &stop));
         if let Err(e) = spawned {
             tracing::error!("could not start library thread: {e}");
         }
         Self {
             commands: ctx_tx,
             events: ev_rx,
+            import_stop,
         }
     }
 
     pub fn send(&self, c: LibraryCommand) {
+        // A new plan or import starts uncancelled.
+        if matches!(
+            c,
+            LibraryCommand::PlanImport { .. } | LibraryCommand::RunImport(_)
+        ) {
+            self.import_stop
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+        }
         let _ = self.commands.send(c);
+    }
+
+    /// Stop the import being planned or copied (what's copied stays, as a
+    /// batch that can be undone).
+    pub fn cancel_import(&self) {
+        self.import_stop
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -599,6 +635,7 @@ fn library_worker(
     commands: &Receiver<LibraryCommand>,
     events: &Sender<LibraryEvent>,
     repaint: &(dyn Fn() + Send + Sync),
+    import_stop: &std::sync::atomic::AtomicBool,
 ) {
     let emit = |e: LibraryEvent| {
         let _ = events.send(e);
@@ -631,8 +668,14 @@ fn library_worker(
     let mut catalog = Catalog::default();
     // The last duplicate search, kept so decisions can be applied to it.
     let mut dupes: Option<Review> = None;
-    // The last import plan, run as planned when confirmed.
+    // The last import plan, run as planned when confirmed, and the scan it
+    // came from (with where to and how named), for planning again.
     let mut import_plan: Option<shoebox_core::import::Plan> = None;
+    let mut import_scan: Option<(
+        shoebox_core::import::Scan,
+        PathBuf,
+        shoebox_core::template::Template,
+    )> = None;
     let batches = |fileops: &FileOps| {
         if let Ok(b) = fileops.journal().batches() {
             emit(LibraryEvent::Batches(b));
@@ -953,17 +996,37 @@ fn library_worker(
                         emit(LibraryEvent::ImportProgress { done, total });
                     }
                 };
-                let r = shoebox_core::template::Template::parse(&template)
-                    .and_then(|t| {
-                        shoebox_core::import::plan(&source, &root, &t, &catalog, &progress)
-                    })
-                    .map_err(|e| e.to_string());
+                use shoebox_core::import;
+                import_plan = None;
+                import_scan = None;
+                let r = shoebox_core::template::Template::parse(&template).and_then(|t| {
+                    let scan = import::scan(&source, &catalog, &progress, import_stop)?;
+                    let plan = import::decide(&scan, &root, &t, &Default::default())?;
+                    Ok((plan, (scan, root, t)))
+                });
                 match r {
+                    Ok((p, scan)) => {
+                        emit(LibraryEvent::ImportPlanned(Some(Ok(Arc::new(p.clone())))));
+                        import_plan = Some(p);
+                        import_scan = Some(scan);
+                    }
+                    Err(shoebox_core::CoreError::Cancelled) => {
+                        emit(LibraryEvent::ImportPlanned(None));
+                    }
+                    Err(e) => emit(LibraryEvent::ImportPlanned(Some(Err(e.to_string())))),
+                }
+                (false, false)
+            }
+            LibraryCommand::ReplanImport(force) => {
+                let Some((scan, root, t)) = &import_scan else {
+                    continue;
+                };
+                match shoebox_core::import::decide(scan, root, t, &force) {
                     Ok(p) => {
-                        emit(LibraryEvent::ImportPlanned(Ok(Arc::new(p.clone()))));
+                        emit(LibraryEvent::ImportReplanned(Arc::new(p.clone())));
                         import_plan = Some(p);
                     }
-                    Err(e) => emit(LibraryEvent::ImportPlanned(Err(e))),
+                    Err(e) => emit(LibraryEvent::Error(format!("import: {e}"))),
                 }
                 (false, false)
             }
@@ -971,6 +1034,7 @@ fn library_worker(
                 let Some(mut p) = import_plan.take() else {
                     continue;
                 };
+                import_scan = None;
                 if p.copies.is_empty() && p.origins.is_empty() {
                     continue;
                 }
@@ -1012,7 +1076,17 @@ fn library_worker(
                     .map(|d| d.display().to_string())
                     .unwrap_or_default();
                 let photos = named.photos;
-                match fileops.import(&format!("import from {source}"), &p.copies, named.writes) {
+                let images = p.photos.len();
+                let copied = std::cell::Cell::new(0);
+                let progress = |done: usize, total: usize| {
+                    copied.set(done);
+                    if done.is_multiple_of(8) || done == total {
+                        emit(LibraryEvent::ImportCopying { done, total });
+                    }
+                };
+                let label = format!("import from {source}");
+                match fileops.import_until(&label, &p.copies, named.writes, &progress, import_stop)
+                {
                     Ok(b) => {
                         undo.push(b);
                         redo.clear();
@@ -1026,6 +1100,17 @@ fn library_worker(
                         if named.new_events > 0 {
                             emit(LibraryEvent::Events(evs));
                         }
+                    }
+                    Err(shoebox_core::CoreError::BatchCancelled { batch, .. }) => {
+                        undo.push(batch);
+                        redo.clear();
+                        fresh.set(true);
+                        history(&undo, &redo);
+                        // Copies of images (sidecars come after them).
+                        emit(LibraryEvent::ImportCancelled {
+                            batch,
+                            copied: copied.get().min(images),
+                        });
                     }
                     Err(e) => emit(LibraryEvent::Error(format!("import: {e}"))),
                 }

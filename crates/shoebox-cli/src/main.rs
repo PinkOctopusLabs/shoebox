@@ -287,18 +287,18 @@ fn import_cmd(
             c.dst.strip_prefix(&root.path).unwrap_or(&c.dst).display()
         );
     }
-    for (s, e) in &plan.skipped {
+    for m in &plan.skipped {
         println!(
             "skip {} (already in the library as {})",
-            s.display(),
-            e.display()
+            m.src.path.display(),
+            m.other.display()
         );
     }
-    for (s, e) in &plan.repeats {
+    for m in &plan.repeats {
         println!(
             "skip {} (the same as {}, copied once)",
-            s.display(),
-            e.display()
+            m.src.path.display(),
+            m.other.display()
         );
     }
     for (s, e) in &plan.unreadable {

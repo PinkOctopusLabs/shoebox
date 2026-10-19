@@ -102,6 +102,14 @@ pub struct ImportState {
     /// Show the photos to copy as a source → destination list, not
     /// thumbnails.
     pub list: bool,
+    /// Left-out source files to copy anyway.
+    pub force: HashSet<PathBuf>,
+    /// Show only the photos this source folder's name goes on.
+    pub filter: Option<PathBuf>,
+    /// Copying: (done, total).
+    pub copying: Option<(usize, usize)>,
+    /// The plan's photos `filter` shows: (folder, plan, indices), cached.
+    pub shown: Option<(PathBuf, usize, Arc<Vec<usize>>)>,
     pub message: Option<String>,
 }
 
@@ -819,14 +827,43 @@ impl ShoeboxApp {
                 LibraryEvent::ImportPlanned(p) => {
                     self.import.running = false;
                     self.import.progress = None;
-                    self.import.folders = p.as_ref().map(|p| p.folders.clone()).unwrap_or_default();
-                    self.import.plan = Some(p);
+                    self.import.force.clear();
+                    self.import.filter = None;
+                    self.import.shown = None;
+                    if p.is_none() {
+                        self.import.message = Some("Cancelled; nothing was copied.".into());
+                    }
+                    self.import.folders = match &p {
+                        Some(Ok(p)) => p.folders.clone(),
+                        _ => Vec::new(),
+                    };
+                    self.import.plan = p;
+                }
+                LibraryEvent::ImportReplanned(p) => {
+                    self.import.shown = None;
+                    self.import.plan = Some(Ok(p));
+                }
+                LibraryEvent::ImportCopying { done, total } => {
+                    self.import.copying = Some((done, total));
+                }
+                LibraryEvent::ImportCancelled { batch, copied } => {
+                    self.import.copying = None;
+                    self.import.plan = None;
+                    self.import.folders.clear();
+                    let m = format!(
+                        "Cancelled after copying {copied} files (batch {batch}). Undo moves \
+                         them to the Trash, or Find photos again to finish: what's copied is \
+                         then already in the library and still gets its folder names."
+                    );
+                    self.import.message = Some(m.clone());
+                    self.notice = Some(m);
                 }
                 LibraryEvent::Imported {
                     batch,
                     copied,
                     named,
                 } => {
+                    self.import.copying = None;
                     self.import.plan = None;
                     self.import.folders.clear();
                     let names = if named > 0 {
@@ -2214,8 +2251,30 @@ impl ShoeboxApp {
     }
 
     pub fn run_import(&mut self) {
+        let total = match &self.import.plan {
+            Some(Ok(p)) => p.copies.len(),
+            _ => 0,
+        };
+        self.import.copying = Some((0, total));
+        self.import.message = None;
         self.library
             .send(LibraryCommand::RunImport(self.import.folders.clone()));
+    }
+
+    /// Stop finding or copying photos.
+    pub fn cancel_import(&mut self) {
+        self.library.cancel_import();
+    }
+
+    /// Copy a left-out source file anyway (or leave it out again).
+    pub(crate) fn force_import(&mut self, src: &Path, on: bool) {
+        if on {
+            self.import.force.insert(src.to_path_buf());
+        } else {
+            self.import.force.remove(src);
+        }
+        self.library
+            .send(LibraryCommand::ReplanImport(self.import.force.clone()));
     }
 
     // --- history ---------------------------------------------------------------
@@ -2352,10 +2411,14 @@ impl ShoeboxApp {
         self.import.plan = None;
     }
 
-    /// The import plan: (copies, skipped), once planned.
+    /// The import plan: (copies, left out as already in the library), once
+    /// planned.
     pub fn import_counts(&self) -> Option<(usize, usize)> {
         match &self.import.plan {
-            Some(Ok(p)) => Some((p.copies.len(), p.skipped.len())),
+            Some(Ok(p)) => Some((
+                p.copies.len(),
+                shoebox_core::import::Plan::left_out(&p.skipped),
+            )),
             _ => None,
         }
     }
@@ -2370,7 +2433,7 @@ impl ShoeboxApp {
             .iter()
             .filter(|p| {
                 self.textures.contains(&Key {
-                    photo: crate::jobs::photo_id(&p.src),
+                    photo: crate::jobs::photo_id(&p.src.path),
                     size: Size::Small,
                 })
             })
@@ -2752,9 +2815,9 @@ impl ShoeboxApp {
 
     /// Ask for a preview of a photo an import will copy (not cached on
     /// disk: the source isn't in the library).
-    pub(crate) fn want_preview(&mut self, p: &shoebox_core::import::PlannedPhoto) {
+    pub(crate) fn want_preview(&mut self, p: &shoebox_core::import::SourceFile) {
         let key = Key {
-            photo: crate::jobs::photo_id(&p.src),
+            photo: crate::jobs::photo_id(&p.path),
             size: Size::Small,
         };
         if self.textures.contains(&key) || self.textures.failed.contains_key(&key) {
@@ -2764,7 +2827,7 @@ impl ShoeboxApp {
             key,
             Priority::Visible,
             Job {
-                path: p.src.clone(),
+                path: p.path.clone(),
                 format: p.format,
                 size: p.size,
                 mtime_ns: p.mtime_ns,

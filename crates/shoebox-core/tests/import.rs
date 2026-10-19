@@ -150,10 +150,10 @@ fn import_names_skips_and_undo() {
     let skipped: Vec<(String, String)> = plan
         .skipped
         .iter()
-        .map(|(s, e)| {
+        .map(|m| {
             (
-                s.strip_prefix(&src).unwrap().display().to_string(),
-                e.file_name().unwrap().to_string_lossy().into_owned(),
+                m.src.path.strip_prefix(&src).unwrap().display().to_string(),
+                m.other.file_name().unwrap().to_string_lossy().into_owned(),
             )
         })
         .collect();
@@ -168,7 +168,12 @@ fn import_names_skips_and_undo() {
     let repeats: Vec<(&Path, &Path)> = plan
         .repeats
         .iter()
-        .map(|(s, e)| (s.strip_prefix(&src).unwrap(), e.strip_prefix(&src).unwrap()))
+        .map(|m| {
+            (
+                m.src.path.strip_prefix(&src).unwrap(),
+                m.other.strip_prefix(&src).unwrap(),
+            )
+        })
         .collect();
     assert_eq!(
         repeats,
@@ -178,6 +183,42 @@ fn import_names_skips_and_undo() {
         )]
     );
     assert_eq!(plan.undated, 1);
+
+    // Asked for, a left-out file is copied anyway, without reading the card
+    // again; it stays listed (as forced).
+    let scan = shoebox_core::import::scan(&src, &catalog, &|_, _| {}, &Default::default()).unwrap();
+    let force: std::collections::HashSet<_> = [
+        src.join("DCIM/100NIKON/DSC_0004.JPG"),
+        src.join("DCIM/100NIKON/DSC_0005.JPG"),
+    ]
+    .into();
+    let forced = shoebox_core::import::decide(&scan, &lib, &tpl, &force).unwrap();
+    assert_eq!(forced.copies.len(), plan.copies.len() + 2);
+    assert!(
+        forced
+            .skipped
+            .iter()
+            .chain(&forced.repeats)
+            .all(|m| m.forced)
+    );
+    assert_eq!(
+        forced.repeats[0].other_src.as_ref().unwrap().path,
+        forced.repeats[0].other
+    );
+    assert!(
+        forced
+            .origins
+            .iter()
+            .all(|(p, _)| !p.ends_with("known.jpg")),
+        "a library photo copied again isn't named as found again"
+    );
+
+    // A cancelled scan stops with nothing to show.
+    let stop = std::sync::atomic::AtomicBool::new(true);
+    assert!(matches!(
+        shoebox_core::import::scan(&src, &catalog, &|_, _| {}, &stop),
+        Err(shoebox_core::error::CoreError::Cancelled)
+    ));
 
     // Copy, verified; the card is untouched.
     let card_before = tree(&src);

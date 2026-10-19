@@ -31,6 +31,16 @@ pub enum CoreError {
         total: usize,
         reason: String,
     },
+    /// Stopped as asked, before anything was written.
+    #[error("cancelled")]
+    Cancelled,
+    /// A batch stopped part-way as asked; what ran stays (and can be undone).
+    #[error("batch {batch} cancelled after {done} of {total} operations")]
+    BatchCancelled {
+        batch: i64,
+        done: usize,
+        total: usize,
+    },
 }
 
 pub type Result<T, E = CoreError> = std::result::Result<T, E>;

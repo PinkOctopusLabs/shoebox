@@ -845,3 +845,23 @@ hashes, embeddings, faces).
   is often when it was downloaded or copied. Chosen by the user.
 - `META_VERSION` 3, so cached movie rows are read again (every file's
   metadata is re-read once).
+
+## Import: check left-out files, filter by folder, cancel (2026-10-19)
+
+- Planning is `import::scan` (read and hash the source, and the same-size
+  library files; slow) then `import::decide` (destinations; quick). The
+  worker keeps the scan, so **Import anyway** on a left-out file
+  (`ReplanImport(force)`) plans again in a moment, even for a big card.
+  Forced files stay listed (`Match::forced`) so they can be left out again.
+- Left-out files show their thumbnail beside the matched file's: a library
+  photo's from the thumbnail cache, a source file's rendered uncached.
+- The folder filter uses `Plan::origins` (the folders each picture turns up
+  in), so a photo copied from one folder but repeated in another shows
+  under both: it gets both names.
+- Cancel is a flag shared with the library worker (`Library::cancel_import`;
+  the worker is busy, so it can't be a command). Scanning stops with
+  `CoreError::Cancelled`; copying stops before the next step with
+  `BatchCancelled`: the rest marked not run, the batch `cancelled`, what ran
+  kept and undoable. Sidecar writes come after the copies in an import
+  batch, so a cancelled import's copies have no folder names yet; importing
+  again adds them (they're then library photos found again).

@@ -1527,6 +1527,21 @@ fn import_in_the_app_and_undo() {
         a.import_counts().is_some()
     });
     assert_eq!(h.state().import_counts(), Some((0, 3)));
+    // Each left-out file shows beside the library photo it matched; one can
+    // be copied anyway, and left out again.
+    h.get_by_label("Already in the library (3)").click();
+    h.run_steps(2);
+    let nef = "2026-04-24/DSC_0001.NEF";
+    h.get_by_label(&format!("Import anyway: {nef}")).click();
+    wait_for(&mut h, Duration::from_secs(10), "forced", |a| {
+        a.import_counts() == Some((1, 2))
+    });
+    settle(&mut h, Duration::from_secs(10));
+    snapshot(&mut h, "17b-import-left-out");
+    h.get_by_label(&format!("Leave out: {nef}")).click();
+    wait_for(&mut h, Duration::from_secs(10), "left out again", |a| {
+        a.import_counts() == Some((0, 3))
+    });
 
     // Undo from History: the copies go to the (test) trash.
     h.get_by_label("History").click();
@@ -1664,6 +1679,15 @@ fn import_folder_names() {
         a.import_previews() == 4
     });
     assert!(h.query_by_label("Trips/Italy 2019/Rome/b.jpg").is_some());
+    // A folder's photo count shows just the photos its name goes on.
+    h.get_by_label("Trips/Italy 2019: photos").click();
+    h.run_steps(2);
+    assert!(h.query_by_label("Trips/Italy 2019/a.jpg").is_some());
+    assert!(h.query_by_label("Trips/Italy 2019/Rome/b.jpg").is_some());
+    assert!(h.query_by_label("Saved/c.jpg").is_none());
+    h.get_by_label("Show all").click();
+    h.run_steps(2);
+    assert!(h.query_by_label("Saved/c.jpg").is_some());
     fn cached(d: &Path) -> usize {
         std::fs::read_dir(d).map_or(0, |rd| {
             rd.filter_map(Result::ok)

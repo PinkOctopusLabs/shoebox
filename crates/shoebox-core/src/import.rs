@@ -8,6 +8,11 @@
 //! card come along under the new name. The copies then run as one batch
 //! through [`crate::fileops::FileOps::import`], each verified by BLAKE3.
 //!
+//! Planning is two steps: [`scan`] reads and hashes the source (slow,
+//! cancellable) and [`decide`] works out the copies from that (quick), so a
+//! person can ask for a left-out file to be copied anyway without the
+//! source being read again. [`plan`] does both.
+//!
 //! The source's folder names can come along: each folder holding photos
 //! (at any depth) is listed in the plan with what its name becomes on the
 //! photos in it: an event (nested as the folders are), a keyword, or
@@ -18,13 +23,14 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rayon::prelude::*;
 use shoebox_decode::Format;
 use walkdir::WalkDir;
 
 use crate::catalog::Catalog;
-use crate::error::{Result, io};
+use crate::error::{CoreError, Result, io};
 use crate::events::{self, Event};
 use crate::fileops::{PlannedCopy, suffixed};
 use crate::marks::Marks;
@@ -60,11 +66,11 @@ pub struct Folder {
 pub struct Plan {
     /// Images first, then sidecars, each with its final destination.
     pub copies: Vec<PlannedCopy>,
-    /// Source files already in the library: (source, the library file).
-    pub skipped: Vec<(PathBuf, PathBuf)>,
+    /// Source files already in the library (`other`: the library file).
+    pub skipped: Vec<Match>,
     /// Source files with the same content as another source file that's
-    /// copied: (source, the source file copied instead).
-    pub repeats: Vec<(PathBuf, PathBuf)>,
+    /// copied (`other`: that file).
+    pub repeats: Vec<Match>,
     /// Source files that couldn't be read: (source, why).
     pub unreadable: Vec<(PathBuf, String)>,
     /// Imported images without a capture date (they go to `_undated/`).
@@ -81,16 +87,40 @@ pub struct Plan {
     pub origins: Vec<(PathBuf, BTreeSet<PathBuf>)>,
 }
 
-/// A photo an import will copy: enough to preview it without reading the
-/// source again.
+/// A source image: enough to preview it without reading it again.
 #[derive(Debug, Clone)]
-pub struct PlannedPhoto {
-    pub src: PathBuf,
-    pub dst: PathBuf,
+pub struct SourceFile {
+    pub path: PathBuf,
     pub format: Format,
     pub size: u64,
     pub mtime_ns: i64,
     pub orientation: u16,
+}
+
+/// A photo an import will copy.
+#[derive(Debug, Clone)]
+pub struct PlannedPhoto {
+    pub src: SourceFile,
+    pub dst: PathBuf,
+}
+
+/// A source image left out because its content is already there.
+#[derive(Debug, Clone)]
+pub struct Match {
+    pub src: SourceFile,
+    /// The library file, or the source file copied instead.
+    pub other: PathBuf,
+    /// That other file, when it's in the source.
+    pub other_src: Option<SourceFile>,
+    /// Copied anyway, as asked ([`decide`]'s `force`).
+    pub forced: bool,
+}
+
+impl Plan {
+    /// Left-out files (not copied anyway).
+    pub fn left_out(matches: &[Match]) -> usize {
+        matches.iter().filter(|m| !m.forced).count()
+    }
 }
 
 /// Month names (and their short forms) that make a folder name a date.
@@ -206,19 +236,28 @@ fn lower_stem(p: &Path) -> String {
         .unwrap_or_default()
 }
 
+#[derive(Debug, Clone)]
 struct Source {
-    path: PathBuf,
+    file: SourceFile,
     fields: Fields,
-    size: u64,
-    mtime_ns: i64,
-    format: Format,
-    orientation: u16,
     hash: [u8; 32],
 }
 
-/// Plan importing everything under `source` into `root` with `template`.
-/// `library` is the current catalog (for skipping what's already there).
-/// `progress(done, total)` is called as source files are read.
+/// A source read and hashed, and the library files with the same content:
+/// everything [`decide`] needs.
+#[derive(Debug, Clone)]
+pub struct Scan {
+    sources: Vec<Source>,
+    xmps: Vec<PathBuf>,
+    unreadable: Vec<(PathBuf, String)>,
+    downloaded: usize,
+    folders: Vec<Folder>,
+    found_in: HashMap<[u8; 32], BTreeSet<PathBuf>>,
+    library_hashes: HashMap<[u8; 32], PathBuf>,
+}
+
+/// Plan importing everything under `source` into `root` with `template`:
+/// [`scan`], then [`decide`] with nothing forced.
 pub fn plan(
     source: &Path,
     root: &Path,
@@ -226,6 +265,20 @@ pub fn plan(
     library: &Catalog,
     progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<Plan> {
+    let scan = scan(source, library, progress, &AtomicBool::new(false))?;
+    decide(&scan, root, template, &HashSet::new())
+}
+
+/// Read and hash every image under `source` (nothing is written), and find
+/// the `library` files with the same content. `progress(done, total)` is
+/// called as source files are read; setting `stop` ends it early with
+/// [`CoreError::Cancelled`].
+pub fn scan(
+    source: &Path,
+    library: &Catalog,
+    progress: &(dyn Fn(usize, usize) + Sync),
+    stop: &AtomicBool,
+) -> Result<Scan> {
     let mut images = Vec::new();
     let mut xmps = Vec::new();
     let walker = WalkDir::new(source).follow_links(false).into_iter();
@@ -239,6 +292,9 @@ pub fn plan(
                 continue;
             }
         };
+        if stop.load(Ordering::Relaxed) {
+            return Err(CoreError::Cancelled);
+        }
         if !e.file_type().is_file() {
             continue;
         }
@@ -260,13 +316,22 @@ pub fn plan(
     let read: Vec<std::result::Result<Source, (PathBuf, String)>> = images
         .par_iter()
         .map(|p| {
+            if stop.load(Ordering::Relaxed) {
+                return Err((p.clone(), "cancelled".to_owned()));
+            }
             let r = (|| {
                 let format = Format::from_path(p).ok_or("not an image")?;
                 let md = std::fs::metadata(p).map_err(|e| e.to_string())?;
                 let meta = crate::meta::read(p, format).map_err(|e| e.to_string())?;
                 let hash = hash_file(p).map_err(|e| e.to_string())?;
                 Ok::<_, String>(Source {
-                    path: p.clone(),
+                    file: SourceFile {
+                        path: p.clone(),
+                        format,
+                        size: md.len(),
+                        mtime_ns: crate::scan::mtime_of(&md),
+                        orientation: meta.orientation(),
+                    },
                     fields: Fields {
                         capture_time: meta.exif.capture_time.clone(),
                         subsec: meta.exif.subsec.clone(),
@@ -279,10 +344,6 @@ pub fn plan(
                         height: meta.height,
                         seq: 0,
                     },
-                    size: md.len(),
-                    mtime_ns: crate::scan::mtime_of(&md),
-                    format,
-                    orientation: meta.orientation(),
                     hash,
                 })
             })();
@@ -291,16 +352,16 @@ pub fn plan(
             r.map_err(|e| (p.clone(), e))
         })
         .collect();
+    if stop.load(Ordering::Relaxed) {
+        return Err(CoreError::Cancelled);
+    }
 
-    let mut out = Plan {
-        downloaded,
-        ..Plan::default()
-    };
+    let mut unreadable = Vec::new();
     let mut sources = Vec::new();
     for r in read {
         match r {
             Ok(s) => sources.push(s),
-            Err(e) => out.unreadable.push(e),
+            Err(e) => unreadable.push(e),
         }
     }
     // The folders photos are in, with how many under each, and the folders
@@ -308,7 +369,7 @@ pub fn plan(
     let mut counts: BTreeMap<PathBuf, usize> = BTreeMap::new();
     let mut found_in: HashMap<[u8; 32], BTreeSet<PathBuf>> = HashMap::new();
     for s in &sources {
-        let rel = rel_dir(source, &s.path);
+        let rel = rel_dir(source, &s.file.path);
         for a in rel.ancestors().filter(|a| !a.as_os_str().is_empty()) {
             *counts.entry(a.to_path_buf()).or_default() += 1;
         }
@@ -316,7 +377,7 @@ pub fn plan(
             found_in.entry(s.hash).or_default().insert(rel);
         }
     }
-    out.folders = counts
+    let folders = counts
         .into_iter()
         .map(|(rel, photos)| {
             let name = rel
@@ -338,7 +399,7 @@ pub fn plan(
     for p in &library.photos {
         by_size.entry(p.size).or_default().push(&p.path);
     }
-    let wanted: HashSet<u64> = sources.iter().map(|s| s.size).collect();
+    let wanted: HashSet<u64> = sources.iter().map(|s| s.file.size).collect();
     let candidates: Vec<&Path> = by_size
         .iter()
         .filter(|(s, _)| wanted.contains(s))
@@ -346,22 +407,69 @@ pub fn plan(
         .collect();
     let library_hashes: HashMap<[u8; 32], PathBuf> = candidates
         .par_iter()
+        .filter(|_| !stop.load(Ordering::Relaxed))
         .filter_map(|p| hash_file(p).ok().map(|h| (h, p.to_path_buf())))
         .collect();
-    let mut seen: HashMap<[u8; 32], PathBuf> = HashMap::new();
+    if stop.load(Ordering::Relaxed) {
+        return Err(CoreError::Cancelled);
+    }
+    Ok(Scan {
+        sources,
+        xmps,
+        unreadable,
+        downloaded,
+        folders,
+        found_in,
+        library_hashes,
+    })
+}
+
+/// Work out an import from a [`scan`]: every destination under `root` (by
+/// `template`), what's left out as already there, and the sidecars that
+/// come along. Source files in `force` are copied even when their content
+/// is already in the library or earlier in the source.
+pub fn decide(
+    scan: &Scan,
+    root: &Path,
+    template: &Template,
+    force: &HashSet<PathBuf>,
+) -> Result<Plan> {
+    let mut out = Plan {
+        downloaded: scan.downloaded,
+        unreadable: scan.unreadable.clone(),
+        folders: scan.folders.clone(),
+        ..Plan::default()
+    };
+    let (library_hashes, found_in) = (&scan.library_hashes, &scan.found_in);
+    let mut seen: HashMap<[u8; 32], &SourceFile> = HashMap::new();
     let mut keep = Vec::new();
     let mut found_again: Vec<(PathBuf, [u8; 32])> = Vec::new();
-    for s in sources {
+    for s in &scan.sources {
+        let forced = force.contains(&s.file.path);
         if let Some(existing) = library_hashes.get(&s.hash) {
-            if !found_again.iter().any(|(p, _)| p == existing) {
+            if !forced && !found_again.iter().any(|(p, _)| p == existing) {
                 found_again.push((existing.clone(), s.hash));
             }
-            out.skipped.push((s.path, existing.clone()));
-        } else if let Some(existing) = seen.get(&s.hash) {
-            out.repeats.push((s.path, existing.clone()));
+            out.skipped.push(Match {
+                src: s.file.clone(),
+                other: existing.clone(),
+                other_src: None,
+                forced,
+            });
+        } else if let Some(first) = seen.get(&s.hash) {
+            out.repeats.push(Match {
+                src: s.file.clone(),
+                other: first.path.clone(),
+                other_src: Some((*first).clone()),
+                forced,
+            });
         } else {
-            seen.insert(s.hash, s.path.clone());
-            keep.push(s);
+            seen.insert(s.hash, &s.file);
+            keep.push(s.clone());
+            continue;
+        }
+        if forced {
+            keep.push(s.clone());
         }
     }
 
@@ -370,8 +478,12 @@ pub fn plan(
     let mut frame_of: HashMap<(PathBuf, String), usize> = HashMap::new();
     for s in keep {
         let key = (
-            s.path.parent().map(Path::to_path_buf).unwrap_or_default(),
-            lower_stem(&s.path),
+            s.file
+                .path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default(),
+            lower_stem(&s.file.path),
         );
         match frame_of.get(&key) {
             Some(&f) => frames[f].push(s),
@@ -385,7 +497,8 @@ pub fn plan(
     let mut taken: HashSet<PathBuf> = HashSet::new();
     let mut seq = 0usize;
     let mut sidecar_copies = Vec::new();
-    let card_sidecars: HashMap<String, PathBuf> = xmps
+    let card_sidecars: HashMap<String, PathBuf> = scan
+        .xmps
         .iter()
         .map(|p| (p.to_string_lossy().to_lowercase(), p.clone()))
         .collect();
@@ -397,7 +510,7 @@ pub fn plan(
     for frame in &frames {
         // A Live Photo's video is named from its photo's capture time, so
         // the pair keeps one name (the video's own clock can differ).
-        let is_movie = |s: &Source| Format::from_path(&s.path).is_some_and(Format::is_movie);
+        let is_movie = |s: &Source| s.file.format.is_movie();
         let lead = frame
             .iter()
             .find(|s| !is_movie(s) && s.fields.capture_time.is_some());
@@ -437,22 +550,18 @@ pub fn plan(
         for (s, dst) in frame.iter().zip(&dsts) {
             taken.insert(dst.clone());
             out.copies.push(PlannedCopy {
-                src: s.path.clone(),
+                src: s.file.path.clone(),
                 dst: dst.clone(),
                 hash: s.hash,
             });
             out.photos.push(PlannedPhoto {
-                src: s.path.clone(),
+                src: s.file.clone(),
                 dst: dst.clone(),
-                format: s.format,
-                size: s.size,
-                mtime_ns: s.mtime_ns,
-                orientation: s.orientation,
             });
             // `DSC_0001.NEF.xmp` → `<new name>.nef.xmp`.
-            let mut name = s.path.file_name().unwrap_or_default().to_os_string();
+            let mut name = s.file.path.file_name().unwrap_or_default().to_os_string();
             name.push(".xmp");
-            if let Some(car) = find_sidecar(s.path.with_file_name(name)) {
+            if let Some(car) = find_sidecar(s.file.path.with_file_name(name)) {
                 let mut dname = dst.file_name().unwrap_or_default().to_os_string();
                 dname.push(".xmp");
                 sidecar_copies.push((car, dst.with_file_name(dname)));
@@ -462,7 +571,7 @@ pub fn plan(
         // frame's files all get one new stem.
         let stems: HashSet<String> = dsts.iter().map(|d| lower_stem(d)).collect();
         if let (Some(first), 1) = (frame.first(), stems.len())
-            && let Some(car) = find_sidecar(first.path.with_extension("xmp"))
+            && let Some(car) = find_sidecar(first.file.path.with_extension("xmp"))
         {
             sidecar_copies.push((car, dsts[0].with_extension("xmp")));
         }

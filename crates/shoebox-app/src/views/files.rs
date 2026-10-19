@@ -2,9 +2,12 @@
 //! dialogs for move, rename, reject, trash and new folder. Every operation
 //! shows its source → destination table first and runs as one batch.
 
-use std::path::Path;
+use std::collections::{BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use eframe::egui::{self, Color32, RichText};
+use shoebox_core::import::Plan;
 use shoebox_core::template::{Fields, Template};
 
 use crate::app::ShoeboxApp;
@@ -66,12 +69,71 @@ fn table(ui: &mut egui::Ui, id: &str, rows: &[(String, String)], height: f32) {
         });
 }
 
+/// A photo's thumbnail fitted into `rect` (or `fallback` while it loads).
+fn draw_thumb(app: &mut ShoeboxApp, ui: &egui::Ui, rect: egui::Rect, id: u64, fallback: &str) {
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 3.0, ui.visuals().faint_bg_color);
+    match app.textures.best(id, crate::jobs::Size::Small) {
+        Some(t) => {
+            let [w, h] = t.size();
+            painter.image(
+                t.id(),
+                super::fit(rect.shrink(3.0), w as f32 / h as f32),
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+        None => {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                fallback,
+                egui::FontId::proportional(11.0),
+                ui.visuals().weak_text_color(),
+            );
+        }
+    }
+}
+
+/// A source file's thumbnail (rendered from the source, not cached).
+fn source_thumb(
+    app: &mut ShoeboxApp,
+    ui: &mut egui::Ui,
+    f: &shoebox_core::import::SourceFile,
+    size: f32,
+) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    app.want_preview(f);
+    draw_thumb(
+        app,
+        ui,
+        rect,
+        crate::jobs::photo_id(&f.path),
+        f.format.label(),
+    );
+    resp
+}
+
+/// A library photo's thumbnail (from the thumbnail cache, as in the grid).
+fn library_thumb(app: &mut ShoeboxApp, ui: &mut egui::Ui, path: &Path, size: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    let id = crate::jobs::photo_id(path);
+    if let Some(idx) = app.index(id) {
+        app.want(
+            idx,
+            crate::jobs::Size::Small,
+            crate::jobs::Priority::Visible,
+        );
+    }
+    draw_thumb(app, ui, rect, id, "?");
+}
+
 /// The photos an import will copy, as thumbnails (each with its source and
 /// new name on hover).
 fn previews(
     app: &mut ShoeboxApp,
     ui: &mut egui::Ui,
-    photos: &[shoebox_core::import::PlannedPhoto],
+    photos: &[&shoebox_core::import::PlannedPhoto],
     source: &Path,
 ) {
     const CELL: f32 = 112.0;
@@ -87,7 +149,19 @@ fn previews(
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = GAP;
                     for p in photos.iter().skip(row * cols).take(cols) {
-                        preview_cell(app, ui, p, source, CELL);
+                        let resp = source_thumb(app, ui, &p.src, CELL);
+                        let src = rel_to(source, &p.src.path);
+                        resp.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::Role::Image, true, &src)
+                        });
+                        resp.on_hover_ui(|ui| {
+                            ui.label(RichText::new(&src).monospace().small());
+                            ui.label(
+                                RichText::new(format!("▶ {}", short(app, &p.dst)))
+                                    .monospace()
+                                    .small(),
+                            );
+                        });
                     }
                 });
                 ui.add_space(GAP);
@@ -95,53 +169,117 @@ fn previews(
         });
 }
 
-fn preview_cell(
+/// `p` relative to the import source, for display.
+fn rel_to(source: &Path, p: &Path) -> String {
+    p.strip_prefix(source).unwrap_or(p).display().to_string()
+}
+
+/// Files left out of an import (already in the library, or repeated in the
+/// source): each beside the file it matched, to check, with a way to copy
+/// it anyway.
+fn left_out(
     app: &mut ShoeboxApp,
     ui: &mut egui::Ui,
-    p: &shoebox_core::import::PlannedPhoto,
+    title: &str,
+    matches: &[shoebox_core::import::Match],
     source: &Path,
-    cell: f32,
 ) {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(cell, cell), egui::Sense::hover());
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 3.0, ui.visuals().faint_bg_color);
-    app.want_preview(p);
-    let id = crate::jobs::photo_id(&p.src);
-    match app.textures.best(id, crate::jobs::Size::Small) {
-        Some(t) => {
-            let [w, h] = t.size();
-            painter.image(
-                t.id(),
-                super::fit(rect.shrink(3.0), w as f32 / h as f32),
-                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                Color32::WHITE,
-            );
-        }
-        None => {
-            painter.text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                p.format.label(),
-                egui::FontId::proportional(11.0),
-                ui.visuals().weak_text_color(),
-            );
-        }
+    use shoebox_core::import::Plan;
+    if matches.is_empty() {
+        return;
     }
-    let src = p
-        .src
-        .strip_prefix(source)
-        .unwrap_or(&p.src)
-        .display()
-        .to_string();
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Image, true, &src));
-    resp.on_hover_ui(|ui| {
-        ui.label(RichText::new(&src).monospace().small());
-        ui.label(
-            RichText::new(format!("▶ {}", short(app, &p.dst)))
-                .monospace()
-                .small(),
-        );
-    });
+    const THUMB: f32 = 64.0;
+    let forced = matches.len() - Plan::left_out(matches);
+    let head = if forced > 0 {
+        format!("{title} ({}, {forced} copied anyway)", matches.len())
+    } else {
+        format!("{title} ({})", matches.len())
+    };
+    egui::CollapsingHeader::new(head)
+        .id_salt(title)
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt(("import-left-out", title))
+                .max_height(320.0)
+                .auto_shrink([false, true])
+                .show_rows(ui, THUMB + 6.0, matches.len(), |ui, range| {
+                    for m in &matches[range] {
+                        ui.horizontal(|ui| {
+                            source_thumb(app, ui, &m.src, THUMB);
+                            ui.weak("=");
+                            match &m.other_src {
+                                Some(f) => {
+                                    source_thumb(app, ui, f, THUMB);
+                                }
+                                None => library_thumb(app, ui, &m.other, THUMB),
+                            }
+                            ui.vertical(|ui| {
+                                let src = rel_to(source, &m.src.path);
+                                ui.label(RichText::new(&src).monospace().small());
+                                let other = match m.other_src {
+                                    Some(_) => rel_to(source, &m.other),
+                                    None => short(app, &m.other),
+                                };
+                                ui.weak(RichText::new(format!("same as {other}")).small());
+                                let (text, on) = if m.forced {
+                                    ("Leave out", false)
+                                } else {
+                                    ("Import anyway", true)
+                                };
+                                ui.horizontal(|ui| {
+                                    let r = ui.small_button(text);
+                                    r.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::Role::Button,
+                                            true,
+                                            format!("{text}: {src}"),
+                                        )
+                                    });
+                                    if r.clicked() {
+                                        app.force_import(&m.src.path, on);
+                                    }
+                                    if m.forced {
+                                        ui.weak(RichText::new("copied anyway").small());
+                                    }
+                                });
+                            });
+                        });
+                        ui.add_space(6.0);
+                    }
+                });
+        });
+}
+
+/// The plan's photos to show: all, or those the chosen folder's name goes
+/// on (cached per plan and folder).
+fn shown_photos(app: &mut ShoeboxApp, plan: &Arc<Plan>) -> Option<(PathBuf, Arc<Vec<usize>>)> {
+    let folder = app.import.filter.clone()?;
+    let key = Arc::as_ptr(plan) as usize;
+    if let Some((f, k, idx)) = &app.import.shown
+        && *f == folder
+        && *k == key
+    {
+        return Some((folder, idx.clone()));
+    }
+    let origins: HashMap<&Path, &BTreeSet<PathBuf>> = plan
+        .origins
+        .iter()
+        .map(|(p, rels)| (p.as_path(), rels))
+        .collect();
+    let idx: Arc<Vec<usize>> = Arc::new(
+        plan.photos
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| {
+                origins
+                    .get(p.dst.as_path())
+                    .is_some_and(|rels| rels.iter().any(|r| r.starts_with(&folder)))
+            })
+            .map(|(i, _)| i)
+            .collect(),
+    );
+    app.import.shown = Some((folder.clone(), key, idx.clone()));
+    Some((folder, idx))
 }
 
 /// Tasks → Import.
@@ -156,6 +294,7 @@ pub fn import(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     if app.import.root.is_none() {
         app.import.root = writable.first().cloned();
     }
+    let busy = app.import.running || app.import.copying.is_some();
     egui::Grid::new("import-form")
         .num_columns(2)
         .spacing(egui::vec2(10.0, 6.0))
@@ -168,7 +307,10 @@ pub fn import(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                     .as_ref()
                     .map_or("No folder chosen".to_owned(), |p| p.display().to_string());
                 ui.label(text);
-                if ui.button("Choose…").clicked() {
+                if ui
+                    .add_enabled(!busy, egui::Button::new("Choose…"))
+                    .clicked()
+                {
                     app.picker.open(
                         crate::picker::FolderFor::ImportSource,
                         "Import from (a card or folder)",
@@ -213,7 +355,7 @@ pub fn import(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     let ready = app.import.source.is_some()
         && app.import.root.is_some()
         && Template::parse(&app.import.template).is_ok()
-        && !app.import.running;
+        && !busy;
     ui.horizontal(|ui| {
         if ui
             .add_enabled(ready, egui::Button::new("Find photos"))
@@ -225,6 +367,9 @@ pub fn import(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             ui.add(egui::Spinner::new());
             if let Some((d, t)) = app.import.progress {
                 ui.label(format!("Reading {d}/{t}"));
+            }
+            if ui.button("Cancel").clicked() {
+                app.cancel_import();
             }
         }
         if let Some(m) = &app.import.message {
@@ -242,15 +387,7 @@ pub fn import(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             return;
         }
     };
-    let images = plan
-        .copies
-        .iter()
-        .filter(|c| {
-            !c.src
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("xmp"))
-        })
-        .count();
+    let images = plan.photos.len();
     ui.horizontal_wrapped(|ui| {
         ui.label(
             RichText::new(format!(
@@ -264,16 +401,17 @@ pub fn import(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             ))
             .strong(),
         );
-        if !plan.skipped.is_empty() {
+        let (skipped, repeats) = (Plan::left_out(&plan.skipped), Plan::left_out(&plan.repeats));
+        if skipped > 0 {
             ui.label(format!(
                 "· {} already in the library",
-                plural(plan.skipped.len(), "file")
+                plural(skipped, "file")
             ));
         }
-        if !plan.repeats.is_empty() {
+        if repeats > 0 {
             ui.label(format!(
                 "· {} repeated in the source",
-                plural(plan.repeats.len(), "file")
+                plural(repeats, "file")
             ));
         }
         if plan.undated > 0 {
@@ -297,28 +435,41 @@ pub fn import(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     });
     folder_names(app, ui);
     let source = app.import.source.clone().unwrap_or_default();
+    let shown = shown_photos(app, &plan);
     ui.horizontal(|ui| {
         ui.selectable_value(&mut app.import.list, false, "Thumbnails");
         ui.selectable_value(&mut app.import.list, true, "List");
+        if let Some((folder, idx)) = &shown {
+            ui.separator();
+            ui.label(format!(
+                "{} named by {}",
+                plural(idx.len(), "photo"),
+                folder.display()
+            ));
+            if ui.small_button("Show all").clicked() {
+                app.import.filter = None;
+            }
+        }
     });
+    let photos: Vec<&shoebox_core::import::PlannedPhoto> = match &shown {
+        Some((_, idx)) => idx.iter().filter_map(|&i| plan.photos.get(i)).collect(),
+        None => plan.photos.iter().collect(),
+    };
     if app.import.list {
-        let rows: Vec<(String, String)> = plan
-            .copies
-            .iter()
-            .map(|c| {
-                (
-                    c.src
-                        .strip_prefix(&source)
-                        .unwrap_or(&c.src)
-                        .display()
-                        .to_string(),
-                    short(app, &c.dst),
-                )
-            })
-            .collect();
+        let rows: Vec<(String, String)> = if shown.is_some() {
+            photos
+                .iter()
+                .map(|p| (rel_to(&source, &p.src.path), short(app, &p.dst)))
+                .collect()
+        } else {
+            plan.copies
+                .iter()
+                .map(|c| (rel_to(&source, &c.src), short(app, &c.dst)))
+                .collect()
+        };
         table(ui, "import-table", &rows, ui.available_height() * 0.7);
     } else {
-        previews(app, ui, &plan.photos, &source);
+        previews(app, ui, &photos, &source);
     }
     // After the photos: look them over, then import.
     ui.add_space(6.0);
@@ -331,43 +482,34 @@ pub fn import(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         )
         .fill(ui.visuals().selection.bg_fill)
         .min_size(egui::vec2(0.0, 26.0));
-        if ui.add_enabled(!plan.copies.is_empty(), button).clicked() {
+        if ui
+            .add_enabled(!plan.copies.is_empty() && !busy, button)
+            .clicked()
+        {
             app.run_import();
         }
-        if let Some(name) = app.import.root.as_deref().and_then(Path::file_name) {
+        if let Some((done, total)) = app.import.copying {
+            ui.add(
+                egui::ProgressBar::new(done as f32 / total.max(1) as f32)
+                    .desired_width(200.0)
+                    .text(format!("Copying {done}/{total}")),
+            );
+            if ui.button("Cancel").clicked() {
+                app.cancel_import();
+            }
+        } else if let Some(name) = app.import.root.as_deref().and_then(Path::file_name) {
             ui.weak(format!("into {}", name.to_string_lossy()));
         }
     });
     ui.add_space(6.0);
-    if !plan.skipped.is_empty() {
-        egui::CollapsingHeader::new(format!("Already in the library ({})", plan.skipped.len()))
-            .show(ui, |ui| {
-                let rows: Vec<(String, String)> = plan
-                    .skipped
-                    .iter()
-                    .map(|(s, e)| {
-                        (
-                            s.strip_prefix(&source).unwrap_or(s).display().to_string(),
-                            short(app, e),
-                        )
-                    })
-                    .collect();
-                table(ui, "import-skipped", &rows, 200.0);
-            });
-    }
-    if !plan.repeats.is_empty() {
-        egui::CollapsingHeader::new(format!(
-            "Repeated in the source, copied once ({})",
-            plan.repeats.len()
-        ))
-        .show(ui, |ui| {
-            let rel =
-                |p: &std::path::PathBuf| p.strip_prefix(&source).unwrap_or(p).display().to_string();
-            let rows: Vec<(String, String)> =
-                plan.repeats.iter().map(|(s, e)| (rel(s), rel(e))).collect();
-            table(ui, "import-repeats", &rows, 200.0);
-        });
-    }
+    left_out(app, ui, "Already in the library", &plan.skipped, &source);
+    left_out(
+        app,
+        ui,
+        "Repeated in the source, copied once",
+        &plan.repeats,
+        &source,
+    );
     for (p, e) in &plan.unreadable {
         ui.colored_label(ui.visuals().warn_fg_color, format!("{}: {e}", p.display()));
     }
@@ -385,6 +527,8 @@ fn folder_names(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         .show(ui, |ui| {
             ui.weak("What each folder's name becomes on the photos in it. Dates and camera folders start as nothing; the new folders come from the date.");
             let before = app.import.folders.clone();
+            let filter = app.import.filter.clone();
+            let mut clicked = None;
             egui::ScrollArea::vertical()
                 .id_salt("import-folders")
                 .max_height(260.0)
@@ -406,7 +550,24 @@ fn folder_names(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                                     )
                                     .on_hover_text(&rel);
                                 });
-                                ui.weak(plural(f.photos, "photo"));
+                                let on = filter.as_ref() == Some(&f.rel);
+                                let r = ui
+                                    .selectable_label(
+                                        on,
+                                        RichText::new(plural(f.photos, "photo")).weak(),
+                                    )
+                                    .on_hover_text("Show only the photos this name goes on");
+                                r.widget_info(|| {
+                                    egui::WidgetInfo::selected(
+                                        egui::Role::Button,
+                                        true,
+                                        on,
+                                        format!("{rel}: photos"),
+                                    )
+                                });
+                                if r.clicked() {
+                                    clicked = Some(if on { None } else { Some(f.rel.clone()) });
+                                }
                                 ui.horizontal(|ui| {
                                     for (kind, label) in [
                                         (FolderUse::Event, "Event"),
@@ -446,6 +607,9 @@ fn folder_names(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                             }
                         });
                 });
+            if let Some(f) = clicked {
+                app.import.filter = f;
+            }
         });
 }
 
