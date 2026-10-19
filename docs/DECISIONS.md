@@ -916,3 +916,23 @@ hashes, embeddings, faces).
   YuNet, SFace, candle) are MIT or Apache-2.0, which GPL-3.0 accepts;
   `vendor/candle-metal-kernels` keeps its own licence.
 - Shoebox will not be sold.
+
+## Editing models: original weights, native on candle (2026-10-19)
+
+- Every Develop model (`docs/EDITING-SPEC.md`, Task 0.3) runs on candle in
+  `shoebox-ml`, written natively in Rust as SigLIP 2 is, with weights from
+  the original authors: RawNIND UtNet2 (Bayer; joint denoise and demosaic)
+  and SAM 2.1 Hiera (image predictor) in Phase 3, SegFormer for skies in
+  Phase 4. darktable-ai's notes guide how each is fed; its ONNX packages
+  aren't used.
+- Still no `ort` (as M6 decided), and `shoebox-ml::onnx` stays the small
+  interpreter for YuNet and SFace; it doesn't grow for these models.
+  `shoebox-develop` reaches them through `shoebox-ml`.
+- RawNIND's weights exist only in the author's Google Drive, which can't be
+  a download source. They are converted once to safetensors
+  (`scripts/convert-rawnind.py`, written with the port in Phase 3) and
+  published on a `models-rawnind-1` release; `shoebox-ml::download` pins
+  the URL and SHA-256. Weights never go in git. It runs in f32: its
+  activations overflow f16.
+- If candle takes over 30 s a frame for RawNIND, the fallback is Core ML
+  through `objc2-core-ml`, not `ort`.
