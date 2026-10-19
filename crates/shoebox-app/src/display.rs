@@ -6,7 +6,8 @@
 //! egui-wgpu has no option for the surface colour space, and wgpu resets the
 //! layer's colour space whenever it reconfigures the surface (on resize), so
 //! [`DisplayTagger::ensure`] re-applies the tag every frame (cheap: two
-//! property reads unless it changed).
+//! property reads unless it changed). It also pins the layer's contents to
+//! the window's top left, so they're never stretched while the window zooms.
 #![cfg_attr(target_os = "macos", allow(unsafe_code))]
 
 use shoebox_decode::Target;
@@ -57,7 +58,7 @@ impl DisplayTagger {
             use objc2::rc::Retained;
             use objc2::runtime::AnyObject;
             use objc2_core_graphics::{CGColorSpace, kCGColorSpaceDisplayP3};
-            use objc2_quartz_core::{CALayer, CAMetalLayer};
+            use objc2_quartz_core::{CALayer, CAMetalLayer, kCAGravityBottomLeft};
 
             let view: &AnyObject = self.view.cast::<AnyObject>().as_ref();
             let root: Option<Retained<CALayer>> = msg_send![view, layer];
@@ -67,6 +68,15 @@ impl DisplayTagger {
                 let Ok(metal) = layer.downcast::<CAMetalLayer>() else {
                     continue;
                 };
+                // During the window's zoom animation (double-click on the
+                // title bar) there are no new frames: the default gravity
+                // stretches the last one, so everything seems to grow until
+                // it's redrawn at the end. Pinned to a corner it keeps its
+                // size; "bottom" is the top here, as the layer's geometry is
+                // flipped.
+                if *metal.contentsGravity() != *kCAGravityBottomLeft {
+                    metal.setContentsGravity(kCAGravityBottomLeft);
+                }
                 let current = metal.colorspace();
                 let is_p3 = CGColorSpace::name(current.as_deref())
                     .is_some_and(|n| *n == *kCGColorSpaceDisplayP3);
