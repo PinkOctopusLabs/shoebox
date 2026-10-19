@@ -294,16 +294,6 @@ pub fn import(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 format!("· {} unreadable", plan.unreadable.len()),
             );
         }
-        let go = format!("Import {}", plural(plan.copies.len(), "file"));
-        if ui
-            .add_enabled(
-                !plan.copies.is_empty(),
-                egui::Button::new(RichText::new(go).strong()),
-            )
-            .clicked()
-        {
-            app.run_import();
-        }
     });
     folder_names(app, ui);
     let source = app.import.source.clone().unwrap_or_default();
@@ -330,6 +320,25 @@ pub fn import(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     } else {
         previews(app, ui, &plan.photos, &source);
     }
+    // After the photos: look them over, then import.
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        let go = format!("Import {}", plural(plan.copies.len(), "file"));
+        let button = egui::Button::new(
+            RichText::new(go)
+                .strong()
+                .color(ui.visuals().selection.stroke.color),
+        )
+        .fill(ui.visuals().selection.bg_fill)
+        .min_size(egui::vec2(0.0, 26.0));
+        if ui.add_enabled(!plan.copies.is_empty(), button).clicked() {
+            app.run_import();
+        }
+        if let Some(name) = app.import.root.as_deref().and_then(Path::file_name) {
+            ui.weak(format!("into {}", name.to_string_lossy()));
+        }
+    });
+    ui.add_space(6.0);
     if !plan.skipped.is_empty() {
         egui::CollapsingHeader::new(format!("Already in the library ({})", plan.skipped.len()))
             .show(ui, |ui| {
