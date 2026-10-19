@@ -265,6 +265,16 @@ pub fn viewbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                         .on_hover_text("Thumbnail size");
                     }
                     View::Loupe => zoom_menu(app, ui),
+                    View::Duplicates => {
+                        ui.spacing_mut().slider_width = 90.0;
+                        let mut w = app.dupes.thumb().x;
+                        ui.add(
+                            egui::Slider::new(&mut w, crate::app::DupeState::THUMB_WIDTHS)
+                                .show_value(false),
+                        )
+                        .on_hover_text("Thumbnail size");
+                        app.dupes.thumb_width = w;
+                    }
                     _ => {}
                 }
             },

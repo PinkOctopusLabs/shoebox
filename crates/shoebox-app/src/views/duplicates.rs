@@ -14,8 +14,9 @@ use shoebox_core::scan::Role;
 use crate::app::{DupeScope, ShoeboxApp};
 use crate::jobs::{Priority, Size, photo_id};
 
-const THUMB: egui::Vec2 = egui::Vec2::new(150.0, 112.0);
-const ROW_H: f32 = 226.0;
+/// A row's height besides its thumbnails: the heading and the text under
+/// each one.
+const ROW_TEXT: f32 = 114.0;
 
 /// "1 file", "3 files".
 pub fn plural(n: usize, word: &str) -> String {
@@ -360,9 +361,10 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         ui.weak("No duplicates to review.");
         return;
     }
+    let row_h = app.dupes.thumb().y + ROW_TEXT;
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
-        .show_rows(ui, ROW_H, visible.len(), |ui, range| {
+        .show_rows(ui, row_h, visible.len(), |ui, range| {
             for row in range {
                 group_row(app, ui, &r, visible[row], row);
             }
@@ -371,7 +373,8 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
 
 fn group_row(app: &mut ShoeboxApp, ui: &mut egui::Ui, r: &Review, gi: usize, row: usize) {
     let g = &r.groups[gi];
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), egui::Sense::hover());
+    let row_h = app.dupes.thumb().y + ROW_TEXT;
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), egui::Sense::hover());
     let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(4.0, 4.0))));
     let ui = &mut ui;
     ui.horizontal(|ui| {
@@ -421,14 +424,19 @@ fn entry_tile(app: &mut ShoeboxApp, ui: &mut egui::Ui, r: &Review, gi: usize, k:
     let f = &r.files[e.file];
     let decision = app.decision(&f.path);
     ui.vertical(|ui| {
-        ui.set_width(THUMB.x);
-        let (rect, resp) = ui.allocate_exact_size(THUMB, egui::Sense::click());
+        let thumb = app.dupes.thumb();
+        ui.set_width(thumb.x);
+        let (rect, resp) = ui.allocate_exact_size(thumb, egui::Sense::click());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 3.0, ui.visuals().faint_bg_color);
         let id = photo_id(&f.path);
         if let Some(idx) = app.index(id) {
-            app.want(idx, Size::Small, Priority::Visible);
-            match app.textures.best(id, Size::Small) {
+            let size = super::size_for(thumb.x, ui.ctx().pixels_per_point());
+            app.want(idx, size, Priority::Visible);
+            if size == Size::Large {
+                app.want(idx, Size::Small, Priority::Visible); // meanwhile
+            }
+            match app.textures.best(id, size) {
                 Some(t) => {
                     let [w, h] = t.size();
                     let target = super::fit(rect.shrink(3.0), w as f32 / h as f32);

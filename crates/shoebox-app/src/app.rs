@@ -205,9 +205,22 @@ pub struct DupeState {
     pub message: Option<String>,
     /// Also list groups of reference files only (nothing there can move).
     pub show_reference_only: bool,
+    /// Thumbnail width in the list (the size slider); see [`Self::thumb`].
+    pub thumb_width: f32,
 }
 
 impl DupeState {
+    pub const THUMB_WIDTHS: std::ops::RangeInclusive<f32> = 150.0..=480.0;
+
+    /// A thumbnail's size in the list (4:3, the smallest until the slider
+    /// is moved).
+    pub fn thumb(&self) -> egui::Vec2 {
+        let w = self
+            .thumb_width
+            .clamp(*Self::THUMB_WIDTHS.start(), *Self::THUMB_WIDTHS.end());
+        egui::vec2(w, (w * 0.75).round())
+    }
+
     /// Groups the list shows, in order.
     pub fn visible(&self) -> Vec<usize> {
         let Some(r) = &self.review else {

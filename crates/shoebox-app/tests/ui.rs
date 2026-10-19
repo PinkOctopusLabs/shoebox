@@ -981,6 +981,30 @@ fn duplicates_within_a_scope() {
     assert!(h.query_by_label_contains("in scan").is_some());
     snapshot(&mut h, "dupes-in-folder");
 
+    // Larger thumbnails from the size slider in the bar under the list.
+    let r = h
+        .get_all_by_role(egui::accesskit::Role::Slider)
+        .map(|n| n.rect())
+        .max_by(|a, b| a.min.y.total_cmp(&b.min.y)) // not the header's
+        .unwrap();
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.event(egui::Event::PointerMoved(r.left_center()));
+    h.event(button(r.left_center(), true));
+    h.run_steps(1);
+    h.event(egui::Event::PointerMoved(r.center()));
+    h.run_steps(1);
+    h.event(button(r.center(), false));
+    h.run_steps(3);
+    let tile = h.get_all_by_label("f0005.jpg").next().unwrap().rect();
+    assert!(tile.width() > 200.0, "{tile:?}");
+    settle(&mut h, Duration::from_secs(30));
+    snapshot(&mut h, "dupes-larger");
+
     // An event of one photo: only its stack's files (the NEF, its JPG and
     // f0004, an exact copy of the JPG), not the TIFF or other copies.
     h.state_mut().set_view(View::Grid);

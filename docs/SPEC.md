@@ -162,7 +162,7 @@ Three levels of match, all cached per file so a second scan only hashes new or c
 
 **Review (in the app)**
 
-1. Tasks → Duplicates lists groups as thumbnail strips with distance, dimensions and paths.
+1. Tasks → Duplicates lists groups as thumbnail strips with distance, dimensions and paths; the size slider in the bar under the list makes the thumbnails larger (sharper ones load as they grow).
    - **In** chooses where to look: All photos (the default), a folder, an event or a collection. Within a folder, event or collection, only its own photos are compared with each other (every file of their stacks), so both files of every match are in it and nothing outside is listed or moved. A folder's, event's or collection's menu has **Find Duplicates in …**, which opens Duplicates and searches there. After applying or undoing, the search runs again in the same place.
 2. Opening a group shows it in Compare (2 files) or Survey (3+).
 3. Per file: keep, move to `_duplicates/`, add to stack as a variant, or ignore.
