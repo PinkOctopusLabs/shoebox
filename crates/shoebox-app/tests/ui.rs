@@ -854,6 +854,24 @@ fn folders_and_events() {
     assert_eq!(h.state().view_name(), View::Grid);
     assert_eq!(h.state().selected_count(), 0);
     assert_eq!(h.state().current_name(), None);
+
+    // Show in All Photos, from the loupe: back to everything in the grid,
+    // with that photo selected.
+    let name = h.state().shown_names().last().unwrap().clone();
+    h.get_by_label(&name).click();
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    h.run_steps(2);
+    h.get_by_label(&name).click_secondary();
+    h.run_steps(3);
+    h.get_by_label("Show in All Photos").click();
+    h.run_steps(3);
+    assert_eq!(h.state().view_name(), View::Grid);
+    assert_eq!(h.state().scope(), (0, None));
+    assert_eq!(h.state().shown_count(), all);
+    assert_eq!(h.state().current_name(), Some(name));
+    assert_eq!(h.state().selected_count(), 1);
+    snapshot(&mut h, "26-show-in-all");
 }
 
 /// Cmd+E makes an event from the selection: events.json in every writable

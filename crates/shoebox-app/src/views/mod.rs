@@ -369,6 +369,8 @@ pub fn cell(
     resp
 }
 
+pub(crate) const SHOW_IN_ALL: &str = "Show in All Photos";
+
 /// The photo context menu (right-click).
 pub fn photo_menu(app: &mut ShoeboxApp, resp: &egui::Response, pos: usize) {
     if resp.secondary_clicked() {
@@ -383,6 +385,17 @@ pub fn photo_menu(app: &mut ShoeboxApp, resp: &egui::Response, pos: usize) {
         };
         if ui.button(label).clicked() {
             app.reveal_selection();
+            ui.close();
+        }
+        if (app.narrowed() || app.view_name() != crate::app::View::Grid)
+            && ui
+                .button(SHOW_IN_ALL)
+                .on_hover_text("All photos in the grid, with the ones taken around this one")
+                .clicked()
+        {
+            if let Some(&i) = app.shown.get(pos) {
+                app.show_in_all(app.ids[i]);
+            }
             ui.close();
         }
         let ids: Vec<crate::jobs::PhotoId> = app.selection.iter().copied().collect();

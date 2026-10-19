@@ -370,6 +370,8 @@ pub struct ShoeboxApp {
     pub(crate) focus_search: bool,
     /// Name being typed when saving a smart filter.
     pub(crate) new_smart_filter: Option<String>,
+    /// A photo to show among all photos, from the next frame.
+    pub(crate) show_in_all_request: Option<PhotoId>,
     /// Keywords in use (for autocomplete), cameras and lenses (for filters).
     pub(crate) all_keywords: Vec<(String, usize)>,
     pub(crate) cameras: Vec<String>,
@@ -524,6 +526,7 @@ impl ShoeboxApp {
             focus_keywords: false,
             focus_search: false,
             new_smart_filter: None,
+            show_in_all_request: None,
             all_keywords: Vec::new(),
             cameras: Vec::new(),
             lenses: Vec::new(),
@@ -1595,6 +1598,46 @@ impl ShoeboxApp {
         self.sem.tag = None;
         self.sem.similar = None;
         self.set_folders(Vec::new());
+    }
+
+    /// Whether the photos shown are fewer than all of them: a folder,
+    /// event, collection, person, tag, similar or a filter.
+    pub(crate) fn narrowed(&self) -> bool {
+        self.filtered()
+            || self.selected_event.is_some()
+            || self.selected_collection.is_some()
+            || self.ppl.showing.is_some()
+            || self.sem.tag.is_some()
+            || self.sem.similar.is_some()
+    }
+
+    /// Show this photo among all photos, by capture time in the grid, so
+    /// the ones taken around it are beside it (from the next frame: this is
+    /// called from inside the views, which `shown` must not change under).
+    pub(crate) fn show_in_all(&mut self, id: PhotoId) {
+        self.show_in_all_request = Some(id);
+    }
+
+    fn start_show_in_all(&mut self, id: PhotoId) {
+        let Some(i) = self.index(id) else { return };
+        self.filter = query::Filter::default();
+        self.show_everything();
+        if self.view != View::Grid {
+            self.set_view(View::Grid);
+        }
+        if self.sort != query::Sort::CaptureTime {
+            self.sort = query::Sort::CaptureTime;
+            self.refilter();
+        }
+        // A file of a folded stack has no tile of its own: its stack's.
+        let shown = |a: &Self, id| a.index(id).is_some_and(|i| a.shown.contains(&i));
+        let id = if shown(self, id) {
+            id
+        } else {
+            self.ids[self.stack_of(i).primary]
+        };
+        self.activate(id);
+        self.scroll_to_current = true;
     }
 
     /// Show these folders. The grid shows one source at a time: folders,
@@ -3299,6 +3342,9 @@ impl eframe::App for ShoeboxApp {
         self.textures.begin_frame();
         self.apply_events(&ctx);
         self.tick_semantic(&ctx);
+        if let Some(id) = self.show_in_all_request.take() {
+            self.start_show_in_all(id);
+        }
         self.tick_people();
         self.tick_picker(&ctx);
         self.tick_quit(&ctx);
