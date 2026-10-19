@@ -1,6 +1,6 @@
 # Shoebox
 
-A Rust + egui photo library app for macOS. **`docs/SPEC.md` is the source of truth**: read the relevant section before changing behaviour, and flag any conflict rather than silently diverging.
+A Rust + egui photo library app for macOS. **`docs/SPEC.md` is the source of truth**: read the relevant section before changing behaviour, and flag any conflict rather than silently diverging. For photo editing (the Develop view, raw decoding, export), **`docs/EDITING-SPEC.md`** is the source of truth in the same way; its *Before Phase 1* tasks come first.
 
 ## Layout
 - `crates/shoebox-core`: library model, scanning, hashing, duplicate index, SQLite cache, and `fileops` (the only module that moves, renames, copies or writes files; it journals everything). No egui.
@@ -56,6 +56,10 @@ A Rust + egui photo library app for macOS. **`docs/SPEC.md` is the source of tru
   PinkOctopusLabs/shoebox) runs macOS and Linux on every push, without the
   GPU-only UI tests; locally, for a Linux check:
   `docker run --rm -v "$PWD":/src:ro -v shoebox-linux-target:/target -e CARGO_TARGET_DIR=/target -w /src rust:1.99-bookworm cargo test --workspace`
+- Licence is GPL-3.0-or-later. Code ported from darktable, RawTherapee or
+  other GPL projects is allowed; note the source file and commit in a comment
+  at the top of the module. Never add a dependency whose licence is
+  incompatible with GPL-3.0 (for example, proprietary or GPL-2.0-only).
 - The repo is public: never commit real photos, real GPS positions or other
   personal data (real files go in the gitignored `tests/fixtures/real/`).
 

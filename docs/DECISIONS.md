@@ -900,3 +900,19 @@ hashes, embeddings, faces).
     before copying again.
 - Shoebox only ever opens a card's files for reading; the journal shows no
   operation on the card in that import.
+
+## Licence: GPL-3.0-or-later (2026-10-19)
+
+- Shoebox moves from MIT OR Apache-2.0 to GPL-3.0-or-later, before any
+  editing code lands (`docs/EDITING-SPEC.md`, Task 0.1). The Develop work
+  ports raw-processing code from GPL projects (darktable, RawTherapee) and
+  ships the RawNIND denoise models, whose code and weights are GPL-3.0;
+  neither can go out under MIT/Apache.
+- Versions up to 0.2.3 were released as MIT OR Apache-2.0 and stay so for
+  anyone who took them. 0.3.0 is the first GPL release.
+- The full licence text is `LICENSE`, and the app bundle carries it as
+  `Contents/Resources/LICENSE.txt`. The public repo and GitHub Releases make
+  the source available. Third-party parts (Sparkle, Phosphor, SigLIP 2,
+  YuNet, SFace, candle) are MIT or Apache-2.0, which GPL-3.0 accepts;
+  `vendor/candle-metal-kernels` keeps its own licence.
+- Shoebox will not be sold.

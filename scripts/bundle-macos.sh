@@ -43,6 +43,8 @@ cp target/release/shoebox-app "$APP/Contents/MacOS/Shoebox"
 # file system is case-insensitive, so `shoebox` would replace `Shoebox`):
 #   ln -s /Applications/Shoebox.app/Contents/Helpers/shoebox ~/bin/shoebox
 cp target/release/shoebox "$APP/Contents/Helpers/shoebox"
+# Shoebox is GPL-3.0-or-later: the licence text ships with the app.
+cp LICENSE "$APP/Contents/Resources/LICENSE.txt"
 # The icon font is compiled in; its licence ships beside it.
 cp crates/shoebox-app/assets/Phosphor-LICENSE.txt "$APP/Contents/Resources/Phosphor-LICENSE.txt"
 

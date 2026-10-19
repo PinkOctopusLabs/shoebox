@@ -81,14 +81,16 @@ files you put in the gitignored `tests/fixtures/real/`.
 
 - [`docs/SPEC.md`](docs/SPEC.md): what Shoebox is meant to be (the source of
   truth).
+- [`docs/EDITING-SPEC.md`](docs/EDITING-SPEC.md): the plan for photo editing
+  (Develop view, raw decoding, export), in phases.
 - [`docs/DECISIONS.md`](docs/DECISIONS.md): where and why the code differs
   from the spec, with measurements.
 - [`CLAUDE.md`](CLAUDE.md): working notes for AI-assisted development.
 
 ## Licence
 
-Dual-licensed under either of [MIT](LICENSE-MIT) or
-[Apache-2.0](LICENSE-APACHE), at your option.
+Licensed under the GNU General Public License v3.0 or later; see
+[LICENSE](LICENSE).
 
 Map tiles © [OpenStreetMap](https://www.openstreetmap.org/copyright)
 contributors. Updates use [Sparkle](https://github.com/sparkle-project/Sparkle)

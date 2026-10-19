@@ -7,7 +7,7 @@ exclude = ["vendor"]
 version = "0.2.3"
 edition = "2024"
 rust-version = "1.99"
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 publish = false
 repository = "https://github.com/PinkOctopusLabs/shoebox"
 
