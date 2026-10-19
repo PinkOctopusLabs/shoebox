@@ -945,6 +945,14 @@ fn collections_panel(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 app.collection_add_selection(&c.id, false);
                 ui.close();
             }
+            if ui
+                .button("Find Duplicates in Collection")
+                .on_hover_text("Compare only this collection's photos with each other")
+                .clicked()
+            {
+                app.find_duplicates_in(crate::app::DupeScope::Collection(c.id.clone()));
+                ui.close();
+            }
             if ui.button("Rename…").clicked() {
                 app.collection_edit = Some((Some(c.id.clone()), c.name.clone()));
                 ui.close();
@@ -1105,6 +1113,14 @@ fn event_node(
             }
             if ui.button("New sub-event from selection").clicked() {
                 app.new_event_from_selection(Some(e.id.clone()));
+                ui.close();
+            }
+            if ui
+                .button("Find Duplicates in Event")
+                .on_hover_text("Compare only this event's photos with each other")
+                .clicked()
+            {
+                app.find_duplicates_in(crate::app::DupeScope::Event(e.id.clone()));
                 ui.close();
             }
             if ui
@@ -1565,6 +1581,14 @@ fn folder_node(
             }
             add_to_event_menu(app, ui, |app| scope(app));
             add_to_collection_menu(app, ui, |app| scope(app));
+            if ui
+                .button("Find Duplicates in This Folder")
+                .on_hover_text("Compare only this folder's photos with each other")
+                .clicked()
+            {
+                app.find_duplicates_in(crate::app::DupeScope::Folder(node.path.clone()));
+                ui.close();
+            }
             ui.separator();
             if !app.selection.is_empty()
                 && ui

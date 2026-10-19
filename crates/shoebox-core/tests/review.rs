@@ -2,7 +2,7 @@
 //! one batch, undo.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use shoebox_core::cache::Cache;
@@ -58,6 +58,7 @@ fn review_auto_select_apply_and_undo() {
         roots(&lib),
         Default::default(),
         &Default::default(),
+        None,
         &|_, _| {},
     )
     .unwrap();
@@ -90,6 +91,42 @@ fn review_auto_select_apply_and_undo() {
             vec!["scan/recovered/f0005.jpg", "scan/recovered/f0006.jpg"],
         ]
     );
+
+    // Within a scope (an event, collection or folder), both files of a
+    // match are in it: f0001 goes with the JPG of its frame, the NEF being
+    // out, and f0005's match is out too.
+    let only: HashSet<PathBuf> = [
+        "ref/2026/2026-04-24/DSC_0001.JPG",
+        "scan/recovered/f0004.jpg",
+        "scan/recovered/f0001.jpg",
+        "scan/recovered/f0005.jpg",
+    ]
+    .iter()
+    .map(|n| lib.join(n))
+    .collect();
+    let scoped = review::find(
+        &mut cache,
+        roots(&lib),
+        Default::default(),
+        &Default::default(),
+        Some(&only),
+        &|_, _| {},
+    )
+    .unwrap();
+    let groups: Vec<Vec<String>> = scoped
+        .groups
+        .iter()
+        .map(|g| g.entries.iter().map(|e| name(&scoped, e.file)).collect())
+        .collect();
+    assert_eq!(
+        groups,
+        [[
+            "ref/2026/2026-04-24/DSC_0001.JPG",
+            "scan/recovered/f0001.jpg",
+            "scan/recovered/f0004.jpg"
+        ]]
+    );
+
     let mut decisions: HashMap<PathBuf, Decision> = HashMap::new();
     let mut proposed: BTreeMap<String, Decision> = BTreeMap::new();
     for g in &r.groups {
@@ -198,6 +235,7 @@ fn review_auto_select_apply_and_undo() {
         roots(&lib),
         Default::default(),
         &settled,
+        None,
         &|_, _| {},
     )
     .unwrap();
@@ -234,6 +272,7 @@ fn ignored_pairs_never_come_back() {
         roots(&lib),
         Default::default(),
         &Default::default(),
+        None,
         &|_, _| {},
     )
     .unwrap();
@@ -247,6 +286,7 @@ fn ignored_pairs_never_come_back() {
         roots(&lib),
         Default::default(),
         &Default::default(),
+        None,
         &|_, _| {},
     )
     .unwrap();

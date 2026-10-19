@@ -319,7 +319,8 @@ pub enum LibraryCommand {
     /// Eject the card or disk mounted here (after importing from it).
     Eject(PathBuf),
     /// Find duplicate groups across the library (hashing what isn't cached).
-    FindDuplicates(shoebox_core::dupes::Config),
+    /// Find duplicates, among just these files when given (a scope).
+    FindDuplicates(shoebox_core::dupes::Config, Option<Arc<HashSet<PathBuf>>>),
     /// Work out what applying these decisions would do (the dry-run table).
     PreviewDuplicates(HashMap<PathBuf, Decision>),
     /// Apply them: moves to `_duplicates/` and stack links as one undoable
@@ -715,6 +716,8 @@ fn library_worker(
     let mut catalog = Catalog::default();
     // The last duplicate search, kept so decisions can be applied to it.
     let mut dupes: Option<Review> = None;
+    // The files the last find was limited to (found again after applying).
+    let mut dupes_only: Option<Arc<HashSet<PathBuf>>> = None;
     // The last import plan, run as planned when confirmed, and the scan it
     // came from (with where to and how named), for planning again.
     let mut import_plan: Option<shoebox_core::import::Plan> = None;
@@ -974,7 +977,10 @@ fn library_worker(
                         &publish,
                         &emit,
                     );
-                    find_dupes(&mut cache, &settings, &catalog, config, &mut dupes, &emit);
+                    let only = dupes_only.as_deref();
+                    find_dupes(
+                        &mut cache, &settings, &catalog, config, only, &mut dupes, &emit,
+                    );
                     (false, false)
                 } else {
                     (false, true)
@@ -1264,8 +1270,12 @@ fn library_worker(
                 batches(&fileops);
                 (false, false)
             }
-            LibraryCommand::FindDuplicates(config) => {
-                find_dupes(&mut cache, &settings, &catalog, config, &mut dupes, &emit);
+            LibraryCommand::FindDuplicates(config, only) => {
+                dupes_only = only;
+                let only = dupes_only.as_deref();
+                find_dupes(
+                    &mut cache, &settings, &catalog, config, only, &mut dupes, &emit,
+                );
                 (false, false)
             }
             LibraryCommand::PreviewDuplicates(decisions) => {
@@ -1305,7 +1315,10 @@ fn library_worker(
                             &publish,
                             &emit,
                         );
-                        find_dupes(&mut cache, &settings, &catalog, config, &mut dupes, &emit);
+                        let only = dupes_only.as_deref();
+                        find_dupes(
+                            &mut cache, &settings, &catalog, config, only, &mut dupes, &emit,
+                        );
                     }
                     Err(e) => emit(LibraryEvent::DupePreview(Err(e))),
                 }
@@ -1529,6 +1542,7 @@ fn find_dupes(
     settings: &Settings,
     catalog: &Catalog,
     config: shoebox_core::dupes::Config,
+    only: Option<&HashSet<PathBuf>>,
     dupes: &mut Option<Review>,
     emit: &(dyn Fn(LibraryEvent) + Sync),
 ) {
@@ -1539,7 +1553,14 @@ fn find_dupes(
     };
     let settled: std::collections::HashSet<PathBuf> =
         catalog.links.iter().map(|l| l.file.clone()).collect();
-    match review::find(cache, settings.scan_roots(), config, &settled, &progress) {
+    match review::find(
+        cache,
+        settings.scan_roots(),
+        config,
+        &settled,
+        only,
+        &progress,
+    ) {
         Ok(r) => {
             tracing::info!(
                 "{} duplicate groups ({} files analysed, {} cached)",

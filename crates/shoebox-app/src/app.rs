@@ -173,10 +173,27 @@ impl HistoryState {
     }
 }
 
+/// Where to look for duplicates: everything, or within one folder, event
+/// or collection (both files of a match in it).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum DupeScope {
+    #[default]
+    All,
+    Folder(PathBuf),
+    /// By event id.
+    Event(String),
+    /// By collection id.
+    Collection(String),
+}
+
 /// Duplicate review state.
 #[derive(Default)]
 pub struct DupeState {
     pub review: Option<Arc<Review>>,
+    /// Where the next find looks.
+    pub scope: DupeScope,
+    /// Where the groups shown were found.
+    pub found_in: Option<DupeScope>,
     pub running: bool,
     pub progress: Option<(usize, usize)>,
     pub config: shoebox_core::dupes::Config,
@@ -653,6 +670,19 @@ impl ShoeboxApp {
             .review
             .as_ref()
             .map(|_| self.dupes.visible().len())
+    }
+
+    /// Files in the groups the list shows (tests).
+    pub fn dupe_files(&self) -> Vec<PathBuf> {
+        let Some(r) = &self.dupes.review else {
+            return Vec::new();
+        };
+        self.dupes
+            .visible()
+            .into_iter()
+            .flat_map(|g| r.groups[g].entries.iter())
+            .map(|e| r.files[e.file].path.clone())
+            .collect()
     }
 
     /// The duplicate search is idle and its result is in.
@@ -2168,8 +2198,73 @@ impl ShoeboxApp {
     pub fn find_duplicates(&mut self) {
         self.dupes.running = true;
         self.dupes.message = None;
+        let only = self.scope_files(&self.dupes.scope).map(Arc::new);
+        self.dupes.found_in = Some(self.dupes.scope.clone());
         self.library
-            .send(LibraryCommand::FindDuplicates(self.dupes.config));
+            .send(LibraryCommand::FindDuplicates(self.dupes.config, only));
+    }
+
+    /// Find duplicates within an event, collection or folder (its menu).
+    pub fn find_duplicates_in(&mut self, scope: DupeScope) {
+        self.dupes.scope = scope;
+        self.dupes.open = None;
+        self.set_view(View::Duplicates);
+        self.find_duplicates();
+    }
+
+    /// The files of a scope's photos (every file of their stacks); None for
+    /// everything.
+    pub(crate) fn scope_files(&self, scope: &DupeScope) -> Option<HashSet<PathBuf>> {
+        let stacks = match scope {
+            DupeScope::All => return None,
+            DupeScope::Folder(f) => {
+                return Some(
+                    self.catalog
+                        .photos
+                        .iter()
+                        .filter(|p| p.path.starts_with(f))
+                        .map(|p| p.path.clone())
+                        .collect(),
+                );
+            }
+            DupeScope::Event(id) => self.event_members.get(id),
+            DupeScope::Collection(id) => self.collection_members.get(id),
+        };
+        Some(
+            stacks
+                .into_iter()
+                .flatten()
+                .filter_map(|&s| self.catalog.stacks.get(s))
+                .flat_map(|st| st.all())
+                .map(|i| self.catalog.photos[i].path.clone())
+                .collect(),
+        )
+    }
+
+    /// "All photos", "Trip", "2026-04-24": what a scope is called.
+    pub(crate) fn scope_name(&self, scope: &DupeScope) -> String {
+        match scope {
+            DupeScope::All => "All photos".to_owned(),
+            DupeScope::Folder(f) => f.file_name().map_or_else(
+                || f.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            ),
+            DupeScope::Event(id) => self
+                .events
+                .iter()
+                .find(|e| &e.id == id)
+                .map_or_else(|| "(deleted event)".to_owned(), |e| e.name.clone()),
+            DupeScope::Collection(id) => self
+                .collections
+                .iter()
+                .find(|c| &c.id == id)
+                .map_or_else(|| "(deleted collection)".to_owned(), |c| c.name.clone()),
+        }
+    }
+
+    /// What the duplicates shown were found in (tests).
+    pub fn duplicates_found_in(&self) -> Option<String> {
+        self.dupes.found_in.as_ref().map(|s| self.scope_name(s))
     }
 
     pub(crate) fn decision(&self, path: &Path) -> Decision {

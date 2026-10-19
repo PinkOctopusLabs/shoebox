@@ -107,15 +107,21 @@ type RawEntry = (usize, Option<Match>, Option<(usize, Match)>, bool, bool);
 
 /// Find duplicate groups across the roots (hashes come from the cache when
 /// files are unchanged). Dismissed pairs are left out, and so are files in
-/// `settled` (already added to a stack as a variant: decided).
+/// `settled` (already added to a stack as a variant: decided). With
+/// `only`, just those files are looked at, so both files of every match
+/// are among them (an event, a collection or a folder).
 pub fn find(
     cache: &mut Cache,
     roots: Vec<Root>,
     config: Config,
     settled: &HashSet<PathBuf>,
+    only: Option<&HashSet<PathBuf>>,
     progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<Review> {
-    let files = scan::scan(&roots, &[])?;
+    let mut files = scan::scan(&roots, &[])?;
+    if let Some(only) = only {
+        files.retain(|f| only.contains(&f.path));
+    }
     let (analyzed, stats) = pipeline::analyze_all_progress(cache, &roots, files, progress)?;
     let items = pipeline::items(&roots, &analyzed);
     let ignored = cache.ignored_pairs()?;

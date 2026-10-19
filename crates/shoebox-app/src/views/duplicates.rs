@@ -11,7 +11,7 @@ use shoebox_core::dupes::Level;
 use shoebox_core::review::{Decision, Entry, Review};
 use shoebox_core::scan::Role;
 
-use crate::app::ShoeboxApp;
+use crate::app::{DupeScope, ShoeboxApp};
 use crate::jobs::{Priority, Size, photo_id};
 
 const THUMB: egui::Vec2 = egui::Vec2::new(150.0, 112.0);
@@ -214,10 +214,60 @@ fn apply_button(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
 }
 
 /// The list of groups.
+/// "In: All photos ▾": where the next find looks. A folder, event or
+/// collection compares only its own photos with each other.
+fn scope_combo(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    let mut choices = vec![DupeScope::All];
+    // The folders shown in the grid, and one chosen from a folder's menu.
+    if let DupeScope::Folder(f) = &app.dupes.scope
+        && !app.folders.contains(f)
+    {
+        choices.push(app.dupes.scope.clone());
+    }
+    choices.extend(app.folders.iter().cloned().map(DupeScope::Folder));
+    let events = choices.len();
+    choices.extend(app.events.iter().map(|e| DupeScope::Event(e.id.clone())));
+    let collections = choices.len();
+    choices.extend(
+        app.collections
+            .iter()
+            .map(|c| DupeScope::Collection(c.id.clone())),
+    );
+    let mut scope = app.dupes.scope.clone();
+    ui.label("In");
+    egui::ComboBox::from_id_salt("dupe-scope")
+        .selected_text(app.scope_name(&scope))
+        .height(400.0)
+        .show_ui(ui, |ui| {
+            for (k, c) in choices.iter().enumerate() {
+                if k == events && events < collections {
+                    ui.separator();
+                    ui.weak("Events");
+                }
+                if k == collections && collections < choices.len() {
+                    ui.separator();
+                    ui.weak("Collections");
+                }
+                let name = match c {
+                    DupeScope::Folder(_) => format!("📁 {}", app.scope_name(c)),
+                    _ => app.scope_name(c),
+                };
+                ui.selectable_value(&mut scope, c.clone(), name);
+            }
+        })
+        .response
+        .on_hover_text(
+            "Where to look: a folder, event or collection compares only its own photos with each other",
+        );
+    app.dupes.scope = scope;
+    ui.separator();
+}
+
 pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     ui.horizontal_wrapped(|ui| {
         ui.heading("Duplicates");
         ui.separator();
+        scope_combo(app, ui);
         let cfg = &mut app.dupes.config;
         ui.label("Similar ≤");
         ui.add(egui::Slider::new(&mut cfg.threshold, 0..=16))
@@ -258,8 +308,12 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     let reference_only = r.groups.iter().filter(|g| g.reference_only(&r)).count();
     ui.horizontal_wrapped(|ui| {
         let files: usize = visible.iter().map(|&g| r.groups[g].entries.len()).sum();
+        let within = match &app.dupes.found_in {
+            Some(s) if *s != DupeScope::All => format!(" in {}", app.scope_name(s)),
+            _ => String::new(),
+        };
         ui.label(format!(
-            "{} · {}",
+            "{} · {}{within}",
             plural(visible.len(), "group"),
             plural(files, "file")
         ));

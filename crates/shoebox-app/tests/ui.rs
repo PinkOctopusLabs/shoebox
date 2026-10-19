@@ -936,6 +936,96 @@ fn show_in_all_photos_scrolls_to_it() {
     }
 }
 
+/// Duplicates within a folder or an event: only its own photos are
+/// compared; the "In" menu goes back to everything.
+#[test]
+fn duplicates_within_a_scope() {
+    let t = tempfile::tempdir().unwrap();
+    let lib = t.path().join("lib");
+    shoebox_fixtures::build_library(&lib).unwrap();
+    let lib = lib.canonicalize().unwrap();
+    let p = paths(t.path(), &[lib.join("ref"), lib.join("scan")]);
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+
+    // Everything first.
+    h.get_by_label("Duplicates").click();
+    h.run_steps(2);
+    h.get_by_label("Find duplicates").click();
+    wait_for(&mut h, Duration::from_secs(60), "all", |a| a.dupes_idle());
+    let all = h.state().dupe_files().len();
+    assert_eq!(
+        h.state().duplicates_found_in().as_deref(),
+        Some("All photos")
+    );
+
+    // A folder's menu: only that folder's files (here a root: the scan
+    // folder without the reference one).
+    let scan = lib.join("scan");
+    let label = format!("scan  {}", h.state().folder_count("scan"));
+    h.get_by_label(&label).click_secondary();
+    h.run_steps(3);
+    h.get_by_label("Find Duplicates in This Folder").click();
+    h.run_steps(2);
+    wait_for(&mut h, Duration::from_secs(60), "folder", |a| {
+        a.dupes_idle() && a.duplicates_found_in().as_deref() == Some("scan")
+    });
+    assert_eq!(h.state().view_name(), View::Duplicates);
+    let files = h.state().dupe_files();
+    assert!(
+        !files.is_empty() && files.len() < all,
+        "{} of {all}",
+        files.len()
+    );
+    assert!(files.iter().all(|f| f.starts_with(&scan)), "{files:?}");
+    assert!(h.query_by_label_contains("in scan").is_some());
+    snapshot(&mut h, "dupes-in-folder");
+
+    // An event of one photo: only its stack's files (the NEF, its JPG and
+    // f0004, an exact copy of the JPG), not the TIFF or other copies.
+    h.state_mut().set_view(View::Grid);
+    h.run_steps(2);
+    h.get_by_label("DSC_0001.NEF").click();
+    h.run_steps(2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::E);
+    h.run_steps(3);
+    h.event(egui::Event::Text("Trip".into()));
+    h.run_steps(1);
+    h.key_press(egui::Key::Enter);
+    wait_for(&mut h, Duration::from_secs(10), "event", |a| {
+        a.event_count("Trip") > 0
+    });
+    let n = h.state().event_count("Trip");
+    h.get_by_label(&format!("Trip  {n}")).click_secondary();
+    h.run_steps(3);
+    h.get_by_label("Find Duplicates in Event").click();
+    h.run_steps(2);
+    wait_for(&mut h, Duration::from_secs(60), "event", |a| {
+        a.dupes_idle() && a.duplicates_found_in().as_deref() == Some("Trip")
+    });
+    let files = h.state().dupe_files();
+    assert!(!files.is_empty());
+    assert!(
+        files.iter().all(|f| {
+            let name = f.file_name().unwrap().to_string_lossy();
+            ["DSC_0001.NEF", "DSC_0001.JPG", "f0004.jpg"].contains(&name.as_ref())
+        }),
+        "{files:?}"
+    );
+
+    // Back to everything from the In menu.
+    h.get_by_role(egui::accesskit::Role::ComboBox).click(); // In: Trip
+    h.run_steps(2);
+    h.get_by_label("All photos").click();
+    h.run_steps(2);
+    h.get_by_label("Find again").click();
+    h.run_steps(2);
+    wait_for(&mut h, Duration::from_secs(60), "all again", |a| {
+        a.dupes_idle() && a.duplicates_found_in().as_deref() == Some("All photos")
+    });
+    assert_eq!(h.state().dupe_files().len(), all);
+}
+
 /// Cmd+E makes an event from the selection: events.json in every writable
 /// root, the event in members' sidecars, and one undo step.
 #[test]
