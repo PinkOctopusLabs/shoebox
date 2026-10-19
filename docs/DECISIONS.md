@@ -555,7 +555,10 @@ single cost.
 - **Auto-select** follows the spec's keeper rule but only proposes moving
   copies taken at the same moment as the keeper (or with no capture time,
   like carved previews). Other exposures (bursts) stay undecided, as in the
-  M1 decision. Reference files never move; a group always keeps one file.
+  M1 decision. (Until 0.2.3 undated look-alikes were left undecided too,
+  against this rule; a burst frame whose closest copy is undated is told
+  apart by the kept copy's time.) Reference files never move; a group
+  always keeps one file.
   Every file to move is re-hashed (BLAKE3) right before the batch.
 - **"Add to stack as a variant"** is stored in `<root>/.shoebox/stacks.json`
   in every writable root (a new app file beside `events.json`), written in

@@ -1315,8 +1315,8 @@ fn undated_cleanup_in_the_app() {
     );
     assert_eq!(
         h.state().decision_of("f0003.jpg"),
-        Decision::Undecided,
-        "a resized copy with no capture time is left for a person"
+        Decision::Move,
+        "a resized copy with no capture time to tell it apart"
     );
 
     // Open the two-file group (f0005/f0006) in Compare, and the big one in

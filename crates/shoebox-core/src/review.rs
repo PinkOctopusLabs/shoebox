@@ -47,7 +47,8 @@ pub struct Entry {
     /// member (index into [`Review::files`]). A carved preview's best match
     /// is its own NEF, even when a burst neighbour became the keeper.
     pub best: Option<(usize, Match)>,
-    /// Taken at the same moment as the best match (or either time unknown).
+    /// Taken at the same moment as the best match, or if either time is
+    /// unknown, as the keeper (or that's unknown too).
     pub same_exposure: bool,
     /// The copy is certain: identical bytes or image data, or both capture
     /// times are known and equal. Only these are proposed for moving.
@@ -170,11 +171,18 @@ pub fn find(
         let gap = dupes::capture_gap(&items[other], &items[me]);
         let times_known = items[other].capture.is_some() && items[me].capture.is_some();
         let exact = best.is_some_and(|(_, x)| x.level <= dupes::Level::ImageData);
+        // With no time on the closest copy, the kept copy's tells (a burst
+        // neighbour of the keeper whose closest copy is an undated export).
+        let same_exposure = if times_known {
+            gap.is_none()
+        } else {
+            dupes::capture_gap(&items[root], &items[me]).is_none()
+        };
         (
             me,
             dupes::compare(&items[root], &items[me], &config),
             best,
-            gap.is_none(),
+            same_exposure,
             exact || (times_known && gap.is_none()),
         )
     };
@@ -295,10 +303,10 @@ pub fn find(
 
 /// Proposed decisions for a group, entry by entry: keep the keeper (the
 /// reference copy, else NEF over TIFF over JPG, else the highest
-/// resolution), keep other reference files, move files that are certainly
-/// copies (identical bytes or image data, or the same capture time), and
-/// leave the rest for a person to look at: other exposures, and look-alikes
-/// with no capture time to confirm them.
+/// resolution), keep other reference files, move the copies taken at the
+/// same moment (or with no capture time to tell, like a resized export or
+/// a carved preview), and leave other exposures (a burst's neighbours,
+/// different photos) for a person to look at.
 pub fn auto_select(r: &Review, g: &Group) -> Vec<Decision> {
     g.entries
         .iter()
@@ -306,7 +314,7 @@ pub fn auto_select(r: &Review, g: &Group) -> Vec<Decision> {
         .map(|(k, e)| {
             if k == 0 || r.files[e.file].role == Role::Reference {
                 Decision::Keep
-            } else if e.certain {
+            } else if e.same_exposure {
                 Decision::Move
             } else {
                 Decision::Undecided

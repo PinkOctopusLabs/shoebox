@@ -140,15 +140,15 @@ fn review_auto_select_apply_and_undo() {
         ("ref/2026/2026-04-24/DSC_0001.JPG", Keep),
         ("ref/2026/2026-04-24/DSC_0001.NEF", Keep),
         ("ref/lightroom/DSC_0001.tif", Keep),
-        // Resized copies with no capture time: likely, not certain.
-        ("scan/misc/f0007.png", Undecided),
+        // Resized copies with no capture time to tell them apart: moved.
+        ("scan/misc/f0007.png", Move),
         ("scan/recovered/f0001.jpg", Move), // same image data as the NEF
-        ("scan/recovered/f0003.jpg", Undecided),
+        ("scan/recovered/f0003.jpg", Move),
         ("scan/recovered/f0004.jpg", Move),
         ("scan/recovered/f0010.jpg", Undecided), // a burst neighbour: a person decides
         ("ref/2026/2026-04-24/DSC_0002.NEF", Keep),
         ("scan/recovered/f0002.jpg", Move),
-        ("scan/rotated/f0008.jpg", Undecided),
+        ("scan/rotated/f0008.jpg", Move),
         ("scan/recovered/f0005.jpg", Keep), // scan-only: one copy stays
         ("scan/recovered/f0006.jpg", Move),
     ]
@@ -169,15 +169,7 @@ fn review_auto_select_apply_and_undo() {
     bad.insert(path("scan/recovered/f0005.jpg"), Move);
     assert!(review::plan(&r, &bad).is_err(), "a group keeps one file");
 
-    // A person confirms the resized copies, and makes the burst neighbour a
-    // variant of the NEF's stack.
-    for f in [
-        "scan/misc/f0007.png",
-        "scan/recovered/f0003.jpg",
-        "scan/rotated/f0008.jpg",
-    ] {
-        decisions.insert(path(f), Move);
-    }
+    // A person makes the burst neighbour a variant of the NEF's stack.
     decisions.insert(path("scan/recovered/f0010.jpg"), Variant);
     let plan = review::plan(&r, &decisions).unwrap();
     assert_eq!(plan.moves.len(), 7);

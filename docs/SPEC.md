@@ -166,7 +166,7 @@ Three levels of match, all cached per file so a second scan only hashes new or c
    - **In** chooses where to look: All photos (the default), a folder, an event or a collection. Within a folder, event or collection, only its own photos are compared with each other (every file of their stacks), so both files of every match are in it and nothing outside is listed or moved. A folder's, event's or collection's menu has **Find Duplicates in …**, which opens Duplicates and searches there. After applying or undoing, the search runs again in the same place.
 2. Opening a group shows it in Compare (2 files) or Survey (3+).
 3. Per file: keep, move to `_duplicates/`, add to stack as a variant, or ignore.
-4. **Auto-select** rules mark the rest of each group in one go: keep the reference copy, then NEF over TIFF over JPG, then the highest resolution.
+4. **Auto-select** rules mark the rest of each group in one go: keep the reference copy, then NEF over TIFF over JPG, then the highest resolution; mark the other copies to move to `_duplicates/` when they were taken at the same moment or have no capture time to tell (a resized export, a carved preview). Other exposures (burst frames, dated at another moment than the copy they match, or than the kept copy when that copy is undated) stay undecided for a person.
 5. Move marked files, as one undoable batch.
 
 **Headless (CLI)**

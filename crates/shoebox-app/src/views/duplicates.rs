@@ -332,7 +332,7 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         ui.separator();
         if ui
             .button("Auto-select all")
-            .on_hover_text("Keep the reference copy (else NEF > TIFF > JPG, then the largest); move other copies taken at the same moment; leave other exposures undecided")
+            .on_hover_text("Keep the reference copy (else NEF > TIFF > JPG, then the largest); move the other copies taken at the same moment or with no capture time to tell; leave other exposures (burst frames) undecided")
             .clicked()
         {
             app.auto_select(None);
