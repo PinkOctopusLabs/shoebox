@@ -2648,6 +2648,7 @@ impl ShoeboxApp {
             .map(|p| photo_id(&p.path))
             .collect();
         self.current = self.selection.iter().next().copied();
+        self.scroll_to_current = true;
     }
 
     /// Timeline days as (title, stacks), then undated stacks (tests).

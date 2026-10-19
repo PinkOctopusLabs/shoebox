@@ -369,6 +369,25 @@ pub fn cell(
     resp
 }
 
+/// The photos' scroll area (grid, masonry, timeline), at offset `jump_to`
+/// when set. egui keeps last frame's scroll limit and any scroll still
+/// under way (a flick, a bounce at the end): a jump past that limit, into
+/// photos just shown, would spring back to it. So a jump starts afresh.
+pub fn photo_scroll(ui: &egui::Ui, jump_to: Option<f32>) -> egui::ScrollArea {
+    let area = egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .id_salt("photos");
+    match jump_to {
+        Some(y) => {
+            // The id `id_salt("photos")` gives the area.
+            let id = ui.make_persistent_id(egui::IdSalt::new("photos"));
+            egui::scroll_area::State::default().store(ui.ctx(), id);
+            area.vertical_scroll_offset(y)
+        }
+        None => area,
+    }
+}
+
 pub(crate) const SHOW_IN_ALL: &str = "Show in All Photos";
 
 /// The photo context menu (right-click).

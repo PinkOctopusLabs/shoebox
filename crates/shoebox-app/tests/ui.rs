@@ -874,6 +874,68 @@ fn folders_and_events() {
     snapshot(&mut h, "26-show-in-all");
 }
 
+/// Show in All Photos scrolls a long grid to the photo, from the grid and
+/// from the loupe.
+#[test]
+fn show_in_all_photos_scrolls_to_it() {
+    let t = tempfile::tempdir().unwrap();
+    let lib = t.path().join("lib");
+    let seed = t.path().join("seed.jpg");
+    std::fs::write(
+        &seed,
+        shoebox_fixtures::jpeg(&shoebox_fixtures::scene(9, 300, 200), 85).unwrap(),
+    )
+    .unwrap();
+    for d in 0..8 {
+        let dir = lib.join(format!("day-{d}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in 0..60 {
+            std::fs::copy(&seed, dir.join(format!("IMG_{d}_{f:02}.jpg"))).unwrap();
+        }
+    }
+    let p = paths(t.path(), std::slice::from_ref(&lib));
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(120));
+    let visible = |h: &Harness<'_, ShoeboxApp>, name: &str| {
+        h.query_by_label(name)
+            .is_some_and(|n| n.rect().min.y > 40.0 && n.rect().max.y < 860.0)
+    };
+    for (folder, name, loupe) in [
+        ("day-6", "IMG_6_55.jpg", false),
+        ("day-1", "IMG_1_03.jpg", true),
+        ("day-7", "IMG_7_59.jpg", false),
+    ] {
+        h.get_by_label(&format!("{folder}  60")).click();
+        h.run_steps(3);
+        // The folder's grid shows its own photos; scroll to the one wanted.
+        let pos = h
+            .state()
+            .shown_names()
+            .iter()
+            .position(|n| n == name)
+            .unwrap();
+        assert_eq!(h.state().shown_count(), 60);
+        h.state_mut().select_names(&[name]);
+        h.run_steps(3);
+        assert!(visible(&h, name), "{name} in its folder");
+        if loupe {
+            h.key_press(egui::Key::Enter);
+            h.run_steps(2);
+        }
+        h.get_by_label(name).click_secondary();
+        h.run_steps(3);
+        h.get_by_label("Show in All Photos").click();
+        h.run_steps(3);
+        assert_eq!(h.state().shown_count(), 480);
+        assert_eq!(h.state().current_name().as_deref(), Some(name));
+        h.run_steps(10); // and stays there
+        assert!(
+            visible(&h, name),
+            "{name} (at {pos} in its folder) on screen"
+        );
+    }
+}
+
 /// Cmd+E makes an event from the selection: events.json in every writable
 /// root, the event in members' sidecars, and one undo step.
 #[test]

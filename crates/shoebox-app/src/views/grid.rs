@@ -120,14 +120,13 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             rows: layout.rows,
         };
     }
-    let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
-    if app.scroll_to_current
-        && let Some((y, _)) = app.current_pos().and_then(|p| layout.line_of(p))
-    {
-        // Bring the current row into view (roughly centred).
-        let y = (y - ui.available_height() / 2.0 + layout.cell / 2.0).max(0.0);
-        area = area.vertical_scroll_offset(y);
-    }
+    // Bring the current row into view (roughly centred).
+    let jump = app
+        .scroll_to_current
+        .then(|| app.current_pos().and_then(|p| layout.line_of(p)))
+        .flatten()
+        .map(|(y, _)| (y - ui.available_height() / 2.0 + layout.cell / 2.0).max(0.0));
+    let area = super::photo_scroll(ui, jump);
     area.show_viewport(ui, |ui, viewport| {
         ui.set_min_size(vec2(width, layout.height));
         let origin = ui.min_rect().min.to_vec2();

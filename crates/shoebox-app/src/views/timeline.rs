@@ -357,7 +357,7 @@ fn body(app: &mut ShoeboxApp, ui: &mut egui::Ui, layout: &Layout) {
         e.1 += 1;
     }
 
-    let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
+    let mut jump = None;
     if app.scroll_to_current
         && let Some(s) = app
             .current
@@ -370,10 +370,9 @@ fn body(app: &mut ShoeboxApp, ui: &mut egui::Ui, layout: &Layout) {
                 .position(|r| matches!(r, Row::Day(k) if *k == d)),
             None => rows.iter().position(|r| matches!(r, Row::Undated)),
         };
-        if let Some(r) = row {
-            area = area.vertical_scroll_offset((tops[r] - MONTH_H).max(0.0));
-        }
+        jump = row.map(|r| (tops[r] - MONTH_H).max(0.0));
     }
+    let area = super::photo_scroll(ui, jump);
     area.show_viewport(ui, |ui, viewport| {
         ui.set_min_height(total);
         let origin = ui.min_rect().min;

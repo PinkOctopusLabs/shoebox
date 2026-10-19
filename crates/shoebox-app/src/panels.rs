@@ -131,7 +131,11 @@ pub fn topbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 .show(ui, |ui| {
                     ui.set_width(field - 16.0);
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(icons::SEARCH).weak());
+                        // Down as far as the text (see search_box).
+                        ui.vertical(|ui| {
+                            ui.add_space(4.0);
+                            ui.label(RichText::new(icons::SEARCH).weak());
+                        });
                         search_box(app, ui);
                     });
                 });
@@ -573,7 +577,11 @@ fn search_box(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     let search = ui.add(
         egui::TextEdit::singleline(&mut app.filter.search)
             .hint_text(hint)
-            .frame(egui::Frame::NONE)
+            // Text sits high in its line: 2 px down, centred on the bar.
+            .frame(egui::Frame::NONE.inner_margin(egui::Margin {
+                top: 4,
+                ..egui::Margin::ZERO
+            }))
             .desired_width(
                 ui.available_width()
                     - if app.settings.semantic_search {
