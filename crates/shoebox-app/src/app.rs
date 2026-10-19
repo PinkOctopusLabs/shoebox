@@ -106,11 +106,37 @@ pub struct ImportState {
     pub force: HashSet<PathBuf>,
     /// Show only the photos this source folder's name goes on.
     pub filter: Option<PathBuf>,
-    /// Copying: (done, total).
-    pub copying: Option<(usize, usize)>,
+    /// Copying, once Import is clicked.
+    pub copying: Option<Copying>,
     /// The plan's photos `filter` shows: (folder, plan, indices), cached.
     pub shown: Option<(PathBuf, usize, Arc<Vec<usize>>)>,
     pub message: Option<String>,
+}
+
+/// Where an import's copying is.
+#[derive(Debug, Clone)]
+pub struct Copying {
+    /// Copies finished, of `files`.
+    pub done: usize,
+    pub files: usize,
+    pub bytes: u64,
+    pub total_bytes: u64,
+    /// The file being copied.
+    pub current: Option<PathBuf>,
+    pub started: std::time::Instant,
+}
+
+impl Copying {
+    /// Bytes a second so far (once there's enough to go on).
+    pub fn rate(&self) -> Option<f64> {
+        let secs = self.started.elapsed().as_secs_f64();
+        (secs >= 1.0 && self.bytes > 0).then(|| self.bytes as f64 / secs)
+    }
+
+    /// Seconds left at the rate so far.
+    pub fn left(&self) -> Option<f64> {
+        Some(self.total_bytes.saturating_sub(self.bytes) as f64 / self.rate()?)
+    }
 }
 
 /// Move, rename, reject and trash: dialogs and the dry-run table.
@@ -843,8 +869,26 @@ impl ShoeboxApp {
                     self.import.shown = None;
                     self.import.plan = Some(Ok(p));
                 }
-                LibraryEvent::ImportCopying { done, total } => {
-                    self.import.copying = Some((done, total));
+                LibraryEvent::ImportCopying {
+                    done,
+                    files,
+                    bytes,
+                    total_bytes,
+                    current,
+                } => {
+                    let started = self
+                        .import
+                        .copying
+                        .as_ref()
+                        .map_or_else(std::time::Instant::now, |c| c.started);
+                    self.import.copying = Some(Copying {
+                        done,
+                        files,
+                        bytes,
+                        total_bytes,
+                        current,
+                        started,
+                    });
                 }
                 LibraryEvent::ImportCancelled { batch, copied } => {
                     self.import.copying = None;
@@ -2251,14 +2295,35 @@ impl ShoeboxApp {
     }
 
     pub fn run_import(&mut self) {
-        let total = match &self.import.plan {
+        let files = match &self.import.plan {
             Some(Ok(p)) => p.copies.len(),
             _ => 0,
         };
-        self.import.copying = Some((0, total));
+        self.import.copying = Some(Copying {
+            done: 0,
+            files,
+            bytes: 0,
+            total_bytes: 0,
+            current: None,
+            started: std::time::Instant::now(),
+        });
         self.import.message = None;
         self.library
             .send(LibraryCommand::RunImport(self.import.folders.clone()));
+    }
+
+    /// Show the import as copying (`None`: not), for snapshots of the
+    /// status (tests).
+    #[doc(hidden)]
+    pub fn show_copying(&mut self, c: Option<(usize, usize, u64, u64, PathBuf)>) {
+        self.import.copying = c.map(|(done, files, bytes, total_bytes, current)| Copying {
+            done,
+            files,
+            bytes,
+            total_bytes,
+            current: Some(current),
+            started: std::time::Instant::now() - std::time::Duration::from_secs(60),
+        });
     }
 
     /// Stop finding or copying photos.

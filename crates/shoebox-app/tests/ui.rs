@@ -1704,6 +1704,21 @@ fn import_folder_names() {
     h.run_steps(2);
     assert!(h.query_by_label("Event Italy 2019 › Rome").is_some());
     snapshot(&mut h, "import-folder-names");
+    // While copying: a bar, files and bytes, speed, time left, the file
+    // being copied, and Cancel (here and in the status bar).
+    h.state_mut().show_copying(Some((
+        1,
+        4,
+        3 << 30,
+        12 << 30,
+        src.join("Trips/Italy 2019/a.jpg"),
+    )));
+    h.run_steps(2);
+    assert!(h.query_by_label("Cancel").is_some());
+    assert!(h.query_by_label_contains("Importing 1/4").is_some());
+    snapshot(&mut h, "import-copying");
+    h.state_mut().show_copying(None);
+    h.run_steps(2);
     assert_eq!(
         cached(&base.join("cache/thumbs")),
         thumbs,

@@ -383,7 +383,18 @@ fn zoom_menu(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
 /// Background work (laid out right to left).
 fn work(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     let busy = app.loader.busy();
-    if let Some((done, total)) = app.download_progress {
+    if let Some(c) = &app.import.copying {
+        let mut text = format!("Importing {}/{}", c.done, c.files);
+        if let Some(rate) = c.rate() {
+            text.push_str(&format!(" · {}/s", human_size(rate as u64)));
+        }
+        if let Some(left) = c.left() {
+            text.push_str(&format!(" · {}", time_left(left)));
+        }
+        ui.label(text)
+            .on_hover_text("Tasks › Import shows more, and can cancel it");
+        ui.add(egui::Spinner::new());
+    } else if let Some((done, total)) = app.download_progress {
         ui.label(format!("Downloading {done}/{total} from the cloud"));
         ui.add(egui::Spinner::new());
     } else if let Some((done, total)) = app.scan_progress {
@@ -403,6 +414,15 @@ fn work(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         ui.label(task)
             .on_hover_text("People (see People in Settings)");
         ui.add(egui::Spinner::new());
+    }
+}
+
+/// "about 3 min left", for a progress line.
+pub(crate) fn time_left(secs: f64) -> String {
+    match secs {
+        s if s < 60.0 => "less than a minute left".to_owned(),
+        s if s < 3600.0 => format!("about {} min left", (s / 60.0).round()),
+        s => format!("about {:.1} h left", s / 3600.0),
     }
 }
 
@@ -1901,7 +1921,7 @@ fn organise(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     }
 }
 
-fn human_size(b: u64) -> String {
+pub(crate) fn human_size(b: u64) -> String {
     match b {
         b if b >= 1 << 30 => format!("{:.1} GB", b as f64 / f64::from(1u32 << 30)),
         b if b >= 1 << 20 => format!("{:.1} MB", b as f64 / f64::from(1u32 << 20)),

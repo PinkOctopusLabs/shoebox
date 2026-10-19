@@ -865,3 +865,16 @@ hashes, embeddings, faces).
   kept and undoable. Sidecar writes come after the copies in an import
   batch, so a cancelled import's copies have no folder names yet; importing
   again adds them (they're then library photos found again).
+
+## Import copy progress (2026-10-19)
+
+- A copy across volumes (a card, another disk) goes 1 MB at a time so
+  progress moves within a big file; on one volume it stays the system copy
+  (an APFS clone: instant, no extra space). `FileOps::import_until` reports
+  `CopyProgress` (files, bytes, the file being copied) as copies start, go
+  and finish; the worker sends at most ~10 updates a second.
+- The Import screen shows a bar by bytes, "3.0 GB of 12.0 GB · 51 MB/s ·
+  about 3 min left", the file being copied and Cancel; the status bar shows
+  "Importing 1/4 · 51 MB/s · …" from any view. Verification (reading the copy
+  back for its BLAKE3) isn't in the bytes, so a file's bar can sit at its end
+  for a moment.

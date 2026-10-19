@@ -215,10 +215,79 @@ pub fn plan_moves(files: &[(PathBuf, PathBuf)]) -> Result<Plan> {
     Ok(plan)
 }
 
+/// Where an import's copying is.
+#[derive(Debug, Clone, Copy)]
+pub struct CopyProgress<'a> {
+    /// Copies finished, of `files`.
+    pub done: usize,
+    pub files: usize,
+    /// Bytes copied (the current file's so far included), of `total_bytes`.
+    pub bytes: u64,
+    pub total_bytes: u64,
+    /// The file being copied (`None` once they're all done).
+    pub current: Option<&'a Path>,
+}
+
+/// What a batch run can be stopped by, and told of a copy's progress
+/// (`on_bytes(plan step, bytes so far)`).
+struct Hooks<'a> {
+    stop: Option<&'a AtomicBool>,
+    on_bytes: &'a mut dyn FnMut(usize, u64),
+}
+
+/// Copy `src` to `dst` (a new file), calling `on_bytes(copied so far)`.
+/// Across volumes (a card) in 1 MB chunks so progress shows within a file;
+/// on one volume the system copy, which clones on APFS (instant, no space).
+fn copy_bytes(src: &Path, dst: &Path, on_bytes: &mut dyn FnMut(u64)) -> std::io::Result<()> {
+    let same_volume = match (std::fs::metadata(src), dst.parent().map(std::fs::metadata)) {
+        (Ok(a), Some(Ok(b))) => a.dev() == b.dev(),
+        _ => false,
+    };
+    if same_volume {
+        let n = std::fs::copy(src, dst)?;
+        on_bytes(n);
+        return Ok(());
+    }
+    copy_chunked(src, dst, on_bytes)
+}
+
+/// Copy `src` to a new file `dst` 1 MB at a time, calling `on_bytes`.
+fn copy_chunked(src: &Path, dst: &Path, on_bytes: &mut dyn FnMut(u64)) -> std::io::Result<()> {
+    use std::io::{Read, Write};
+    let mut from = std::fs::File::open(src)?;
+    let mut to = std::fs::File::options()
+        .write(true)
+        .create_new(true)
+        .open(dst)?;
+    let mut buf = vec![0u8; 1 << 20];
+    let mut copied = 0u64;
+    loop {
+        let n = match from.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        to.write_all(&buf[..n])?;
+        copied += n as u64;
+        on_bytes(copied);
+    }
+    to.sync_all()?;
+    if let Ok(p) = from.metadata().map(|m| m.permissions()) {
+        let _ = to.set_permissions(p);
+    }
+    Ok(())
+}
+
 /// Copy `src` to a temporary name beside `dst`, check its BLAKE3, keep the
 /// source's modification time, then rename it to `dst` without replacing.
 /// On any failure the temporary file (ours) is removed and `dst` untouched.
-fn copy_verified(src: &Path, dst: &Path, hash: &[u8; 32]) -> std::result::Result<(), String> {
+fn copy_verified(
+    src: &Path,
+    dst: &Path,
+    hash: &[u8; 32],
+    on_bytes: &mut dyn FnMut(u64),
+) -> std::result::Result<(), String> {
     let name = dst
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -228,7 +297,7 @@ fn copy_verified(src: &Path, dst: &Path, hash: &[u8; 32]) -> std::result::Result
         return Err(format!("{} is in the way", tmp.display()));
     }
     let result = (|| {
-        std::fs::copy(src, &tmp).map_err(|e| e.to_string())?;
+        copy_bytes(src, &tmp, on_bytes).map_err(|e| e.to_string())?;
         if hash_file(&tmp).map_err(|e| e.to_string())? != *hash {
             return Err("the copy doesn't match the source (changed, or a read error)".into());
         }
@@ -574,10 +643,10 @@ impl FileOps {
         copies: &[PlannedCopy],
         writes: Vec<(PathBuf, Vec<u8>)>,
     ) -> Result<i64> {
-        self.import_until(label, copies, writes, &|_, _| {}, &AtomicBool::new(false))
+        self.import_until(label, copies, writes, &|_| {}, &AtomicBool::new(false))
     }
 
-    /// [`Self::import`], calling `progress(done, total)` as copies finish.
+    /// [`Self::import`], calling `progress` as copies start, go and finish.
     /// Setting `stop` ends the batch before its next step: what ran stays
     /// journaled (and can be undone), the rest is marked not run, and the
     /// result is [`CoreError::BatchCancelled`].
@@ -586,10 +655,11 @@ impl FileOps {
         label: &str,
         copies: &[PlannedCopy],
         writes: Vec<(PathBuf, Vec<u8>)>,
-        progress: &dyn Fn(usize, usize),
+        progress: &dyn Fn(CopyProgress<'_>),
         stop: &AtomicBool,
     ) -> Result<i64> {
         let mut dsts = HashSet::new();
+        let mut sizes = Vec::with_capacity(copies.len());
         for c in copies {
             self.check_unprotected(&c.dst)?;
             if exists(&c.dst) || !dsts.insert(&c.dst) {
@@ -605,6 +675,7 @@ impl FileOps {
                     c.src.display()
                 )));
             }
+            sizes.push(meta.len());
         }
         // A write goes beside a copy (its folder made by the copies) or to
         // a sidecar or app file of the library.
@@ -642,12 +713,34 @@ impl FileOps {
                     .map(|(path, bytes)| Planned::Sidecar { path, bytes }),
             )
             .collect();
-        let total = copies.len();
-        let mut done = 0;
-        self.run_until("import", label, None, &ops, Some(stop), |i| {
-            if i < total {
-                done += 1;
-                progress(done, total);
+        let files = copies.len();
+        let total_bytes = sizes.iter().sum();
+        // Bytes of the finished copies, and how many there are.
+        let finished = std::cell::Cell::new((0u64, 0usize));
+        let report = |current: Option<&Path>, bytes: u64| {
+            let (before, done) = finished.get();
+            progress(CopyProgress {
+                done,
+                files,
+                bytes: before + bytes,
+                total_bytes,
+                current,
+            });
+        };
+        report(copies.first().map(|c| c.src.as_path()), 0);
+        let mut hooks = Hooks {
+            stop: Some(stop),
+            on_bytes: &mut |i, b| {
+                if let Some(c) = copies.get(i) {
+                    report(Some(&c.src), b);
+                }
+            },
+        };
+        self.run_until("import", label, None, &ops, &mut hooks, |i| {
+            if let Some(size) = sizes.get(i) {
+                let (before, done) = finished.get();
+                finished.set((before + size, done + 1));
+                report(copies.get(i + 1).map(|c| c.src.as_path()), 0);
             }
             Ok(())
         })
@@ -731,7 +824,11 @@ impl FileOps {
         ops: &[Planned],
         after_each: impl FnMut(usize) -> Result<()>,
     ) -> Result<i64> {
-        self.run_until(kind, label, undo_of, ops, None, after_each)
+        let mut hooks = Hooks {
+            stop: None,
+            on_bytes: &mut |_, _| {},
+        };
+        self.run_until(kind, label, undo_of, ops, &mut hooks, after_each)
     }
 
     /// [`Self::run`], stopping before the next step once `stop` is set.
@@ -741,7 +838,7 @@ impl FileOps {
         label: &str,
         undo_of: Option<i64>,
         ops: &[Planned],
-        stop: Option<&AtomicBool>,
+        hooks: &mut Hooks<'_>,
         mut after_each: impl FnMut(usize) -> Result<()>,
     ) -> Result<i64> {
         let j = &self.journal;
@@ -756,7 +853,7 @@ impl FileOps {
         let steps = j.ops(batch)?;
         let mut done = 0;
         for (op, owner) in steps.iter().zip(&owners) {
-            if stop.is_some_and(|s| s.load(Ordering::Relaxed)) {
+            if hooks.stop.is_some_and(|s| s.load(Ordering::Relaxed)) {
                 j.fail_pending(batch, "not run: cancelled")?;
                 j.set_batch_status(batch, "cancelled")?;
                 return Err(CoreError::BatchCancelled {
@@ -765,7 +862,11 @@ impl FileOps {
                     total: ops.len(),
                 });
             }
-            if let Err(e) = self.perform(op) {
+            let step = match owner {
+                Some(i) => self.perform_with(op, &mut |b| (hooks.on_bytes)(*i, b)),
+                None => self.perform(op),
+            };
+            if let Err(e) = step {
                 j.fail(op.id, &e)?;
                 j.fail_pending(batch, "not run: the batch stopped at an earlier error")?;
                 j.set_batch_status(batch, "failed")?;
@@ -860,6 +961,15 @@ impl FileOps {
 
     /// Carry out one journaled step. Never replaces an existing file.
     fn perform(&self, op: &OpRecord) -> std::result::Result<(), String> {
+        self.perform_with(op, &mut |_| {})
+    }
+
+    /// [`Self::perform`], calling `on_bytes` as a copy goes.
+    fn perform_with(
+        &self,
+        op: &OpRecord,
+        on_bytes: &mut dyn FnMut(u64),
+    ) -> std::result::Result<(), String> {
         let hash = || {
             op.after_hash
                 .as_deref()
@@ -873,7 +983,7 @@ impl FileOps {
                 Err(e) => Err(e.to_string()),
             },
             Op::Move => sys::rename_excl(&op.src, &op.dst).map_err(|e| e.to_string()),
-            Op::Copy => copy_verified(&op.src, &op.dst, &hash()?),
+            Op::Copy => copy_verified(&op.src, &op.dst, &hash()?, on_bytes),
             Op::Trash => match hash_file(&op.src) {
                 Ok(h) if h == hash()? => {
                     if op.dst == op.src {
@@ -1317,6 +1427,22 @@ mod tests {
     }
 
     #[test]
+    fn chunked_copy_reports_bytes() {
+        let t = tempfile::tempdir().unwrap();
+        let (src, dst) = (t.path().join("a.mov"), t.path().join("b.mov"));
+        let body: Vec<u8> = (0..2_500_000u32).map(|i| i as u8).collect();
+        std::fs::write(&src, &body).unwrap();
+        let mut seen = Vec::new();
+        copy_chunked(&src, &dst, &mut |b| seen.push(b)).unwrap();
+        assert_eq!(seen, [1 << 20, 2 << 20, 2_500_000]);
+        assert_eq!(std::fs::read(&dst).unwrap(), body);
+        assert!(
+            copy_chunked(&src, &dst, &mut |_| {}).is_err(),
+            "never onto a file"
+        );
+    }
+
+    #[test]
     fn a_cancelled_import_keeps_what_ran_and_undoes() {
         let t = tempfile::tempdir().unwrap();
         let root = t.path().canonicalize().unwrap();
@@ -1336,15 +1462,17 @@ mod tests {
         let sidecar = (root.join("lib/a.jpg.xmp"), b"<x/>".to_vec());
         // Cancelled once the first copy is done.
         let stop = AtomicBool::new(false);
-        let seen = std::cell::RefCell::new(Vec::new());
+        let last = std::cell::Cell::new((0, 0, 0, 0));
         let err = fo
             .import_until(
                 "import",
                 &copies,
                 vec![sidecar],
-                &|done, total| {
-                    seen.borrow_mut().push((done, total));
-                    stop.store(true, Ordering::Relaxed);
+                &|p| {
+                    last.set((p.done, p.files, p.bytes, p.total_bytes));
+                    if p.done == 1 {
+                        stop.store(true, Ordering::Relaxed);
+                    }
                 },
                 &stop,
             )
@@ -1352,7 +1480,7 @@ mod tests {
         let CoreError::BatchCancelled { batch, .. } = err else {
             panic!("{err}");
         };
-        assert_eq!(seen.into_inner(), [(1, 3)]);
+        assert_eq!(last.get(), (1, 3, 1, 3), "one copy (of one byte) of three");
         assert!(root.join("lib/a.jpg").exists());
         assert!(!root.join("lib/b.jpg").exists());
         assert!(!root.join("lib/a.jpg.xmp").exists(), "writes come last");

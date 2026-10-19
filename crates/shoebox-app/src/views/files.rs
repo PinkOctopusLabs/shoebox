@@ -250,6 +250,43 @@ fn left_out(
         });
 }
 
+/// Where an import's copying is: a bar by bytes, files and bytes done, the
+/// speed and time left so far, the file being copied, and Cancel.
+fn copying(app: &mut ShoeboxApp, ui: &mut egui::Ui, c: &crate::app::Copying, source: &Path) {
+    use crate::panels::{human_size, time_left};
+    let fraction = if c.total_bytes > 0 {
+        c.bytes as f32 / c.total_bytes as f32
+    } else {
+        c.done as f32 / c.files.max(1) as f32
+    };
+    ui.vertical(|ui| {
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::ProgressBar::new(fraction)
+                    .desired_width(320.0)
+                    .text(format!("Copying {} of {}", c.done, c.files)),
+            );
+            if ui.button("Cancel").clicked() {
+                app.cancel_import();
+            }
+        });
+        let mut line = format!("{} of {}", human_size(c.bytes), human_size(c.total_bytes));
+        match c.rate() {
+            Some(rate) => {
+                line.push_str(&format!(" · {}/s", human_size(rate as u64)));
+                if let Some(left) = c.left() {
+                    line.push_str(&format!(" · {}", time_left(left)));
+                }
+            }
+            None => line.push_str(" · starting…"),
+        }
+        ui.weak(line);
+        if let Some(p) = &c.current {
+            ui.weak(RichText::new(rel_to(source, p)).monospace().small());
+        }
+    });
+}
+
 /// The plan's photos to show: all, or those the chosen folder's name goes
 /// on (cached per plan and folder).
 fn shown_photos(app: &mut ShoeboxApp, plan: &Arc<Plan>) -> Option<(PathBuf, Arc<Vec<usize>>)> {
@@ -488,15 +525,8 @@ pub fn import(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         {
             app.run_import();
         }
-        if let Some((done, total)) = app.import.copying {
-            ui.add(
-                egui::ProgressBar::new(done as f32 / total.max(1) as f32)
-                    .desired_width(200.0)
-                    .text(format!("Copying {done}/{total}")),
-            );
-            if ui.button("Cancel").clicked() {
-                app.cancel_import();
-            }
+        if let Some(c) = app.import.copying.clone() {
+            copying(app, ui, &c, &source);
         } else if let Some(name) = app.import.root.as_deref().and_then(Path::file_name) {
             ui.weak(format!("into {}", name.to_string_lossy()));
         }

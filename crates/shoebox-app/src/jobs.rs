@@ -481,10 +481,14 @@ pub enum LibraryEvent {
     ImportPlanned(Option<Result<Arc<shoebox_core::import::Plan>, String>>),
     /// The import planned again with files forced in (folders unchanged).
     ImportReplanned(Arc<shoebox_core::import::Plan>),
-    /// Copying: `done` of `total` copies.
+    /// Copying: `done` of `files` copies, `bytes` of `total_bytes`, and the
+    /// file being copied.
     ImportCopying {
         done: usize,
-        total: usize,
+        files: usize,
+        bytes: u64,
+        total_bytes: u64,
+        current: Option<PathBuf>,
     },
     /// The import was cancelled part-way: `copied` files stay, as `batch`.
     ImportCancelled {
@@ -1078,11 +1082,23 @@ fn library_worker(
                 let photos = named.photos;
                 let images = p.photos.len();
                 let copied = std::cell::Cell::new(0);
-                let progress = |done: usize, total: usize| {
-                    copied.set(done);
-                    if done.is_multiple_of(8) || done == total {
-                        emit(LibraryEvent::ImportCopying { done, total });
+                // At most ~10 updates a second (a fast disk copies many
+                // small files a second), and every finished file count.
+                let last = std::cell::Cell::new((std::time::Instant::now(), usize::MAX));
+                let progress = |p: shoebox_core::fileops::CopyProgress<'_>| {
+                    copied.set(p.done);
+                    let (at, done) = last.get();
+                    if done == p.done && at.elapsed() < std::time::Duration::from_millis(100) {
+                        return;
                     }
+                    last.set((std::time::Instant::now(), p.done));
+                    emit(LibraryEvent::ImportCopying {
+                        done: p.done,
+                        files: p.files,
+                        bytes: p.bytes,
+                        total_bytes: p.total_bytes,
+                        current: p.current.map(std::path::Path::to_path_buf),
+                    });
                 };
                 let label = format!("import from {source}");
                 match fileops.import_until(&label, &p.copies, named.writes, &progress, import_stop)
