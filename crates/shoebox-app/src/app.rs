@@ -110,6 +110,9 @@ pub struct ImportState {
     pub copying: Option<Copying>,
     /// The plan's photos `filter` shows: (folder, plan, indices), cached.
     pub shown: Option<(PathBuf, usize, Arc<Vec<usize>>)>,
+    /// The card or disk the import copies from, when it can be ejected
+    /// (kept after the import for its Eject button).
+    pub volume: Option<PathBuf>,
     pub message: Option<String>,
 }
 
@@ -392,6 +395,12 @@ pub struct ShoeboxApp {
     pub(crate) import: ImportState,
     /// The open folder picker, if any.
     pub(crate) picker: crate::picker::Picker,
+    /// Asking whether to stop an import and quit.
+    pub(crate) confirm_quit: bool,
+    /// Quit once the import has stopped.
+    pub(crate) quit_when_stopped: bool,
+    /// Quit asked for other than by the menu or the window (tests).
+    quit_asked: bool,
     pub(crate) org: OrgState,
     pub(crate) history: HistoryState,
     pub(crate) collections: Vec<Collection>,
@@ -523,6 +532,9 @@ impl ShoeboxApp {
             dupes: DupeState::default(),
             import: ImportState::default(),
             picker: crate::picker::Picker::default(),
+            confirm_quit: false,
+            quit_when_stopped: false,
+            quit_asked: false,
             org: OrgState::default(),
             history: HistoryState::default(),
             collections: Vec::new(),
@@ -945,6 +957,14 @@ impl ShoeboxApp {
                 LibraryEvent::BatchOps(id, ops) => {
                     self.history.open.insert(id, ops);
                 }
+                LibraryEvent::ImportEnded => self.import.copying = None,
+                LibraryEvent::Ejected(r) => match r {
+                    Ok(name) => {
+                        self.import.volume = None;
+                        self.notice = Some(format!("{name} was ejected; it's safe to remove."));
+                    }
+                    Err(e) => self.error = Some(e),
+                },
                 LibraryEvent::BatchResumed(r) => {
                     self.history.message = Some(r.map(|n| {
                         format!("Finished the interrupted operation ({n} steps left to run).")
@@ -2299,6 +2319,7 @@ impl ShoeboxApp {
             Some(Ok(p)) => p.copies.len(),
             _ => 0,
         };
+        self.import.volume = self.import.source.as_deref().and_then(ejectable_volume);
         self.import.copying = Some(Copying {
             done: 0,
             files,
@@ -2859,6 +2880,48 @@ impl ShoeboxApp {
         ));
     }
 
+    /// Quitting (the window's close button, or Quit in the menu) while an
+    /// import copies asks first; stopping it then quits once it's stopped.
+    fn tick_quit(&mut self, ctx: &egui::Context) {
+        let menu_quit = crate::menu::take_quit() || std::mem::take(&mut self.quit_asked);
+        let closing = ctx.input(|i| i.viewport().close_requested());
+        if self.import.copying.is_some() {
+            if closing {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            }
+            if (menu_quit || closing) && !self.quit_when_stopped {
+                self.confirm_quit = true;
+            }
+        } else if menu_quit || std::mem::take(&mut self.quit_when_stopped) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    /// Quit as the menu's Quit does (tests).
+    #[doc(hidden)]
+    pub fn ask_quit(&mut self) {
+        self.quit_asked = true;
+    }
+
+    /// Whether Shoebox is asking about stopping an import to quit (tests).
+    pub fn asking_to_quit(&self) -> bool {
+        self.confirm_quit
+    }
+
+    /// Stop the import and quit once it has stopped.
+    pub(crate) fn stop_import_and_quit(&mut self) {
+        self.confirm_quit = false;
+        self.quit_when_stopped = true;
+        self.cancel_import();
+    }
+
+    /// Eject the card or disk the last import came from.
+    pub(crate) fn eject_import_volume(&mut self) {
+        if let Some(v) = self.import.volume.clone() {
+            self.library.send(LibraryCommand::Eject(v));
+        }
+    }
+
     /// Act on a folder picked in the folder picker.
     fn tick_picker(&mut self, ctx: &egui::Context) {
         use crate::picker::FolderFor;
@@ -2872,6 +2935,7 @@ impl ShoeboxApp {
             }
             FolderFor::ImportSource => {
                 self.import.source = Some(p);
+                self.import.volume = None;
                 self.import.plan = None;
             }
             FolderFor::MoveSelection => self.move_selection_to(p.canonicalize().unwrap_or(p)),
@@ -3237,6 +3301,7 @@ impl eframe::App for ShoeboxApp {
         self.tick_semantic(&ctx);
         self.tick_people();
         self.tick_picker(&ctx);
+        self.tick_quit(&ctx);
         crate::updater::tick(&ctx, crate::jobs::working());
         self.handle_keys(&ctx);
         self.wanted.clear();
@@ -3440,6 +3505,24 @@ pub struct EventEdit {
 
 /// What the status bar says when photos in reference folders were left
 /// unchanged.
+/// The card or disk `p` is on, when it's one that can be ejected (mounted
+/// under `/Volumes` on macOS, `/media` or `/run/media` on Linux).
+pub(crate) fn ejectable_volume(p: &Path) -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    let depth = p.starts_with("/Volumes").then_some(3);
+    #[cfg(not(target_os = "macos"))]
+    let depth = if p.starts_with("/run/media") {
+        Some(5)
+    } else if p.starts_with("/media") {
+        Some(4)
+    } else {
+        None
+    };
+    let parts: Vec<_> = p.components().collect();
+    let depth = depth?;
+    (parts.len() >= depth).then(|| parts[..depth].iter().collect())
+}
+
 pub(crate) fn reference_notice(n: usize) -> String {
     if n == 1 {
         "1 photo is in a reference folder (read-only), so it was left as it is".to_owned()
@@ -3462,4 +3545,28 @@ pub(crate) fn local_time_ms(ms: i64) -> String {
 /// Local date and time of a file modification time in nanoseconds.
 pub(crate) fn local_time_ns(ns: i64) -> String {
     local_time_ms(ns / 1_000_000)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ejectable_volume;
+    use std::path::Path;
+
+    #[test]
+    fn ejectable_volumes() {
+        #[cfg(target_os = "macos")]
+        let (card, inside) = ("/Volumes/NIKON Z F  ", "/Volumes/NIKON Z F  /DCIM/100NCZ_F");
+        #[cfg(not(target_os = "macos"))]
+        let (card, inside) = ("/media/me/NIKON", "/media/me/NIKON/DCIM/100NCZ_F");
+        assert_eq!(
+            ejectable_volume(Path::new(inside)).as_deref(),
+            Some(Path::new(card))
+        );
+        assert_eq!(
+            ejectable_volume(Path::new(card)).as_deref(),
+            Some(Path::new(card))
+        );
+        assert_eq!(ejectable_volume(Path::new("/Users/me/Pictures")), None);
+        assert_eq!(ejectable_volume(Path::new("/Volumes")), None);
+    }
 }

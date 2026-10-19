@@ -878,3 +878,22 @@ hashes, embeddings, faces).
   "Importing 1/4 · 51 MB/s · …" from any view. Verification (reading the copy
   back for its BLAKE3) isn't in the bytes, so a file's bar can sit at its end
   for a moment.
+
+## Import safety: quitting, cards, interrupted copies (2026-10-19)
+
+- After an import from a card was cut off by quitting (and the card was
+  then pulled without ejecting, and macOS's exFAT repair left it empty):
+  - Quitting while an import copies asks first. The window's close button
+    is held with `ViewportCommand::CancelClose`; the menu's Quit (⌘Q),
+    which terminated at once, is pointed at `menu.rs`'s target and raises a
+    flag the app reads. "Stop and Quit" cancels between files and quits
+    when `ImportEnded` arrives (sent however the import ends).
+  - While copying from `/Volumes/…` (macOS) or `/media`, `/run/media`
+    (Linux), the screen says to keep it connected, and offers Eject after:
+    `diskutil eject` / `gio mount --eject` on the library worker (it moves
+    no files, so it isn't a `fileops` operation).
+  - Rolling back an interrupted import trashes each pending copy's
+    `.shoebox-tmp` (journaled in the undo batch). Resume already removed it
+    before copying again.
+- Shoebox only ever opens a card's files for reading; the journal shows no
+  operation on the card in that import.

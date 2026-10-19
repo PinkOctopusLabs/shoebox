@@ -284,7 +284,56 @@ fn copying(app: &mut ShoeboxApp, ui: &mut egui::Ui, c: &crate::app::Copying, sou
         if let Some(p) = &c.current {
             ui.weak(RichText::new(rel_to(source, p)).monospace().small());
         }
+        if let Some(name) = app.import.volume.as_deref().and_then(Path::file_name) {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!(
+                    "Keep {} connected until the import finishes.",
+                    name.to_string_lossy()
+                ),
+            );
+        }
     });
+}
+
+/// Quitting while an import copies: keep going, or stop it (cleanly, between
+/// files) and quit once it has stopped.
+fn quit_dialog(app: &mut ShoeboxApp, ctx: &egui::Context) {
+    let (done, files) = app
+        .import
+        .copying
+        .as_ref()
+        .map_or((0, 0), |c| (c.done, c.files));
+    let resp = egui::Modal::new(egui::Id::unique("quit-while-importing")).show(ctx, |ui| {
+        ui.set_width(460.0);
+        ui.heading("An import is still copying");
+        ui.add_space(4.0);
+        ui.label(format!(
+            "{done} of {files} files are copied. Stopping now keeps those (undo them from \
+             History) and leaves the rest uncopied; finding photos again finishes the job."
+        ));
+        if let Some(name) = app.import.volume.as_deref().and_then(Path::file_name) {
+            ui.label(format!(
+                "Keep {} connected until Shoebox has quit.",
+                name.to_string_lossy()
+            ));
+        }
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui
+                .button(RichText::new("Keep Importing").strong())
+                .clicked()
+            {
+                app.confirm_quit = false;
+            }
+            if ui.button("Stop and Quit").clicked() {
+                app.stop_import_and_quit();
+            }
+        });
+    });
+    if resp.should_close() {
+        app.confirm_quit = false;
+    }
 }
 
 /// The plan's photos to show: all, or those the chosen folder's name goes
@@ -411,6 +460,14 @@ pub fn import(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         }
         if let Some(m) = &app.import.message {
             ui.label(RichText::new(m).color(Color32::from_rgb(80, 200, 120)));
+        }
+        if app.import.copying.is_none()
+            && let Some(name) = app.import.volume.as_deref().and_then(Path::file_name)
+            && ui
+                .button(format!("Eject {}", name.to_string_lossy()))
+                .clicked()
+        {
+            app.eject_import_volume();
         }
     });
     ui.separator();
@@ -755,6 +812,9 @@ pub fn history(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
 /// The rename and new-folder dialogs, and the dry-run table for every
 /// move, rename, reject and trash.
 pub fn dialogs(app: &mut ShoeboxApp, ctx: &egui::Context) {
+    if app.confirm_quit {
+        quit_dialog(app, ctx);
+    }
     if let Some((photos, mut template)) = app.org.rename.take() {
         let mut keep = true;
         let mut go = false;

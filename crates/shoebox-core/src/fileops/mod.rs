@@ -279,6 +279,12 @@ fn copy_chunked(src: &Path, dst: &Path, on_bytes: &mut dyn FnMut(u64)) -> std::i
     Ok(())
 }
 
+/// The temporary name a copy to `dst` is written under (hidden, beside it).
+fn copy_tmp(dst: &Path) -> PathBuf {
+    let name = dst.file_name().unwrap_or_default().to_string_lossy();
+    dst.with_file_name(format!(".{name}.shoebox-tmp"))
+}
+
 /// Copy `src` to a temporary name beside `dst`, check its BLAKE3, keep the
 /// source's modification time, then rename it to `dst` without replacing.
 /// On any failure the temporary file (ours) is removed and `dst` untouched.
@@ -288,11 +294,7 @@ fn copy_verified(
     hash: &[u8; 32],
     on_bytes: &mut dyn FnMut(u64),
 ) -> std::result::Result<(), String> {
-    let name = dst
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let tmp = dst.with_file_name(format!(".{name}.shoebox-tmp"));
+    let tmp = copy_tmp(dst);
     if exists(&tmp) {
         return Err(format!("{} is in the way", tmp.display()));
     }
@@ -1072,8 +1074,7 @@ impl FileOps {
             let result = check.map_err(|e| e.to_string()).and_then(|()| {
                 if op.op == Op::Copy {
                     // A partial copy from the interrupted run (ours) goes first.
-                    let name = op.dst.file_name().unwrap_or_default().to_string_lossy();
-                    let tmp = op.dst.with_file_name(format!(".{name}.shoebox-tmp"));
+                    let tmp = copy_tmp(&op.dst);
                     if exists(&tmp) {
                         std::fs::remove_file(&tmp).map_err(|e| e.to_string())?;
                     }
@@ -1153,6 +1154,15 @@ impl FileOps {
                             hash,
                         };
                         out.push((op, back));
+                    } else if op.status == OpStatus::Pending {
+                        // Interrupted mid-copy: the partial copy (ours) goes
+                        // to the Trash too.
+                        let tmp = copy_tmp(&op.dst);
+                        let partial =
+                            std::fs::symlink_metadata(&tmp).is_ok_and(|m| m.file_type().is_file());
+                        if partial && let Ok(hash) = hash_file(&tmp) {
+                            out.push((op, Planned::Trash { path: tmp, hash }));
+                        }
                     }
                 }
                 Op::Trash => {
@@ -1910,5 +1920,31 @@ mod tests {
         assert_eq!(fo.journal().incomplete().unwrap().len(), 1);
         fo.undo(batch).unwrap();
         assert!(src.exists() && !dst.exists());
+    }
+
+    #[test]
+    fn rolling_back_an_interrupted_import_trashes_its_partial_copy() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        let src = root.join("card/DSC_0001.NEF");
+        touch(&src, "raw bytes");
+        let dst = root.join("lib/a.nef");
+        let fo = ops(&root, vec![]).with_trash(TrashMode::Folder(root.join("trash")));
+        // The app quit part-way through the copy: the row is pending and
+        // half the file is under its temporary name.
+        let batch = fo.journal().begin_batch("import", "card", None).unwrap();
+        fo.journal()
+            .record_hashed(batch, 0, Op::Copy, &src, &dst, Some(9), &h(&src))
+            .unwrap();
+        touch(&copy_tmp(&dst), "raw ");
+        fo.undo(batch).unwrap();
+        assert!(!copy_tmp(&dst).exists(), "the partial copy is gone");
+        assert_eq!(
+            std::fs::read_to_string(root.join("trash/.a.nef.shoebox-tmp")).unwrap(),
+            "raw ",
+            "to the Trash, not deleted"
+        );
+        assert!(!dst.exists());
+        assert!(src.exists(), "the card is never touched");
     }
 }

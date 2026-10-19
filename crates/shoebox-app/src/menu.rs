@@ -2,11 +2,15 @@
 //! item, so it's added here, with a tiny Objective-C target that raises a
 //! flag the app reads each frame. Elsewhere the app's own ⌘/Ctrl+, shortcut
 //! and the left panel's Settings… entry do the same.
+//!
+//! The menu's Quit (⌘Q) is pointed at the same target, so it asks the app
+//! (which may want to finish an import first) instead of terminating at once.
 #![cfg_attr(target_os = "macos", allow(unsafe_code))]
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static OPEN_SETTINGS: AtomicBool = AtomicBool::new(false);
+static QUIT: AtomicBool = AtomicBool::new(false);
 
 /// Add the menu item. Call once, on the main thread, after the window exists.
 pub fn install(ctx: &eframe::egui::Context) {
@@ -19,6 +23,11 @@ pub fn install(ctx: &eframe::egui::Context) {
 /// Whether Settings… was chosen since the last call.
 pub fn take_open_settings() -> bool {
     OPEN_SETTINGS.swap(false, Ordering::AcqRel)
+}
+
+/// Whether Quit was chosen since the last call.
+pub fn take_quit() -> bool {
+    QUIT.swap(false, Ordering::AcqRel)
 }
 
 #[cfg(target_os = "macos")]
@@ -44,6 +53,14 @@ mod mac {
             #[unsafe(method(openSettings:))]
             fn open_settings(&self, _sender: Option<&AnyObject>) {
                 super::OPEN_SETTINGS.store(true, std::sync::atomic::Ordering::Release);
+                if let Some(ctx) = CTX.get() {
+                    ctx.request_repaint();
+                }
+            }
+
+            #[unsafe(method(requestQuit:))]
+            fn request_quit(&self, _sender: Option<&AnyObject>) {
+                super::QUIT.store(true, std::sync::atomic::Ordering::Release);
                 if let Some(ctx) = CTX.get() {
                     ctx.request_repaint();
                 }
@@ -86,6 +103,17 @@ mod mac {
             let _: () = msg_send![&*item, setTarget: &*target];
             let count: isize = msg_send![&*app_menu, numberOfItems];
             let _: () = msg_send![&*app_menu, insertItem: &*item, atIndex: count.min(1)];
+            // Quit asks the app instead of terminating.
+            let count: isize = msg_send![&*app_menu, numberOfItems];
+            for i in 0..count {
+                let it: Option<Retained<AnyObject>> = msg_send![&*app_menu, itemAtIndex: i];
+                let Some(it) = it else { continue };
+                let action: Option<objc2::runtime::Sel> = msg_send![&*it, action];
+                if action == Some(sel!(terminate:)) {
+                    let _: () = msg_send![&*it, setAction: sel!(requestQuit:)];
+                    let _: () = msg_send![&*it, setTarget: &*target];
+                }
+            }
         }
         std::mem::forget(target);
     }

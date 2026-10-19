@@ -9,7 +9,7 @@
 //!   the roots, so changes made by other apps show up without a rescan.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 
 use crossbeam_channel::{Receiver, Sender};
@@ -316,6 +316,8 @@ pub enum LibraryCommand {
     UndoBatch(i64),
     /// Finish an interrupted batch.
     ResumeBatch(i64),
+    /// Eject the card or disk mounted here (after importing from it).
+    Eject(PathBuf),
     /// Find duplicate groups across the library (hashing what isn't cached).
     FindDuplicates(shoebox_core::dupes::Config),
     /// Work out what applying these decisions would do (the dry-run table).
@@ -490,6 +492,11 @@ pub enum LibraryEvent {
         total_bytes: u64,
         current: Option<PathBuf>,
     },
+    /// An import's copying is over, however it ended (after `Imported`,
+    /// `ImportCancelled` or an error).
+    ImportEnded,
+    /// A card or disk was ejected (or why it couldn't be).
+    Ejected(Result<String, String>),
     /// The import was cancelled part-way: `copied` files stay, as `batch`.
     ImportCancelled {
         batch: i64,
@@ -598,6 +605,42 @@ impl Library {
     pub fn cancel_import(&self) {
         self.import_stop
             .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Sends `ImportEnded` when dropped.
+struct Ended<'a>(&'a dyn Fn(LibraryEvent));
+
+impl Drop for Ended<'_> {
+    fn drop(&mut self) {
+        (self.0)(LibraryEvent::ImportEnded);
+    }
+}
+
+/// Eject the card or disk mounted at `volume` (the system's own eject, which
+/// unmounts it first). Returns its name.
+fn eject(volume: &Path) -> Result<String, String> {
+    let name = volume.file_name().map_or_else(
+        || volume.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    #[cfg(target_os = "macos")]
+    let out = std::process::Command::new("/usr/sbin/diskutil")
+        .arg("eject")
+        .arg(volume)
+        .output();
+    #[cfg(not(target_os = "macos"))]
+    let out = std::process::Command::new("gio")
+        .args(["mount", "--eject"])
+        .arg(volume)
+        .output();
+    match out {
+        Ok(o) if o.status.success() => Ok(name),
+        Ok(o) => Err(format!(
+            "{name} couldn't be ejected: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        )),
+        Err(e) => Err(format!("{name} couldn't be ejected: {e}")),
     }
 }
 
@@ -1035,6 +1078,8 @@ fn library_worker(
                 (false, false)
             }
             LibraryCommand::RunImport(folders) => {
+                // However it ends (done, cancelled, refused, nothing to do).
+                let _ended = Ended(&emit);
                 let Some(mut p) = import_plan.take() else {
                     continue;
                 };
@@ -1097,7 +1142,7 @@ fn library_worker(
                         files: p.files,
                         bytes: p.bytes,
                         total_bytes: p.total_bytes,
-                        current: p.current.map(std::path::Path::to_path_buf),
+                        current: p.current.map(Path::to_path_buf),
                     });
                 };
                 let label = format!("import from {source}");
@@ -1132,6 +1177,10 @@ fn library_worker(
                 }
                 batches(&fileops);
                 (false, true)
+            }
+            LibraryCommand::Eject(volume) => {
+                emit(LibraryEvent::Ejected(eject(&volume)));
+                (false, false)
             }
             LibraryCommand::Download(paths) => {
                 let total = paths.len();

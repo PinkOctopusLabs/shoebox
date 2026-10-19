@@ -1717,6 +1717,15 @@ fn import_folder_names() {
     assert!(h.query_by_label("Cancel").is_some());
     assert!(h.query_by_label_contains("Importing 1/4").is_some());
     snapshot(&mut h, "import-copying");
+    // Quitting while it copies asks first; keeping on importing carries on.
+    h.state_mut().ask_quit();
+    h.run_steps(2);
+    assert!(h.state().asking_to_quit());
+    assert!(h.query_by_label("An import is still copying").is_some());
+    snapshot(&mut h, "import-quit");
+    h.get_by_label("Keep Importing").click();
+    h.run_steps(2);
+    assert!(!h.state().asking_to_quit());
     h.state_mut().show_copying(None);
     h.run_steps(2);
     assert_eq!(
