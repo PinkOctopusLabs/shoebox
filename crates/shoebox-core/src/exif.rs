@@ -23,6 +23,9 @@ pub struct ExifInfo {
     pub gps: Option<(f64, f64)>,
     /// Shutter actuations, from a Nikon MakerNote.
     pub shutter_count: Option<u32>,
+    /// A NEF's compression (`NEFCompression`, from its MakerNote), which says
+    /// whether Develop can decode it directly.
+    pub nef_compression: Option<u16>,
 }
 
 fn ascii(e: &exif::Exif, tag: Tag) -> Option<String> {
@@ -104,6 +107,12 @@ pub fn read(data: &[u8]) -> ExifInfo {
         gps: gps(&e),
         shutter_count: match e.get_field(Tag::MakerNote, In::PRIMARY).map(|f| &f.value) {
             Some(Value::Undefined(note, _)) => nikon_shutter_count(note),
+            _ => None,
+        },
+        nef_compression: match e.get_field(Tag::MakerNote, In::PRIMARY).map(|f| &f.value) {
+            Some(Value::Undefined(note, _)) => {
+                shoebox_decode::nef::compression_in_maker_note(note).map(|c| c.tag())
+            }
             _ => None,
         },
     }
@@ -277,5 +286,10 @@ mod tests {
             };
             assert!(read(&data).shutter_count.is_some_and(|n| n > 0), "{f}");
         }
+        // The NEF is High efficiency★; the camera JPEG records no compression.
+        let nef = std::fs::read(dir.join("20260501-203002-65.nef")).unwrap();
+        assert_eq!(read(&nef).nef_compression, Some(14));
+        let jpg = std::fs::read(dir.join("20260501-203002-65.jpg")).unwrap();
+        assert_eq!(read(&jpg).nef_compression, None);
     }
 }

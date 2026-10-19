@@ -47,7 +47,9 @@ CREATE TABLE IF NOT EXISTS exif (
     orientation   INTEGER,
     shutter_count INTEGER,
     gps_lat       REAL,
-    gps_lon       REAL
+    gps_lon       REAL,
+    -- Nikon's NEFCompression tag value (13, 14: High efficiency).
+    nef_compression INTEGER
 );
 
 -- Effective culling marks (sidecar > embedded XMP > EXIF), and a signature

@@ -125,16 +125,19 @@ pub fn edited_variant(img: &RgbImage) -> RgbImage {
 // Minimal little-endian TIFF writer for EXIF blocks and fake NEFs.
 
 pub enum Val {
+    Byte(Vec<u8>),
     Undefined(Vec<u8>),
     Short(Vec<u16>),
     Long(Vec<u32>),
     Ascii(String),
     Rational(Vec<(u32, u32)>),
+    SRational(Vec<(i32, i32)>),
 }
 
 impl Val {
     fn encode(&self) -> (u16, u32, Vec<u8>) {
         match self {
+            Val::Byte(v) => (1, v.len() as u32, v.clone()),
             Val::Undefined(v) => (7, v.len() as u32, v.clone()),
             Val::Short(v) => (
                 3,
@@ -153,6 +156,13 @@ impl Val {
             }
             Val::Rational(v) => (
                 5,
+                v.len() as u32,
+                v.iter()
+                    .flat_map(|(n, d)| n.to_le_bytes().into_iter().chain(d.to_le_bytes()))
+                    .collect(),
+            ),
+            Val::SRational(v) => (
+                10,
                 v.len() as u32,
                 v.iter()
                     .flat_map(|(n, d)| n.to_le_bytes().into_iter().chain(d.to_le_bytes()))
@@ -224,6 +234,159 @@ impl TiffWriter {
         self.buf[4..8].copy_from_slice(&ifd0.to_le_bytes());
         self.buf
     }
+}
+
+/// A synthetic Bayer DNG, as rawler reads one: 16-bit uncompressed CFA data.
+pub struct Dng {
+    pub width: u32,
+    pub height: u32,
+    /// CFA colours (0 R, 1 G, 2 B) at `(row % 2, col % 2)` of the full image.
+    pub cfa: [[u8; 2]; 2],
+    pub black: u16,
+    pub white: u16,
+    /// `(left, top, right, bottom)` of the active area, if any.
+    pub active: Option<(u32, u32, u32, u32)>,
+    /// Default crop origin and size within the active area, if any.
+    pub crop: Option<((u32, u32), (u32, u32))>,
+    /// AsShotNeutral (camera RGB of a neutral, green 1.0).
+    pub neutral: [f32; 3],
+    /// ColorMatrix1 (XYZ → camera, row by row) and its illuminant (17 = A).
+    pub matrix1: ([f32; 9], u16),
+    /// ColorMatrix2 and its illuminant (21 = D65).
+    pub matrix2: Option<([f32; 9], u16)>,
+    pub make: String,
+    pub model: String,
+}
+
+impl Dng {
+    /// A 2×2-RGGB test DNG with Z f-like levels and matrices.
+    pub fn new(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            cfa: [[0, 1], [1, 2]],
+            black: 1008,
+            white: 15892,
+            active: None,
+            crop: None,
+            neutral: [0.5, 1.0, 0.7],
+            matrix1: (
+                [
+                    1.3904, -0.7947, 0.0654, -0.432, 1.2105, 0.2497, -0.0235, 0.083, 0.9243,
+                ],
+                17,
+            ),
+            matrix2: Some((
+                [
+                    1.1607, -0.4491, -0.0977, -0.4522, 1.246, 0.2304, -0.0458, 0.1519, 0.7616,
+                ],
+                21,
+            )),
+            make: "Shoebox".into(),
+            model: "Test Sensor".into(),
+        }
+    }
+
+    /// The file, with photosite values from `value(x, y)` (raw counts).
+    pub fn write(&self, value: impl Fn(u32, u32) -> u16) -> Vec<u8> {
+        let mut pixels = Vec::with_capacity((self.width * self.height * 2) as usize);
+        for y in 0..self.height {
+            for x in 0..self.width {
+                pixels.extend(value(x, y).to_le_bytes());
+            }
+        }
+        let srat = |m: &[f32; 9]| {
+            Val::SRational(
+                m.iter()
+                    .map(|v| ((v * 10000.0).round() as i32, 10000))
+                    .collect(),
+            )
+        };
+        let mut w = TiffWriter::new();
+        let strip = w.blob(&pixels);
+        let mut entries = vec![
+            (0x00FE, Val::Long(vec![0])),
+            (0x0100, Val::Long(vec![self.width])),
+            (0x0101, Val::Long(vec![self.height])),
+            (0x0102, Val::Short(vec![16])),
+            (0x0103, Val::Short(vec![1])),
+            (0x0106, Val::Short(vec![32803])),
+            (0x010F, Val::Ascii(self.make.clone())),
+            (0x0110, Val::Ascii(self.model.clone())),
+            (0x0111, Val::Long(vec![strip])),
+            (0x0112, Val::Short(vec![1])),
+            (0x0115, Val::Short(vec![1])),
+            (0x0116, Val::Long(vec![self.height])),
+            (0x0117, Val::Long(vec![pixels.len() as u32])),
+            (0x011C, Val::Short(vec![1])),
+            (0x828D, Val::Short(vec![2, 2])),
+            (
+                0x828E,
+                Val::Byte(vec![
+                    self.cfa[0][0],
+                    self.cfa[0][1],
+                    self.cfa[1][0],
+                    self.cfa[1][1],
+                ]),
+            ),
+            (0xC612, Val::Byte(vec![1, 4, 0, 0])),
+            (0xC613, Val::Byte(vec![1, 1, 0, 0])),
+            (0xC614, Val::Ascii(format!("{} {}", self.make, self.model))),
+            (0xC61A, Val::Short(vec![self.black])),
+            (0xC61D, Val::Short(vec![self.white])),
+            (0xC621, srat(&self.matrix1.0)),
+            (
+                0xC628,
+                Val::Rational(
+                    self.neutral
+                        .iter()
+                        .map(|v| ((v * 10000.0).round() as u32, 10000))
+                        .collect(),
+                ),
+            ),
+            (0xC65A, Val::Short(vec![self.matrix1.1])),
+        ];
+        if let Some((m, ill)) = &self.matrix2 {
+            entries.push((0xC622, srat(m)));
+            entries.push((0xC65B, Val::Short(vec![*ill])));
+        }
+        if let Some((l, t, r, b)) = self.active {
+            entries.push((0xC68D, Val::Long(vec![t, l, b, r])));
+        }
+        if let Some(((ox, oy), (cw, ch))) = self.crop {
+            entries.push((0xC61F, Val::Long(vec![ox, oy])));
+            entries.push((0xC620, Val::Long(vec![cw, ch])));
+        }
+        let ifd0 = w.ifd(entries, 0);
+        w.finish(ifd0)
+    }
+}
+
+/// A TIFF carrying just a Nikon maker note that records `compression` the
+/// way a Z body does (tag 0x51) or an older body does (tag 0x93).
+pub fn nikon_compression_stub(compression: u16, z_body: bool) -> Vec<u8> {
+    let mut inner = TiffWriter::new();
+    let entry = if z_body {
+        let mut block = vec![0u8; 24];
+        block[10..12].copy_from_slice(&compression.to_le_bytes());
+        (0x0051, Val::Undefined(block))
+    } else {
+        (0x0093, Val::Short(vec![compression]))
+    };
+    let ifd = inner.ifd(vec![(0x0001, Val::Undefined(b"0211".to_vec())), entry], 0);
+    let mut note = b"Nikon\0\x02\x11\0\0".to_vec();
+    note.extend(inner.finish(ifd));
+
+    let mut w = TiffWriter::new();
+    let exif = w.ifd(vec![(0x927C, Val::Undefined(note))], 0);
+    let ifd0 = w.ifd(
+        vec![
+            (0x010F, Val::Ascii("NIKON CORPORATION".into())),
+            (0x8769, Val::Long(vec![exif])),
+        ],
+        0,
+    );
+    w.finish(ifd0)
 }
 
 /// An uncompressed 8-bit RGB TIFF (one strip) with an embedded ICC profile,

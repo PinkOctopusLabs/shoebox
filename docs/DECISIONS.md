@@ -936,3 +936,32 @@ hashes, embeddings, faces).
   activations overflow f16.
 - If candle takes over 30 s a frame for RawNIND, the fallback is Core ML
   through `objc2-core-ml`, not `ort`.
+
+## Develop, Phase 1: raw decode (2026-10-19)
+
+- `shoebox-decode::raw` decodes with `rawler` 0.8.0 (pure Rust, LGPL-2.1)
+  and prepares the data the pipe starts from: cropped to the image area
+  (DNG crop, else active area), black subtracted per CFA position (the
+  pattern counted from the active area, DNG's rule), normalised so white is
+  1.0, never negative, values above white kept. White balance, highlights
+  and demosaic stay in the pipe. `CLIP` (0.98) marks clipped photosites.
+  rawler has `todo!()`s and asserts for unexpected inputs, so it runs inside
+  `catch_unwind`: a bad file is an error, not a crash. Only 2×2 RGB Bayer
+  data is accepted.
+- The real Z f fixture is **High efficiency★**, and rawler refuses it.
+  Assumed typical of the archive, so the DNG route (EDITING-SPEC, RAW
+  decode) is how existing photos get edited, not an edge case. New photos
+  will be Lossless (the camera setting is changing) and go to rawler
+  directly.
+- Tested on the same file, macOS 27's `CIRAWFilter` decodes HE★ properly
+  (decoder versions 7 and 8; 6048×4032 in 1.8 s; at −3 EV the sparklers
+  keep detail the camera JPEG has blown). It gives demosaiced linear RGB,
+  not the CFA, so it isn't used: the decision was the spec's DNG route.
+- `NEFCompression` is read from Nikon's maker note at scan time (Z bodies:
+  tag 0x51, u16 at byte 10, little-endian as rawler reads it; older bodies:
+  tag 0x93), stored as `exif.nef_compression`, and shown in the Info panel
+  with a note on High efficiency files. The maker note is within the first
+  256 KB, so scans read nothing more.
+- Cache schema 8 adds that column with `ALTER TABLE` instead of the usual
+  rebuild, which would have discarded every duplicate hash;
+  `META_VERSION` 4 re-reads metadata (the cheap part) to fill it.

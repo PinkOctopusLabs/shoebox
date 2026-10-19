@@ -12,6 +12,7 @@ pub mod jpeg;
 pub mod mov;
 pub mod nef;
 pub mod png;
+pub mod raw;
 pub mod rgb;
 pub mod tiff;
 pub mod tiffparse;

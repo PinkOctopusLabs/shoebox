@@ -19,6 +19,7 @@ tiff = "0.11.3"
 turbojpeg = { version = "1.5.1", optional = true, default-features = false }
 zune-core = "0.5.3"
 zune-jpeg = "0.5.15"
+rawler = { version = "0.8.0", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.5"

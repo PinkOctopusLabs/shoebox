@@ -54,7 +54,7 @@ fn label_from(s: Option<String>) -> Option<Label> {
     s.and_then(|s| Label::ALL.into_iter().find(|l| l.name() == s))
 }
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 /// Rebuildable tables, dropped when the schema version changes.
 /// `dupe_ignores` holds user decisions and is never dropped.
@@ -111,7 +111,10 @@ impl Cache {
                 "cache schema {version} is newer than this build ({SCHEMA_VERSION})"
             )));
         }
-        if version != 0 && version < SCHEMA_VERSION {
+        if version == 7 {
+            // 8 adds a column; a rebuild would throw away every hash.
+            conn.execute_batch("ALTER TABLE exif ADD COLUMN nef_compression INTEGER")?;
+        } else if version != 0 && version < SCHEMA_VERSION {
             tracing::info!("cache schema {version} is out of date; rebuilding");
             for t in REBUILDABLE {
                 conn.execute_batch(&format!("DROP TABLE IF EXISTS {t}"))?;
@@ -151,7 +154,7 @@ impl Cache {
                         f.luma_stddev,
                         e.capture_time, e.subsec, e.offset, e.make, e.model, e.serial, e.lens,
                         e.focal, e.fnumber, e.exposure, e.iso, e.orientation, e.gps_lat, e.gps_lon,
-                        e.shutter_count
+                        e.shutter_count, e.nef_compression
                  FROM files f LEFT JOIN exif e ON e.file_id = f.id
                  WHERE f.root_id = ?1 AND f.rel_path = ?2 AND f.size = ?3 AND f.mtime = ?4
                    AND f.analyzer_version = ?5",
@@ -182,6 +185,7 @@ impl Cache {
                                 .get::<_, Option<f64>>(19)?
                                 .zip(r.get::<_, Option<f64>>(20)?),
                             shutter_count: r.get(21)?,
+                            nef_compression: r.get(22)?,
                         },
                     ))
                 },
@@ -236,9 +240,9 @@ impl Cache {
             let mut exif = tx.prepare_cached(
                 "INSERT OR REPLACE INTO exif(file_id, capture_time, subsec, offset, make, model,
                     serial, lens, focal, fnumber, exposure, iso, width, height, orientation,
-                    gps_lat, gps_lon, shutter_count)
+                    gps_lat, gps_lon, shutter_count, nef_compression)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                         ?18)",
+                         ?18, ?19)",
             )?;
             let mut marks = tx.prepare_cached(
                 "INSERT OR REPLACE INTO marks(file_id, rating, pick, label, keywords, sidecar, sidecar_sig, event,
@@ -280,6 +284,7 @@ impl Cache {
                     x.gps.map(|g| g.0),
                     x.gps.map(|g| g.1),
                     x.shutter_count,
+                    x.nef_compression,
                 ])?;
                 let k = e.marks;
                 marks.execute(params![
@@ -332,7 +337,7 @@ impl Cache {
                     e.focal, e.fnumber, e.exposure, e.iso, e.orientation,
                     k.rating, k.pick, k.label, k.keywords, k.sidecar, k.sidecar_sig, k.event,
                     f.changed_at, f.change_source, e.gps_lat, e.gps_lon, e.shutter_count,
-                    k.gps_lat_e7, k.gps_lon_e7
+                    k.gps_lat_e7, k.gps_lon_e7, e.nef_compression
              FROM files f LEFT JOIN exif e ON e.file_id = f.id
                           LEFT JOIN marks k ON k.file_id = f.id
              WHERE f.root_id = ?1 AND f.meta_version = ?2",
@@ -370,6 +375,7 @@ impl Cache {
                                 .get::<_, Option<f64>>(26)?
                                 .zip(r.get::<_, Option<f64>>(27)?),
                             shutter_count: r.get(28)?,
+                            nef_compression: r.get(31)?,
                         },
                     },
                     marks: match r.get::<_, Option<u8>>(17)? {
@@ -521,9 +527,9 @@ impl Cache {
             let mut exif = tx.prepare_cached(
                 "INSERT OR REPLACE INTO exif(file_id, capture_time, subsec, offset, make, model,
                     serial, lens, focal, fnumber, exposure, iso, width, height, orientation,
-                    gps_lat, gps_lon, shutter_count)
+                    gps_lat, gps_lon, shutter_count, nef_compression)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                         ?18)",
+                         ?18, ?19)",
             )?;
             let mut clear = tx.prepare_cached("DELETE FROM phash WHERE file_id = ?1")?;
             let mut ph = tx.prepare_cached(
@@ -569,6 +575,7 @@ impl Cache {
                     x.gps.map(|g| g.0),
                     x.gps.map(|g| g.1),
                     x.shutter_count,
+                    x.nef_compression,
                 ])?;
                 clear.execute([id])?;
                 for (rot, h) in a.hashes.iter().enumerate() {
@@ -578,5 +585,43 @@ impl Cache {
         }
         tx.commit()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Schema 7 → 8 adds a column in place: hashes survive the upgrade.
+    #[test]
+    fn schema_7_upgrades_without_a_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(include_str!("schema.sql")).unwrap();
+            conn.execute_batch(
+                "ALTER TABLE exif DROP COLUMN nef_compression;
+                 INSERT INTO roots(id, path) VALUES (1, '/photos');
+                 INSERT INTO files(id, root_id, rel_path, ext, size, mtime, blake3)
+                   VALUES (1, 1, 'a.nef', 'nef', 10, 20, x'00ff');
+                 INSERT INTO exif(file_id, make) VALUES (1, 'NIKON');",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 7).unwrap();
+        }
+        let cache = Cache::open(&path).unwrap();
+        let (blake3, compression): (Vec<u8>, Option<u16>) = cache
+            .conn
+            .query_row(
+                "SELECT f.blake3, e.nef_compression FROM files f JOIN exif e ON e.file_id = f.id",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((blake3, compression), (vec![0x00, 0xff], None));
+        drop(cache);
+        // And opening it again is a no-op.
+        Cache::open(&path).unwrap();
     }
 }

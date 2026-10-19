@@ -10,7 +10,7 @@ use crate::error::{Result, io};
 use crate::exif::{self, ExifInfo};
 
 /// Bump when metadata extraction changes, so cached rows are re-read.
-pub const META_VERSION: i64 = 3;
+pub const META_VERSION: i64 = 4;
 
 /// Real NEFs and Lightroom TIFFs keep IFD0, the Exif IFD, XMP and the ICC
 /// profile in their first ~40 KB; JPEG EXIF lives in APP1 at the start.

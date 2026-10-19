@@ -1724,6 +1724,14 @@ fn details(app: &mut ShoeboxApp, ui: &mut egui::Ui, id: crate::jobs::PhotoId, id
                 .zip(photo.meta.height)
                 .map(|(w, h)| format!("{w} × {h}"))),
         ),
+        (
+            "Compression",
+            opt(x.nef_compression.map(|c| {
+                shoebox_decode::nef::NefCompression::from_tag(c)
+                    .label()
+                    .to_string()
+            })),
+        ),
         ("File size", human_size(photo.size)),
         ("Image modified", crate::app::local_time_ns(photo.mtime_ns)),
         (
@@ -1753,6 +1761,21 @@ fn details(app: &mut ShoeboxApp, ui: &mut egui::Ui, id: crate::jobs::PhotoId, id
                 ui.end_row();
             }
         });
+    if x.nef_compression
+        .is_some_and(|c| shoebox_decode::nef::NefCompression::from_tag(c).needs_dng())
+    {
+        ui.add_space(4.0);
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "Editing this NEF goes through Adobe DNG Converter: no open decoder reads \
+                     High efficiency compression yet.",
+                )
+                .weak(),
+            )
+            .wrap(),
+        );
+    }
     if let Some(ch) = &photo.change {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
