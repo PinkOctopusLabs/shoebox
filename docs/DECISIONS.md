@@ -1573,3 +1573,36 @@ with the frame. Auto-upright (line detection) is Phase 3.
   ±5% of the range for black, 0.5–1.2× for white. Like the other Raw
   settings, they re-prepare the photo, and the develop thread keeps only
   the newest request while a slider drags.
+
+## Presets, copy and paste (2026-10-20)
+
+- **What a preset is.** It carries whole *parts*: White balance, Exposure,
+  Tone, Presence, Tone curve, Colour, Black & white, Calibration, Detail,
+  Lens, Transform, Crop & rotate and Raw. A part is replaced whole, so a
+  "Colour" preset sets vibrance back to 0 too, as Lightroom does with the
+  panels a preset includes.
+- **Amount** (0–200%) scales every number from its default. Anything else
+  (switches, modes, curve points) takes the preset's value from 50% up,
+  and the default below. The Amount slider shows under the list after
+  applying a preset, and hides once anything else changes: re-applying
+  from the earlier settings would undo that change.
+- **Where they're saved.** User presets go in one file,
+  `<data>/presets/user.json`, rather than a file each. Deleting one is then
+  a rewrite of Shoebox's own file, never a file deletion (safety rule 1).
+  Packs will have folders of their own beside it. Hovering a preset shows
+  the photo with it applied; nothing changes until a click.
+- **Copy and paste.** Shift-⌘C (in Develop) opens a checklist of parts.
+  Transform, Crop & rotate and Raw start unticked, as the spec says
+  ("rarely transfer between frames"). Shift-⌘V pastes onto the selection
+  (or the current photo):
+  - the photo open in Develop changes as an ordinary step;
+  - the others go to the library worker in one `ApplyPreset` command:
+    each edit gets a "Paste settings" step in its own history, and the
+    edits are written as one batch;
+  - reference photos are skipped, with a note saying how many.
+
+  egui may deliver ⌘C and ⌘V as Copy and Paste events, so both are
+  accepted. "Sync" (copy, then paste onto the selection) and auto-sync can
+  follow on top of this.
+- The two "+" buttons in Develop's left panel now have their own names for
+  VoiceOver ("New snapshot", "New preset").

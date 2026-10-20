@@ -87,6 +87,10 @@ enum Message {
     Export(Box<ExportJob>),
     LoadPresets,
     SavePresets(Vec<Preset>),
+    /// Edit presets (`<data>/presets/user.json`): load (answered by
+    /// `Looks`), and save the whole list.
+    LoadLooks,
+    SaveLooks(Vec<shoebox_develop::preset::Preset>),
     /// Render part of a photo at full resolution (zoomed in).
     Region(Box<RegionJob>),
     /// High efficiency NEFs to convert in the background (replaces the last
@@ -201,6 +205,8 @@ pub enum Event {
     },
     /// The export presets (saved, or the starters).
     Presets(Vec<Preset>),
+    /// The edit presets.
+    Looks(Vec<shoebox_develop::preset::Preset>),
     /// The converter and cache, as checked.
     Status(RawStatus),
     /// An edit's preview is in the previews folder.
@@ -239,6 +245,15 @@ impl Develop {
 
     pub fn save_presets(&self, presets: Vec<Preset>) {
         let _ = self.requests.send(Message::SavePresets(presets));
+    }
+
+    /// Load the edit presets (answered by `Looks`).
+    pub fn load_looks(&self) {
+        let _ = self.requests.send(Message::LoadLooks);
+    }
+
+    pub fn save_looks(&self, looks: Vec<shoebox_develop::preset::Preset>) {
+        let _ = self.requests.send(Message::SaveLooks(looks));
     }
 
     pub fn new(
@@ -403,6 +418,15 @@ fn worker(
                     let _ = ahead.send((converter.clone(), list));
                 }
                 Message::LoadPresets => emit(Event::Presets(load_presets(presets_file))),
+                Message::LoadLooks => emit(Event::Looks(shoebox_develop::preset::load(
+                    &looks_file(presets_file),
+                ))),
+                Message::SaveLooks(list) => {
+                    if let Err(e) = shoebox_develop::preset::save(&looks_file(presets_file), &list)
+                    {
+                        tracing::warn!("saving presets: {e}");
+                    }
+                }
                 Message::SavePresets(list) => {
                     if let Err(e) = save_presets(presets_file, &list) {
                         tracing::warn!("saving export presets: {e}");
@@ -687,6 +711,11 @@ fn finished_image(r: &Request, long_edge: Option<u32>) -> Result<Ready, String> 
 
 /// The export presets file, or the starters if there's none (or it can't
 /// be read).
+/// The edit presets' file, beside the export presets'.
+fn looks_file(export_presets: &std::path::Path) -> PathBuf {
+    export_presets.with_file_name("presets").join("user.json")
+}
+
 fn load_presets(file: &std::path::Path) -> Vec<Preset> {
     std::fs::read_to_string(file)
         .ok()

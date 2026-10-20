@@ -489,6 +489,8 @@ pub struct ShoeboxApp {
     pub(crate) collection_edit: Option<(Option<String>, String)>,
     /// A short note for the status bar (what the last operation did).
     pub(crate) notice: Option<String>,
+    /// Settings copied in Develop (⇧⌘C), for pasting onto other photos.
+    pub(crate) settings_clipboard: Option<shoebox_develop::preset::Preset>,
     pub(crate) timeline: views::timeline::State,
     pub(crate) map: views::map::State,
     /// Left-panel sections folded away.
@@ -548,6 +550,7 @@ impl ShoeboxApp {
                 c5.request_repaint()
             });
         developer.load_presets();
+        developer.load_looks();
         Self {
             loader,
             library,
@@ -639,6 +642,7 @@ impl ShoeboxApp {
             selected_collection: None,
             collection_edit: None,
             notice: None,
+            settings_clipboard: None,
             timeline: views::timeline::State::default(),
             map: views::map::State::new(tile_cache),
             collapsed: HashSet::new(),
@@ -886,6 +890,11 @@ impl ShoeboxApp {
     /// image's size (tests).
     pub fn loupe_drawn(&self) -> Option<(bool, [usize; 2])> {
         self.loupe.drawn
+    }
+
+    /// The edit presets' names (tests).
+    pub fn develop_presets(&self) -> Vec<String> {
+        self.develop.looks.iter().map(|p| p.name.clone()).collect()
     }
 
     /// Edit files the last scan couldn't find a photo for (tests).
@@ -3602,6 +3611,23 @@ impl ShoeboxApp {
                 (self.left_open, self.right_open) = (show, show);
             }
         }
+        // ⇧⌘C copies Develop's settings, ⇧⌘V pastes them (egui may send
+        // these as Copy and Paste events rather than key presses).
+        let copy = input.events.iter().any(|e| matches!(e, egui::Event::Copy));
+        let paste = input
+            .events
+            .iter()
+            .any(|e| matches!(e, egui::Event::Paste(_)));
+        if m.command && m.shift && (pressed(egui::Key::C) || copy) {
+            if self.view == View::Develop {
+                views::presets::start_copy(self);
+            }
+            return;
+        }
+        if m.command && m.shift && (pressed(egui::Key::V) || paste) {
+            views::presets::paste(self);
+            return;
+        }
         if m.command && m.shift && pressed(egui::Key::E) {
             if m.alt {
                 views::export::repeat(self);
@@ -3961,6 +3987,7 @@ impl eframe::App for ShoeboxApp {
         views::files::dialogs(self, &ctx);
         views::settings::show(self, &ctx);
         views::export::dialog(self, &ctx);
+        views::presets::copy_window(self, &ctx);
         self.scroll_to_current = false;
 
         let wanted = std::mem::take(&mut self.wanted);

@@ -458,8 +458,8 @@ fn points_mut(t: &mut ToneCurve, channel: usize) -> &mut Vec<[f64; 2]> {
     }
 }
 
-/// The point curve: drag a point to move it, drag elsewhere to add one,
-/// double-click (or right-click) a point to remove it. RGB shows the parametric curve too.
+/// The point curve: drag a point to move it, click or drag elsewhere to
+/// add one, double-click (or right-click) a point to remove it. RGB shows the parametric curve too.
 fn curve_editor(app: &mut ShoeboxApp, ui: &mut egui::Ui, t: &ToneCurve) {
     let mut channel = app.develop.curve_channel;
     ui.horizontal(|ui| {
@@ -471,7 +471,7 @@ fn curve_editor(app: &mut ShoeboxApp, ui: &mut egui::Ui, t: &ToneCurve) {
     let side = (ui.available_width() - 14.0).clamp(120.0, 260.0);
     let (rect, resp) = ui.allocate_exact_size(vec2(side, side), Sense::click_and_drag());
     let resp = resp.on_hover_text(
-        "Drag to add or move a point; double-click or right-click a point to remove it",
+        "Click or drag to add or move a point; double-click or right-click a point to remove it",
     );
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 2.0, Color32::from_gray(24));
@@ -587,6 +587,19 @@ fn curve_editor(app: &mut ShoeboxApp, ui: &mut egui::Ui, t: &ToneCurve) {
         };
         points[i] = [x.clamp(lo, hi.max(lo)), y];
         set = Some((points.clone(), true));
+    }
+    // A click away from the points adds one there too.
+    if set.is_none()
+        && resp.clicked()
+        && let Some(at) = resp.interact_pointer_pos()
+        && near(at, &points).is_none()
+    {
+        let (x, y) = from_screen(at);
+        if x > 0.01 && x < 0.99 {
+            let i = points.partition_point(|p| p[0] < x);
+            points.insert(i, [x, y]);
+            set = Some((points.clone(), false));
+        }
     }
     if resp.drag_stopped() {
         app.develop.curve_drag = None;

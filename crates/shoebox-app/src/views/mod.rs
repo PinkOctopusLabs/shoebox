@@ -12,6 +12,7 @@ pub mod look;
 pub mod loupe;
 pub mod map;
 pub mod masonry;
+pub mod presets;
 pub mod settings;
 pub mod survey;
 pub mod timeline;

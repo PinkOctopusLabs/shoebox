@@ -98,6 +98,17 @@ pub struct State {
     pub histogram: Option<Box<[[u32; 256]; 4]>>,
     /// The snapshot being renamed, and its name so far.
     renaming: Option<(usize, String)>,
+    /// Edit presets (loaded once; kept from photo to photo).
+    pub looks: Vec<shoebox_develop::preset::Preset>,
+    /// Settings shown instead of the edit while a preset is hovered.
+    pub(super) preview: Option<Settings>,
+    /// The preset last applied, the settings before it, and its amount (the
+    /// Amount slider re-applies it).
+    pub(super) applied: Option<super::presets::Applied>,
+    /// The "Save preset" window: name, group and parts.
+    pub(super) saving_look: Option<super::presets::Saving>,
+    /// The "Copy settings" window: the parts ticked.
+    pub copying: Option<std::collections::BTreeSet<shoebox_develop::preset::Part>>,
     /// The tone curve channel shown (0 RGB, 1–3 red, green, blue), and
     /// the point being dragged.
     pub(super) curve_channel: usize,
@@ -216,6 +227,7 @@ impl State {
             zoom: self.zoom,
             compare: self.compare,
             split_at: self.split_at,
+            looks: std::mem::take(&mut self.looks),
             ..Default::default()
         };
     }
@@ -298,6 +310,10 @@ pub fn poll(app: &mut ShoeboxApp) {
         let ev = match ev {
             Event::Status(s) => {
                 app.raw_status = Some(s);
+                continue;
+            }
+            Event::Looks(list) => {
+                app.develop.looks = list;
                 continue;
             }
             Event::Presets(list) => {
@@ -446,7 +462,8 @@ fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_w
         return;
     };
     // The settings shown (while cropping, the whole rotated frame).
-    let mut settings = doc.settings().clone();
+    // A preset being hovered shows instead of the edit.
+    let mut settings = st.preview.clone().unwrap_or_else(|| doc.settings().clone());
     if st.crop.is_some() {
         settings.geometry.crop = [0.0, 0.0, 1.0, 1.0];
     }
@@ -1711,6 +1728,8 @@ pub fn history(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     ui.add_space(6.0);
     snapshots(app, ui);
     ui.add_space(10.0);
+    super::presets::panel(app, ui);
+    ui.add_space(10.0);
     heading(ui, "HISTORY");
     let st = &app.develop;
     let Some(doc) = &st.doc else { return };
@@ -1741,7 +1760,7 @@ pub fn history(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     }
 }
 
-fn heading(ui: &mut egui::Ui, text: &str) {
+pub(super) fn heading(ui: &mut egui::Ui, text: &str) {
     ui.label(
         RichText::new(text)
             .size(11.0)
@@ -1751,7 +1770,7 @@ fn heading(ui: &mut egui::Ui, text: &str) {
 }
 
 /// The edit changed outside a slider: show it and save it.
-fn touched(st: &mut State) {
+pub(super) fn touched(st: &mut State) {
     st.changed = Some(Instant::now());
     st.unsaved.get_or_insert_with(Instant::now);
 }
@@ -1777,11 +1796,13 @@ fn snapshots(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         heading(ui, "SNAPSHOTS");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
+            let r = ui
                 .add_enabled(!read_only, egui::Button::new("+").small())
-                .on_hover_text("New snapshot of the edit as it is now")
-                .clicked()
-            {
+                .on_hover_text("New snapshot of the edit as it is now");
+            r.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::Role::Button, !read_only, "New snapshot")
+            });
+            if r.clicked() {
                 action = Some(SnapshotAction::New);
             }
         });

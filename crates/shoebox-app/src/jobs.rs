@@ -378,6 +378,13 @@ pub enum LibraryCommand {
     },
     /// Write every edit changed since its last save to its `.shoebox` file.
     SaveEdits,
+    /// Apply a preset (or pasted settings) to these photos' edits, as one
+    /// step in each one's history, and write them as one batch.
+    ApplyPreset {
+        photos: Vec<(PathBuf, String)>,
+        preset: shoebox_develop::preset::Preset,
+        label: String,
+    },
     /// Remember files just exported.
     RecordExports(Vec<shoebox_core::cache::ExportRow>),
     /// A photo's exports (answered by `Exports`).
@@ -1524,6 +1531,62 @@ fn library_worker(
                     })
                     .collect();
                 emit(LibraryEvent::Exports(photo, rows));
+                (false, false)
+            }
+            LibraryCommand::ApplyPreset {
+                photos,
+                preset,
+                label,
+            } => {
+                use shoebox_develop::edit::{EditDoc, Source};
+                let mut infos = Vec::new();
+                for (root, rel) in photos {
+                    let json = shoebox_core::edits::load(
+                        &cache,
+                        &root,
+                        &rel,
+                        shoebox_core::edits::MAIN,
+                        render_hash,
+                    )
+                    .unwrap_or_default();
+                    let mut doc = json
+                        .and_then(|j| EditDoc::from_json(&j).ok())
+                        .unwrap_or_else(|| {
+                            EditDoc::new(Source {
+                                path: rel.clone(),
+                                blake3: String::new(),
+                                size: None,
+                                camera: None,
+                                lens: None,
+                            })
+                        });
+                    if !doc.change(&label, |s| *s = preset.apply(s, 1.0)) {
+                        continue;
+                    }
+                    let kept =
+                        complete_source(&root, &rel, &doc.to_json()).and_then(|(json, hash)| {
+                            shoebox_core::edits::put(
+                                &cache,
+                                &root,
+                                &rel,
+                                shoebox_core::edits::MAIN,
+                                &json,
+                                &hash,
+                            )
+                            .map_err(|e| e.to_string())?;
+                            Ok(json)
+                        });
+                    match kept {
+                        Ok(json) => infos.extend(edit_info(&root, &rel, json)),
+                        Err(e) => emit(LibraryEvent::Error(format!("{label}: {rel}: {e}"))),
+                    }
+                }
+                if let Err(e) = shoebox_core::edits::save_pending(&cache, &fileops) {
+                    emit(LibraryEvent::Error(format!("saving edits: {e}")));
+                }
+                if !infos.is_empty() {
+                    emit(LibraryEvent::Edits(infos));
+                }
                 (false, false)
             }
             LibraryCommand::SaveEdits => {

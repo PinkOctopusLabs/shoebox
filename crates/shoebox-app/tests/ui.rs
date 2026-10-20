@@ -3388,7 +3388,7 @@ fn develop_a_jpeg() {
 
     // A snapshot, named as it's made; turn the photo; the snapshot brings
     // it back, as a step of its own.
-    h.get_by_label("+").click();
+    h.get_by_label("New snapshot").click();
     h.run_steps(3);
     h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
     h.event(egui::Event::Text("Upright".into()));
@@ -3532,6 +3532,102 @@ fn develop_look_modules() {
             .black_and_white
             .enabled
     );
+}
+
+/// Presets and copied settings: save a preset from one photo, hover it on
+/// another (a preview: the edit is untouched), click to apply; copy
+/// settings (⇧⌘C) and paste them onto a third from the grid (⇧⌘V), which
+/// writes its edit file.
+#[test]
+fn presets_and_pasted_settings() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(&root).unwrap();
+    for (n, name) in [(1, "a.jpg"), (2, "b.jpg"), (3, "c.jpg")] {
+        let img = shoebox_fixtures::scene(n, 400, 300);
+        std::fs::write(root.join(name), shoebox_fixtures::jpeg(&img, 90).unwrap()).unwrap();
+    }
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let mut h = harness(p, egui::vec2(1400.0, 1500.0));
+    settle(&mut h, Duration::from_secs(60));
+    let open_in_develop = |h: &mut Harness<'_, ShoeboxApp>, name: &str| {
+        h.get_by_label(name).click();
+        h.run_steps(2);
+        h.key_press(egui::Key::D);
+        wait_for(h, Duration::from_secs(30), "develop", |a| a.develop_ready());
+        h.run_steps(3);
+    };
+    open_in_develop(&mut h, "a.jpg");
+    // A quarter turn (a step), then a preset of everything copied by
+    // default plus Crop & rotate.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::CloseBracket);
+    h.run_steps(3);
+    h.get_by_label("New preset").click();
+    h.run_steps(2);
+    let tick = |h: &mut Harness<'_, ShoeboxApp>, name: &str| {
+        h.get_by(|n| {
+            n.role() == egui::accesskit::Role::CheckBox && n.label().as_deref() == Some(name)
+        })
+        .click();
+    };
+    tick(&mut h, "Crop & rotate"); // in the window's list
+    h.run_steps(1);
+    h.get_by_label("Save").click();
+    h.run_steps(3);
+    assert_eq!(h.state().develop_presets(), ["Preset 1"]);
+    wait_for(&mut h, Duration::from_secs(10), "presets file", |_| {
+        t.path().join("data/presets/user.json").exists()
+    });
+
+    // On b: hover previews, the edit doesn't change; a click applies it.
+    h.key_press(egui::Key::ArrowRight);
+    h.run_steps(2);
+    wait_for(&mut h, Duration::from_secs(30), "b in develop", |a| {
+        a.develop_ready() && a.develop_doc().is_some()
+    });
+    h.run_steps(3);
+    snapshot(&mut h, "develop-presets");
+    h.get_by_label("Preset 1").hover();
+    h.run_steps(3);
+    assert_eq!(
+        h.state().develop_doc().unwrap().settings().geometry.quarter,
+        0
+    );
+    let wide = h.state().develop_photo_rect().unwrap();
+    assert!(wide.aspect_ratio() < 1.0, "the preview is turned: {wide:?}");
+    h.get_by_label("Preset 1").click();
+    h.run_steps(3);
+    assert_eq!(
+        h.state().develop_doc().unwrap().settings().geometry.quarter,
+        1
+    );
+
+    // Copy b's settings (Crop & rotate included) and paste onto c from the grid.
+    h.key_press_modifiers(
+        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+        egui::Key::C,
+    );
+    h.run_steps(2);
+    tick(&mut h, "Crop & rotate");
+    h.run_steps(1);
+    h.get_by_label("Copy").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::G);
+    h.run_steps(3);
+    h.get_by_label("c.jpg").click();
+    h.run_steps(2);
+    h.key_press_modifiers(
+        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+        egui::Key::V,
+    );
+    let edit = root.join(".shoebox/edits/c.jpg.json");
+    wait_for(&mut h, Duration::from_secs(20), "c's edit", |_| {
+        edit.exists()
+    });
+    let doc = shoebox_develop::edit::EditDoc::from_json(&std::fs::read_to_string(&edit).unwrap())
+        .unwrap();
+    assert_eq!(doc.settings().geometry.quarter, 1);
+    assert_eq!(doc.history().last().unwrap().label, "Paste settings");
 }
 
 /// A photo in a reference folder opens in Develop read-only, with an offer
