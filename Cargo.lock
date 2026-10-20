@@ -6016,6 +6016,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "shoebox-develop"
+version = "0.2.3"
+dependencies = [
+ "blake3",
+ "shoebox-decode",
+ "shoebox-fixtures",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
 name = "shoebox-fixtures"
 version = "0.2.3"
 dependencies = [

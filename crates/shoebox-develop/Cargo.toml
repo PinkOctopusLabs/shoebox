@@ -1,0 +1,21 @@
+[package]
+name = "shoebox-develop"
+description = "Photo editing: raw preparation, edit documents and the render pipeline."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+blake3 = { version = "1.8.7", features = ["rayon"] }
+shoebox-decode.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+shoebox-fixtures = { path = "../shoebox-fixtures" }
+tempfile = "3.27.0"

@@ -965,3 +965,18 @@ hashes, embeddings, faces).
 - Cache schema 8 adds that column with `ALTER TABLE` instead of the usual
   rebuild, which would have discarded every duplicate hash;
   `META_VERSION` 4 re-reads metadata (the cheap part) to fill it.
+- **DNG conversion** (`shoebox-develop::dng`), measured on the HE★
+  fixture with Adobe DNG Converter 18.7: `-c -p0` (lossless-JPEG DNG
+  1.4, no preview) takes 0.5–1.4 s and makes a 22 MB DNG; rawler decodes it
+  in 0.11 s (uncompressed `-u`: 49 MB, 0.03 s). A rough half-size render
+  from it (binning, as-shot WB, D65 matrix) matches the camera JPEG's
+  colours. No command-line switch was found that makes JPEG XL DNGs
+  (`-jxl`, `-dng1.7.1` changed nothing), and lossless JPEG is fast
+  enough, so the spec's JXL option is dropped. Never run the converter
+  with `-h`: it opens its window instead of printing help.
+- The DNG cache is keyed by the NEF's BLAKE3, computed when converting (the
+  catalog's hash is only there after duplicate analysis). The spec says the
+  converter is proven by converting a small bundled test file; the repo is
+  public and can't carry a real NEF, so instead each DNG is decoded by
+  rawler before it's kept, and a failed conversion is reported as such.
+  Conversions run two at a time; a file asked for twice converts once.
