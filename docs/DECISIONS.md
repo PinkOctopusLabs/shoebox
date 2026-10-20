@@ -1405,7 +1405,10 @@ files from then on, so they show up in the catalog.
 
 - The Phase 1 gate (30 NEFs clean, ColorChecker ΔE2000 ≤ 3) needs new
   photos, a ColorChecker shot among them, so it's deferred until those are
-  taken. Phase 2 starts now. The gate still has to pass before a release
+  taken. Phase 2 starts now. When those photos are taken, add a frame of
+  straight lines (a building or door frame) near the edges, shot with the
+  most distorting lens available. It confirms the convention used for the
+  NEF's own distortion coefficients (see Lens corrections). The gate still has to pass before a release
   calls Phase 1 done. The 0.3.0 release isn't held for it.
 - Testing never depends on licensed editors (PhotoLab, DeepPRIME, PureRAW,
   Lightroom): none is available. EDITING-SPEC's definition of done, the
