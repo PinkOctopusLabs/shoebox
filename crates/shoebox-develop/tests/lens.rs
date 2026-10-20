@@ -181,3 +181,24 @@ fn barrel_lines_come_out_straight() {
     let spread = cols.iter().max().unwrap() - cols.iter().min().unwrap();
     assert!(spread >= 3, "the raw bows: {cols:?}");
 }
+
+/// The camera's own distortion comes first, even where Lensfun knows the
+/// lens (it matches the camera's JPEG; DECISIONS, 2026-10-21).
+#[test]
+fn the_cameras_distortion_comes_first() {
+    let data = LensData {
+        distortion: Some([-0.2, 0.0, 0.0]),
+        vignette: None,
+    };
+    let with = lens::grid(&zf("NIKKOR Z 40mm f/2", data), &on(), 6048, 4032).unwrap();
+    let without = lens::grid(
+        &zf("NIKKOR Z 40mm f/2", LensData::default()),
+        &on(),
+        6048,
+        4032,
+    )
+    .unwrap();
+    let (a, b) = (with.at(0.0, 0.0), without.at(0.0, 0.0));
+    assert!((a[2] - b[2]).abs() > 0.01, "{a:?} {b:?}");
+    assert!(with.source.contains("camera") && with.chromatic);
+}

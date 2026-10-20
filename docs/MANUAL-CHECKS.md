@@ -35,13 +35,10 @@ check fails, note the file and what's wrong, and copy the file into
 
 ## Lens corrections (from 2026-10-20)
 
-- [ ] **Nikon's distortion convention.** Take a frame with straight lines
-  (a building or a door frame) near the edges, with the most distorting
-  lens you have. With Lens corrections on and Lensfun overridden (choose
-  a different lens in the menu, or a lens Lensfun doesn't have), the lines
-  should come out straight using only the camera's data. If they bow
-  more instead, the convention is the other way round (`lens::make`; see
-  DECISIONS, Lens corrections).
+- [x] **Nikon's distortion convention** (2026-10-21): confirmed on a NIKKOR
+  Z 24-70mm f/2.8 S frame at 51 mm against the camera's own corrected
+  JPEG: 2.5 px RMS with Shoebox's reading, against 12.2 px for the reverse
+  (DECISIONS, 2026-10-21).
 - [ ] **Vignetting from the camera's data**, on an evenly lit wall or sky
   at the widest aperture: the corners match the centre with the correction
   on.

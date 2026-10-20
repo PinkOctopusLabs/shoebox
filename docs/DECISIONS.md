@@ -1696,3 +1696,27 @@ Develop level, on the storage that already supports them
 - A profile per Picture Control (the spec's "fit one per Picture Control")
   is a matter of fitting from pairs shot with each and choosing between
   them. It can follow once the first one has been fitted.
+
+## Lens corrections: the camera's distortion, confirmed (2026-10-21)
+
+On a real NEF from a NIKKOR Z 24-70mm f/2.8 S at 51 mm, Auto's lens
+correction made the edit look larger than the Original side of the split.
+Setting Distortion to 0 put it back. The NEF's coefficients (0.01025,
+−0.00956, 0.02218) ask for about 2.3% more image at the corners, and the
+fill zoom then crops in by about that much. Lensfun's profile for the same
+lens and focal length barely moves the frame (fill zoom 0.998).
+
+Block-matching the uncorrected raw against the camera's own corrected JPEG
+(the NEF's JpgFromRaw, `examples/lens_probe.rs`) settles the convention:
+
+| Model | RMS |
+|---|---|
+| r·(1 + k1·r² + k2·r⁴ + k3·r⁶), r = 1 at the half-diagonal | 2.5 px |
+| A uniform scale only | 7.1 px |
+| The inverse convention | 12.2 px |
+
+The camera's own scale (0.980) also matches Shoebox's fill zoom (0.978).
+So the larger frame is the correction doing what the camera does: the
+edit is framed like the Z f's JPEG, and the Original shows the raw
+uncorrected. Chosen with the user: the camera's distortion stays first.
+Lensfun covers chromatic aberration, and anything the camera doesn't give.
