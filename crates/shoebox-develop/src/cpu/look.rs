@@ -65,6 +65,10 @@ pub struct Look {
     pub mix: [f32; 8],
     /// Rec.2020 luminance weights.
     pub luma: [f32; 3],
+    /// Defringe: purple and green amounts (0–1); `fringe` when either is on.
+    pub fringe: bool,
+    pub purple: f32,
+    pub green: f32,
 }
 
 /// Linear Rec.2020 ↔ Oklab's LMS.
@@ -106,8 +110,53 @@ impl Look {
             mono,
             mix: bw.mix.map(unit),
             luma: y.map(|v| v as f32),
+            fringe: false,
+            purple: 0.0,
+            green: 0.0,
         }
     }
+
+    pub fn with_defringe(mut self, d: &crate::edit::Defringe) -> Self {
+        self.purple = (d.purple / 100.0) as f32;
+        self.green = (d.green / 100.0) as f32;
+        self.fringe = self.purple > 0.0 || self.green > 0.0;
+        self
+    }
+}
+
+/// How strongly a hue (degrees) falls in a window `[lo, hi]`, with soft
+/// 15° edges.
+fn window(h: f32, lo: f32, hi: f32) -> f32 {
+    smoothstep(lo - 15.0, lo, h) * (1.0 - smoothstep(hi, hi + 15.0, h))
+}
+
+/// The purple and green hue windows (Oklab hue, degrees).
+pub const PURPLE: (f32, f32) = (285.0, 345.0);
+pub const GREEN: (f32, f32) = (105.0, 165.0);
+
+/// An edge's strength from the luminance either side of a pixel, left,
+/// right, up and down: the relative gradient, 0 (flat) to 1 (a hard edge).
+pub fn edge(l: f32, r: f32, u: f32, d: f32) -> f32 {
+    let g = ((r - l).abs() + (d - u).abs()) / (0.25 * (l + r + u + d)).max(1e-3);
+    smoothstep(0.1, 0.6, g)
+}
+
+/// Defringe one linear Rec.2020 pixel at an edge of strength `edge`:
+/// purple and green lose their colour there.
+pub fn defringe_pixel(l: &Look, p: [f32; 3], edge: f32) -> [f32; 3] {
+    if !l.fringe || edge <= 0.0 {
+        return p;
+    }
+    let lms = mul3(&l.to_lms, p).map(cbrt);
+    let [lum, a, b] = mul3(&LMS_TO_LAB, lms);
+    let h = b.atan2(a).to_degrees().rem_euclid(360.0);
+    let w = l.purple * window(h, PURPLE.0, PURPLE.1) + l.green * window(h, GREEN.0, GREEN.1);
+    let k = (1.0 - w.min(1.0) * edge).max(0.0);
+    if k >= 1.0 {
+        return p;
+    }
+    let lms = mul3(&LAB_TO_LMS, [lum, a * k, b * k]).map(|v| v * v * v);
+    mul3(&l.from_lms, lms)
 }
 
 fn mul3(m: &[[f32; 3]; 3], p: [f32; 3]) -> [f32; 3] {

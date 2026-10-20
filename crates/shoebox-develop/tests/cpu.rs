@@ -587,3 +587,70 @@ fn manual_transform() {
     }
     assert_eq!(g, before);
 }
+
+/// Raw fixes: a hot and a dead photosite are mended (a smooth gradient
+/// isn't touched), and the black and white points move the levels.
+#[test]
+fn hot_pixels_and_raw_levels() {
+    use shoebox_develop::cpu::raw::{Mosaic, hot_pixels};
+    let (w, h) = (40, 30);
+    let mut data: Vec<f32> = (0..w * h)
+        .map(|i| 0.2 + 0.3 * (i % w) as f32 / w as f32)
+        .collect();
+    data[10 * w + 10] = 0.95; // hot
+    data[20 * w + 21] = 0.0; // dead
+    let m = Mosaic {
+        width: w,
+        height: h,
+        cfa: [[0, 1], [1, 2]],
+        data: &data,
+    };
+    let (fixed, n) = hot_pixels(&m);
+    assert_eq!(n, 2);
+    assert!((fixed[10 * w + 10] - data[10 * w + 12]).abs() < 0.05);
+    assert!(fixed[20 * w + 21] > 0.15);
+    let clean: Vec<f32> = (0..w * h)
+        .map(|i| 0.2 + 0.3 * (i % w) as f32 / w as f32)
+        .collect();
+    let m = Mosaic { data: &clean, ..m };
+    assert_eq!(hot_pixels(&m).1, 0);
+
+    // Levels: a white point of 0.5 doubles the raw values (up to 1).
+    let raw = grey_card(0.2);
+    let mut r = shoebox_develop::edit::Raw::default();
+    let base = cpu::demosaic(&raw, &r, None);
+    r.white = 0.5;
+    let bright = cpu::demosaic(&raw, &r, None);
+    let (a, b) = (base.rgb.px(5, 5)[1], bright.rgb.px(5, 5)[1]);
+    assert!((b / a - 2.0).abs() < 0.01, "{a} {b}");
+}
+
+/// Defringe: a purple pixel on a hard edge loses its colour; the same
+/// purple in a flat area keeps it.
+#[test]
+fn defringe_takes_purple_off_edges() {
+    use shoebox_develop::cpu::look::{Look, defringe_pixel, edge};
+    let l = Look::new(
+        &Default::default(),
+        &Default::default(),
+        &Default::default(),
+    )
+    .with_defringe(&shoebox_develop::edit::Defringe {
+        purple: 100.0,
+        green: 0.0,
+    });
+    let purple = [0.30, 0.05, 0.40];
+    let chroma = |p: [f32; 3]| {
+        let (mx, mn) = (p[0].max(p[1]).max(p[2]), p[0].min(p[1]).min(p[2]));
+        (mx - mn) / mx
+    };
+    let hard = edge(0.02, 0.8, 0.3, 0.3);
+    let flat = edge(0.3, 0.31, 0.3, 0.3);
+    assert!(hard > 0.9 && flat < 1e-6, "{hard} {flat}");
+    assert!(chroma(defringe_pixel(&l, purple, hard)) < 0.1 * chroma(purple));
+    assert_eq!(defringe_pixel(&l, purple, flat), purple);
+    // Green fringes are left alone with only purple on.
+    let green = [0.05, 0.30, 0.08];
+    let g = defringe_pixel(&l, green, hard);
+    assert!((chroma(g) - chroma(green)).abs() < 0.02);
+}

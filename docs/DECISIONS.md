@@ -1551,3 +1551,22 @@ quarter of the frame). Constrain (on by default) zooms in after the
 perspective just enough that the frame's corners come from inside the
 original, so the user's Scale is kept. The transform turns and mirrors
 with the frame. Auto-upright (line detection) is Phase 3.
+
+## Defringe, hot pixels and raw levels (2026-10-20)
+
+- **Defringe** runs in the live pass, after the lens grid (so after
+  chromatic aberration correction, as the spec says) and the colour matrix.
+  Its edge strength is the relative luminance gradient from four source
+  samples. Purple (Oklab hue 285–345°) and green (105–165°) lose
+  saturation in proportion to the amount and the edge, so flat areas of
+  the same colour keep theirs. The hue windows are fixed for now: adjustable
+  ranges can follow if photos need them. It has its own section so it
+  works without a lens profile.
+- **Hot and dead pixels** are fixed on the CFA data before demosaicing. A
+  photosite more than twice its brightest same-colour neighbour (+0.02), or
+  under 30% of its darkest lit one, takes their median. It's off by
+  default, because an isolated star can trip it.
+- **Raw black and white points** move the levels the decoder normalised:
+  ±5% of the range for black, 0.5–1.2× for white. Like the other Raw
+  settings, they re-prepare the photo, and the develop thread keeps only
+  the newest request while a slider drags.

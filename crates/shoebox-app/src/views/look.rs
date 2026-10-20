@@ -3,8 +3,8 @@
 
 use eframe::egui::{self, Color32, RichText, Sense, pos2, vec2};
 use shoebox_develop::edit::{
-    BlackAndWhite, Calibration, Clarity, Colour, Dehaze, HUES, LensCorrection, NoiseReduction,
-    Settings, Sharpening, ToneCurve, Transform,
+    BlackAndWhite, Calibration, Clarity, Colour, Defringe, Dehaze, HUES, LensCorrection,
+    NoiseReduction, Settings, Sharpening, ToneCurve, Transform,
 };
 
 use super::develop::{edit, slider};
@@ -57,9 +57,41 @@ pub fn modules(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &Settings) {
     colour(app, ui, &s.modules.colour);
     detail(app, ui, s);
     lens(app, ui, &s.modules.lens);
+    defringe(app, ui, &s.modules.defringe);
     transform(app, ui, &s.geometry.transform);
     black_and_white(app, ui, &s.modules.black_and_white);
     calibration(app, ui, &s.modules.calibration);
+}
+
+/// Purple and green fringes along hard edges.
+fn defringe(app: &mut ShoeboxApp, ui: &mut egui::Ui, d: &Defringe) {
+    let reset = section(ui, "Defringe", *d != Defringe::default(), false, |ui| {
+        egui::Grid::new("fringe-grid")
+            .num_columns(2)
+            .show(ui, |ui| {
+                if let Some((v, dr)) = slider(ui, "Purple", d.purple, 0.0..=100.0, 0.0, 0) {
+                    edit(
+                        app,
+                        "fringe-p",
+                        format!("Defringe purple {v:.0}"),
+                        dr,
+                        |s| {
+                            s.modules.defringe.purple = v;
+                        },
+                    );
+                }
+                if let Some((v, dr)) = slider(ui, "Green", d.green, 0.0..=100.0, 0.0, 0) {
+                    edit(app, "fringe-g", format!("Defringe green {v:.0}"), dr, |s| {
+                        s.modules.defringe.green = v;
+                    });
+                }
+            });
+    });
+    if reset {
+        edit(app, "fringe", "Reset defringe".into(), false, |s| {
+            s.modules.defringe = Defringe::default();
+        });
+    }
 }
 
 /// Perspective (vertical, horizontal), aspect, scale and offsets.

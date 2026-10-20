@@ -558,3 +558,49 @@ pub fn rcd(m: &Mosaic<'_>) -> Rgb {
         });
     out
 }
+
+/// Hot and dead photosites mended: a photosite far brighter than every one
+/// of its eight same-colour neighbours (two away), or far darker while they
+/// are lit, takes their median. Returns the photosites and how many were
+/// mended.
+pub fn hot_pixels(m: &Mosaic) -> (Vec<f32>, usize) {
+    let (w, h) = (m.width, m.height);
+    let mended = std::sync::atomic::AtomicUsize::new(0);
+    let mut out = m.data.to_vec();
+    out.par_chunks_mut(w).enumerate().for_each(|(y, line)| {
+        if y < 2 || y + 2 >= h {
+            return;
+        }
+        for (x, o) in line
+            .iter_mut()
+            .enumerate()
+            .take(w.saturating_sub(2))
+            .skip(2)
+        {
+            let v = m.data[y * w + x];
+            let mut n = [0f32; 8];
+            let mut k = 0;
+            for dy in [-2isize, 0, 2] {
+                for dx in [-2isize, 0, 2] {
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
+                    let (xx, yy) = ((x as isize + dx) as usize, (y as isize + dy) as usize);
+                    n[k] = m.data[yy * w + xx];
+                    k += 1;
+                }
+            }
+            let (lo, hi) = n
+                .iter()
+                .fold((f32::MAX, f32::MIN), |(a, b), &p| (a.min(p), b.max(p)));
+            let hot = v > hi * 2.0 + 0.02;
+            let dead = lo > 0.05 && v < lo * 0.3;
+            if hot || dead {
+                n.sort_by(f32::total_cmp);
+                *o = (n[3] + n[4]) / 2.0;
+                mended.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    });
+    (out, mended.into_inner())
+}

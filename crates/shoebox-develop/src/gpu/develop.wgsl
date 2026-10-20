@@ -46,6 +46,7 @@ struct Params {
     air: vec4<f32>,       // dehaze airlight (rgb), its luminance
     lens: vec4<f32>,      // grid on (0/1), columns, rows, chromatic (0/1)
     map2: vec4<f32>,      // the map's perspective row: (sx, sy) are divided by map2·(x, y, 1)
+    fringe: vec4<f32>,    // defringe on (0/1), purple, green
 };
 
 @group(0) @binding(0) var src: texture_2d<f32>;
@@ -333,6 +334,46 @@ fn lens_sample(sx: f32, sy: f32) -> Lensed {
     return Lensed(px * n[6], g);
 }
 
+fn window(h: f32, lo: f32, hi: f32) -> f32 {
+    return smooth01(lo - 15.0, lo, h) * (1.0 - smooth01(hi, hi + 15.0, h));
+}
+
+fn luma_at(x: f32, y: f32) -> f32 {
+    return dot(p.luma.xyz, mul3(p.colour0, p.colour1, p.colour2, bilinear(x, y)));
+}
+
+// Defringe (see `cpu::look::defringe_pixel`, `cpu::look::edge`).
+fn defringe(px: vec3<f32>, sx: f32, sy: f32) -> vec3<f32> {
+    let l = luma_at(sx - 1.0, sy);
+    let r = luma_at(sx + 1.0, sy);
+    let u = luma_at(sx, sy - 1.0);
+    let d = luma_at(sx, sy + 1.0);
+    let g = (abs(r - l) + abs(d - u)) / max(0.25 * (l + r + u + d), 1e-3);
+    let e = smooth01(0.1, 0.6, g);
+    if (e <= 0.0) {
+        return px;
+    }
+    let lms = mul3(p.lms0, p.lms1, p.lms2, px);
+    let l3 = vec3<f32>(cbrt(lms.x), cbrt(lms.y), cbrt(lms.z));
+    let lum = 0.21045426 * l3.x + 0.7936178 * l3.y - 0.004072047 * l3.z;
+    let a = 1.9779985 * l3.x - 2.4285922 * l3.y + 0.4505937 * l3.z;
+    let b = 0.025904037 * l3.x + 0.78277177 * l3.y - 0.80867577 * l3.z;
+    let h = rem360(degrees(atan2(b, a)));
+    let w = p.fringe.y * window(h, 285.0, 345.0) + p.fringe.z * window(h, 105.0, 165.0);
+    let k = max(1.0 - min(w, 1.0) * e, 0.0);
+    if (k >= 1.0) {
+        return px;
+    }
+    let la = a * k;
+    let lb = b * k;
+    let m3 = vec3<f32>(
+        lum + 0.39633778 * la + 0.21580376 * lb,
+        lum - 0.105561346 * la - 0.06385417 * lb,
+        lum - 0.08948418 * la - 1.2914855 * lb,
+    );
+    return mul3(p.inv0, p.inv1, p.inv2, m3 * m3 * m3);
+}
+
 fn tone_at(ch: u32, v: f32) -> f32 {
     let x = clamp(v, 0.0, 1.0) * f32(CURVE_SIZE - 1u);
     let i = min(u32(floor(x)), CURVE_SIZE - 2u);
@@ -398,6 +439,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         raw = bilinear(sx, sy);
     }
     var px = mul3(p.colour0, p.colour1, p.colour2, raw);
+    if (p.fringe.x > 0.5) {
+        px = defringe(px, sx, sy);
+    }
     if (p.maps.x > 0.5) {
         px = local_px(px, sx, sy);
     }

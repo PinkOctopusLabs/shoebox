@@ -77,6 +77,14 @@ impl Default for Copy {
 pub struct Raw {
     pub demosaic: Demosaic,
     pub highlights: Highlights,
+    /// Fix hot and dead photosites before demosaicing.
+    pub hot_pixels: bool,
+    /// Raw black point, a fraction of the range to move it by (−0.05 to
+    /// +0.05: lifts or deepens the blacks the camera recorded).
+    pub black: f64,
+    /// Raw white point as a fraction of the camera's (0.5–1.2): below 1,
+    /// highlights clip sooner and come out brighter.
+    pub white: f64,
 }
 
 impl Default for Raw {
@@ -84,6 +92,9 @@ impl Default for Raw {
         Self {
             demosaic: Demosaic::Rcd,
             highlights: Highlights::InpaintOpposed,
+            hot_pixels: false,
+            black: 0.0,
+            white: 1.0,
         }
     }
 }
@@ -231,6 +242,15 @@ impl Default for LensCorrection {
             lens: None,
         }
     }
+}
+
+/// Defringe (Tools beyond PhotoLab): purple and green fringes along
+/// high-contrast edges lose their colour, 0–100.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Defringe {
+    pub purple: f64,
+    pub green: f64,
 }
 
 /// Highlights and shadows (module 7): −100 to +100, applied through an
@@ -395,6 +415,7 @@ pub struct Modules {
     pub input_colour: InputColour,
     pub exposure: Exposure,
     pub lens: LensCorrection,
+    pub defringe: Defringe,
     pub noise_reduction: NoiseReduction,
     pub sharpening: Sharpening,
     pub dehaze: Dehaze,

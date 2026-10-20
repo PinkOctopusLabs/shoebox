@@ -1682,6 +1682,25 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                         s.modules.raw.demosaic = dm
                     });
                 }
+                let mut hot = r.hot_pixels;
+                if ui.checkbox(&mut hot, "Fix hot and dead pixels").changed() {
+                    let label = format!("Hot pixels {}", if hot { "on" } else { "off" });
+                    edit(app, "raw", label, false, |s| s.modules.raw.hot_pixels = hot);
+                }
+                // Levels re-prepare the photo (the develop thread takes the
+                // newest, so a drag doesn't queue them up).
+                egui::Grid::new("raw-levels").num_columns(2).show(ui, |ui| {
+                    if let Some((v, d)) = slider(ui, "Black point", r.black, -0.05..=0.05, 0.0, 3) {
+                        edit(app, "raw-black", format!("Raw black {v:+.3}"), d, |s| {
+                            s.modules.raw.black = v;
+                        });
+                    }
+                    if let Some((v, d)) = slider(ui, "White point", r.white, 0.5..=1.2, 1.0, 2) {
+                        edit(app, "raw-white", format!("Raw white {v:.2}"), d, |s| {
+                            s.modules.raw.white = v;
+                        });
+                    }
+                });
             });
     });
 }

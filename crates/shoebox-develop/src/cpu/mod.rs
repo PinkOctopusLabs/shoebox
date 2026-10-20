@@ -227,14 +227,33 @@ pub fn srgb_eotf(v: f32) -> f32 {
 /// highlights, demosaic, and downscale to `long_edge` (the proxy) if given.
 pub fn demosaic(raw: &RawImage, r: &Raw, long_edge: Option<u32>) -> Demosaiced {
     let mult = wb::resolve(raw, &Default::default()).multipliers;
-    let balanced: Vec<f32> = raw
-        .data
+    // Hot and dead photosites, then the black and white points (the
+    // decoder already put them at 0 and 1; these move them).
+    let fixed = r.hot_pixels.then(|| {
+        raw::hot_pixels(&raw::Mosaic {
+            width: raw.width,
+            height: raw.height,
+            cfa: raw.cfa,
+            data: &raw.data,
+        })
+        .0
+    });
+    let data = fixed.as_deref().unwrap_or(&raw.data);
+    let (black, white) = (r.black as f32, r.white.max(0.1) as f32);
+    let levels = |v: f32| {
+        if black == 0.0 && white == 1.0 {
+            v
+        } else {
+            ((v - black) / (white - black)).min(1.0)
+        }
+    };
+    let balanced: Vec<f32> = data
         .par_chunks(raw.width)
         .enumerate()
         .flat_map_iter(|(row, line)| {
             line.iter()
                 .enumerate()
-                .map(move |(col, v)| v * mult[usize::from(raw.cfa[row % 2][col % 2])])
+                .map(move |(col, v)| levels(*v) * mult[usize::from(raw.cfa[row % 2][col % 2])])
         })
         .collect();
     let clips = mult.map(|m| m * raw::OPPOSED_CLIP);
@@ -653,7 +672,8 @@ pub fn frame(raw: &RawImage, src: &Demosaiced, s: &Settings, o: &Options) -> Fra
             &s.modules.colour,
             &s.modules.calibration,
             &s.modules.black_and_white,
-        ),
+        )
+        .with_defringe(&s.modules.defringe),
         display,
         warnings: false,
     }
@@ -760,7 +780,15 @@ pub fn apply(src: &Rgb, f: &Frame, display: bool) -> Rgb {
                 let (xf, yf) = (x as f32, y as f32);
                 let (sx, sy) = f.source_at(xf, yf);
                 let (rgb, sx, sy) = lens_sample(src, f.lens.as_deref(), sx, sy);
-                let lin = mul3(&f.colour, rgb);
+                let mut lin = mul3(&f.colour, rgb);
+                if f.look.fringe {
+                    let y = |dx: f32, dy: f32| {
+                        let p = mul3(&f.colour, sample(src, sx + dx, sy + dy));
+                        f.look.luma[0] * p[0] + f.look.luma[1] * p[1] + f.look.luma[2] * p[2]
+                    };
+                    let e = look::edge(y(-1.0, 0.0), y(1.0, 0.0), y(0.0, -1.0), y(0.0, 1.0));
+                    lin = look::defringe_pixel(&f.look, lin, e);
+                }
                 let lin = look::look_pixel(&f.look, maps::local_pixel(&f.local, lin, sx, sy));
                 let px = if display {
                     let d = display_pixel(&f.display, lin);

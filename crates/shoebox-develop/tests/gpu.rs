@@ -170,6 +170,10 @@ fn gpu_matches_the_cpu_reference() {
             ..o
         },
     ));
+    let mut s = base.clone();
+    s.modules.defringe.purple = 80.0;
+    s.modules.defringe.green = 60.0;
+    cases.push(("defringe", s, o));
     // Lens corrections need the photo's shot: a second source with one.
     let lensed = src
         .clone()
