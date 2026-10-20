@@ -1222,9 +1222,11 @@ hashes, embeddings, faces).
   cache, whose temporary folders are now per thread). One at a time rather
   than the spec's two concurrent.
 - Metadata: with exiftool installed, the original's tags and its
-  sidecar's XMP are copied in (copyright only, or everything but
-  location: GPS, IPTC and XMP place names, IPTC Extension locations and
-  maker notes all removed, tested against a file carrying each), Orientation set to 1 (the pixels are upright) and the
+  sidecar's XMP are copied in ("all"); "all but location" copies an
+  allowlist instead (camera, lens, exposure, dates, author, copyright,
+  caption, keywords, rating, label), so no location field of any format
+  can come through, tested against a file carrying GPS, IPTC, XMP and IPTC
+  Extension locations; "copyright only" copies just that, Orientation set to 1 (the pixels are upright) and the
   export's own ICC profile kept. Without exiftool, files go out without
   metadata and the notice says so.
 - Exports never go inside a library folder (compared as real paths: a

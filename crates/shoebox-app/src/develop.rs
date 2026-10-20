@@ -656,26 +656,47 @@ fn exiftool() -> Option<PathBuf> {
     .find(|p| p.is_file())
 }
 
-/// Every tag that can say where a photo was taken, deleted for "all but
-/// location": coordinates (EXIF, XMP), place names (IPTC, XMP Photoshop and
-/// IPTC Core/Extension), and maker notes (Nikon's can hold location info).
-const LOCATION_TAGS: [&str; 16] = [
-    "-GPS:all=",
-    "-XMP-exif:GPS*=",
-    "-XMP:Location*=",
-    "-IPTC:City=",
-    "-IPTC:Sub-location=",
-    "-IPTC:Province-State=",
-    "-IPTC:Country-PrimaryLocationName=",
-    "-IPTC:Country-PrimaryLocationCode=",
-    "-XMP-photoshop:City=",
-    "-XMP-photoshop:State=",
-    "-XMP-photoshop:Country=",
-    "-XMP-iptcCore:CountryCode=",
-    "-XMP-iptcCore:Location=",
-    "-XMP-iptcExt:LocationShown*=",
-    "-XMP-iptcExt:LocationCreated*=",
-    "-MakerNotes:all=",
+/// What "all but location" copies: an allowlist (camera, exposure, dates,
+/// author, copyright, caption, keywords, rating, label), so no location
+/// field of any format, known or not, can come through.
+const NOT_LOCATION: [&str; 37] = [
+    "-EXIF:Make",
+    "-EXIF:Model",
+    "-EXIF:LensMake",
+    "-EXIF:LensModel",
+    "-EXIF:LensInfo",
+    "-EXIF:ExposureTime",
+    "-EXIF:FNumber",
+    "-EXIF:ISO",
+    "-EXIF:ExposureProgram",
+    "-EXIF:ExposureCompensation",
+    "-EXIF:MeteringMode",
+    "-EXIF:Flash",
+    "-EXIF:WhiteBalance",
+    "-EXIF:FocalLength",
+    "-EXIF:FocalLengthIn35mmFormat",
+    "-EXIF:DateTimeOriginal",
+    "-EXIF:CreateDate",
+    "-EXIF:OffsetTimeOriginal",
+    "-EXIF:SubSecTimeOriginal",
+    "-EXIF:Artist",
+    "-EXIF:Copyright",
+    "-EXIF:ImageDescription",
+    "-XMP-dc:Title",
+    "-XMP-dc:Description",
+    "-XMP-dc:Subject",
+    "-XMP-dc:Creator",
+    "-XMP-dc:Rights",
+    "-XMP-xmp:Rating",
+    "-XMP-xmp:Label",
+    "-XMP-lr:HierarchicalSubject",
+    "-IPTC:Keywords",
+    "-IPTC:ObjectName",
+    "-IPTC:Caption-Abstract",
+    "-IPTC:By-line",
+    "-IPTC:CopyrightNotice",
+    "-IPTC:Headline",
+    "-XMP-photoshop:Headline",
 ];
 
 /// Copy the original's metadata (and its sidecar's) into an exported file,
@@ -695,7 +716,13 @@ fn copy_metadata(
             cmd.arg("-TagsFromFile").arg(&item.path);
             cmd.args(["-Copyright", "-Artist", "-XMP-dc:Rights", "-XMP-dc:Creator"]);
         }
-        Metadata::All | Metadata::AllButLocation => {
+        Metadata::AllButLocation => {
+            cmd.arg("-TagsFromFile").arg(&item.path).args(NOT_LOCATION);
+            if let Some(s) = &item.sidecar {
+                cmd.arg("-TagsFromFile").arg(s).args(NOT_LOCATION);
+            }
+        }
+        Metadata::All => {
             cmd.arg("-TagsFromFile").arg(&item.path);
             cmd.args([
                 "-all:all",
@@ -706,9 +733,6 @@ fn copy_metadata(
             ]);
             if let Some(s) = &item.sidecar {
                 cmd.arg("-TagsFromFile").arg(s).arg("-XMP:all");
-            }
-            if preset.metadata == Metadata::AllButLocation {
-                cmd.args(LOCATION_TAGS);
             }
         }
     }
@@ -762,6 +786,12 @@ mod tests {
                 "-XMP-photoshop:Country=Japan",
                 "-XMP-iptcCore:Location=Gion",
                 "-XMP-iptcExt:LocationShownCity=Kyoto",
+                "-IPTC:ContentLocationName=Kyoto",
+                "-XMP-dc:Coverage=Japan",
+                "-XMP-iptcExt:LocationCreatedCity=Kyoto",
+                "-XMP-exif:GPSLatitude=35.0",
+                "-Make=NIKON CORPORATION",
+                "-ExposureTime=1/30",
                 "-Artist=Someone",
                 "-Copyright=Pink Octopus",
             ],
@@ -796,6 +826,10 @@ mod tests {
         // The rest came across.
         assert!(
             text.contains("Pink Octopus") && text.contains("Someone"),
+            "{text}"
+        );
+        assert!(
+            text.contains("NIKON CORPORATION") && text.contains("1/30"),
             "{text}"
         );
     }
