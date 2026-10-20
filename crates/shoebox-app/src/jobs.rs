@@ -382,6 +382,9 @@ pub enum LibraryCommand {
     RecordExports(Vec<shoebox_core::cache::ExportRow>),
     /// A photo's exports (answered by `Exports`).
     LoadExports(PathBuf),
+    /// Copy exports rendered into the cache into the library, as one
+    /// journaled batch (never replacing), then remove them from the cache.
+    AddExports(Vec<shoebox_core::fileops::PlannedCopy>),
 }
 
 /// A move, reject, rename or trash of stacks, by the paths of their files.
@@ -1483,6 +1486,32 @@ fn library_worker(
                     }
                 }
                 (false, false)
+            }
+            LibraryCommand::AddExports(copies) => {
+                let n = copies.len();
+                let r = fileops.import("export into the library", &copies, Vec::new());
+                // The cache's copies, whatever happened (an interrupted batch
+                // is resumed from the journal, so keep them then).
+                if !matches!(r, Err(shoebox_core::CoreError::BatchCancelled { .. })) {
+                    for c in &copies {
+                        let _ = std::fs::remove_file(&c.src);
+                    }
+                }
+                match r {
+                    Ok(b) => {
+                        undo.push(b);
+                        redo.clear();
+                        fresh.set(true);
+                        history(&undo, &redo);
+                        emit(LibraryEvent::Notice(format!(
+                            "Exported {n} file{} into the library. ⌘Z undoes it.",
+                            if n == 1 { "" } else { "s" }
+                        )));
+                    }
+                    Err(e) => emit(LibraryEvent::Error(format!("export: {e}"))),
+                }
+                batches(&fileops);
+                (false, true)
             }
             LibraryCommand::LoadExports(photo) => {
                 let rows = photo

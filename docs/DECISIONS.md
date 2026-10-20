@@ -1383,3 +1383,20 @@ the export.
   (proxy and full alike: it demosaics at full size, then downscales), CPU
   proxy render 55 ms (the live GPU pipe is the one held to 33 ms), Lanczos
   to 2048 px 23 ms, JPEG encode 184 ms.
+
+## Exports into the library; rule 3 amended (2026-10-20)
+
+Decision: Shoebox may write new files into the library, but never modify
+originals. Rule 3 now reads that files already in a library are never
+modified or replaced. New files may be added (imports, and exports the
+person sends there), always through `fileops`. Rule 4's Replace exception
+applies only outside the library.
+
+An export whose folder is inside a writable root is rendered into
+`<cache>/export-staging/`, with metadata copied there. The library worker
+then copies it in with `fileops::import`: journaled, BLAKE3-verified, never
+replacing. The batch is called "export into the library", ⌘Z moves its files
+to the Trash, and the cache copies are removed afterwards. Inside the
+library a clash never asks: the export just takes the next free `-1`, `-2`
+name. Reference folders are refused. Exported files are ordinary library
+files from then on, so they show up in the catalog.

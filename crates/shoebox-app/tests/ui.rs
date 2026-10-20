@@ -3651,8 +3651,9 @@ fn likely_edits_convert_when_idle() {
 }
 
 /// Export: ⇧⌘E, the first preset (JPEG, full size), into a folder outside
-/// the library; the Info panel lists it. A folder inside the library is
-/// refused.
+/// the library; the Info panel lists it. Into a folder in the library, it
+/// lands as a new file (journaled, never replacing, no question asked) and
+/// ⌘Z takes it out again; the original is untouched.
 #[test]
 fn export_a_photo() {
     let t = tempfile::tempdir().unwrap();
@@ -3753,17 +3754,32 @@ fn export_a_photo() {
         a.export_state().2 == Some(2)
     });
 
-    // Inside the library: refused, nothing written there (even given by a
-    // path through a symlink: the temp folder is /var, the root /private/var).
-    h.state_mut().set_export_folder(&root.join("exports"));
-    h.key_press_modifiers(opt_shift_cmd, egui::Key::E);
-    wait_for(&mut h, Duration::from_secs(30), "refused", |a| {
-        a.export_state()
-            .4
-            .as_deref()
-            .is_some_and(|e| e.contains("inside your library"))
+    // Into the library (given by a path through a symlink: the temp folder
+    // is /var, the root /private/var): a new file each time, then ⌘Z.
+    let original = std::fs::read(root.join("beach.jpg")).unwrap();
+    let inside = root.join("exports");
+    h.state_mut().set_export_folder(&inside);
+    for n in 1..=2 {
+        h.key_press_modifiers(opt_shift_cmd, egui::Key::E);
+        wait_for(&mut h, Duration::from_secs(30), "exported inside", |_| {
+            walk(&inside).len() == n
+        });
+        assert!(!h.state().export_asking());
+    }
+    wait_for(&mut h, Duration::from_secs(30), "in the catalog", |a| {
+        a.photo_count() == 3
     });
-    assert!(!root.join("exports").exists());
+    assert!(
+        h.state()
+            .notice()
+            .is_some_and(|n| n.contains("into the library"))
+    );
+    assert!(walk(&t.path().join("cache/export-staging")).is_empty());
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    wait_for(&mut h, Duration::from_secs(30), "undone", |_| {
+        walk(&inside).len() == 1
+    });
+    assert_eq!(std::fs::read(root.join("beach.jpg")).unwrap(), original);
 }
 
 fn walk(dir: &Path) -> Vec<PathBuf> {

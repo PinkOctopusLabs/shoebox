@@ -92,8 +92,11 @@ pub struct RegionJob {
 pub struct ExportJob {
     pub items: Vec<ExportItem>,
     pub presets: Vec<Preset>,
-    /// Library folders: exports never go inside them.
+    /// Library folders. An export into one is written to the cache first,
+    /// then copied in by the library worker (journaled, never replacing).
     pub roots: Vec<PathBuf>,
+    /// The library's reference folders: exports never go inside them.
+    pub reference: Vec<PathBuf>,
     /// What to do where a file is already there; None: ask first.
     pub on_clash: Option<Clash>,
 }
@@ -171,6 +174,9 @@ pub enum Event {
         errors: Vec<String>,
         /// Metadata couldn't be copied (exiftool isn't installed).
         no_metadata: bool,
+        /// Files for the library, in the cache: for the library worker to
+        /// copy in (`LibraryCommand::AddExports`).
+        into_library: Vec<shoebox_core::fileops::PlannedCopy>,
     },
     /// The export presets (saved, or the starters).
     Presets(Vec<Preset>),
@@ -300,11 +306,12 @@ fn worker(
     let (exporter, jobs) = crossbeam_channel::unbounded::<(ExportJob, Option<PathBuf>)>();
     {
         let (dngs, events, repaint) = (dngs.clone(), events.clone(), repaint.clone());
+        let staging = cache_dir.join("export-staging");
         let spawned = std::thread::Builder::new()
             .name("export".into())
             .spawn(move || {
                 while let Ok((job, conv)) = jobs.recv() {
-                    run_export(&job, conv.as_deref(), &dngs, &|e| {
+                    run_export(&job, conv.as_deref(), &dngs, &staging, &|e| {
                         let _ = events.send(e);
                         repaint();
                     });
@@ -677,6 +684,12 @@ pub fn default_folder(preset: &str) -> Option<PathBuf> {
 /// each preset.
 /// Where an item goes with a preset: the folder and file name (without
 /// `-1`, `-2`), or why it can't go there.
+/// Whether `folder` is inside one of the library's folders.
+fn in_library(job: &ExportJob, folder: &std::path::Path) -> bool {
+    let real = real_path(folder);
+    job.roots.iter().any(|r| real.starts_with(real_path(r)))
+}
+
 fn destination(
     job: &ExportJob,
     item: &ExportItem,
@@ -688,11 +701,11 @@ fn destination(
         None => default_folder(&preset.name).ok_or("no home folder")?,
     };
     // Compared as real paths: /var is /private/var on macOS, and a symlink
-    // mustn't sneak an export into the library.
+    // mustn't sneak an export into a reference folder.
     let real = real_path(&folder);
-    if job.roots.iter().any(|r| real.starts_with(real_path(r))) {
+    if job.reference.iter().any(|r| real.starts_with(real_path(r))) {
         return Err(format!(
-            "{} is inside your library; exports go elsewhere",
+            "{} is in a reference folder, which Shoebox never writes to",
             folder.display()
         ));
     }
@@ -715,6 +728,7 @@ fn run_export(
     job: &ExportJob,
     converter: Option<&std::path::Path>,
     dngs: &DngCache,
+    staging: &std::path::Path,
     emit: &(dyn Fn(Event) + Sync),
 ) {
     // Before anything is written: files already there? Ask first.
@@ -723,8 +737,9 @@ fn run_export(
         for (seq, item) in job.items.iter().enumerate() {
             for preset in &job.presets {
                 if let Ok((folder, file)) = destination(job, item, preset, seq) {
+                    // In the library nothing is replaced: no question.
                     let p = folder.join(file);
-                    if p.exists() && !clashes.contains(&p) {
+                    if p.exists() && !clashes.contains(&p) && !in_library(job, &folder) {
                         clashes.push(p);
                     }
                 }
@@ -757,6 +772,7 @@ fn run_export(
                         seq,
                         item,
                         &names,
+                        staging,
                         converter,
                         dngs,
                         exiftool.as_deref(),
@@ -771,10 +787,13 @@ fn run_export(
     let p = progress.into_inner().unwrap_or_else(|e| e.into_inner());
     let mut written = p.written;
     written.sort_by_key(|(seq, _)| *seq);
+    let mut into_library = p.into_library;
+    into_library.sort_by_key(|(seq, _)| *seq);
     emit(Event::ExportDone {
         written: written.into_iter().map(|(_, w)| w).collect(),
         errors: p.errors,
         no_metadata: exiftool.is_none(),
+        into_library: into_library.into_iter().map(|(_, c)| c).collect(),
     });
 }
 
@@ -788,6 +807,9 @@ struct ExportProgress {
     /// Files written, by the photo's place in the export.
     written: Vec<(usize, Exported)>,
     errors: Vec<String>,
+    /// Files rendered for the library, waiting in the cache to be copied
+    /// in, by the photo's place in the export.
+    into_library: Vec<(usize, shoebox_core::fileops::PlannedCopy)>,
 }
 
 /// Where each photo goes with each preset, by (photo, preset): the
@@ -806,7 +828,9 @@ fn plan_names(job: &ExportJob) -> Names {
                 let target = folder.join(&file);
                 // A file there before this export is replaced only when
                 // the person chose Replace.
-                let free = job.on_clash == Some(Clash::Replace) || !target.exists();
+                // In the library, never: a new name instead.
+                let free = (job.on_clash == Some(Clash::Replace) && !in_library(job, &folder))
+                    || !target.exists();
                 if claimed.insert(target) && free {
                     return (folder, file, true);
                 }
@@ -835,6 +859,7 @@ fn export_item(
     seq: usize,
     item: &ExportItem,
     names: &Names,
+    staging: &std::path::Path,
     converter: Option<&std::path::Path>,
     dngs: &DngCache,
     exiftool: Option<&std::path::Path>,
@@ -875,6 +900,30 @@ fn export_item(
                     let bytes = shoebox_develop::export::encode(&img, preset)?;
                     let ext = preset.format.extension();
                     let stem = file.strip_suffix(&format!(".{ext}")).unwrap_or(&file);
+                    if in_library(job, &folder) {
+                        // Written in the cache; the library worker copies it
+                        // in as a journaled batch that never replaces.
+                        std::fs::create_dir_all(staging)
+                            .map_err(|e| format!("{}: {e}", staging.display()))?;
+                        let staged =
+                            shoebox_develop::export::write_new(staging, stem, ext, &bytes)?;
+                        if let Some(tool) = exiftool {
+                            copy_metadata(tool, item, preset, &staged);
+                        }
+                        let hash = std::fs::read(&staged)
+                            .map(|b| *blake3::hash(&b).as_bytes())
+                            .map_err(|e| format!("{}: {e}", staged.display()))?;
+                        let dst = folder.join(&file);
+                        lock().into_library.push((
+                            seq,
+                            shoebox_core::fileops::PlannedCopy {
+                                src: staged,
+                                dst: dst.clone(),
+                                hash,
+                            },
+                        ));
+                        return Ok(dst);
+                    }
                     // Replace only what was there before this export: two
                     // photos landing on one name keep both.
                     let out = if job.on_clash == Some(Clash::Replace) && first {
@@ -1095,11 +1144,14 @@ mod tests {
             items,
             presets: vec![preset],
             roots: vec![t.path().join("lib")],
+            reference: Vec::new(),
             on_clash: Some(Clash::NewFile),
         };
         let events = Mutex::new(Vec::new());
         let dngs = DngCache::new(&t.path().join("cache"), 1 << 30);
-        run_export(&job, None, &dngs, &|e| events.lock().unwrap().push(e));
+        run_export(&job, None, &dngs, &t.path().join("staging"), &|e| {
+            events.lock().unwrap().push(e)
+        });
         let events = events.into_inner().unwrap();
         let mut done: Vec<usize> = events
             .iter()
@@ -1134,9 +1186,20 @@ mod tests {
         let names = plan_names(&job);
         assert_eq!(names[&(0, 0)].as_ref().unwrap().1, "one-2.jpg");
         assert_eq!(names[&(3, 0)].as_ref().unwrap().1, "one-3.jpg");
-        run_export(&job, None, &dngs, &|_| {});
+        run_export(&job, None, &dngs, &t.path().join("staging"), &|_| {});
         assert_eq!(std::fs::read_dir(&out).unwrap().count(), 10);
         assert!(out.join("one-3.jpg").exists() && out.join("two-1.jpg").exists());
+
+        // Into a reference folder: refused, for every photo.
+        let refused = ExportJob {
+            reference: vec![t.path().to_path_buf()],
+            ..job.clone()
+        };
+        assert!(
+            plan_names(&refused)
+                .values()
+                .all(|r| r.as_ref().is_err_and(|e| e.contains("reference folder")))
+        );
     }
 
     /// "All but location" leaves nothing that says where: coordinates or

@@ -314,7 +314,11 @@ pub fn poll(app: &mut ShoeboxApp) {
                 written,
                 errors,
                 no_metadata,
+                into_library,
             } => {
+                if !into_library.is_empty() {
+                    app.command(LibraryCommand::AddExports(into_library));
+                }
                 super::export::done(app, written, errors, no_metadata);
                 continue;
             }

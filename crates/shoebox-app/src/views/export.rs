@@ -110,10 +110,18 @@ fn send(app: &mut ShoeboxApp, ids: &[PhotoId], presets: Vec<Preset>) {
     }
     app.export.progress = Some((0, items.len() * presets.len()));
     let roots = app.catalog.roots.iter().map(|r| r.path.clone()).collect();
+    let reference = app
+        .catalog
+        .roots
+        .iter()
+        .filter(|r| r.role == shoebox_core::scan::Role::Reference)
+        .map(|r| r.path.clone())
+        .collect();
     app.developer.export(ExportJob {
         items,
         presets,
         roots,
+        reference,
         on_clash: None,
     });
 }
@@ -385,7 +393,10 @@ pub fn dialog(app: &mut ShoeboxApp, ctx: &egui::Context) {
                     go = true;
                 }
             });
-            ui.weak("Exports go outside your library; a name that's taken gets -1, -2.");
+            ui.weak(
+                "A name that's taken gets -1, -2. Into your library, exports are new files \
+                 (never replacing one), and ⌘Z undoes them.",
+            );
         });
     if changed {
         app.developer.save_presets(app.export.presets.clone());
