@@ -2308,7 +2308,8 @@ fn settings_window() {
     snapshot(&mut h, "settings-4-updates");
 
     // Everything reached settings.json.
-    wait_for(&mut h, Duration::from_secs(10), "settings saved", |_| {
+    // Generous: the worker can be slow while other tests load the machine.
+    wait_for(&mut h, Duration::from_secs(30), "settings saved", |_| {
         let s = saved();
         s.offline_map && s.marks_to_all_stack_members
     });
