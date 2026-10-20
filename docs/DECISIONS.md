@@ -1537,3 +1537,17 @@ files from then on, so they show up in the catalog.
 - Lensfun's colour pass with `reverse` set simulates vignetting (unlike its
   geometry passes), so the correction is its reciprocal.
 - Lens corrections are off by default for now. Auto will turn them on.
+
+## Manual transform (2026-10-20)
+
+The geometry map is now a 3×3 projective matrix: output → crop →
+un-rotate → un-transform → orientation → source. The shader divides by its
+third row; `Frame::source_at` does the same on the CPU. The transform is a
+camera tilted (Vertical) or panned (Horizontal) by up to 30° about the
+centre, with the focal length set to the frame's diagonal. The tilt is
+re-centred, because a real tilt also moves the picture. Then come Aspect
+(±0.5 stop of width against height), Scale (50–150%) and offsets (up to a
+quarter of the frame). Constrain (on by default) zooms in after the
+perspective just enough that the frame's corners come from inside the
+original, so the user's Scale is kept. The transform turns and mirrors
+with the frame. Auto-upright (line detection) is Phase 3.

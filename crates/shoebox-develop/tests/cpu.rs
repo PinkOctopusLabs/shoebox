@@ -500,3 +500,90 @@ fn sixteen_bit_sources_match_and_refine_eight_bit() {
         assert!(fine.rgb.data[3] > fine.rgb.data[0]);
     }
 }
+
+/// The manual transform: a vertical tilt makes the frame's top and bottom
+/// edges come from different widths of the original; constrained, every
+/// output corner still comes from inside; scale and offsets do what they
+/// say; four quarter turns leave it as it was.
+#[test]
+fn manual_transform() {
+    use shoebox_develop::cpu::transform_inverse;
+    use shoebox_develop::edit::{Geometry, Transform};
+    let (w, h) = (600.0, 400.0);
+    let at = |m: &[[f64; 3]; 3], x: f64, y: f64| {
+        let p = shoebox_develop::colour::mulv(m, [x, y, 1.0]);
+        (p[0] / p[2], p[1] / p[2])
+    };
+    let t = Transform {
+        vertical: 50.0,
+        ..Transform::default()
+    };
+    let m = transform_inverse(&t, w, h);
+    let (tl, bl) = (at(&m, -w / 2.0, -h / 2.0), at(&m, -w / 2.0, h / 2.0));
+    assert!((tl.0.abs() - bl.0.abs()).abs() > 10.0, "{tl:?} {bl:?}");
+    for (x, y) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+        let p = at(&m, x * w / 2.0, y * h / 2.0);
+        assert!(
+            p.0.abs() <= w / 2.0 + 1e-6 && p.1.abs() <= h / 2.0 + 1e-6,
+            "{p:?}"
+        );
+    }
+    // Without constrain, a corner falls outside (a blank edge).
+    let loose = transform_inverse(
+        &Transform {
+            constrain: false,
+            ..t.clone()
+        },
+        w,
+        h,
+    );
+    let outside = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+        .iter()
+        .any(|&(x, y)| {
+            let p = at(&loose, x * w / 2.0, y * h / 2.0);
+            p.0.abs() > w / 2.0 + 0.5 || p.1.abs() > h / 2.0 + 0.5
+        });
+    assert!(outside);
+    // Scale 200%: the frame's edge comes from halfway out; an offset moves
+    // the centre.
+    let m = transform_inverse(
+        &Transform {
+            scale: 200.0,
+            ..Transform::default()
+        },
+        w,
+        h,
+    );
+    assert!((at(&m, w / 2.0, 0.0).0 - w / 4.0).abs() < 1e-9);
+    let m = transform_inverse(
+        &Transform {
+            offset_x: 100.0,
+            ..Transform::default()
+        },
+        w,
+        h,
+    );
+    assert!((at(&m, 0.0, 0.0).0 + 0.25 * w).abs() < 1e-9);
+    // Turns.
+    let mut g = Geometry {
+        transform: Transform {
+            vertical: 30.0,
+            horizontal: -10.0,
+            aspect: 20.0,
+            offset_x: 5.0,
+            offset_y: -7.0,
+            ..Transform::default()
+        },
+        ..Geometry::default()
+    };
+    let before = g.clone();
+    g.turn(true);
+    assert_eq!(
+        (g.transform.vertical, g.transform.horizontal),
+        (-10.0, -30.0)
+    );
+    for _ in 0..3 {
+        g.turn(true);
+    }
+    assert_eq!(g, before);
+}

@@ -4,7 +4,7 @@
 use eframe::egui::{self, Color32, RichText, Sense, pos2, vec2};
 use shoebox_develop::edit::{
     BlackAndWhite, Calibration, Clarity, Colour, Dehaze, HUES, LensCorrection, NoiseReduction,
-    Settings, Sharpening, ToneCurve,
+    Settings, Sharpening, ToneCurve, Transform,
 };
 
 use super::develop::{edit, slider};
@@ -57,9 +57,83 @@ pub fn modules(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &Settings) {
     colour(app, ui, &s.modules.colour);
     detail(app, ui, s);
     lens(app, ui, &s.modules.lens);
+    transform(app, ui, &s.geometry.transform);
     black_and_white(app, ui, &s.modules.black_and_white);
     calibration(app, ui, &s.modules.calibration);
 }
+
+/// Perspective (vertical, horizontal), aspect, scale and offsets.
+fn transform(app: &mut ShoeboxApp, ui: &mut egui::Ui, t: &Transform) {
+    let reset = section(ui, "Transform", *t != Transform::default(), false, |ui| {
+        egui::Grid::new("transform-grid")
+            .num_columns(2)
+            .show(ui, |ui| {
+                let rows: [TransformRow; 6] = [
+                    ("Vertical", "tf-v", t.vertical, -100.0..=100.0, 0.0, |t| {
+                        &mut t.vertical
+                    }),
+                    (
+                        "Horizontal",
+                        "tf-h",
+                        t.horizontal,
+                        -100.0..=100.0,
+                        0.0,
+                        |t| &mut t.horizontal,
+                    ),
+                    ("Aspect", "tf-a", t.aspect, -100.0..=100.0, 0.0, |t| {
+                        &mut t.aspect
+                    }),
+                    ("Scale", "tf-s", t.scale, 50.0..=150.0, 100.0, |t| {
+                        &mut t.scale
+                    }),
+                    ("X offset", "tf-x", t.offset_x, -100.0..=100.0, 0.0, |t| {
+                        &mut t.offset_x
+                    }),
+                    ("Y offset", "tf-y", t.offset_y, -100.0..=100.0, 0.0, |t| {
+                        &mut t.offset_y
+                    }),
+                ];
+                for (name, key, value, range, default, field) in rows {
+                    if let Some((v, d)) = slider(ui, name, value, range, default, 0) {
+                        edit(app, key, format!("{name} {v:+.0}"), d, |s| {
+                            *field(&mut s.geometry.transform) = v;
+                        });
+                    }
+                }
+            });
+        let mut c = t.constrain;
+        if ui
+            .checkbox(&mut c, "Constrain")
+            .on_hover_text("Zoom in just enough that no blank edge shows")
+            .changed()
+        {
+            edit(
+                app,
+                "tf-c",
+                format!("Constrain {}", if c { "on" } else { "off" }),
+                false,
+                |s| {
+                    s.geometry.transform.constrain = c;
+                },
+            );
+        }
+    });
+    if reset {
+        edit(app, "transform", "Reset transform".into(), false, |s| {
+            s.geometry.transform = Transform::default();
+        });
+    }
+}
+
+/// A transform slider: name, history key, value, range, default, field.
+type TransformRow = (
+    &'static str,
+    &'static str,
+    f64,
+    std::ops::RangeInclusive<f64>,
+    f64,
+    fn(&mut Transform) -> &mut f64,
+);
 
 /// Clarity and dehaze.
 fn presence(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &Settings) {

@@ -45,6 +45,7 @@ struct Params {
     scale: vec4<f32>,     // source → map pixels (x, y)
     air: vec4<f32>,       // dehaze airlight (rgb), its luminance
     lens: vec4<f32>,      // grid on (0/1), columns, rows, chromatic (0/1)
+    map2: vec4<f32>,      // the map's perspective row: (sx, sy) are divided by map2·(x, y, 1)
 };
 
 @group(0) @binding(0) var src: texture_2d<f32>;
@@ -384,8 +385,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let x = f32(id.x);
     let y = f32(id.y);
-    var sx = p.map0.x * x + p.map0.y * y + p.map0.z;
-    var sy = p.map1.x * x + p.map1.y * y + p.map1.z;
+    let pw = p.map2.x * x + p.map2.y * y + p.map2.z;
+    var sx = (p.map0.x * x + p.map0.y * y + p.map0.z) / pw;
+    var sy = (p.map1.x * x + p.map1.y * y + p.map1.z) / pw;
     var raw: vec3<f32>;
     if (p.lens.x > 0.5) {
         let l = lens_sample(sx, sy);

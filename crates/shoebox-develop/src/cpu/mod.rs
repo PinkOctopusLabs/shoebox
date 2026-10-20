@@ -305,8 +305,9 @@ pub struct Frame {
     pub width: usize,
     pub height: usize,
     /// Output pixel `(x, y)` → source position `(sx, sy)` in source pixel
-    /// indices: `sx = map[0]·(x, y, 1)`, `sy = map[1]·(x, y, 1)`.
-    pub map: [[f32; 3]; 2],
+    /// indices, projectively: `sx = map[0]·(x, y, 1) / map[2]·(x, y, 1)`,
+    /// likewise `sy` with `map[1]`.
+    pub map: [[f32; 3]; 3],
     /// Source (camera RGB balanced at as shot) → linear Rec.2020, with the
     /// white balance change, exposure and calibration folded in.
     pub colour: [[f32; 3]; 3],
@@ -451,7 +452,7 @@ pub fn geometry_map(
     src_h: usize,
     orientation: u16,
     g: &Geometry,
-) -> ([[f64; 3]; 2], usize, usize) {
+) -> ([[f64; 3]; 3], usize, usize) {
     let orientation = compose_orientation(orientation, g.quarter, g.flip);
     let (uw, uh) = upright(src_w, src_h, orientation);
     let (uwf, uhf) = (uw as f64, uh as f64);
@@ -461,27 +462,123 @@ pub fn geometry_map(
     // Output index (x, y) → centre in the rotated upright frame, relative
     // to its centre: (x + 0.5 + l·W − W/2, …).
     let (ox, oy) = (l * uwf + 0.5 - uwf / 2.0, t * uhf + 0.5 - uhf / 2.0);
+    let out = [[1.0, 0.0, ox], [0.0, 1.0, oy], [0.0, 0.0, 1.0]];
+    // Un-rotate.
     let a = g.rotate.to_radians();
     let (sin, cos) = (a.sin(), a.cos());
-    // Un-rotate: upright centre coords u = cos·px + sin·py + W/2, v = −sin·px + cos·py + H/2.
-    let u = [cos, sin, cos * ox + sin * oy + uwf / 2.0];
-    let v = [-sin, cos, -sin * ox + cos * oy + uhf / 2.0];
+    let unrotate = [[cos, sin, 0.0], [-sin, cos, 0.0], [0.0, 0.0, 1.0]];
+    // Un-transform (perspective, scale, offsets), about the centre.
+    let untransform = transform_inverse(&g.transform, uwf, uhf);
+    let corner = [
+        [1.0, 0.0, uwf / 2.0],
+        [0.0, 1.0, uhf / 2.0],
+        [0.0, 0.0, 1.0],
+    ];
     // Upright (continuous) → stored (continuous), per the EXIF definitions.
     let (w, h) = (src_w as f64, src_h as f64);
-    let neg = |p: [f64; 3], k: f64| [-p[0], -p[1], k - p[2]];
-    let (sx, sy) = match orientation {
-        2 => (neg(u, w), v),
-        3 => (neg(u, w), neg(v, h)),
-        4 => (u, neg(v, h)),
-        5 => (v, u),
-        6 => (v, neg(u, h)),
-        7 => (neg(v, w), neg(u, h)),
-        8 => (neg(v, w), u),
-        _ => (u, v),
+    let stored = match orientation {
+        2 => [[-1.0, 0.0, w], [0.0, 1.0, 0.0]],
+        3 => [[-1.0, 0.0, w], [0.0, -1.0, h]],
+        4 => [[1.0, 0.0, 0.0], [0.0, -1.0, h]],
+        5 => [[0.0, 1.0, 0.0], [1.0, 0.0, 0.0]],
+        6 => [[0.0, 1.0, 0.0], [-1.0, 0.0, h]],
+        7 => [[0.0, -1.0, w], [-1.0, 0.0, h]],
+        8 => [[0.0, -1.0, w], [1.0, 0.0, 0.0]],
+        _ => [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
     };
+    let stored = [stored[0], stored[1], [0.0, 0.0, 1.0]];
     // Continuous → sample index (centres at +0.5).
-    let to_index = |p: [f64; 3]| [p[0], p[1], p[2] - 0.5];
-    ([to_index(sx), to_index(sy)], ow, oh)
+    let index = [[1.0, 0.0, -0.5], [0.0, 1.0, -0.5], [0.0, 0.0, 1.0]];
+    let m = [stored, corner, untransform, unrotate, out]
+        .iter()
+        .fold(index, |acc, next| colour::mul(&acc, next));
+    (m, ow, oh)
+}
+
+/// The manual transform's inverse on centred upright coordinates: from
+/// where a pixel ends up to where it was. Perspective is a camera tilted
+/// (vertical) or panned (horizontal) about the centre, focal length the
+/// frame's diagonal; then aspect, scale and offsets. With `constrain`, a
+/// zoom after the perspective keeps the frame filled.
+pub fn transform_inverse(t: &crate::edit::Transform, w: f64, h: f64) -> M3 {
+    if t.is_identity() {
+        return colour::IDENTITY;
+    }
+    let f = w.hypot(h);
+    let (av, ah) = (
+        (t.vertical / 100.0 * 30.0).to_radians(),
+        (t.horizontal / 100.0 * 30.0).to_radians(),
+    );
+    let tilt = [
+        [1.0, 0.0, 0.0],
+        [0.0, av.cos(), -av.sin()],
+        [0.0, av.sin(), av.cos()],
+    ];
+    let pan = [
+        [ah.cos(), 0.0, ah.sin()],
+        [0.0, 1.0, 0.0],
+        [-ah.sin(), 0.0, ah.cos()],
+    ];
+    let k = colour::diag([f, f, 1.0]);
+    let k_inv = colour::diag([1.0 / f, 1.0 / f, 1.0]);
+    // Original → after the perspective, re-centred: tilting the camera
+    // also moves the picture, and the original's centre should stay put.
+    let persp = colour::mul(&k, &colour::mul(&colour::mul(&pan, &tilt), &k_inv));
+    let c = colour::mulv(&persp, [0.0, 0.0, 1.0]);
+    let recentre = [
+        [1.0, 0.0, -c[0] / c[2]],
+        [0.0, 1.0, -c[1] / c[2]],
+        [0.0, 0.0, 1.0],
+    ];
+    let persp = colour::mul(&recentre, &persp);
+    let persp_inv = colour::inv(&persp).unwrap_or(colour::IDENTITY);
+    let zoom = if t.constrain {
+        fill_zoom(&persp_inv, w, h)
+    } else {
+        1.0
+    };
+    let s = t.scale / 100.0 * zoom;
+    let aspect = 2f64.powf(t.aspect / 200.0);
+    let (sx, sy) = (s * aspect, s / aspect);
+    let (dx, dy) = (t.offset_x / 100.0 * 0.25 * w, t.offset_y / 100.0 * 0.25 * h);
+    // Where a pixel ends up: perspective, then scale and offset.
+    let place_inv = [
+        [1.0 / sx, 0.0, -dx / sx],
+        [0.0, 1.0 / sy, -dy / sy],
+        [0.0, 0.0, 1.0],
+    ];
+    colour::mul(&persp_inv, &place_inv)
+}
+
+/// The smallest zoom at which the frame's corners, taken back through
+/// `inv`, land inside the original (so no blank edge shows).
+fn fill_zoom(inv: &M3, w: f64, h: f64) -> f64 {
+    let inside = |z: f64| {
+        [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+            .iter()
+            .all(|&(cx, cy)| {
+                let p = colour::mulv(inv, [cx * w / 2.0 / z, cy * h / 2.0 / z, 1.0]);
+                p[2] > 0.0
+                    && (p[0] / p[2]).abs() <= w / 2.0 + 1e-6
+                    && (p[1] / p[2]).abs() <= h / 2.0 + 1e-6
+            })
+    };
+    if inside(1.0) {
+        return 1.0;
+    }
+    let (mut lo, mut hi) = (1.0, 8.0);
+    if !inside(hi) {
+        return 1.0;
+    }
+    for _ in 0..40 {
+        let mid = (lo + hi) / 2.0;
+        if inside(mid) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    hi
 }
 
 /// Exposure added to every render before the slider's: cameras place mid
@@ -536,10 +633,13 @@ pub fn frame(raw: &RawImage, src: &Demosaiced, s: &Settings, o: &Options) -> Fra
             (src.rgb.width as f64 - 1.0) / 2.0,
             (src.rgb.height as f64 - 1.0) / 2.0,
         ];
-        for (r, row) in map.iter_mut().enumerate() {
-            row[0] /= z;
-            row[1] /= z;
-            row[2] = c[r] + (row[2] - c[r]) / z;
+        // Scale the source position about its centre: s' = c + (s − c)/z,
+        // on the homogeneous rows.
+        let last = map[2];
+        for (r, row) in map.iter_mut().take(2).enumerate() {
+            for k in 0..3 {
+                row[k] = c[r] * last[k] + (row[k] - c[r] * last[k]) / z;
+            }
         }
     }
     Frame {
@@ -588,6 +688,16 @@ pub fn histogram(img: &Rgb) -> [[u32; 256]; 4] {
 }
 
 impl Frame {
+    /// The source position of output pixel `(x, y)`.
+    pub fn source_at(&self, x: f32, y: f32) -> (f32, f32) {
+        let m = &self.map;
+        let w = m[2][0] * x + m[2][1] * y + m[2][2];
+        (
+            (m[0][0] * x + m[0][1] * y + m[0][2]) / w,
+            (m[1][0] * x + m[1][1] * y + m[1][2]) / w,
+        )
+    }
+
     /// Just the part `[x, y, width, height]` of this frame (clamped to it):
     /// the same map, starting at the part's corner.
     pub fn region(&self, r: [usize; 4]) -> Frame {
@@ -596,7 +706,7 @@ impl Frame {
         let mut f = self.clone();
         f.width = r[2].min(self.width - x).max(1);
         f.height = r[3].min(self.height - y).max(1);
-        for row in 0..2 {
+        for row in 0..3 {
             f.map[row][2] += self.map[row][0] * x as f32 + self.map[row][1] * y as f32;
         }
         f
@@ -648,8 +758,7 @@ pub fn apply(src: &Rgb, f: &Frame, display: bool) -> Rgb {
         .for_each(|(y, line)| {
             for x in 0..f.width {
                 let (xf, yf) = (x as f32, y as f32);
-                let sx = f.map[0][0] * xf + f.map[0][1] * yf + f.map[0][2];
-                let sy = f.map[1][0] * xf + f.map[1][1] * yf + f.map[1][2];
+                let (sx, sy) = f.source_at(xf, yf);
                 let (rgb, sx, sy) = lens_sample(src, f.lens.as_deref(), sx, sy);
                 let lin = mul3(&f.colour, rgb);
                 let lin = look::look_pixel(&f.look, maps::local_pixel(&f.local, lin, sx, sy));
@@ -744,7 +853,7 @@ pub fn rotate_crop(img: &Rgb, g: &Geometry) -> Rgb {
     resample(img, map, w, h)
 }
 
-fn resample(img: &Rgb, map: [[f64; 3]; 2], w: usize, h: usize) -> Rgb {
+fn resample(img: &Rgb, map: [[f64; 3]; 3], w: usize, h: usize) -> Rgb {
     let f = Frame {
         width: w,
         height: h,

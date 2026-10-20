@@ -425,6 +425,8 @@ pub struct Geometry {
     pub crop: [f64; 4],
     /// The crop's aspect lock: "free", "original" or "w:h".
     pub aspect: String,
+    /// Perspective and framing, before rotation and crop.
+    pub transform: Transform,
 }
 
 impl Default for Geometry {
@@ -435,7 +437,51 @@ impl Default for Geometry {
             rotate: 0.0,
             crop: [0.0, 0.0, 1.0, 1.0],
             aspect: "free".into(),
+            transform: Transform::default(),
         }
+    }
+}
+
+/// The manual transform (Tools beyond PhotoLab): vertical and horizontal
+/// perspective (−100 to +100, a camera tilted or panned up to 30°), aspect
+/// (−100 to +100: narrower to wider), scale (50–150%) and offsets (−100 to
+/// +100, a quarter of the frame), in the upright frame. With `constrain`,
+/// it zooms in just enough that no blank edge shows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Transform {
+    pub vertical: f64,
+    pub horizontal: f64,
+    pub aspect: f64,
+    pub scale: f64,
+    pub offset_x: f64,
+    pub offset_y: f64,
+    pub constrain: bool,
+}
+
+impl Default for Transform {
+    fn default() -> Self {
+        Self {
+            vertical: 0.0,
+            horizontal: 0.0,
+            aspect: 0.0,
+            scale: 100.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            constrain: true,
+        }
+    }
+}
+
+impl Transform {
+    pub fn is_identity(&self) -> bool {
+        let d = Self::default();
+        self.vertical == 0.0
+            && self.horizontal == 0.0
+            && self.aspect == 0.0
+            && self.scale == d.scale
+            && self.offset_x == 0.0
+            && self.offset_y == 0.0
     }
 }
 
@@ -456,6 +502,16 @@ impl Geometry {
             self.quarter = (self.quarter + 2) % 4;
         }
         self.aspect = flip_aspect(&self.aspect);
+        // The transform turns with the frame: what was vertical is now
+        // horizontal.
+        let t = &mut self.transform;
+        let (v, h, x, y) = (t.vertical, t.horizontal, t.offset_x, t.offset_y);
+        if clockwise {
+            (t.vertical, t.horizontal, t.offset_x, t.offset_y) = (h, -v, -y, x);
+        } else {
+            (t.vertical, t.horizontal, t.offset_x, t.offset_y) = (-h, v, y, -x);
+        }
+        t.aspect = -t.aspect;
     }
 
     /// Mirror left to right, the crop mirroring with it.
@@ -463,6 +519,8 @@ impl Geometry {
         let [l, t, r, b] = self.crop;
         self.flip = !self.flip;
         self.crop = [1.0 - r, t, 1.0 - l, b];
+        self.transform.horizontal = -self.transform.horizontal;
+        self.transform.offset_x = -self.transform.offset_x;
     }
 }
 

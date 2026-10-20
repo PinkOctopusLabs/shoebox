@@ -606,7 +606,7 @@ impl Histogram {
     }
 }
 
-/// The uniform block (`Params` in the shader), as 39 vec4s.
+/// The uniform block (`Params` in the shader), as 40 vec4s.
 fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
     let row = |r: [f32; 3]| [r[0], r[1], r[2], 0.0];
     let d = &f.display;
@@ -673,6 +673,7 @@ fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
         Some(g) => v.extend([1.0, g.cols as f32, g.rows as f32, flag(g.chromatic)]),
         None => v.extend([0.0, 2.0, 2.0, 0.0]),
     }
+    v.extend([f.map[2][0], f.map[2][1], f.map[2][2], 0.0]);
     v
 }
 

@@ -157,6 +157,19 @@ fn gpu_matches_the_cpu_reference() {
         },
     ));
 
+    let mut s = base.clone();
+    s.geometry.transform.vertical = 40.0;
+    s.geometry.transform.horizontal = -20.0;
+    s.geometry.transform.aspect = 30.0;
+    s.geometry.rotate = 1.5;
+    cases.push((
+        "perspective",
+        s,
+        Options {
+            orientation: 6,
+            ..o
+        },
+    ));
     // Lens corrections need the photo's shot: a second source with one.
     let lensed = src
         .clone()
@@ -198,7 +211,11 @@ fn gpu_matches_the_cpu_reference() {
             // A rotated sample position differs by float rounding (the GPU
             // fuses the map's multiply-adds), and a checkerboard edge
             // amplifies that: 1e-3 there, a quarter of an 8-bit step.
-            let tolerance = if s.geometry.rotate != 0.0 { 1e-3 } else { 1e-4 };
+            let tolerance = if s.geometry.rotate != 0.0 || !s.geometry.transform.is_identity() {
+                1e-3
+            } else {
+                1e-4
+            };
             assert!(
                 d / scale <= tolerance,
                 "{name} (display {display}): differs by {d} at pixel {at} (scale {scale}): cpu {:?} gpu {:?}",

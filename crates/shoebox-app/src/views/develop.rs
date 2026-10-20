@@ -1000,8 +1000,7 @@ fn pick_neutral(app: &mut ShoeboxApp, at: egui::Pos2) {
         return;
     };
     let f = cpu::frame(&ready.meta, &ready.src, doc.settings(), &o);
-    let sx = f.map[0][0] * at.x + f.map[0][1] * at.y + f.map[0][2];
-    let sy = f.map[1][0] * at.x + f.map[1][1] * at.y + f.map[1][2];
+    let (sx, sy) = f.source_at(at.x, at.y);
     let img = &ready.src.rgb;
     let (cx, cy) = (sx.round() as i64, sy.round() as i64);
     let mut sum = [0.0f64; 3];
