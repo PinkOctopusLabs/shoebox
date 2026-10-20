@@ -3354,6 +3354,31 @@ fn develop_a_jpeg() {
         "{wide:?} {tall:?}"
     );
     snapshot(&mut h, "develop-jpeg-turned");
+
+    // Z: 100%, and the sharp full-size part arrives; dragging pans; Z fits.
+    h.key_press(egui::Key::Z);
+    wait_for(&mut h, Duration::from_secs(20), "zoomed region", |a| {
+        a.develop_zoom().1.is_some()
+    });
+    let centre = h.state().develop_zoom().0.unwrap();
+    let photo = h.state().develop_photo_rect().unwrap();
+    assert!(photo.width() > 600.0 / 2.0 - 1.0, "{photo:?}");
+    let at = egui::pos2(660.0, 400.0);
+    h.event(egui::Event::PointerMoved(at));
+    h.event(button(at, true));
+    h.run_steps(1);
+    h.event(egui::Event::PointerMoved(at + egui::vec2(40.0, 0.0)));
+    h.run_steps(1);
+    h.event(button(at + egui::vec2(40.0, 0.0), false));
+    h.run_steps(2);
+    assert!(
+        h.state().develop_zoom().0.unwrap().x < centre.x,
+        "dragging right moves the view left"
+    );
+    snapshot(&mut h, "develop-jpeg-zoomed");
+    h.key_press(egui::Key::Z);
+    h.run_steps(2);
+    assert!(h.state().develop_zoom().0.is_none());
     h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::OpenBracket);
     h.run_steps(4);
     assert_eq!(

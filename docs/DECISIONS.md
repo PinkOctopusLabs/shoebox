@@ -1270,3 +1270,18 @@ hashes, embeddings, faces).
   Relative white balance for finished images now adapts to D65 itself
   (not a Planckian 6500 K, which isn't quite D65), so a picked grey comes
   out grey.
+
+## Develop: zoom to 100% (2026-10-20)
+
+- Z, Space or a double-click toggle fit and 100% (one full-size pixel per
+  screen pixel); drag or scroll pans. The proxy shows enlarged at once (the
+  draft); the develop thread then renders just the visible part, plus a
+  third again on each side, at full resolution on the CPU
+  (`Frame::region`: the same map from the region's corner, tested equal to
+  that part of a whole render) and it's drawn over the draft. A new region
+  is asked for when the view moves past it or the edit changes; the
+  newest request wins. The full-size demosaic of the photo being zoomed is
+  kept in the develop thread (about 290 MB for 24 MP) rather than uploaded
+  as a 390 MB float texture. Zoomed views show the edit (not the
+  original or a split); crop and the eyedropper work at fit (the
+  eyedropper at 100% too).

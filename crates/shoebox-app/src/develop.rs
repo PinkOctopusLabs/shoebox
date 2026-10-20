@@ -68,6 +68,20 @@ enum Message {
     Export(Box<ExportJob>),
     LoadPresets,
     SavePresets(Vec<Preset>),
+    /// Render part of a photo at full resolution (zoomed in).
+    Region(Box<RegionJob>),
+}
+
+/// A part of a photo to render at full resolution: `region` is
+/// `[x, y, width, height]` in the full-size render's pixels.
+pub struct RegionJob {
+    pub request: Request,
+    pub settings: shoebox_develop::edit::Settings,
+    pub options: cpu::Options,
+    pub warnings: bool,
+    pub region: [usize; 4],
+    /// Echoed back, to tell which request a result answers.
+    pub key: u64,
 }
 
 /// Export these photos with these presets.
@@ -127,6 +141,15 @@ pub struct RawStatus {
 const PREVIEW: u32 = PROXY;
 
 pub enum Event {
+    /// A full-resolution region (answer to `region`), and the full render's
+    /// size. `region` may be clamped to the render.
+    Region {
+        id: PhotoId,
+        key: u64,
+        region: [usize; 4],
+        full: (usize, usize),
+        rgb: cpu::Rgb,
+    },
     /// Exporting: files written of the total, and the last one.
     ExportProgress {
         done: usize,
@@ -172,6 +195,11 @@ impl Develop {
     /// Export photos (after any photo being opened).
     pub fn export(&self, job: ExportJob) {
         let _ = self.requests.send(Message::Export(Box::new(job)));
+    }
+
+    /// Render part of the photo at full size (the newest request wins).
+    pub fn region(&self, job: RegionJob) {
+        let _ = self.requests.send(Message::Region(Box::new(job)));
     }
 
     /// Load the export presets (answered by `Presets`).
@@ -278,9 +306,12 @@ fn worker(
     let mut kept: Vec<Ready> = Vec::new();
     let mut open: Option<Request> = None;
     let mut queue: std::collections::VecDeque<PreviewJob> = Default::default();
+    let mut region: Option<Box<RegionJob>> = None;
+    // The photo being zoomed into, demosaiced at full size.
+    let mut full: Option<Ready> = None;
     loop {
         // Take everything waiting; with nothing to do, wait.
-        let first = if open.is_none() && queue.is_empty() {
+        let first = if open.is_none() && queue.is_empty() && region.is_none() {
             match requests.recv() {
                 Ok(m) => Some(m),
                 Err(_) => return,
@@ -292,6 +323,7 @@ fn worker(
             match m {
                 // Only the newest photo opened matters.
                 Message::Open(r) => open = Some(r),
+                Message::Region(j) => region = Some(j),
                 Message::Preview(p) => {
                     queue.retain(|q| q.id != p.id);
                     queue.push_back(*p);
@@ -342,6 +374,46 @@ fn worker(
                 }
                 Ok(None) => emit(Event::NeedsConverter(r.id)),
                 Err(e) => emit(Event::Failed(r.id, e)),
+            }
+            continue;
+        }
+        if let Some(job) = region.take() {
+            let r = &job.request;
+            if full.as_ref().is_none_or(|f| f.id != r.id || f.raw != r.raw) {
+                full = None;
+                match prepare(r, None, converter.as_deref(), &dngs, &|_| {}) {
+                    Ok(Some(k)) => full = Some(k),
+                    Ok(None) => continue,
+                    Err(e) => {
+                        tracing::warn!("full-size render of {}: {e}", r.path.display());
+                        continue;
+                    }
+                }
+            }
+            if let Some(f) = &full {
+                let o = cpu::Options {
+                    orientation: if f.upright {
+                        1
+                    } else {
+                        job.options.orientation
+                    },
+                    ..job.options
+                };
+                let mut frame = cpu::frame(&f.meta, &f.src, &job.settings, &o);
+                frame.warnings = job.warnings;
+                let size = (frame.width, frame.height);
+                let frame = frame.region(job.region);
+                let x = job.region[0].min(size.0.saturating_sub(1));
+                let y = job.region[1].min(size.1.saturating_sub(1));
+                let (w, h) = (frame.width, frame.height);
+                let rgb = cpu::apply(&f.src.rgb, &frame, true);
+                emit(Event::Region {
+                    id: r.id,
+                    key: job.key,
+                    region: [x, y, w, h],
+                    full: size,
+                    rgb,
+                });
             }
             continue;
         }

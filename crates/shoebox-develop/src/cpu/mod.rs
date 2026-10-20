@@ -488,6 +488,22 @@ pub fn histogram(img: &Rgb) -> [[u32; 256]; 4] {
     h
 }
 
+impl Frame {
+    /// Just the part `[x, y, width, height]` of this frame (clamped to it):
+    /// the same map, starting at the part's corner.
+    pub fn region(&self, r: [usize; 4]) -> Frame {
+        let x = r[0].min(self.width.saturating_sub(1));
+        let y = r[1].min(self.height.saturating_sub(1));
+        let mut f = *self;
+        f.width = r[2].min(self.width - x).max(1);
+        f.height = r[3].min(self.height - y).max(1);
+        for row in 0..2 {
+            f.map[row][2] += self.map[row][0] * x as f32 + self.map[row][1] * y as f32;
+        }
+        f
+    }
+}
+
 /// Bilinear sample at a fractional position (black outside the image).
 pub fn sample(img: &Rgb, x: f32, y: f32) -> [f32; 3] {
     let (x0, y0) = (x.floor(), y.floor());

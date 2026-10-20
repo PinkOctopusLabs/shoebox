@@ -452,3 +452,42 @@ fn the_eyedropper_makes_its_patch_neutral() {
         );
     }
 }
+
+/// A region rendered on its own is exactly that part of the whole render
+/// (zoomed views render only what's visible).
+#[test]
+fn a_region_is_that_part_of_the_render() {
+    let raw = grey_card(0.3);
+    let src = cpu::Demosaiced {
+        rgb: truth(80, 60),
+        as_shot: [1.0; 3],
+        referred: cpu::Referred::Scene,
+    };
+    let mut s = Settings::default();
+    s.geometry.rotate = 3.0;
+    s.geometry.crop = [0.1, 0.05, 0.9, 0.95];
+    let f = cpu::frame(
+        &raw,
+        &src,
+        &s,
+        &Options {
+            orientation: 6,
+            ..Default::default()
+        },
+    );
+    let whole = cpu::apply(&src.rgb, &f, true);
+    let part = cpu::apply(&src.rgb, &f.region([7, 11, 20, 15]), true);
+    assert_eq!((part.width, part.height), (20, 15));
+    for y in 0..15 {
+        for x in 0..20 {
+            let (a, b) = (part.px(x, y), whole.px(x + 7, y + 11));
+            assert!(
+                a.iter().zip(b).all(|(p, q)| (p - q).abs() < 1e-5),
+                "({x},{y})"
+            );
+        }
+    }
+    // Clamped to the frame.
+    let edge = f.region([f.width - 5, 0, 50, 50]);
+    assert_eq!((edge.width, edge.height), (5, 50.min(f.height)));
+}

@@ -872,6 +872,12 @@ impl ShoeboxApp {
         self.develop.crop.is_some()
     }
 
+    /// Develop's zoom: the centre point (None: fit), and the sharp region
+    /// shown (tests).
+    pub fn develop_zoom(&self) -> (Option<egui::Pos2>, Option<[usize; 4]>) {
+        (self.develop.zoom, self.develop.zoom_region())
+    }
+
     /// Where Develop drew the photo last frame (tests).
     pub fn develop_photo_rect(&self) -> Option<egui::Rect> {
         self.develop.photo_rect
@@ -3606,6 +3612,13 @@ impl ShoeboxApp {
             }
             if pressed(egui::Key::W) {
                 self.develop.picking = !self.develop.picking;
+            }
+            if (pressed(egui::Key::Z) || pressed(egui::Key::Space)) && self.develop.crop.is_none() {
+                // Fit ↔ 100%, about the centre.
+                self.develop.zoom = match self.develop.zoom {
+                    Some(_) => None,
+                    None => Some(egui::pos2(0.5, 0.5)),
+                };
             }
             if pressed(egui::Key::R) {
                 if self.develop.crop.is_some() {

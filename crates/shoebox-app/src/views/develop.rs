@@ -81,6 +81,17 @@ pub struct State {
     pub warnings: bool,
     /// Picking a neutral for white balance (W): the next click on the photo.
     pub picking: bool,
+    /// Zoomed to 100% (Z): the frame point at the centre of the view, as
+    /// fractions of the frame. None: fit.
+    pub zoom: Option<egui::Pos2>,
+    /// The full-size render's size, once the develop thread has said.
+    full_size: Option<(PhotoId, (usize, usize))>,
+    /// The sharp full-resolution part shown over the zoomed draft.
+    region: Option<RegionShown>,
+    /// A region rendered, waiting to become a texture.
+    pending_region: Option<PendingRegion>,
+    /// The last region asked for: (key, region).
+    asked_region: Option<(u64, [usize; 4])>,
     /// Drawing a crop (R): the whole frame shows, the crop over it.
     pub crop: Option<super::crop::CropEdit>,
     /// The render's histogram (R, G, B, luma).
@@ -88,6 +99,42 @@ pub struct State {
     gpu: Option<GpuShared>,
     edited: Option<Shown>,
     original: Option<Shown>,
+}
+
+/// A rendered region from the develop thread: photo, key, region, the full
+/// render's size, and its pixels.
+type PendingRegion = (PhotoId, u64, [usize; 4], (usize, usize), cpu::Rgb);
+
+/// A full-resolution part of the photo on screen.
+struct RegionShown {
+    id: PhotoId,
+    key: u64,
+    region: [usize; 4],
+    texture: egui::TextureHandle,
+}
+
+/// What a zoomed region depends on (settings and the clipping overlay).
+fn region_key(settings: &Settings, warnings: bool) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    EditDoc::settings_hash(settings).hash(&mut h);
+    warnings.hash(&mut h);
+    h.finish()
+}
+
+/// Display values as an egui image.
+fn color_image(img: &cpu::Rgb) -> egui::ColorImage {
+    let pixels: Vec<Color32> = img
+        .data
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|p| {
+            let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            Color32::from_rgb(q(p[0]), q(p[1]), q(p[2]))
+        })
+        .collect();
+    egui::ColorImage::new([img.width, img.height], pixels)
 }
 
 /// The GPU side, shared by the edited and original renders.
@@ -133,6 +180,14 @@ impl State {
             .is_some_and(|v| Some(v.key.0) == self.photo)
     }
 
+    /// The sharp full-resolution region shown while zoomed.
+    pub fn zoom_region(&self) -> Option<[usize; 4]> {
+        self.region
+            .as_ref()
+            .filter(|r| Some(r.id) == self.photo)
+            .map(|r| r.region)
+    }
+
     /// The split's divider (fraction of the image's width).
     pub fn split(&self) -> f32 {
         if self.split_at <= 0.0 {
@@ -148,6 +203,7 @@ impl State {
             edited: self.edited.take(),
             original: self.original.take(),
             warnings: self.warnings,
+            zoom: self.zoom,
             compare: self.compare,
             split_at: self.split_at,
             ..Default::default()
@@ -268,6 +324,13 @@ pub fn poll(app: &mut ShoeboxApp) {
                 st.ready = Some(r);
                 st.status = Status::Ready;
             }
+            Event::Region {
+                id,
+                key,
+                region,
+                full,
+                rgb,
+            } if Some(id) == st.photo => st.pending_region = Some((id, key, region, full, rgb)),
             Event::Converting(id) if Some(id) == st.photo => st.status = Status::Converting,
             Event::NeedsConverter(id) if Some(id) == st.photo => st.status = Status::NeedsConverter,
             Event::Failed(id, e) if Some(id) == st.photo => st.status = Status::Failed(e),
@@ -551,7 +614,7 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
     tick_saving(app, &ctx);
 
     let rect = ui.available_rect_before_wrap();
-    let resp = ui.allocate_rect(rect, egui::Sense::click());
+    let resp = ui.allocate_rect(rect, egui::Sense::click_and_drag());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, Color32::from_gray(18));
     let st = &app.develop;
@@ -584,9 +647,70 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
         rect.max - egui::vec2(0.0, 6.0),
     );
     let fit = (area.width() / size[0]).min(area.height() / size[1]);
-    let target = Rect::from_center_size(area.center(), egui::vec2(size[0], size[1]) * fit);
+    let fit_target = Rect::from_center_size(area.center(), egui::vec2(size[0], size[1]) * fit);
     let full = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+    // Zoomed to 100%: one full-size pixel per screen pixel, placed by the
+    // centre point; the proxy shows enlarged until the sharp part arrives.
+    let ppp = ctx.pixels_per_point();
+    let zoom = app
+        .develop
+        .zoom
+        .filter(|_| app.develop.crop.is_none() && edited.is_some());
+    let full_size = match app.develop.full_size {
+        Some((pid, (w, h))) if pid == id => (w as f32, h as f32),
+        _ => {
+            // Until the develop thread says: the photo's size over the
+            // proxy's.
+            let photo = &app.catalog.photos[idx];
+            let long = photo.meta.width.max(photo.meta.height).unwrap_or(0) as f32;
+            let proxy = app
+                .develop
+                .ready
+                .as_ref()
+                .map_or(1.0, |r| r.src.rgb.width.max(r.src.rgb.height) as f32);
+            let f = (long / proxy).max(1.0);
+            (size[0] * f, size[1] * f)
+        }
+    };
+    let target = match zoom {
+        Some(c) => {
+            let shown = egui::vec2(full_size.0 / ppp, full_size.1 / ppp);
+            Rect::from_min_size(
+                area.center() - egui::vec2(c.x * shown.x, c.y * shown.y),
+                shown,
+            )
+        }
+        None => fit_target,
+    };
+    let painter = painter.with_clip_rect(area);
     app.develop.photo_rect = Some(target);
+    // Double-click toggles fit and 100% at that point; drag or scroll pans.
+    if app.develop.crop.is_none() && edited.is_some() && !app.develop.picking {
+        if resp.double_clicked()
+            && let Some(p) = resp.interact_pointer_pos()
+        {
+            app.develop.zoom = match app.develop.zoom {
+                Some(_) => None,
+                None => Some(pos2(
+                    ((p.x - target.left()) / target.width()).clamp(0.0, 1.0),
+                    ((p.y - target.top()) / target.height()).clamp(0.0, 1.0),
+                )),
+            };
+        }
+        if let Some(c) = &mut app.develop.zoom {
+            let mut d = egui::Vec2::ZERO;
+            if resp.dragged() {
+                d += resp.drag_delta();
+            }
+            if resp.hovered() {
+                d += ui.input(|i| i.smooth_scroll_delta);
+            }
+            if d != egui::Vec2::ZERO {
+                c.x = (c.x - d.x / target.width()).clamp(0.0, 1.0);
+                c.y = (c.y - d.y / target.height()).clamp(0.0, 1.0);
+            }
+        }
+    }
     if app.develop.picking && app.develop.crop.is_none() && edited.is_some() {
         if resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
@@ -679,6 +803,9 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
             painter.image(t, target, full, Color32::WHITE);
         }
         _ => {}
+    }
+    if zoom.is_some() && compare == Compare::Edited {
+        zoomed_region(app, &ctx, &painter, target, area, full_size, ppp);
     }
     // Cropping: the crop over the whole frame, its aspect and Done above.
     if let (Some(_), Some((_, s))) = (&app.develop.crop, edited) {
@@ -892,6 +1019,107 @@ pub fn finish_crop(app: &mut ShoeboxApp, apply: bool) {
             s.geometry.aspect = c.aspect.clone();
         });
     }
+}
+
+/// Zoomed: show the sharp full-resolution part over the draft, asking for
+/// a new one when the view moves beyond it or the edit changes.
+fn zoomed_region(
+    app: &mut ShoeboxApp,
+    ctx: &egui::Context,
+    painter: &egui::Painter,
+    target: Rect,
+    area: Rect,
+    full_size: (f32, f32),
+    ppp: f32,
+) {
+    let o = options(app);
+    let st = &mut app.develop;
+    let (true, Some(doc), Some(id)) = (st.ready.is_some(), &st.doc, st.photo) else {
+        return;
+    };
+    let settings = doc.settings().clone();
+    if let Some((pid, key, region, full, rgb)) = st.pending_region.take() {
+        let image = color_image(&rgb);
+        st.full_size = Some((pid, full));
+        match &mut st.region {
+            Some(r) => {
+                r.texture.set(image, egui::TextureOptions::NEAREST);
+                (r.id, r.key, r.region) = (pid, key, region);
+            }
+            None => {
+                st.region = Some(RegionShown {
+                    id: pid,
+                    key,
+                    region,
+                    texture: ctx.load_texture("develop-zoom", image, egui::TextureOptions::NEAREST),
+                })
+            }
+        }
+    }
+    let key = region_key(&settings, st.warnings);
+    let to_screen = |r: [usize; 4]| {
+        Rect::from_min_size(
+            target.min + egui::vec2(r[0] as f32 / ppp, r[1] as f32 / ppp),
+            egui::vec2(r[2] as f32 / ppp, r[3] as f32 / ppp),
+        )
+    };
+    let current = st.region.as_ref().filter(|r| r.id == id && r.key == key);
+    if let Some(r) = current {
+        painter.image(
+            r.texture.id(),
+            to_screen(r.region),
+            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    }
+    // What's visible, in full-size pixels; ask for it with a margin.
+    let vis = target.intersect(area);
+    if vis.width() <= 0.0 || vis.height() <= 0.0 {
+        return;
+    }
+    let px = |v: f32| (v * ppp).max(0.0) as usize;
+    let (x0, y0) = (px(vis.min.x - target.min.x), px(vis.min.y - target.min.y));
+    let (x1, y1) = (px(vis.max.x - target.min.x), px(vis.max.y - target.min.y));
+    let covered = current.is_some_and(|r| {
+        let [rx, ry, rw, rh] = r.region;
+        rx <= x0
+            && ry <= y0
+            && rx + rw >= x1.min(full_size.0 as usize)
+            && ry + rh >= y1.min(full_size.1 as usize)
+    });
+    if covered {
+        return;
+    }
+    let (mx, my) = ((x1 - x0) / 3, (y1 - y0) / 3);
+    let (fw, fh) = (full_size.0 as usize, full_size.1 as usize);
+    let wanted = [
+        x0.saturating_sub(mx),
+        y0.saturating_sub(my),
+        (x1 + mx).min(fw).saturating_sub(x0.saturating_sub(mx)),
+        (y1 + my).min(fh).saturating_sub(y0.saturating_sub(my)),
+    ];
+    if st.asked_region == Some((key, wanted)) {
+        return;
+    }
+    st.asked_region = Some((key, wanted));
+    let warnings = st.warnings;
+    let Some(photo) = app.index(id).map(|i| &app.catalog.photos[i]) else {
+        return;
+    };
+    let request = Request {
+        id,
+        path: photo.path.clone(),
+        format: photo.format,
+        raw: settings.modules.raw.clone(),
+    };
+    app.developer.region(crate::develop::RegionJob {
+        request,
+        settings,
+        options: o,
+        warnings,
+        region: wanted,
+        key,
+    });
 }
 
 /// A small label over the photo.
