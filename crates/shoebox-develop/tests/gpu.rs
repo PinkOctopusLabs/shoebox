@@ -174,6 +174,21 @@ fn gpu_matches_the_cpu_reference() {
     s.modules.defringe.purple = 80.0;
     s.modules.defringe.green = 60.0;
     cases.push(("defringe", s, o));
+    // A camera match look for this camera (the test raw's model, "Z f").
+    let mut table = shoebox_develop::profile::Lut3::identity(shoebox_develop::profile::SIZE);
+    for c in &mut table.data {
+        let m = (c[0] + c[1] + c[2]) / 3.0;
+        *c = c.map(|v| (m + (v - m) * 1.3 + 0.03 * (1.0 - v)).clamp(0.0, 1.0));
+    }
+    shoebox_develop::profile::register(&shoebox_develop::profile::Profile {
+        camera: "Z f".into(),
+        look: table,
+        pairs: 0,
+        delta_e: None,
+    });
+    let mut s = base.clone();
+    s.modules.input_colour.profile = shoebox_develop::edit::Profile::CameraMatch;
+    cases.push(("camera match", s, o));
     // Lens corrections need the photo's shot: a second source with one.
     let lensed = src
         .clone()

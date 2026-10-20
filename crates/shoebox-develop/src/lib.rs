@@ -16,6 +16,7 @@ pub mod golden;
 pub mod gpu;
 pub mod lens;
 pub mod preset;
+pub mod profile;
 pub mod wb;
 
 use std::path::PathBuf;

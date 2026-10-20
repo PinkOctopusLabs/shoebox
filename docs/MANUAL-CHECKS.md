@@ -53,3 +53,13 @@ check fails, note the file and what's wrong, and copy the file into
 - [ ] **Noise reduction** on the 10 highest-ISO files: noise clearly lower,
   detail (hair, foliage, text) kept, no blotches.
 - [ ] **Auto** on the 30: rarely far from the camera JPEG's brightness.
+- [ ] **Fit the camera match profile.** On an APFS clone, collect a few
+  hundred varied NEF+JPEG pairs (same names) in one folder. Shoot them with
+  the Picture Control you use, and with Active D-Lighting off if you can.
+  Then run
+  `cargo run --release -p shoebox-develop --example camera_match -- <folder> NIKON_Z_f.json`.
+  It prints the held-back pairs' mean ΔE2000 with the matrix and with the
+  look; the look should be clearly lower. Copy the file into Shoebox's
+  `profiles/` folder (beside `export-presets.json` in its Application
+  Support folder), and "Camera match" appears beside Auto. Then check it
+  by eye against the camera JPEGs on a few photos it wasn't fitted on.

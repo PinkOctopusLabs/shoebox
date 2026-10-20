@@ -373,6 +373,11 @@ fn worker(
         }
     }
     let previews = cache_dir.join("edited");
+    // Camera match profiles (`<data>/profiles/*.json`).
+    let n = shoebox_develop::profile::load_dir(&presets_file.with_file_name("profiles"));
+    if n > 0 {
+        tracing::info!("{n} camera match profiles");
+    }
     // Load Lensfun's database now, so turning lens corrections on doesn't
     // wait for it.
     let _ = std::thread::Builder::new()

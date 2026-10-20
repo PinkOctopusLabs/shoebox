@@ -1666,3 +1666,33 @@ Develop level, on the storage that already supports them
 - Still to come: copies as their own tiles in the library (stacked with the
   original), and stale-export badges per copy (export rows are recorded
   against the master's hash for now).
+
+## Camera match profiles (2026-10-20)
+
+- **The look.** It's a 17³ 3D table on the display transform's output
+  (display-linear Rec.2020, 2.2-encoded), applied before the user's tone
+  curve, on the CPU and the GPU (checked against each other). It learns
+  both the camera's tone and its colour, as the spec asks ("a tone curve
+  plus a 3D LUT"). One table carries both, because they're fitted from the
+  same pairs.
+- **Fitting** (`examples/camera_match.rs`, run on an APFS clone; see
+  MANUAL-CHECKS):
+  - each raw is rendered with the matrix at the exposure that matches its
+    JPEG's median, so the table learns shape, not each photo's exposure;
+  - both images are shrunk to about 320 px, and only the middle 70% is
+    used, because the camera's distortion correction moves the JPEG's
+    edges;
+  - clipped JPEG pixels are skipped;
+  - each pixel's offset is splatted into the eight cells around it. Cells
+    with little data are pulled towards no change, and empty ones take
+    their neighbours' offsets.
+  - Every tenth pair is held back to report mean ΔE2000 with and without
+    the look. On the one real pair in `tests/fixtures/real` it goes from
+    2.32 to 1.63 (on the pair fitted, so only a smoke test).
+- Profiles live in `<data>/profiles/*.json`, keyed by camera model, and
+  load when Shoebox starts. Develop offers "Camera match" beside Auto when
+  the camera has one, and Auto picks it then. It's part of a preset's
+  Colour part.
+- A profile per Picture Control (the spec's "fit one per Picture Control")
+  is a matter of fitting from pairs shot with each and choosing between
+  them. It can follow once the first one has been fitted.

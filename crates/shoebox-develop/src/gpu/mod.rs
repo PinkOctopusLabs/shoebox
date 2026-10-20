@@ -142,6 +142,16 @@ impl Pipe {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -284,10 +294,31 @@ impl Pipe {
                 usage: wgpu::BufferUsages::STORAGE,
             },
         );
+        let lut: Vec<u8> = match &frame.display.look {
+            Some(l) => l
+                .data
+                .iter()
+                .flatten()
+                .flat_map(|v| v.to_le_bytes())
+                .collect(),
+            None => vec![0; 12],
+        };
+        let lut = wgpu::util::DeviceExt::create_buffer_init(
+            device,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("camera look"),
+                contents: &lut,
+                usage: wgpu::BufferUsages::STORAGE,
+            },
+        );
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("develop"),
             layout: &self.layout,
             entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: lut.as_entire_binding(),
+                },
                 wgpu::BindGroupEntry {
                     binding: 5,
                     resource: grid.as_entire_binding(),
@@ -606,7 +637,7 @@ impl Histogram {
     }
 }
 
-/// The uniform block (`Params` in the shader), as 41 vec4s.
+/// The uniform block (`Params` in the shader), as 42 vec4s.
 fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
     let row = |r: [f32; 3]| [r[0], r[1], r[2], 0.0];
     let d = &f.display;
@@ -675,6 +706,10 @@ fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
     }
     v.extend([f.map[2][0], f.map[2][1], f.map[2][2], 0.0]);
     v.extend([flag(l.fringe), l.purple, l.green, 0.0]);
+    match &d.look {
+        Some(t) => v.extend([1.0, t.size as f32, 0.0, 0.0]),
+        None => v.extend([0.0, 2.0, 0.0, 0.0]),
+    }
     v
 }
 

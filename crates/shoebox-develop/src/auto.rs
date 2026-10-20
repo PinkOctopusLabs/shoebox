@@ -142,6 +142,16 @@ pub fn settings(base: &Settings, s: &Stats, iso: Option<u32>, lens: bool) -> Set
     out
 }
 
+/// Auto's input colour: the camera match profile when there's one for the
+/// camera, else the matrix.
+pub fn profile_for(model: &str) -> crate::edit::Profile {
+    if crate::profile::has(model) {
+        crate::edit::Profile::CameraMatch
+    } else {
+        crate::edit::Profile::Matrix
+    }
+}
+
 fn round(v: f64, step: f64) -> f64 {
     (v / step).round() * step
 }

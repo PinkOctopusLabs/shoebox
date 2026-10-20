@@ -47,6 +47,7 @@ struct Params {
     lens: vec4<f32>,      // grid on (0/1), columns, rows, chromatic (0/1)
     map2: vec4<f32>,      // the map's perspective row: (sx, sy) are divided by map2·(x, y, 1)
     fringe: vec4<f32>,    // defringe on (0/1), purple, green
+    look3: vec4<f32>,     // camera match table on (0/1), its size
 };
 
 @group(0) @binding(0) var src: texture_2d<f32>;
@@ -63,6 +64,35 @@ const STRIDE: u32 = 6u;
 // The lens grid (see `lens::Grid`): GRID floats per node.
 @group(0) @binding(5) var<storage, read> grid: array<f32>;
 const GRID: u32 = 7u;
+
+// The camera match look (see `profile::Lut3`): size³ RGB entries, red fastest.
+@group(0) @binding(6) var<storage, read> lut3: array<f32>;
+
+fn lut_at(r: u32, g: u32, b: u32) -> vec3<f32> {
+    let n = u32(p.look3.y);
+    let i = ((b * n + g) * n + r) * 3u;
+    return vec3<f32>(lut3[i], lut3[i + 1u], lut3[i + 2u]);
+}
+
+fn camera_look(px: vec3<f32>) -> vec3<f32> {
+    let e = min(pow(max(px, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2)), vec3<f32>(1.0));
+    let n = p.look3.y - 1.0;
+    let pos = clamp(e, vec3<f32>(0.0), vec3<f32>(1.0)) * n;
+    let i = min(vec3<u32>(floor(pos)), vec3<u32>(u32(n) - 1u));
+    let f = pos - vec3<f32>(i);
+    var out = vec3<f32>(0.0);
+    for (var db = 0u; db < 2u; db++) {
+        for (var dg = 0u; dg < 2u; dg++) {
+            for (var dr = 0u; dr < 2u; dr++) {
+                let wr = select(1.0 - f.x, f.x, dr == 1u);
+                let wg = select(1.0 - f.y, f.y, dg == 1u);
+                let wb = select(1.0 - f.z, f.z, db == 1u);
+                out += wr * wg * wb * lut_at(i.x + dr, i.y + dg, i.z + db);
+            }
+        }
+    }
+    return pow(max(out, vec3<f32>(0.0)), vec3<f32>(2.2));
+}
 const CURVE_SIZE: u32 = 1024u;
 const CENTRES = array<f32, 8>(29.0, 58.0, 110.0, 142.0, 195.0, 264.0, 295.0, 328.0);
 
@@ -410,6 +440,9 @@ fn display(px: vec3<f32>) -> vec3<f32> {
         shaped = scaled + (per - scaled) * t;
     } else {
         shaped = vec3<f32>(lin(curve(v.x)), lin(curve(v.y)), lin(curve(v.z)));
+    }
+    if (p.look3.x > 0.5) {
+        shaped = camera_look(shaped);
     }
     if (p.tone.x > 0.5) {
         shaped = tone_curve(shaped);

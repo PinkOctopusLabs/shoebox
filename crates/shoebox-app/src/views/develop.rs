@@ -530,8 +530,10 @@ pub fn run_auto(app: &mut ShoeboxApp) {
         };
         shoebox_develop::lens::grid(shot, &on, size.0, size.1).is_some()
     });
+    let profile = shoebox_develop::auto::profile_for(&ready.meta.model);
     edit(app, "auto", "Auto".into(), false, |s| {
         *s = shoebox_develop::auto::settings(s, &stats, iso, lens);
+        s.modules.input_colour.profile = profile;
     });
 }
 
@@ -1681,13 +1683,55 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         return;
     };
     let can_auto = ready.auto.is_some() && !st.read_only;
-    if ui
-        .add_enabled(can_auto, egui::Button::new("Auto"))
-        .on_hover_text("Exposure, noise reduction, sharpening, dehaze and lens corrections from the photo itself")
-        .clicked()
-    {
+    // Camera match is offered when there's a profile for this camera.
+    let model = ready.meta.model.clone();
+    let matched = !model.is_empty() && shoebox_develop::profile::has(&model);
+    let profile = st
+        .doc
+        .as_ref()
+        .map(|d| d.settings().modules.input_colour.profile);
+    let mut pick = None;
+    let mut auto = false;
+    ui.horizontal(|ui| {
+        auto = ui
+            .add_enabled(can_auto, egui::Button::new("Auto"))
+            .on_hover_text(
+                "Exposure, noise reduction, sharpening, dehaze and lens corrections from the photo itself",
+            )
+            .clicked();
+        if matched || profile == Some(shoebox_develop::edit::Profile::CameraMatch) {
+            use shoebox_develop::edit::Profile;
+            let name = |p: Option<Profile>| match p {
+                Some(Profile::CameraMatch) => "Camera match",
+                _ => "Matrix",
+            };
+            egui::ComboBox::from_id_salt("input-profile")
+                .selected_text(name(profile))
+                .show_ui(ui, |ui| {
+                    for p in [Profile::Matrix, Profile::CameraMatch] {
+                        if ui.selectable_label(profile == Some(p), name(Some(p))).clicked() {
+                            pick = Some(p);
+                        }
+                    }
+                })
+                .response
+                .on_hover_text("Matrix: the camera's colour, neutral. Camera match: a look fitted to this camera's own JPEGs");
+        }
+    });
+    if auto {
         run_auto(app);
         return;
+    }
+    if let Some(p) = pick
+        && Some(p) != profile
+    {
+        let label = match p {
+            shoebox_develop::edit::Profile::CameraMatch => "Profile Camera match",
+            shoebox_develop::edit::Profile::Matrix => "Profile Matrix",
+        };
+        edit(app, "profile", label.into(), false, |s| {
+            s.modules.input_colour.profile = p;
+        });
     }
     let st = &app.develop;
     let (Some(doc), Some(ready)) = (&st.doc, &st.ready) else {

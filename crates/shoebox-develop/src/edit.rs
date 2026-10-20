@@ -172,6 +172,9 @@ impl Default for InputColour {
 pub enum Profile {
     /// The file's colour matrices, interpolated by white balance.
     Matrix,
+    /// The matrices, then a look fitted to the camera's own JPEGs (see
+    /// `profile`); the matrix alone when there's no profile for the camera.
+    CameraMatch,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -3200,8 +3200,12 @@ fn develop_a_raw_photo() {
 
     // Kept, then written to the library's .shoebox/edits after a pause.
     let file = root.join(".shoebox/edits/2026/DSC_0001.NEF.json");
+    // (Auto's step was written first; wait for the drag's.)
     wait_for(&mut h, Duration::from_secs(15), "edit file", |_| {
-        file.is_file()
+        std::fs::read_to_string(&file)
+            .ok()
+            .and_then(|s| shoebox_develop::edit::EditDoc::from_json(&s).ok())
+            .is_some_and(|d| d.settings().modules.exposure.ev == ev)
     });
     let saved = shoebox_develop::edit::EditDoc::from_json(&std::fs::read_to_string(&file).unwrap())
         .unwrap();

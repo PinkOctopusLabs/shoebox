@@ -358,6 +358,8 @@ pub struct Display {
     /// The tone curve's tables (red, green, blue; see
     /// [`look::curve_table`]), applied to the display values; None: none.
     pub tone: Option<std::sync::Arc<[f32]>>,
+    /// A camera match profile's look (see [`crate::profile`]).
+    pub look: Option<std::sync::Arc<crate::profile::Lut3>>,
 }
 
 /// Tone for a display-referred image: `x' = (x − black) / (white − black)`,
@@ -401,6 +403,7 @@ impl Display {
             preserve_hue: d.preserve_hue,
             referred: None,
             tone: None,
+            look: None,
             target,
         }
     }
@@ -633,6 +636,10 @@ pub fn frame(raw: &RawImage, src: &Demosaiced, s: &Settings, o: &Options) -> Fra
     let colour = f32m(&m.map(|r| r.map(|v| v * gain)));
     let display = Display {
         tone: look::curve_table(&s.modules.tone_curve),
+        look: match s.modules.input_colour.profile {
+            crate::edit::Profile::CameraMatch => crate::profile::find(&raw.model),
+            crate::edit::Profile::Matrix => None,
+        },
         ..display
     };
     let (mut map, width, height) =
@@ -1018,9 +1025,30 @@ fn toward_grey(amount: f64) -> M3 {
 /// The display transform and output for one scene-linear Rec.2020 pixel:
 /// display values (0–1, the target space's transfer curve).
 pub fn display_pixel(d: &Display, p: [f32; 3]) -> [f32; 3] {
+    let shaped = shape(d, p);
+    // The camera match look (a profile's table), then the tone curve.
+    let shaped = match &d.look {
+        Some(l) => l.apply(shaped),
+        None => shaped,
+    };
+    // The tone curve, on 2.2-encoded display values.
+    let shaped = match &d.tone {
+        Some(t) => {
+            [0, 1, 2].map(|c| look::curve_at(t, c, shaped[c].max(0.0).powf(1.0 / 2.2)).powf(2.2))
+        }
+        None => shaped,
+    };
+    let lin = mul3(&d.to_target, mul3(&d.outset, shaped));
+    lin.map(|c| d.target.encode(c.clamp(0.0, 1.0)))
+}
+
+/// The display transform's tone mapping of one scene-linear Rec.2020
+/// pixel: display-linear Rec.2020 (before the look, the tone curve and the
+/// output space).
+pub fn shape(d: &Display, p: [f32; 3]) -> [f32; 3] {
     let curve = &d.curve;
     let v = mul3(&d.inset, p);
-    let shaped = if let Some(l) = &d.referred {
+    if let Some(l) = &d.referred {
         if d.preserve_hue {
             let norm = v[0].max(v[1]).max(v[2]).max(1e-10);
             let n = l.apply(norm);
@@ -1043,16 +1071,7 @@ pub fn display_pixel(d: &Display, p: [f32; 3]) -> [f32; 3] {
         [0, 1, 2].map(|i| scaled[i] + (per[i] - scaled[i]) * t)
     } else {
         v.map(|c| curve.apply(c).powf(2.2))
-    };
-    // The tone curve, on 2.2-encoded display values.
-    let shaped = match &d.tone {
-        Some(t) => {
-            [0, 1, 2].map(|c| look::curve_at(t, c, shaped[c].max(0.0).powf(1.0 / 2.2)).powf(2.2))
-        }
-        None => shaped,
-    };
-    let lin = mul3(&d.to_target, mul3(&d.outset, shaped));
-    lin.map(|c| d.target.encode(c.clamp(0.0, 1.0)))
+    }
 }
 
 /// The sRGB transfer curve (Display P3 uses the same one).
