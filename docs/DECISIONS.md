@@ -1346,3 +1346,13 @@ EDITING-SPEC's "hiding the wait" for High efficiency NEFs:
   `DngCache`, so "at most two conversions at once" holds across all of them.
   Before this, the export thread made its own cache and could run two more.
   The cache limit became settable in place for this.
+
+## Two exports at once (2026-10-20)
+
+EDITING-SPEC's export queue runs "2 concurrent". An export works on two
+photos at a time. Export jobs still run one after another, because the
+status bar and the clash question each follow a single job. Output names
+are planned before anything is written, in the photos' order, so the
+`-1`, `-2` suffixes don't depend on which thread finishes first. Writes still
+never overwrite (rule 4); Replace replaces only files that were there before
+the export.

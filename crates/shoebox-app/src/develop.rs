@@ -7,7 +7,7 @@
 //! few results are kept so stepping back and forth is instant.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::{Receiver, Sender};
 use shoebox_decode::raw::RawImage;
@@ -715,7 +715,7 @@ fn run_export(
     job: &ExportJob,
     converter: Option<&std::path::Path>,
     dngs: &DngCache,
-    emit: &dyn Fn(Event),
+    emit: &(dyn Fn(Event) + Sync),
 ) {
     // Before anything is written: files already there? Ask first.
     if job.on_clash.is_none() {
@@ -738,98 +738,189 @@ fn run_export(
             return;
         }
     }
-    let mut taken: std::collections::HashSet<PathBuf> = Default::default();
     let total = job.items.len() * job.presets.len();
-    let mut done = 0;
-    let mut written = Vec::new();
-    let mut errors = Vec::new();
     let exiftool = exiftool();
-    for (seq, item) in job.items.iter().enumerate() {
-        let name = item
-            .path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let r = Request {
-            id: item.id,
-            path: item.path.clone(),
-            format: item.format,
-            raw: item.settings.modules.raw.clone(),
-        };
-        let ready = match prepare(&r, None, converter, dngs, &|_| {}) {
-            Ok(Some(k)) => k,
-            Ok(None) => {
-                errors.push(format!("{name}: needs Adobe DNG Converter"));
-                done += job.presets.len();
-                continue;
-            }
-            Err(e) => {
-                errors.push(format!("{name}: {e}"));
-                done += job.presets.len();
-                continue;
-            }
-        };
-        for preset in &job.presets {
-            let result = (|| -> Result<PathBuf, String> {
-                let (folder, file) = destination(job, item, preset, seq)?;
-                let o = cpu::Options {
-                    long_edge: None,
-                    orientation: if ready.upright { 1 } else { item.orientation },
-                    target: preset.space.target(),
-                };
-                let frame = cpu::frame(&ready.meta, &ready.src, &item.settings, &o);
-                let img = cpu::apply(&ready.src.rgb, &frame, true);
-                let (w, h) =
-                    shoebox_develop::export::output_size(img.width, img.height, preset.size);
-                let img = shoebox_develop::export::resize(&img, w, h);
-                let bytes = shoebox_develop::export::encode(&img, preset)?;
-                let ext = preset.format.extension();
-                let stem = file.strip_suffix(&format!(".{ext}")).unwrap_or(&file);
-                // Replace only what was there before this export: two
-                // photos landing on one name keep both.
-                let target = folder.join(&file);
-                let out = if job.on_clash == Some(Clash::Replace) && !taken.contains(&target) {
-                    shoebox_develop::export::write_replacing(&folder, stem, ext, &bytes)?
-                } else {
-                    shoebox_develop::export::write_new(&folder, stem, ext, &bytes)?
-                };
-                taken.insert(out.clone());
-                if let Some(tool) = &exiftool {
-                    copy_metadata(tool, item, preset, &out);
-                }
-                Ok(out)
-            })();
-            done += 1;
-            match result {
-                Ok(file) => {
-                    emit(Event::ExportProgress {
-                        done,
+    let names = plan_names(job);
+    let progress = Mutex::new(ExportProgress::default());
+    // Two photos at a time (the spec's two concurrent exports).
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..EXPORTS_AT_ONCE.min(job.items.len()) {
+            scope.spawn(|| {
+                loop {
+                    let seq = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(item) = job.items.get(seq) else {
+                        return;
+                    };
+                    export_item(
+                        job,
+                        seq,
+                        item,
+                        &names,
+                        converter,
+                        dngs,
+                        exiftool.as_deref(),
+                        &progress,
                         total,
-                        last: Some(file.clone()),
-                    });
-                    written.push(Exported {
-                        photo: item.path.clone(),
-                        file,
-                        preset: preset.clone(),
-                        edit_key: item.edit_key.clone(),
-                    });
+                        emit,
+                    );
                 }
-                Err(e) => {
-                    errors.push(format!("{name} ({}): {e}", preset.name));
-                    emit(Event::ExportProgress {
-                        done,
-                        total,
-                        last: None,
-                    });
-                }
-            }
+            });
         }
-    }
+    });
+    let p = progress.into_inner().unwrap_or_else(|e| e.into_inner());
+    let mut written = p.written;
+    written.sort_by_key(|(seq, _)| *seq);
     emit(Event::ExportDone {
-        written,
-        errors,
+        written: written.into_iter().map(|(_, w)| w).collect(),
+        errors: p.errors,
         no_metadata: exiftool.is_none(),
     });
+}
+
+/// How many photos an export works on at once.
+const EXPORTS_AT_ONCE: usize = 2;
+
+/// An export so far, shared by its threads.
+#[derive(Default)]
+struct ExportProgress {
+    done: usize,
+    /// Files written, by the photo's place in the export.
+    written: Vec<(usize, Exported)>,
+    errors: Vec<String>,
+}
+
+/// Where each photo goes with each preset, by (photo, preset): the
+/// preset's name, or with `-1`, `-2` when an earlier photo in this export
+/// has it (in the photos' order, however the threads finish), and whether
+/// it's the first to claim it (Replace replaces only what was there before
+/// this export). Errors (a folder inside the library) are kept for each.
+type Names = std::collections::HashMap<(usize, usize), Result<(PathBuf, String, bool), String>>;
+
+fn plan_names(job: &ExportJob) -> Names {
+    let mut claimed: std::collections::HashSet<PathBuf> = Default::default();
+    let mut out = Names::new();
+    for (seq, item) in job.items.iter().enumerate() {
+        for (k, preset) in job.presets.iter().enumerate() {
+            let planned = destination(job, item, preset, seq).map(|(folder, file)| {
+                let target = folder.join(&file);
+                // A file there before this export is replaced only when
+                // the person chose Replace.
+                let free = job.on_clash == Some(Clash::Replace) || !target.exists();
+                if claimed.insert(target) && free {
+                    return (folder, file, true);
+                }
+                let ext = preset.format.extension();
+                let stem = file.strip_suffix(&format!(".{ext}")).unwrap_or(&file);
+                let mut n = 1;
+                loop {
+                    let alt = format!("{stem}-{n}.{ext}");
+                    let p = folder.join(&alt);
+                    if !p.exists() && claimed.insert(p) {
+                        return (folder, alt, false);
+                    }
+                    n += 1;
+                }
+            });
+            out.insert((seq, k), planned);
+        }
+    }
+    out
+}
+
+/// Export one photo with each preset.
+#[allow(clippy::too_many_arguments)]
+fn export_item(
+    job: &ExportJob,
+    seq: usize,
+    item: &ExportItem,
+    names: &Names,
+    converter: Option<&std::path::Path>,
+    dngs: &DngCache,
+    exiftool: Option<&std::path::Path>,
+    progress: &Mutex<ExportProgress>,
+    total: usize,
+    emit: &(dyn Fn(Event) + Sync),
+) {
+    let lock = || progress.lock().unwrap_or_else(|e| e.into_inner());
+    let name = item
+        .path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let r = Request {
+        id: item.id,
+        path: item.path.clone(),
+        format: item.format,
+        raw: item.settings.modules.raw.clone(),
+    };
+    let failed = match prepare(&r, None, converter, dngs, &|_| {}) {
+        Ok(Some(ready)) => {
+            for (k, preset) in job.presets.iter().enumerate() {
+                let result = (|| -> Result<PathBuf, String> {
+                    let (folder, file, first) = names
+                        .get(&(seq, k))
+                        .cloned()
+                        .unwrap_or_else(|| Err("not planned".into()))?;
+                    let o = cpu::Options {
+                        long_edge: None,
+                        orientation: if ready.upright { 1 } else { item.orientation },
+                        target: preset.space.target(),
+                    };
+                    let frame = cpu::frame(&ready.meta, &ready.src, &item.settings, &o);
+                    let img = cpu::apply(&ready.src.rgb, &frame, true);
+                    let (w, h) =
+                        shoebox_develop::export::output_size(img.width, img.height, preset.size);
+                    let img = shoebox_develop::export::resize(&img, w, h);
+                    let bytes = shoebox_develop::export::encode(&img, preset)?;
+                    let ext = preset.format.extension();
+                    let stem = file.strip_suffix(&format!(".{ext}")).unwrap_or(&file);
+                    // Replace only what was there before this export: two
+                    // photos landing on one name keep both.
+                    let out = if job.on_clash == Some(Clash::Replace) && first {
+                        shoebox_develop::export::write_replacing(&folder, stem, ext, &bytes)?
+                    } else {
+                        shoebox_develop::export::write_new(&folder, stem, ext, &bytes)?
+                    };
+                    if let Some(tool) = exiftool {
+                        copy_metadata(tool, item, preset, &out);
+                    }
+                    Ok(out)
+                })();
+                let mut p = lock();
+                p.done += 1;
+                let last = match result {
+                    Ok(file) => {
+                        p.written.push((
+                            seq,
+                            Exported {
+                                photo: item.path.clone(),
+                                file: file.clone(),
+                                preset: preset.clone(),
+                                edit_key: item.edit_key.clone(),
+                            },
+                        ));
+                        Some(file)
+                    }
+                    Err(e) => {
+                        p.errors.push(format!("{name} ({}): {e}", preset.name));
+                        None
+                    }
+                };
+                emit(Event::ExportProgress {
+                    done: p.done,
+                    total,
+                    last,
+                });
+            }
+            return;
+        }
+        Ok(None) => format!("{name}: needs Adobe DNG Converter"),
+        Err(e) => format!("{name}: {e}"),
+    };
+    let mut p = lock();
+    p.errors.push(failed);
+    p.done += job.presets.len();
 }
 
 /// `p` with symlinks resolved, as far as it exists (the rest appended).
@@ -959,6 +1050,94 @@ fn copy_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Five photos, two at a time: every file written once, two with the
+    /// same name kept apart, listed in the photos' order, and progress
+    /// counts up to the total.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn exports_two_photos_at_a_time() {
+        let t = tempfile::tempdir().unwrap();
+        let mut items = Vec::new();
+        for (i, rel) in [
+            "a/one.jpg",
+            "b/two.jpg",
+            "c/three.jpg",
+            "d/one.jpg",
+            "e/five.jpg",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let path = t.path().join("lib").join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let img = shoebox_fixtures::scene(i as u64 + 1, 96, 64);
+            std::fs::write(&path, shoebox_fixtures::jpeg(&img, 90).unwrap()).unwrap();
+            items.push(ExportItem {
+                id: i as u64,
+                path,
+                format: shoebox_decode::Format::Jpeg,
+                orientation: 1,
+                settings: Default::default(),
+                edit_key: None,
+                date: None,
+                sidecar: None,
+            });
+        }
+        let out = t.path().join("out");
+        let preset = Preset {
+            folder: Some(out.clone()),
+            naming: "{name}".into(),
+            metadata: shoebox_develop::export::Metadata::CopyrightOnly,
+            ..shoebox_develop::export::starters()[0].clone()
+        };
+        let job = ExportJob {
+            items,
+            presets: vec![preset],
+            roots: vec![t.path().join("lib")],
+            on_clash: Some(Clash::NewFile),
+        };
+        let events = Mutex::new(Vec::new());
+        let dngs = DngCache::new(&t.path().join("cache"), 1 << 30);
+        run_export(&job, None, &dngs, &|e| events.lock().unwrap().push(e));
+        let events = events.into_inner().unwrap();
+        let mut done: Vec<usize> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::ExportProgress { done, total: 5, .. } => Some(*done),
+                _ => None,
+            })
+            .collect();
+        done.sort_unstable();
+        assert_eq!(done, [1, 2, 3, 4, 5]);
+        let Some(Event::ExportDone {
+            written, errors, ..
+        }) = events.last()
+        else {
+            panic!("no ExportDone");
+        };
+        assert!(errors.is_empty(), "{errors:?}");
+        let photos: Vec<_> = written.iter().map(|w| w.photo.clone()).collect();
+        let want: Vec<_> = job.items.iter().map(|i| i.path.clone()).collect();
+        assert_eq!(photos, want);
+        let names: Vec<_> = written
+            .iter()
+            .map(|w| w.file.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            ["one.jpg", "two.jpg", "three.jpg", "one-1.jpg", "five.jpg"]
+        );
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), 5);
+
+        // Again, as new files: each takes the next free name.
+        let names = plan_names(&job);
+        assert_eq!(names[&(0, 0)].as_ref().unwrap().1, "one-2.jpg");
+        assert_eq!(names[&(3, 0)].as_ref().unwrap().1, "one-3.jpg");
+        run_export(&job, None, &dngs, &|_| {});
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), 10);
+        assert!(out.join("one-3.jpg").exists() && out.join("two-1.jpg").exists());
+    }
 
     /// "All but location" leaves nothing that says where: coordinates or
     /// place names, in EXIF, IPTC or XMP. Needs exiftool (skipped without).
