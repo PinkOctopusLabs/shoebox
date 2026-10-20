@@ -45,6 +45,7 @@ fn paths(tmp: &Path, roots: &[PathBuf]) -> AppPaths {
         },
         people: tmp.join("data/people.json"),
         raw_cache: tmp.join("cache"),
+        export_presets: tmp.join("data/export-presets.json"),
     }
 }
 
@@ -3332,4 +3333,93 @@ fn settings_raw_tab() {
     assert!(h.query_by_label_contains("In use:").is_some());
     assert!(h.query_by_label("Download Adobe DNG Converter").is_some());
     snapshot(&mut h, "settings-raw");
+}
+
+/// Export: ⇧⌘E, the first preset (JPEG, full size), into a folder outside
+/// the library; the Info panel lists it. A folder inside the library is
+/// refused.
+#[test]
+fn export_a_photo() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(&root).unwrap();
+    let img = shoebox_fixtures::scene(5, 640, 480);
+    std::fs::write(
+        root.join("beach.jpg"),
+        shoebox_fixtures::jpeg(&img, 92).unwrap(),
+    )
+    .unwrap();
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+    wait_for(&mut h, Duration::from_secs(10), "presets", |a| {
+        a.export_state().0 > 0
+    });
+    let out = t.path().join("exports");
+    h.state_mut().set_export_folder(&out);
+    h.get_by_label("beach.jpg").click();
+    h.run_steps(2);
+    h.key_press_modifiers(
+        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+        egui::Key::E,
+    );
+    h.run_steps(3);
+    snapshot(&mut h, "export-dialog");
+    // The window's title is "Export" too; the button comes after it.
+    h.get_all_by_label("Export").last().unwrap().click();
+    h.run_steps(2);
+    wait_for(&mut h, Duration::from_secs(30), "export", |a| {
+        !a.export_state().1 && a.export_state().3.is_some()
+    });
+    let files: Vec<_> = walk(&out);
+    assert_eq!(files.len(), 1, "{files:?}");
+    let f = &files[0];
+    assert!(
+        f.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("beach_JPEG"),
+        "{f:?}"
+    );
+    let decoded = shoebox_decode::render_path(
+        shoebox_decode::Format::Jpeg,
+        f,
+        None,
+        1,
+        shoebox_decode::Target::Srgb,
+    )
+    .unwrap();
+    assert_eq!((decoded.width, decoded.height), (640, 480));
+    // Listed in the Info panel.
+    wait_for(&mut h, Duration::from_secs(10), "listed", |a| {
+        a.export_state().2 == Some(1)
+    });
+
+    // Inside the library: refused, nothing written there (even given by a
+    // path through a symlink: the temp folder is /var, the root /private/var).
+    h.state_mut().set_export_folder(&root.join("exports"));
+    h.key_press_modifiers(
+        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT | egui::Modifiers::ALT,
+        egui::Key::E,
+    );
+    wait_for(&mut h, Duration::from_secs(30), "refused", |a| {
+        a.export_state()
+            .4
+            .as_deref()
+            .is_some_and(|e| e.contains("inside your library"))
+    });
+    assert!(!root.join("exports").exists());
+}
+
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            out.extend(walk(&p));
+        } else {
+            out.push(p);
+        }
+    }
+    out
 }

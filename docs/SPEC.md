@@ -298,6 +298,7 @@ Shortcuts follow Lightroom wherever one exists, so existing muscle memory carrie
 | \\ / Y | In Develop: original / edited; split view (drag the divider) |
 | R | In Develop: crop (Enter applies, Escape cancels) |
 | J | In Develop: show clipping |
+| Shift+Cmd+E / Opt+Shift+Cmd+E | Export… / export again with the last presets |
 
 ## Milestones
 

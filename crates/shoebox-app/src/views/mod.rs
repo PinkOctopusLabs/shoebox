@@ -4,6 +4,7 @@ pub mod compare;
 pub mod crop;
 pub mod develop;
 pub mod duplicates;
+pub mod export;
 pub mod files;
 pub mod filmstrip;
 pub mod grid;
@@ -426,6 +427,14 @@ pub fn photo_menu(app: &mut ShoeboxApp, resp: &egui::Response, pos: usize) {
             if let Some(&i) = app.shown.get(pos) {
                 app.show_in_all(app.ids[i]);
             }
+            ui.close();
+        }
+        if ui
+            .button("Export…")
+            .on_hover_text("Export with presets (Shift-⌘E)")
+            .clicked()
+        {
+            app.export.open = true;
             ui.close();
         }
         let ids: Vec<crate::jobs::PhotoId> = app.selection.iter().copied().collect();

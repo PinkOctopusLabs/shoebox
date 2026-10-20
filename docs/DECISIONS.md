@@ -1203,3 +1203,43 @@ hashes, embeddings, faces).
   or clearing the cache run on the develop thread, so the UI thread never
   touches the disk. The spec's "pre-convert likely edits when idle" option
   isn't built yet.
+
+## Develop, Phase 1: export (2026-10-20)
+
+- `shoebox-develop::export`: presets (format and options, colour space,
+  size, metadata, folder, naming) as JSON in `export-presets.json` in the
+  data folder (one file rather than a folder of them), starting with
+  "JPEG · Full size", "JPEG · Web 2048" and "TIFF · 16-bit" (ZIP, Adobe
+  RGB). JPEG through the pure-Rust `jpeg-encoder` (not mozjpeg, a C
+  library); 16-bit TIFF (LZW or ZIP) through `tiff`; each tagged with its
+  profile (sRGB, Display P3, Adobe RGB, ProPhoto; ProPhoto adapted to
+  D50, with the 1.8 curve, Adobe RGB 2.2). Long edge or megapixels with a
+  separable Lanczos-3 (Shoebox's own, not `fast_image_resize`), never
+  upscaling. Names from `{name}`, `{preset}`, `{date}`, `{seq}`; a taken
+  name gets `-1`, `-2` (files are only ever created, `create_new`).
+- Exports run on their own thread (so Develop never waits on one), at full
+  resolution through the CPU pipe (High efficiency NEFs through the DNG
+  cache, whose temporary folders are now per thread). One at a time rather
+  than the spec's two concurrent.
+- Metadata: with exiftool installed, the original's tags and its
+  sidecar's XMP are copied in (location dropped, or copyright only, as the
+  preset says), Orientation set to 1 (the pixels are upright) and the
+  export's own ICC profile kept. Without exiftool, files go out without
+  metadata and the notice says so.
+- Exports never go inside a library folder (compared as real paths: a
+  first version compared `/var/…` with the root's `/private/var/…` and
+  let one through; the test now covers it). Exporting into the library,
+  which the spec allows as an explicit choice, waits for safety rule 3 to
+  be amended.
+- The dialog (Shift-⌘E, or Export… in the photo menu) ticks presets and
+  edits them; ⌥-Shift-⌘E repeats the last export on the selection (the
+  spec's ⌘E is already "new event from selection"). Progress is in the
+  status bar; a notice says where files went. Each export is recorded in
+  the catalog (`exports`, outside the rebuildable set, following photo
+  moves) with the preset and the edit it came from; the Info panel lists a
+  photo's exports, flagged stale (the edit changed) or missing.
+- Not built: re-export. The spec replaces the old file once the new one is
+  written, but safety rule 1 forbids deleting outside the app's caches;
+  needs a decision (overwrite-in-place exception for exports, the Trash,
+  or a new name). Output sharpening and the PNG, AVIF and JPEG XL formats
+  are later phases' items.

@@ -370,6 +370,10 @@ pub enum LibraryCommand {
     },
     /// Write every edit changed since its last save to its `.shoebox` file.
     SaveEdits,
+    /// Remember files just exported.
+    RecordExports(Vec<shoebox_core::cache::ExportRow>),
+    /// A photo's exports (answered by `Exports`).
+    LoadExports(PathBuf),
 }
 
 /// A move, reject, rename or trash of stacks, by the paths of their files.
@@ -595,6 +599,9 @@ pub enum LibraryEvent {
     /// Photos' edits, for their previews elsewhere: every one after the
     /// library opens, then each as it changes.
     Edits(Vec<EditInfo>),
+    /// A photo's exports, newest first, each with whether its file is still
+    /// there.
+    Exports(PathBuf, Vec<(shoebox_core::cache::ExportRow, bool)>),
     /// A photo's edit, if it has one (answer to `LoadEdit`).
     EditLoaded {
         root: PathBuf,
@@ -1456,6 +1463,28 @@ fn library_worker(
                     }
                     Err(e) => emit(LibraryEvent::Error(e)),
                 }
+                (false, false)
+            }
+            LibraryCommand::RecordExports(rows) => {
+                for r in &rows {
+                    if let Err(e) = cache.add_export(r) {
+                        tracing::warn!("recording an export: {e}");
+                    }
+                }
+                (false, false)
+            }
+            LibraryCommand::LoadExports(photo) => {
+                let rows = photo
+                    .to_str()
+                    .map(|p| cache.exports_of(p).unwrap_or_default())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|r| {
+                        let there = Path::new(&r.path).is_file();
+                        (r, there)
+                    })
+                    .collect();
+                emit(LibraryEvent::Exports(photo, rows));
                 (false, false)
             }
             LibraryCommand::SaveEdits => {

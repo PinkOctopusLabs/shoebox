@@ -712,6 +712,9 @@ impl Catalog {
                 self.roots[new_root].path.to_str(),
             ) {
                 cache.move_edits((from, &self.photos[i].rel), (to, &rel))?;
+                if let (Some(a), Some(b)) = (self.photos[i].path.to_str(), m.dst.to_str()) {
+                    cache.move_exports(a, b)?;
+                }
             }
             let new = &self.roots[new_root];
             let new_id = cache.root_id(&new.path, new.role == Role::Reference)?;

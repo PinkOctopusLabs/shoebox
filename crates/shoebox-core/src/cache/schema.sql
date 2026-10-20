@@ -96,3 +96,16 @@ CREATE TABLE IF NOT EXISTS edits (
     saved_at   INTEGER,
     PRIMARY KEY (root, rel_path, copy_id)
 );
+
+-- Files exported from photos (Develop's export), with the preset used and
+-- the edit they were made from (to tell a stale export). Not rebuildable.
+CREATE TABLE IF NOT EXISTS exports (
+    photo       TEXT NOT NULL,
+    copy_id     TEXT NOT NULL,
+    path        TEXT NOT NULL,
+    preset_name TEXT NOT NULL,
+    preset_json TEXT NOT NULL,
+    edit_key    TEXT,
+    created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS exports_photo ON exports(photo);

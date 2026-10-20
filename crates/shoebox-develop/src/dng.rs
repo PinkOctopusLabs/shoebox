@@ -225,7 +225,14 @@ impl DngCache {
         std::fs::create_dir_all(&self.dir).map_err(io(&self.dir))?;
         // A private folder per conversion: the converter names its output
         // after the NEF, and two NEFs can share a name.
-        let tmp = self.dir.join(format!("tmp-{key}"));
+        // Per thread, so two threads converting one file can't collide.
+        let thread = format!("{:?}", std::thread::current().id())
+            .chars()
+            .filter(char::is_ascii_digit)
+            .collect::<String>();
+        let tmp = self
+            .dir
+            .join(format!("tmp-{key}-{}-{thread}", std::process::id()));
         if tmp.exists() {
             std::fs::remove_dir_all(&tmp).map_err(io(&tmp))?;
         }

@@ -329,7 +329,12 @@ fn relative_white_balance() {
 #[test]
 fn a_grey_card_is_neutral_in_every_export_space() {
     let raw = grey_card(0.2);
-    for target in [Target::Srgb, Target::DisplayP3, Target::AdobeRgb, Target::ProPhoto] {
+    for target in [
+        Target::Srgb,
+        Target::DisplayP3,
+        Target::AdobeRgb,
+        Target::ProPhoto,
+    ] {
         let p = cpu::render(
             &raw,
             &Settings::default(),

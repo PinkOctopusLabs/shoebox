@@ -227,10 +227,34 @@ pub fn poll(app: &mut ShoeboxApp) {
             app.preview_ready(id, key);
             continue;
         }
-        if let Event::Status(s) = ev {
-            app.raw_status = Some(s);
-            continue;
-        }
+        let ev = match ev {
+            Event::Status(s) => {
+                app.raw_status = Some(s);
+                continue;
+            }
+            Event::Presets(list) => {
+                if app.export.ticked.is_empty()
+                    && let Some(first) = list.first()
+                {
+                    app.export.ticked.insert(first.name.clone());
+                }
+                app.export.presets = list;
+                continue;
+            }
+            Event::ExportProgress { done, total, .. } => {
+                app.export.progress = Some((done, total));
+                continue;
+            }
+            Event::ExportDone {
+                written,
+                errors,
+                no_metadata,
+            } => {
+                super::export::done(app, written, errors, no_metadata);
+                continue;
+            }
+            ev => ev,
+        };
         let st = &mut app.develop;
         match ev {
             Event::Ready(r) if Some(r.id) == st.photo => {

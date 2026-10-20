@@ -767,6 +767,11 @@ pub fn status(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             )
             .on_hover_text("Shown from their names and cached thumbnails. Open one, or choose Download from Cloud, to get the file.");
         }
+        if let Some((done, total)) = app.export.progress {
+            ui.separator();
+            ui.add(egui::Spinner::new().size(12.0));
+            ui.label(format!("Exporting {done}/{total}"));
+        }
         if let Some(p) = app.current.and_then(|c| app.photo(c)) {
             ui.separator();
             ui.label(RichText::new(short_path(&p.path)).weak())
@@ -1776,7 +1781,13 @@ fn details(app: &mut ShoeboxApp, ui: &mut egui::Ui, id: crate::jobs::PhotoId, id
             .wrap(),
         );
     }
-    if let Some(ch) = &photo.change {
+    let path = photo.path.clone();
+    crate::views::export::info_section(app, ui, &path);
+    let change = app
+        .current
+        .and_then(|c| app.photo(c))
+        .and_then(|p| p.change.clone());
+    if let Some(ch) = &change {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             let (dot, _) = ui.allocate_exact_size(vec2(10.0, 10.0), egui::Sense::hover());

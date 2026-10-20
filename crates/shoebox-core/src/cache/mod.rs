@@ -72,6 +72,22 @@ pub struct EditKey<'a> {
     pub copy: &'a str,
 }
 
+/// A file exported from a photo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportRow {
+    /// The photo's path.
+    pub photo: String,
+    pub copy: String,
+    /// The exported file.
+    pub path: String,
+    pub preset_name: String,
+    pub preset_json: String,
+    /// The edit it was made from (None: unedited).
+    pub edit_key: Option<String>,
+    /// When (ms since the epoch).
+    pub created_at: i64,
+}
+
 /// An edit's working copy in the catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CachedEdit {
@@ -487,6 +503,45 @@ impl Cache {
         )?;
         let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Record a file exported from `photo`.
+    pub fn add_export(&self, e: &ExportRow) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO exports(photo, copy_id, path, preset_name, preset_json, edit_key, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![e.photo, e.copy, e.path, e.preset_name, e.preset_json, e.edit_key, e.created_at],
+        )?;
+        Ok(())
+    }
+
+    /// A photo's exports, newest first.
+    pub fn exports_of(&self, photo: &str) -> Result<Vec<ExportRow>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT photo, copy_id, path, preset_name, preset_json, edit_key, created_at
+             FROM exports WHERE photo = ?1 ORDER BY created_at DESC",
+        )?;
+        let rows = st.query_map([photo], |r| {
+            Ok(ExportRow {
+                photo: r.get(0)?,
+                copy: r.get(1)?,
+                path: r.get(2)?,
+                preset_name: r.get(3)?,
+                preset_json: r.get(4)?,
+                edit_key: r.get(5)?,
+                created_at: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// A photo Shoebox moved keeps its exports.
+    pub fn move_exports(&self, from: &str, to: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE exports SET photo = ?2 WHERE photo = ?1",
+            params![from, to],
+        )?;
+        Ok(())
     }
 
     /// Every edit's working copy: `(root, rel, copy, json)`.

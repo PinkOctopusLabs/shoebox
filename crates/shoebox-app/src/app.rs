@@ -261,6 +261,8 @@ pub struct AppPaths {
     pub people: PathBuf,
     /// Develop's caches (DNGs of High efficiency NEFs, under `dng/`).
     pub raw_cache: PathBuf,
+    /// Export presets (JSON).
+    pub export_presets: PathBuf,
 }
 
 impl AppPaths {
@@ -297,6 +299,7 @@ impl AppPaths {
             },
             people: shoebox_core::paths::people_file(&data),
             raw_cache: cache.clone(),
+            export_presets: data.join("export-presets.json"),
         })
     }
 }
@@ -437,6 +440,10 @@ pub struct ShoeboxApp {
     pub(crate) developer: crate::develop::Develop,
     /// Edited photos: photo path → its preview's key.
     pub(crate) edited: HashMap<PathBuf, String>,
+    /// Edited photos' edit documents (for export).
+    pub(crate) edited_json: HashMap<PathBuf, String>,
+    /// Export: the dialog, presets and progress.
+    pub(crate) export: views::export::State,
     /// Previews rendered and on disk, by key.
     previews_ready: HashSet<String>,
     /// The DNG converter and cache, as last checked (Settings → Raw).
@@ -521,7 +528,11 @@ impl ShoeboxApp {
                 c3.request_repaint()
             });
         let c5 = ctx.clone();
-        let developer = crate::develop::Develop::new(paths.raw_cache, move || c5.request_repaint());
+        let developer =
+            crate::develop::Develop::new(paths.raw_cache, paths.export_presets, move || {
+                c5.request_repaint()
+            });
+        developer.load_presets();
         Self {
             loader,
             library,
@@ -567,6 +578,8 @@ impl ShoeboxApp {
             develop: Default::default(),
             developer,
             edited: HashMap::new(),
+            edited_json: HashMap::new(),
+            export: Default::default(),
             previews_ready: HashSet::new(),
             raw_status: None,
             raw_config: None,
@@ -824,6 +837,25 @@ impl ShoeboxApp {
         )
     }
 
+    /// Point every export preset at `folder` (tests: never ~/Pictures).
+    pub fn set_export_folder(&mut self, folder: &Path) {
+        for p in &mut self.export.presets {
+            p.folder = Some(folder.to_path_buf());
+        }
+    }
+
+    /// Export presets loaded, an export running, files listed for the
+    /// current photo, and the last notice and error (tests).
+    pub fn export_state(&self) -> (usize, bool, Option<usize>, Option<String>, Option<String>) {
+        (
+            self.export.presets.len(),
+            self.export.progress.is_some(),
+            self.export.of_photo.as_ref().map(|(_, r)| r.len()),
+            self.notice.clone(),
+            self.error.clone(),
+        )
+    }
+
     /// Edited photos, and previews of edits ready (tests).
     pub fn edited_previews(&self) -> (usize, usize) {
         (self.edited.len(), self.previews_ready.len())
@@ -945,6 +977,7 @@ impl ShoeboxApp {
         while let Ok(ev) = self.library.events.try_recv() {
             match ev {
                 LibraryEvent::Edits(list) => self.note_edits(list),
+                LibraryEvent::Exports(photo, rows) => views::export::loaded(self, photo, rows),
                 LibraryEvent::EditLoaded { root, rel, json } => {
                     views::develop::edit_loaded(self, root, rel, json);
                 }
@@ -3101,6 +3134,12 @@ impl ShoeboxApp {
     fn note_edits(&mut self, list: Vec<crate::jobs::EditInfo>) {
         for info in list {
             let id = crate::jobs::photo_id(&info.path);
+            if info.key.is_some() {
+                self.edited_json
+                    .insert(info.path.clone(), info.json.clone());
+            } else {
+                self.edited_json.remove(&info.path);
+            }
             let before = self.edited.get(&info.path).cloned();
             if before == info.key {
                 continue;
@@ -3423,6 +3462,14 @@ impl ShoeboxApp {
                 let show = !(self.left_open || self.right_open);
                 (self.left_open, self.right_open) = (show, show);
             }
+        }
+        if m.command && m.shift && pressed(egui::Key::E) {
+            if m.alt {
+                views::export::repeat(self);
+            } else {
+                self.export.open = true;
+            }
+            return;
         }
         if m.command {
             if pressed(egui::Key::Z) {
@@ -3752,6 +3799,7 @@ impl eframe::App for ShoeboxApp {
         views::duplicates::apply_dialog(self, &ctx);
         views::files::dialogs(self, &ctx);
         views::settings::show(self, &ctx);
+        views::export::dialog(self, &ctx);
         self.scroll_to_current = false;
 
         let wanted = std::mem::take(&mut self.wanted);

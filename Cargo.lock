@@ -5962,6 +5962,7 @@ dependencies = [
  "raw-window-handle",
  "rayon",
  "rfd",
+ "serde_json",
  "shoebox-core",
  "shoebox-decode",
  "shoebox-develop",
