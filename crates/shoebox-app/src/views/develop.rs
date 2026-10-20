@@ -1244,6 +1244,35 @@ fn module(ui: &mut egui::Ui, title: &str, reset: bool) -> bool {
     clicked
 }
 
+/// The camera settings under the histogram: ISO, shutter, aperture, focal
+/// length and lens, as far as the file says.
+pub fn exif_summary(x: &shoebox_core::exif::ExifInfo) -> Option<String> {
+    let shutter = x.exposure.as_ref().map(|e| {
+        if e.ends_with('s') {
+            e.clone()
+        } else {
+            format!("{e} s")
+        }
+    });
+    let parts: Vec<String> = [
+        x.iso.map(|i| format!("ISO {i}")),
+        shutter,
+        x.fnumber.map(|f| format!("f/{}", trim(f))),
+        x.focal.map(|f| format!("{} mm", trim(f))),
+        x.lens.clone(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// 2.8 → "2.8", 8.0 → "8", 50.0 → "50".
+fn trim(v: f64) -> String {
+    let s = format!("{v:.1}");
+    s.strip_suffix(".0").map_or(s.clone(), str::to_owned)
+}
+
 /// The right panel in Develop: the modules.
 pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     if let Some(h) = &app.develop.histogram {
@@ -1268,6 +1297,16 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 pct(lo)
             ));
         });
+    }
+    if let Some(text) = app
+        .develop
+        .photo
+        .and_then(|id| app.index(id))
+        .and_then(|i| exif_summary(&app.catalog.photos[i].meta.exif))
+    {
+        ui.weak(text);
+    }
+    if app.develop.histogram.is_some() {
         ui.separator();
     }
     let st = &app.develop;
@@ -1574,5 +1613,34 @@ pub fn history(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             st.changed = Some(Instant::now());
             st.unsaved.get_or_insert_with(Instant::now);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exif_summary;
+    use shoebox_core::exif::ExifInfo;
+
+    #[test]
+    fn camera_settings_line() {
+        let x = ExifInfo {
+            iso: Some(800),
+            exposure: Some("1/250 s".into()),
+            fnumber: Some(2.8),
+            focal: Some(40.0),
+            lens: Some("NIKKOR Z 40mm f/2".into()),
+            ..ExifInfo::default()
+        };
+        assert_eq!(
+            exif_summary(&x).as_deref(),
+            Some("ISO 800 · 1/250 s · f/2.8 · 40 mm · NIKKOR Z 40mm f/2")
+        );
+        let y = ExifInfo {
+            exposure: Some("1/60".into()),
+            fnumber: Some(8.0),
+            ..ExifInfo::default()
+        };
+        assert_eq!(exif_summary(&y).as_deref(), Some("1/60 s · f/8"));
+        assert_eq!(exif_summary(&ExifInfo::default()), None);
     }
 }
