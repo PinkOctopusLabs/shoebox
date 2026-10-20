@@ -1034,3 +1034,44 @@ hashes, embeddings, faces).
   edit. `save_pending` writes every unsaved row as one batch (the app
   calls it after 2 s idle and on leaving a photo); `load` takes the file
   when it was written after the row (another Mac, a restore).
+
+## Develop, Phase 1: the CPU reference pipeline (2026-10-20)
+
+- `shoebox-develop::cpu` runs the stages in order on the CPU: white
+  balance on the mosaic → highlights → demosaic → proxy downscale (box, by
+  a whole factor) → camera → linear Rec.2020 → exposure → EXIF orientation
+  → rotate and crop (one bilinear resample) → display transform → output
+  space and sRGB transfer curve. Exports use it until the GPU pipe exists;
+  then it's what the shaders are tested against. 24 MP renders in 1.2 s
+  (M2 Max, release, partly single-threaded).
+- **Ported from darktable** (commit 2747ed2a, downloaded with permission):
+  RCD (`src/iop/demosaicing/rcd.c`) and inpaint opposed
+  (`src/iop/hlreconstruct/opposed.c`, `_calc_refavg` from `segbased.c`).
+  Whole-image buffers instead of tiles; RCD's 9-pixel border comes from
+  the bilinear (box3) demosaic instead of PPG. Highlights clip at darktable's
+  0.987 of each channel's white-balanced white (the spec's 0.98 is close).
+  RCD beats bilinear by over 1 dB on all four Bayer layouts of a synthetic
+  scene; on the Z f fixture it shows no mazes or fringes at 100%.
+- **White balance** follows the DNG SDK: Robertson temperature and tint,
+  dual matrices blended by inverse temperature, the as-shot white found by
+  iteration, Bradford to D65. White-balanced raw values keep their physical
+  meaning (the matrix undoes the multipliers relative to green), so moving
+  white balance doesn't change brightness. Presets use Lightroom's values.
+- **Display transform**, Shoebox's own (the spec's "AgX-style" left the
+  details open): in stops from mid grey, grey stays at display grey (0.18
+  linear) with a slope of 0.17 display units per stop (the contrast slider
+  scales it by 2^(c/100)); above, a shoulder `t/(1+t^p)^(1/p)` reaches 99%
+  at the white point (4 stops up by default: the sensor clips ~2.5 up);
+  below, an exponential fall-off like a gamma encode's, pulled to zero at
+  the black point (10 stops down). A first attempt (one logistic with a
+  power to pin grey) crushed the midtones whenever the range changed. Before
+  the curve, primaries are pulled 15% towards grey and pushed 10% back
+  after (AgX's idea), so bright saturated colours roll off to white. With
+  "preserve hue", the brightest channel is tone-mapped and the others
+  scaled with it, blending to per-channel near white.
+- **Baseline exposure** +0.75 stops before the slider: on the HE★ fixture
+  that puts luminance percentiles (5/25/50/75/95/99%: 1 4 10 24 123 248)
+  close to the Z f's own JPEG (3 5 9 19 137 252). To be tuned on the
+  30-NEF set; Auto exposure (Phase 2) refines it per photo.
+- `examples/develop_probe.rs` renders files (HE NEFs through the
+  converter) with slider values from the environment, for tuning.

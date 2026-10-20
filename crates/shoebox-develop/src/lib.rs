@@ -5,8 +5,11 @@
 //! - [`edit`]: the edit document: settings that differ from the defaults,
 //!   with undoable history.
 
+pub mod colour;
+pub mod cpu;
 pub mod dng;
 pub mod edit;
+pub mod wb;
 
 use std::path::PathBuf;
 

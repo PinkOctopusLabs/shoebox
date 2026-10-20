@@ -6044,6 +6044,8 @@ dependencies = [
  "blake3",
  "jiff",
  "json-patch",
+ "png 0.18.1",
+ "rayon",
  "serde",
  "serde_json",
  "shoebox-decode",

@@ -105,3 +105,8 @@ Semantic search uses Google's
 both with
 [candle](https://github.com/huggingface/candle) (MIT or Apache-2.0; one crate
 vendored with a fix, see `vendor/README.md`).
+Raw editing ports two of [darktable](https://www.darktable.org)'s algorithms
+(GPL-3.0): Luis Sanz Rodríguez's RCD demosaicing and the "inpaint opposed"
+highlight reconstruction (each module names its source file and commit), and
+decodes raw files with [rawler](https://github.com/dnglab/dnglab)
+(LGPL-2.1).
