@@ -3387,6 +3387,69 @@ fn develop_a_jpeg() {
     );
 }
 
+/// A photo renamed in Finder keeps its edit: after the scan the edit is
+/// found by content and moved beside the photo's new name (journaled);
+/// an edit whose photo is gone stays, listed in Settings → Raw.
+#[test]
+fn edits_follow_photos_moved_in_finder() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(root.join("trips")).unwrap();
+    let bytes = shoebox_fixtures::jpeg(&shoebox_fixtures::scene(3, 400, 300), 92).unwrap();
+    std::fs::write(root.join("trips/beach.jpg"), &bytes).unwrap();
+    std::fs::write(
+        root.join("other.jpg"),
+        shoebox_fixtures::jpeg(&shoebox_fixtures::scene(4, 400, 300), 92).unwrap(),
+    )
+    .unwrap();
+    let write_edit = |rel: &str, blake3: String, size: u64| {
+        let mut doc = shoebox_develop::edit::EditDoc::new(shoebox_develop::edit::Source {
+            path: rel.to_owned(),
+            blake3,
+            size: Some(size),
+            camera: None,
+            lens: None,
+        });
+        doc.change("Exposure", |s| s.modules.exposure.ev = 1.0);
+        let p = shoebox_core::edits::path(&root, Path::new(rel), shoebox_core::edits::MAIN);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, doc.to_json()).unwrap();
+        p
+    };
+    // Edited as IMG_1.jpg, since renamed trips/beach.jpg.
+    let old = write_edit(
+        "IMG_1.jpg",
+        blake3::hash(&bytes).to_hex().to_string(),
+        bytes.len() as u64,
+    );
+    // And one whose photo is gone.
+    let gone = write_edit("gone.jpg", "00".repeat(32), bytes.len() as u64);
+
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+    wait_for(&mut h, Duration::from_secs(20), "reattached", |a| {
+        a.edited_previews().0 == 1 && !a.unattached_edits().is_empty()
+    });
+    let new = shoebox_core::edits::path(
+        &root,
+        Path::new("trips/beach.jpg"),
+        shoebox_core::edits::MAIN,
+    );
+    assert!(new.exists() && !old.exists());
+    assert!(gone.exists(), "never deleted");
+    let listed = h.state().unattached_edits();
+    assert_eq!(listed.len(), 1);
+    assert!(listed[0].ends_with("lib/.shoebox/edits/gone.jpg.json"));
+    assert!(h.state().notice().is_some_and(|n| n.contains("1 edit")));
+
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Comma);
+    h.run_steps(2);
+    h.get_by_label("Raw").click();
+    h.run_steps(5);
+    assert!(h.query_by_label_contains("Edits without a photo").is_some());
+}
+
 /// Settings → Raw: the converter's status, the High efficiency count, and
 /// the DNG cache.
 #[test]

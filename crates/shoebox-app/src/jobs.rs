@@ -602,6 +602,9 @@ pub enum LibraryEvent {
     /// A photo's exports, newest first, each with whether its file is still
     /// there.
     Exports(PathBuf, Vec<(shoebox_core::cache::ExportRow, bool)>),
+    /// Edit files whose photo wasn't found after a scan (kept, never
+    /// deleted; listed in Settings).
+    Unattached(Vec<PathBuf>),
     /// A photo's edit, if it has one (answer to `LoadEdit`).
     EditLoaded {
         root: PathBuf,
@@ -1521,6 +1524,7 @@ fn library_worker(
                 &publish,
                 &emit,
             );
+            reattach_edits(&cache, &catalog, &settings, &fileops, &emit);
         }
     }
     drop(watcher);
@@ -1558,6 +1562,127 @@ fn library_worker(
             Err(e) => emit(LibraryEvent::Error(format!("scanning: {e}"))),
         }
     }
+}
+
+/// After a scan: edits whose photo has gone (moved or renamed in Finder)
+/// are matched to a photo by size, then content, and moved to its edit
+/// path as one journaled batch; the rest are reported as unattached.
+fn reattach_edits(
+    cache: &shoebox_core::cache::Cache,
+    catalog: &Catalog,
+    settings: &Settings,
+    fileops: &FileOps,
+    emit: &(dyn Fn(LibraryEvent) + Sync),
+) {
+    use shoebox_core::edits;
+    let writable: Vec<PathBuf> = settings
+        .roots
+        .iter()
+        .filter(|r| !r.reference)
+        .map(|r| r.path.clone())
+        .collect();
+    let mut orphans = Vec::new();
+    let mut edited: HashSet<PathBuf> = HashSet::new();
+    let mut orphan_of: HashMap<PathBuf, (PathBuf, edits::EditFile)> = HashMap::new();
+    for root in &writable {
+        let Ok(files) = edits::all(root) else {
+            continue;
+        };
+        for f in files {
+            let photo = root.join(&f.rel);
+            if photo.exists() {
+                edited.insert(photo);
+            } else if f.blake3.is_some() {
+                orphan_of.insert(f.path.clone(), (root.clone(), f.clone()));
+                orphans.push(f);
+            }
+        }
+    }
+    if orphans.is_empty() {
+        emit(LibraryEvent::Unattached(Vec::new()));
+        return;
+    }
+    let candidates: Vec<(PathBuf, u64)> = catalog
+        .photos
+        .iter()
+        .filter(|p| !edited.contains(&p.path) && writable.iter().any(|r| p.path.starts_with(r)))
+        .map(|p| (p.path.clone(), p.size))
+        .collect();
+    let plan = edits::reattach(
+        &orphans,
+        |p| writable.iter().find(|r| p.starts_with(r)).cloned(),
+        &candidates,
+        |p| {
+            std::fs::read(p)
+                .ok()
+                .map(|b| shoebox_develop::dng::DngCache::key(&b))
+        },
+    );
+    let moved: HashSet<PathBuf> = plan.iter().map(|(src, _)| src.clone()).collect();
+    if !plan.is_empty() {
+        let p = shoebox_core::fileops::Plan {
+            moves: plan
+                .iter()
+                .map(|(src, dst)| PlannedMove {
+                    src: src.clone(),
+                    dst: dst.clone(),
+                })
+                .collect(),
+        };
+        match fileops.execute("Reattach edits", &p) {
+            Ok(_) => {
+                for (src, dst) in &plan {
+                    let (Some((old_root, old)), Some(new_root)) = (
+                        orphan_of.get(src),
+                        writable.iter().find(|r| dst.starts_with(edits::dir(r))),
+                    ) else {
+                        continue;
+                    };
+                    // The photo's path from the edit's: drop `.json` or
+                    // `.<copy>.json`.
+                    let suffix = if old.copy == edits::MAIN {
+                        ".json".to_owned()
+                    } else {
+                        format!(".{}.json", old.copy)
+                    };
+                    let new_rel = dst
+                        .strip_prefix(edits::dir(new_root))
+                        .ok()
+                        .and_then(|r| r.to_str())
+                        .and_then(|r| r.strip_suffix(&suffix));
+                    if let (Some(a), Some(b), Some(ra), Some(rb)) = (
+                        old_root.to_str(),
+                        new_root.to_str(),
+                        old.rel.to_str(),
+                        new_rel,
+                    ) {
+                        if let Err(e) = cache.move_edits((a, ra), (b, rb)) {
+                            tracing::warn!("carrying an edit's row: {e}");
+                        }
+                        if old.copy == edits::MAIN
+                            && let Ok(Some(json)) = edits::read(dst)
+                            && let Some(info) = edit_info(new_root, rb, json)
+                        {
+                            emit(LibraryEvent::Edits(vec![info]));
+                        }
+                    }
+                }
+                emit(LibraryEvent::Notice(format!(
+                    "Found the photos of {} edit{} moved outside Shoebox",
+                    plan.len(),
+                    if plan.len() == 1 { "" } else { "s" }
+                )));
+            }
+            Err(e) => emit(LibraryEvent::Error(format!("reattaching edits: {e}"))),
+        }
+    }
+    emit(LibraryEvent::Unattached(
+        orphans
+            .into_iter()
+            .map(|o| o.path)
+            .filter(|p| !moved.contains(p))
+            .collect(),
+    ));
 }
 
 /// Undo one batch, carrying catalog entries back across reversed moves and

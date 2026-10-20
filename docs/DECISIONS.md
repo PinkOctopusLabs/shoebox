@@ -1285,3 +1285,17 @@ hashes, embeddings, faces).
   as a 390 MB float texture. Zoomed views show the edit (not the
   original or a split); crop and the eyedropper work at fit (the
   eyedropper at 100% too).
+
+## Edits after photos move in Finder (2026-10-20)
+
+- After every full scan (start-up, Rescan, roots changed), the library
+  worker lists each writable root's edit files; one whose photo isn't on
+  disk is matched by size, then BLAKE3, to a photo without an edit of its
+  own and moved to that photo's edit path. All the moves are one journaled
+  batch, "Reattach edits" (undoable from History like any move); the
+  catalog rows follow, and a notice says how many were found. Watcher
+  updates don't reattach; the next full scan does.
+- Edits that match nothing stay where they are and are listed under
+  "Edits without a photo" in Settings → Raw, with Show in Finder. They're
+  matched again on every scan, so a photo that comes back gets its edit.
+  Empty edits (`{}`, an undone first save) aren't listed.

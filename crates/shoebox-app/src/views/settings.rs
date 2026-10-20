@@ -540,6 +540,32 @@ fn raw(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &mut Settings) {
         "Converted DNGs are kept in Shoebox's cache, never in your library; the least \
          recently used go first beyond the limit.",
     );
+    if !app.unattached.is_empty() {
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Edits without a photo").strong());
+        note(
+            ui,
+            &format!(
+                "Shoebox couldn't find the photo of {} edit{} (moved or deleted outside \
+                 Shoebox). They're kept; if the photo comes back, its edit is found again.",
+                app.unattached.len(),
+                if app.unattached.len() == 1 { "" } else { "s" }
+            ),
+        );
+        egui::ScrollArea::vertical()
+            .max_height(140.0)
+            .id_salt("unattached")
+            .show(ui, |ui| {
+                for p in &app.unattached {
+                    ui.horizontal(|ui| {
+                        if ui.small_button("Show").clicked() {
+                            crate::app::reveal(p);
+                        }
+                        ui.weak(p.display().to_string());
+                    });
+                }
+            });
+    }
 }
 
 fn updates(ui: &mut egui::Ui) {

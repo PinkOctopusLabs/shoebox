@@ -448,6 +448,8 @@ pub struct ShoeboxApp {
     previews_ready: HashSet<String>,
     /// The DNG converter and cache, as last checked (Settings → Raw).
     pub(crate) raw_status: Option<crate::develop::RawStatus>,
+    /// Edit files whose photo the last scan didn't find (Settings → Raw).
+    pub(crate) unattached: Vec<PathBuf>,
     /// What the develop thread was last told (converter, cache limit).
     raw_config: Option<(Option<PathBuf>, u64)>,
     pub(crate) compare: CompareState,
@@ -582,6 +584,7 @@ impl ShoeboxApp {
             export: Default::default(),
             previews_ready: HashSet::new(),
             raw_status: None,
+            unattached: Vec::new(),
             raw_config: None,
             events: Vec::new(),
             event_members: HashMap::new(),
@@ -862,6 +865,11 @@ impl ShoeboxApp {
         self.export.clashes.is_some()
     }
 
+    /// Edit files the last scan couldn't find a photo for (tests).
+    pub fn unattached_edits(&self) -> &[PathBuf] {
+        &self.unattached
+    }
+
     /// Edited photos, and previews of edits ready (tests).
     pub fn edited_previews(&self) -> (usize, usize) {
         (self.edited.len(), self.previews_ready.len())
@@ -990,6 +998,7 @@ impl ShoeboxApp {
             match ev {
                 LibraryEvent::Edits(list) => self.note_edits(list),
                 LibraryEvent::Exports(photo, rows) => views::export::loaded(self, photo, rows),
+                LibraryEvent::Unattached(paths) => self.unattached = paths,
                 LibraryEvent::EditLoaded { root, rel, json } => {
                     views::develop::edit_loaded(self, root, rel, json);
                 }
