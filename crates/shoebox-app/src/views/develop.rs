@@ -101,6 +101,12 @@ pub struct State {
     /// A new photo (no edit yet): its first look (Auto, or the chosen
     /// preset) is applied once it's prepared.
     auto_due: bool,
+    /// The copy being edited ("" is the master) and the photo's copies
+    /// (id, name), the master first.
+    pub(super) copy: String,
+    pub(crate) copies: Vec<(String, String)>,
+    /// The copy being renamed, and its name so far.
+    pub(super) renaming_copy: Option<(String, String)>,
     /// Edit presets (loaded once; kept from photo to photo).
     pub looks: Vec<shoebox_develop::preset::Preset>,
     /// Settings shown instead of the edit while a preset is hovered.
@@ -250,6 +256,7 @@ fn keep(app: &mut ShoeboxApp, now: bool) {
         (Some(_), Some(doc), Some((root, rel))) => Some(LibraryCommand::PutEdit {
             root: root.clone(),
             rel: rel.clone(),
+            copy: st.copy_id().to_owned(),
             json: doc.to_json(),
         }),
         _ => None,
@@ -267,9 +274,20 @@ fn keep(app: &mut ShoeboxApp, now: bool) {
 }
 
 /// The library worker's answer to `LoadEdit`.
-pub fn edit_loaded(app: &mut ShoeboxApp, root: PathBuf, rel: String, json: Option<String>) {
+pub fn edit_loaded(
+    app: &mut ShoeboxApp,
+    root: PathBuf,
+    rel: String,
+    copy: String,
+    copies: Vec<(String, String)>,
+    json: Option<String>,
+) {
     let st = &mut app.develop;
-    if st.file.as_ref() != Some(&(root.clone(), rel.clone())) || st.doc.is_some() {
+    if st.file.as_ref() != Some(&(root.clone(), rel.clone())) {
+        return;
+    }
+    st.copies = copies;
+    if st.doc.is_some() || copy != st.copy_id() {
         return;
     }
     let photo = st
@@ -293,8 +311,174 @@ pub fn edit_loaded(app: &mut ShoeboxApp, root: PathBuf, rel: String, json: Optio
         }
         None => fresh(),
     };
-    app.develop.auto_due = json.is_none();
+    // Only the master gets a first look; a copy starts as made.
+    app.develop.auto_due = json.is_none() && copy == shoebox_core::edits::MAIN;
     app.develop.doc = Some(doc);
+}
+
+impl State {
+    /// The copy being edited (`edits::MAIN` for the master).
+    pub fn copy_id(&self) -> &str {
+        if self.copy.is_empty() {
+            shoebox_core::edits::MAIN
+        } else {
+            &self.copy
+        }
+    }
+}
+
+/// Switch Develop to another copy of the photo: the current one is kept,
+/// the other loaded.
+fn switch_copy(app: &mut ShoeboxApp, id: &str) {
+    if app.develop.copy_id() == id {
+        return;
+    }
+    keep(app, true);
+    let st = &mut app.develop;
+    let Some((root, rel)) = st.file.clone() else {
+        return;
+    };
+    st.copy = id.to_owned();
+    st.doc = None;
+    st.applied = None;
+    st.auto_due = false;
+    app.command(LibraryCommand::LoadEdit {
+        root,
+        rel,
+        copy: id.to_owned(),
+    });
+}
+
+/// A new virtual copy of the edit as it is now, opened.
+fn new_copy(app: &mut ShoeboxApp) {
+    let st = &app.develop;
+    let Some(doc) = &st.doc else { return };
+    let n = (1..)
+        .find(|n| !st.copies.iter().any(|(id, _)| *id == format!("copy-{n}")))
+        .unwrap_or(1);
+    let (id, name) = (format!("copy-{n}"), format!("Copy {n}"));
+    let copy = doc.copy_of(&id, &name);
+    keep(app, true);
+    let st = &mut app.develop;
+    st.copies.push((id.clone(), name));
+    st.copy = id;
+    st.doc = Some(copy);
+    st.applied = None;
+    touched(st);
+    keep(app, true);
+}
+
+/// Copies of the photo's edit: the master and virtual copies.
+fn copies(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    let st = &app.develop;
+    if st.doc.is_none() {
+        return;
+    }
+    let read_only = st.read_only;
+    let current = st.copy_id().to_owned();
+    let list = st.copies.clone();
+    let mut action: Option<(&str, String)> = None;
+    ui.horizontal(|ui| {
+        heading(ui, "COPIES");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let r = ui
+                .add_enabled(!read_only, egui::Button::new("+").small())
+                .on_hover_text("A virtual copy: another edit of the same photo");
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, !read_only, "New copy"));
+            if r.clicked() {
+                action = Some(("new", String::new()));
+            }
+        });
+    });
+    // Before the first edit is kept, the master isn't listed yet.
+    let shown: Vec<(String, String)> = if list.iter().any(|(id, _)| id == shoebox_core::edits::MAIN)
+    {
+        list
+    } else {
+        std::iter::once((shoebox_core::edits::MAIN.to_owned(), "Master".to_owned()))
+            .chain(list)
+            .collect()
+    };
+    for (id, name) in &shown {
+        if let Some((at, text)) = &mut app.develop.renaming_copy
+            && at == id
+        {
+            let r = ui.text_edit_singleline(text);
+            if r.lost_focus() {
+                let done = ui.input(|i| !i.key_pressed(egui::Key::Escape));
+                action = Some((
+                    "renamed",
+                    if done {
+                        text.trim().to_owned()
+                    } else {
+                        String::new()
+                    },
+                ));
+            } else if !r.has_focus() {
+                r.request_focus();
+            }
+            continue;
+        }
+        let r = ui.add(egui::Button::selectable(*id == current, name));
+        if r.clicked() {
+            action = Some(("open", id.clone()));
+        }
+        if id != shoebox_core::edits::MAIN && !read_only {
+            r.context_menu(|ui| {
+                if ui.button("Rename…").clicked() {
+                    action = Some(("rename", id.clone()));
+                }
+                if ui.button("Delete").clicked() {
+                    action = Some(("delete", id.clone()));
+                }
+            });
+        }
+    }
+    match action {
+        Some(("new", _)) => new_copy(app),
+        Some(("open", id)) => switch_copy(app, &id),
+        Some(("rename", id)) => {
+            // Renaming changes the copy's document: open it first.
+            switch_copy(app, &id);
+            let name = shown
+                .iter()
+                .find(|c| c.0 == id)
+                .map(|c| c.1.clone())
+                .unwrap_or_default();
+            app.develop.renaming_copy = Some((id, name));
+        }
+        Some(("renamed", name)) => {
+            let st = &mut app.develop;
+            if let Some((id, _)) = st.renaming_copy.take()
+                && !name.is_empty()
+            {
+                if let Some(c) = st.copies.iter_mut().find(|c| c.0 == id) {
+                    c.1 = name.clone();
+                }
+                if st.copy_id() == id
+                    && let Some(doc) = &mut st.doc
+                {
+                    doc.copy.name = name;
+                    touched(st);
+                }
+            }
+        }
+        Some(("delete", id)) => {
+            if app.develop.copy_id() == id {
+                switch_copy(app, shoebox_core::edits::MAIN);
+            }
+            let st = &mut app.develop;
+            st.copies.retain(|c| c.0 != id);
+            if let Some((root, rel)) = st.file.clone() {
+                app.command(LibraryCommand::RemoveCopy {
+                    root,
+                    rel,
+                    copy: id,
+                });
+            }
+        }
+        _ => {}
+    }
 }
 
 /// A new photo's first look, once its edit and its preparation are both
@@ -448,6 +632,7 @@ fn follow(app: &mut ShoeboxApp) {
         app.command(LibraryCommand::LoadEdit {
             root,
             rel: p.rel.clone(),
+            copy: shoebox_core::edits::MAIN.to_owned(),
         });
         // The photos either side, converted while this one is edited.
         let near: Vec<PathBuf> = app
@@ -1809,6 +1994,8 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
 pub fn history(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     ui.set_min_width(200.0);
     ui.add_space(6.0);
+    copies(app, ui);
+    ui.add_space(10.0);
     snapshots(app, ui);
     ui.add_space(10.0);
     super::presets::panel(app, ui);

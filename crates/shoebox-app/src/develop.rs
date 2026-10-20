@@ -151,6 +151,8 @@ pub struct ExportItem {
     pub sidecar: Option<PathBuf>,
     /// How it was taken (lens corrections).
     pub lens: Option<Arc<Shot>>,
+    /// A virtual copy's name, added to the file name ("DSC_1234_Copy 1").
+    pub copy_name: Option<String>,
 }
 
 /// A file an export wrote.
@@ -800,11 +802,14 @@ fn destination(
             folder.display()
         ));
     }
-    let name = item
+    let mut name = item
         .path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
+    if let Some(copy) = &item.copy_name {
+        name = format!("{name}_{copy}");
+    }
     let stem = shoebox_develop::export::file_stem(
         &preset.naming,
         &name,
@@ -1224,6 +1229,7 @@ mod tests {
                 date: None,
                 sidecar: None,
                 lens: None,
+                copy_name: None,
             });
         }
         let out = t.path().join("out");
@@ -1352,6 +1358,7 @@ mod tests {
             date: None,
             sidecar: None,
             lens: None,
+            copy_name: None,
         };
         let preset = Preset {
             metadata: shoebox_develop::export::Metadata::AllButLocation,

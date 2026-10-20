@@ -368,13 +368,22 @@ pub enum LibraryCommand {
     LoadEdit {
         root: PathBuf,
         rel: String,
+        copy: String,
     },
     /// Keep a changed edit in the catalog; `SaveEdits` writes it to its
     /// file. The document's source hash and size are filled in if missing.
     PutEdit {
         root: PathBuf,
         rel: String,
+        copy: String,
         json: String,
+    },
+    /// Move a virtual copy's edit file to the Trash (journaled) and forget
+    /// it.
+    RemoveCopy {
+        root: PathBuf,
+        rel: String,
+        copy: String,
     },
     /// Write every edit changed since its last save to its `.shoebox` file.
     SaveEdits,
@@ -624,7 +633,13 @@ pub enum LibraryEvent {
     /// deleted; listed in Settings).
     Unattached(Vec<PathBuf>),
     /// A photo's edit, if it has one (answer to `LoadEdit`).
+    /// How many virtual copies these photos have (merged into the app's).
+    Copies(Vec<(PathBuf, usize)>),
     EditLoaded {
+        /// Which copy (`edits::MAIN`, or a virtual copy's id).
+        copy: String,
+        /// The photo's copies: (id, name), the master first.
+        copies: Vec<(String, String)>,
         root: PathBuf,
         rel: String,
         json: Option<String>,
@@ -952,14 +967,21 @@ fn library_worker(
                     publish(&catalog, &settings, false);
                 }
                 match cache.edits() {
-                    Ok(rows) => emit(LibraryEvent::Edits(
-                        rows.into_iter()
-                            .filter(|r| r.2 == shoebox_core::edits::MAIN)
-                            .filter_map(|(root, rel, _, json)| {
-                                edit_info(Path::new(&root), &rel, json)
-                            })
-                            .collect(),
-                    )),
+                    Ok(rows) => {
+                        let mut copies: HashMap<PathBuf, usize> = HashMap::new();
+                        for r in rows.iter().filter(|r| r.2 != shoebox_core::edits::MAIN) {
+                            *copies.entry(Path::new(&r.0).join(&r.1)).or_default() += 1;
+                        }
+                        emit(LibraryEvent::Copies(copies.into_iter().collect()));
+                        emit(LibraryEvent::Edits(
+                            rows.into_iter()
+                                .filter(|r| r.2 == shoebox_core::edits::MAIN)
+                                .filter_map(|(root, rel, _, json)| {
+                                    edit_info(Path::new(&root), &rel, json)
+                                })
+                                .collect(),
+                        ));
+                    }
                     Err(e) => tracing::warn!("listing edits: {e}"),
                 }
                 (false, true)
@@ -1449,35 +1471,80 @@ fn library_worker(
                 }
                 (false, false)
             }
-            LibraryCommand::LoadEdit { root, rel } => {
-                let json = shoebox_core::edits::load(
-                    &cache,
-                    &root,
-                    &rel,
-                    shoebox_core::edits::MAIN,
-                    render_hash,
-                )
-                .unwrap_or_else(|e| {
-                    tracing::warn!("loading the edit of {rel}: {e}");
-                    None
+            LibraryCommand::LoadEdit { root, rel, copy } => {
+                let json = shoebox_core::edits::load(&cache, &root, &rel, &copy, render_hash)
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("loading the edit of {rel}: {e}");
+                        None
+                    });
+                let copies =
+                    shoebox_core::edits::copies_of(&cache, &root, &rel).unwrap_or_default();
+                emit(LibraryEvent::EditLoaded {
+                    root,
+                    rel,
+                    copy,
+                    copies,
+                    json,
                 });
-                emit(LibraryEvent::EditLoaded { root, rel, json });
                 (false, false)
             }
-            LibraryCommand::PutEdit { root, rel, json } => {
+            LibraryCommand::RemoveCopy { root, rel, copy } => {
+                if copy != shoebox_core::edits::MAIN {
+                    // Written first, so the file is there to move.
+                    if let Err(e) = shoebox_core::edits::save_pending(&cache, &fileops) {
+                        tracing::warn!("saving edits: {e}");
+                    }
+                    let file = shoebox_core::edits::path(&root, Path::new(&rel), &copy);
+                    let hash = std::fs::read(&file).map(|b| *blake3::hash(&b).as_bytes());
+                    let result = match hash {
+                        Ok(h) => fileops
+                            .trash("Remove virtual copy", &[(file.clone(), h)])
+                            .map(Some)
+                            .map_err(|e| e.to_string()),
+                        Err(_) => Ok(None), // never written: nothing to move
+                    };
+                    match result {
+                        Ok(batch) => {
+                            if let Some(r) = root.to_str() {
+                                let _ = cache.remove_edit(&shoebox_core::cache::EditKey {
+                                    root: r,
+                                    rel: &rel,
+                                    copy: &copy,
+                                });
+                            }
+                            if let Some(b) = batch {
+                                undo.push(b);
+                                redo.clear();
+                                fresh.set(true);
+                                history(&undo, &redo);
+                            }
+                        }
+                        Err(e) => emit(LibraryEvent::Error(format!("removing the copy: {e}"))),
+                    }
+                    emit(copy_count(&cache, &root, &rel));
+                }
+                (false, false)
+            }
+            LibraryCommand::PutEdit {
+                root,
+                rel,
+                copy,
+                json,
+            } => {
                 match complete_source(&root, &rel, &json) {
                     Ok((json, hash)) => {
-                        if let Err(e) = shoebox_core::edits::put(
-                            &cache,
-                            &root,
-                            &rel,
-                            shoebox_core::edits::MAIN,
-                            &json,
-                            &hash,
-                        ) {
+                        if let Err(e) =
+                            shoebox_core::edits::put(&cache, &root, &rel, &copy, &json, &hash)
+                        {
                             emit(LibraryEvent::Error(format!("keeping the edit: {e}")));
                         }
-                        if let Some(info) = edit_info(&root, &rel, json) {
+                        if copy != shoebox_core::edits::MAIN {
+                            emit(copy_count(&cache, &root, &rel));
+                        }
+                        // The master's edit is what the library shows.
+                        if copy == shoebox_core::edits::MAIN
+                            && let Some(info) = edit_info(&root, &rel, json)
+                        {
                             emit(LibraryEvent::Edits(vec![info]));
                         }
                     }
@@ -1832,6 +1899,17 @@ fn undo_batch(
 /// Stacks of these files.
 /// An edit document's render hash (for the catalog row); empty if it
 /// doesn't parse.
+/// A photo's virtual copies, counted (for the grid's badge).
+fn copy_count(cache: &shoebox_core::cache::Cache, root: &Path, rel: &str) -> LibraryEvent {
+    let n = root
+        .to_str()
+        .and_then(|r| cache.edit_copies(r, rel).ok())
+        .map_or(0, |c| {
+            c.iter().filter(|c| *c != shoebox_core::edits::MAIN).count()
+        });
+    LibraryEvent::Copies(vec![(root.join(rel), n)])
+}
+
 fn render_hash(json: &str) -> String {
     shoebox_develop::edit::EditDoc::from_json(json)
         .map_or_else(|_| String::new(), |d| d.render_hash())

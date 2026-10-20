@@ -3644,6 +3644,71 @@ fn presets_and_pasted_settings() {
     assert_eq!(doc.history().last().unwrap().label, "Paste settings");
 }
 
+/// Virtual copies: a copy of the edit opens as a second document with its
+/// own settings; switching keeps each; both are written; deleting the copy
+/// moves its file to the Trash and goes back to the master.
+#[test]
+fn virtual_copies() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(&root).unwrap();
+    let img = shoebox_fixtures::scene(6, 400, 300);
+    std::fs::write(
+        root.join("pier.jpg"),
+        shoebox_fixtures::jpeg(&img, 90).unwrap(),
+    )
+    .unwrap();
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let mut h = harness(p, egui::vec2(1400.0, 1500.0));
+    settle(&mut h, Duration::from_secs(60));
+    h.get_by_label("pier.jpg").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(30), "develop", |a| {
+        a.develop_ready()
+    });
+    h.run_steps(3);
+    let turn = |h: &mut Harness<'_, ShoeboxApp>| {
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::CloseBracket);
+        h.run_steps(3);
+    };
+    let quarter =
+        |h: &Harness<'_, ShoeboxApp>| h.state().develop_doc().unwrap().settings().geometry.quarter;
+    turn(&mut h); // the master: a quarter turn
+    h.get_by_label("New copy").click();
+    h.run_steps(3);
+    assert_eq!(h.state().develop_copies().1, "copy-1");
+    assert_eq!(quarter(&h), 1, "a copy starts from the edit as it was");
+    turn(&mut h); // the copy: half a turn
+    assert_eq!(quarter(&h), 2);
+    h.get_by_label("Master").click();
+    wait_for(&mut h, Duration::from_secs(10), "master", |a| {
+        a.develop_doc().is_some() && a.develop_copies().1 == "main"
+    });
+    assert_eq!(quarter(&h), 1);
+    h.get_by_label("Copy 1").click();
+    wait_for(&mut h, Duration::from_secs(10), "copy", |a| {
+        a.develop_doc().is_some() && a.develop_copies().1 == "copy-1"
+    });
+    assert_eq!(quarter(&h), 2);
+    let edits = root.join(".shoebox/edits");
+    wait_for(&mut h, Duration::from_secs(20), "both written", |a| {
+        edits.join("pier.jpg.json").exists()
+            && edits.join("pier.jpg.copy-1.json").exists()
+            && a.copy_count("pier.jpg") == 1
+    });
+    // Delete the copy (right-click): to the Trash, back to the master.
+    h.get_by_label("Copy 1").click_secondary();
+    h.run_steps(2);
+    h.get_by_label("Delete").click();
+    wait_for(&mut h, Duration::from_secs(20), "copy removed", |a| {
+        !edits.join("pier.jpg.copy-1.json").exists() && a.copy_count("pier.jpg") == 0
+    });
+    assert!(t.path().join("trash/pier.jpg.copy-1.json").exists());
+    assert_eq!(h.state().develop_copies().1, "main");
+    assert_eq!(quarter(&h), 1);
+}
+
 /// A photo in a reference folder opens in Develop read-only, with an offer
 /// to import its folder: that plans an import of it (nothing copied yet).
 #[test]
@@ -3925,6 +3990,7 @@ fn export_a_photo() {
         a.export_asking()
     });
     snapshot(&mut h, "export-clash");
+    h.run_steps(3); // the question's window drawn before clicking in it
     h.get_by_label("Cancel").click();
     h.run_steps(3);
     assert!(!h.state().export_asking());

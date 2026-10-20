@@ -281,7 +281,16 @@ pub fn cell(
         .all()
         .any(|i| app.edited.contains_key(&app.catalog.photos[i].path))
     {
-        format!("{label} · EDITED")
+        // Virtual copies besides the master: "EDITED +2".
+        let copies: usize = st
+            .all()
+            .filter_map(|i| app.copy_counts.get(&app.catalog.photos[i].path))
+            .sum();
+        if copies > 0 {
+            format!("{label} · EDITED +{copies}")
+        } else {
+            format!("{label} · EDITED")
+        }
     } else {
         label
     };

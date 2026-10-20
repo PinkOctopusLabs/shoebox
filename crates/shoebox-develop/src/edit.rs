@@ -668,6 +668,21 @@ impl EditDoc {
         }
     }
 
+    /// A virtual copy of this edit: the same settings, its own id and name,
+    /// a history of its own (empty).
+    pub fn copy_of(&self, id: &str, name: &str) -> Self {
+        Self {
+            copy: Copy {
+                id: id.to_owned(),
+                name: name.to_owned(),
+            },
+            history: Vec::new(),
+            history_at: None,
+            snapshots: Vec::new(),
+            ..self.clone()
+        }
+    }
+
     /// Read a document. History that doesn't replay to the stored settings
     /// (edited by hand, say) is dropped: the settings win.
     pub fn from_json(text: &str) -> Result<Self, EditError> {

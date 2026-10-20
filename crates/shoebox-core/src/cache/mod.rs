@@ -557,6 +557,24 @@ impl Cache {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Forget an edit's row (a virtual copy moved to the Trash).
+    pub fn remove_edit(&self, key: &EditKey<'_>) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM edits WHERE root = ?1 AND rel_path = ?2 AND copy_id = ?3",
+            params![key.root, key.rel, key.copy],
+        )?;
+        Ok(())
+    }
+
+    /// The copy ids of a photo's edits in the catalog.
+    pub fn edit_copies(&self, root: &str, rel: &str) -> Result<Vec<String>> {
+        let mut st = self
+            .conn
+            .prepare_cached("SELECT copy_id FROM edits WHERE root = ?1 AND rel_path = ?2")?;
+        let rows = st.query_map(params![root, rel], |r| r.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// A photo Shoebox moved takes its edits' rows along.
     pub fn move_edits(&self, from: (&str, &str), to: (&str, &str)) -> Result<()> {
         self.conn.execute(

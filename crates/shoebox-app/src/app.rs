@@ -489,6 +489,8 @@ pub struct ShoeboxApp {
     pub(crate) collection_edit: Option<(Option<String>, String)>,
     /// A short note for the status bar (what the last operation did).
     pub(crate) notice: Option<String>,
+    /// Photos with virtual copies, and how many (the grid's badge).
+    pub(crate) copy_counts: HashMap<PathBuf, usize>,
     /// Settings copied in Develop (⇧⌘C), for pasting onto other photos.
     pub(crate) settings_clipboard: Option<shoebox_develop::preset::Preset>,
     pub(crate) timeline: views::timeline::State,
@@ -643,6 +645,7 @@ impl ShoeboxApp {
             collection_edit: None,
             notice: None,
             settings_clipboard: None,
+            copy_counts: HashMap::new(),
             timeline: views::timeline::State::default(),
             map: views::map::State::new(tile_cache),
             collapsed: HashSet::new(),
@@ -892,6 +895,26 @@ impl ShoeboxApp {
         self.loupe.drawn
     }
 
+    /// Develop's copies of the open photo, and the one being edited (tests).
+    pub fn develop_copies(&self) -> (Vec<String>, String) {
+        (
+            self.develop.copies.iter().map(|c| c.1.clone()).collect(),
+            self.develop.copy_id().to_owned(),
+        )
+    }
+
+    /// Virtual copies the photo with this file name has (the grid's count;
+    /// tests).
+    pub fn copy_count(&self, name: &str) -> usize {
+        self.catalog
+            .photos
+            .iter()
+            .find(|p| p.path.file_name().is_some_and(|n| n == name))
+            .and_then(|p| self.copy_counts.get(&p.path))
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// The edit presets' names (tests).
     pub fn develop_presets(&self) -> Vec<String> {
         self.develop.looks.iter().map(|p| p.name.clone()).collect()
@@ -1031,8 +1054,23 @@ impl ShoeboxApp {
                 LibraryEvent::Edits(list) => self.note_edits(list),
                 LibraryEvent::Exports(photo, rows) => views::export::loaded(self, photo, rows),
                 LibraryEvent::Unattached(paths) => self.unattached = paths,
-                LibraryEvent::EditLoaded { root, rel, json } => {
-                    views::develop::edit_loaded(self, root, rel, json);
+                LibraryEvent::EditLoaded {
+                    root,
+                    rel,
+                    copy,
+                    copies,
+                    json,
+                } => {
+                    views::develop::edit_loaded(self, root, rel, copy, copies, json);
+                }
+                LibraryEvent::Copies(list) => {
+                    for (path, n) in list {
+                        if n == 0 {
+                            self.copy_counts.remove(&path);
+                        } else {
+                            self.copy_counts.insert(path, n);
+                        }
+                    }
                 }
                 LibraryEvent::Catalog {
                     published,

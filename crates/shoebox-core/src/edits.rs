@@ -283,6 +283,74 @@ pub fn load(
     Ok(row.map(|r| r.json))
 }
 
+/// A photo's edits by copy, the master first: `(copy id, name)`. From its
+/// edit files (`<name>.json`, `<name>.<copy>.json`) and the catalog's rows
+/// not yet written.
+pub fn copies_of(
+    cache: &crate::cache::Cache,
+    root: &Path,
+    rel: &str,
+) -> Result<Vec<(String, String)>> {
+    let mut ids: Vec<String> = Vec::new();
+    if let Some(r) = root.to_str() {
+        ids.extend(cache.edit_copies(r, rel)?);
+    }
+    let main = path(root, Path::new(rel), MAIN);
+    if let (Some(dir), Some(name)) = (main.parent(), main.file_name()) {
+        let stem = name.to_string_lossy();
+        let stem = stem.strip_suffix(".json").unwrap_or(&stem).to_owned();
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let n = e.file_name().to_string_lossy().into_owned();
+                if n == format!("{stem}.json") {
+                    ids.push(MAIN.to_owned());
+                } else if let Some(copy) = n
+                    .strip_prefix(&format!("{stem}."))
+                    .and_then(|r| r.strip_suffix(".json"))
+                    && !copy.is_empty()
+                    && !copy.contains('.')
+                {
+                    ids.push(copy.to_owned());
+                }
+            }
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    // The master first, then the copies in order of their ids.
+    ids.sort_by_key(|id| (id != MAIN, id.clone()));
+    let name_of = |id: &str| -> String {
+        let text = root
+            .to_str()
+            .and_then(|r| {
+                cache
+                    .edit(&crate::cache::EditKey {
+                        root: r,
+                        rel,
+                        copy: id,
+                    })
+                    .ok()
+                    .flatten()
+                    .map(|e| e.json)
+            })
+            .or_else(|| read(&path(root, Path::new(rel), id)).ok().flatten());
+        text.and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|v| v["copy"]["name"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| {
+                if id == MAIN {
+                    "Master".into()
+                } else {
+                    id.to_owned()
+                }
+            })
+    };
+    Ok(ids
+        .into_iter()
+        .map(|id| (name_of(&id), id))
+        .map(|(n, id)| (id, n))
+        .collect())
+}
+
 /// Keep a changed edit in the catalog (`json`, with render hash `hash`);
 /// [`save_pending`] writes it to its file shortly after.
 pub fn put(

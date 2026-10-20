@@ -81,12 +81,24 @@ fn send(app: &mut ShoeboxApp, ids: &[PhotoId], presets: Vec<Preset>) {
         if p.format.is_movie() {
             continue;
         }
-        let settings = app
-            .edited_json
-            .get(&p.path)
-            .and_then(|j| shoebox_develop::edit::EditDoc::from_json(j).ok())
-            .map(|d| d.settings().clone())
-            .unwrap_or_default();
+        // The photo open in Develop: its edit as it is now (the copy shown).
+        let open = app
+            .develop
+            .doc
+            .as_ref()
+            .filter(|_| app.develop.photo == Some(id));
+        let copy_name = open
+            .filter(|_| app.develop.copy_id() != shoebox_core::edits::MAIN)
+            .map(|d| d.copy.name.clone());
+        let settings = match open {
+            Some(doc) => doc.settings().clone(),
+            None => app
+                .edited_json
+                .get(&p.path)
+                .and_then(|j| shoebox_develop::edit::EditDoc::from_json(j).ok())
+                .map(|d| d.settings().clone())
+                .unwrap_or_default(),
+        };
         let date = p
             .meta
             .exif
@@ -104,6 +116,7 @@ fn send(app: &mut ShoeboxApp, ids: &[PhotoId], presets: Vec<Preset>) {
             date,
             sidecar: p.sidecar.clone(),
             lens: crate::develop::shot(p),
+            copy_name,
         });
     }
     if items.is_empty() {

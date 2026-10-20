@@ -1642,3 +1642,27 @@ with the frame. Auto-upright (line detection) is Phase 3.
     step. Changes below half a displayed step are now ignored unless the
     slider is in use. And a press that moves a slider is now part of the
     drag that follows, so they make one step, not two.
+
+## Virtual copies (2026-10-20)
+
+EDITING-SPEC shows virtual copies "as a stack in the library". That would
+give each copy its own identity in the catalog, where everything (selection,
+textures, marks, previews) is keyed by file path. So copies start at the
+Develop level, on the storage that already supports them
+(`<rel>.<copy>.json`, and `copy_id` in the catalog's edits table):
+
+- Develop's left panel lists the photo's copies (Master first), from its edit
+  files and any catalog rows not yet written (`edits::copies_of`). "+" makes
+  a copy of the edit as it is now: same settings, its own name and an empty
+  history (`EditDoc::copy_of`). A click switches copies, keeping the one
+  left. Right-click renames a copy (opening it first) or deletes it.
+- Deleting moves the copy's edit file to the Trash through `fileops`, as a
+  journaled, undoable batch, and forgets its catalog row.
+- Only the master gets Auto and drives the library's preview. The grid
+  badge reads "EDITED +n" for n copies.
+- Exporting the photo open in Develop uses the edit as it is now (any
+  copy), with a copy's name added to the file name ("DSC_1234_Copy 1").
+  An export from elsewhere uses the master.
+- Still to come: copies as their own tiles in the library (stacked with the
+  original), and stale-export badges per copy (export rows are recorded
+  against the master's hash for now).
