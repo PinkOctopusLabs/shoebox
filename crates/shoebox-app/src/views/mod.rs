@@ -1,6 +1,7 @@
 //! Centre views.
 
 pub mod compare;
+pub mod crop;
 pub mod develop;
 pub mod duplicates;
 pub mod files;

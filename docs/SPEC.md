@@ -296,6 +296,8 @@ Shortcuts follow Lightroom wherever one exists, so existing muscle memory carrie
 | Cmd+Z / Cmd+Shift+Z | Undo / redo the last batch (in Develop: the edit's own history) |
 | D | Develop the current photo |
 | \\ / Y | In Develop: original / edited; split view (drag the divider) |
+| R | In Develop: crop (Enter applies, Escape cancels) |
+| J | In Develop: show clipping |
 
 ## Milestones
 

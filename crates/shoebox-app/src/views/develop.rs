@@ -75,8 +75,12 @@ pub struct State {
     split_at: f32,
     /// Where the divider was last drawn (screen x; tests find it there).
     pub divider_x: Option<f32>,
+    /// Where the photo was last drawn.
+    pub photo_rect: Option<Rect>,
     /// Show clipped highlights and shadows (J).
     pub warnings: bool,
+    /// Drawing a crop (R): the whole frame shows, the crop over it.
+    pub crop: Option<super::crop::CropEdit>,
     /// The render's histogram (R, G, B, luma).
     pub histogram: Option<Box<[[u32; 256]; 4]>>,
     gpu: Option<GpuShared>,
@@ -356,9 +360,14 @@ fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_w
         st.histogram = Some(counts);
     }
 
-    let mut frame = cpu::frame(&ready.meta, &ready.src, doc.settings(), &o);
+    // While cropping, the whole (rotated) frame.
+    let mut settings = doc.settings().clone();
+    if st.crop.is_some() {
+        settings.geometry.crop = [0.0, 0.0, 1.0, 1.0];
+    }
+    let mut frame = cpu::frame(&ready.meta, &ready.src, &settings, &o);
     frame.warnings = st.warnings;
-    let key = (ready.id, doc.render_hash(), st.warnings);
+    let key = (ready.id, EditDoc::settings_hash(&settings), st.warnings);
     if st.edited.as_ref().is_none_or(|v| v.key != key) {
         let h = render_into(
             &mut st.edited,
@@ -373,7 +382,7 @@ fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_w
             st.histogram = h;
         }
     }
-    if st.compare != Compare::Edited {
+    if st.compare != Compare::Edited && st.crop.is_none() {
         let s = original_settings(doc);
         let frame = cpu::frame(&ready.meta, &ready.src, &s, &o);
         let key = (
@@ -514,7 +523,11 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
     };
     let edited = current(&st.edited);
     let original = current(&st.original).filter(|o| edited.is_some_and(|e| e.1 == o.1));
-    let compare = st.compare;
+    let compare = if st.crop.is_some() {
+        Compare::Edited
+    } else {
+        st.compare
+    };
     let (tex, size) = match edited {
         Some((t, s)) => (Some(t), [s[0] as f32, s[1] as f32]),
         None => {
@@ -534,6 +547,7 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
     let fit = (area.width() / size[0]).min(area.height() / size[1]);
     let target = Rect::from_center_size(area.center(), egui::vec2(size[0], size[1]) * fit);
     let full = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+    app.develop.photo_rect = Some(target);
     match (compare, tex, original) {
         (Compare::Original, Some(_), Some((o, _))) => {
             painter.image(o, target, full, Color32::WHITE);
@@ -611,8 +625,65 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
         }
         _ => {}
     }
-    // Edited / Original / Split, over the top of the photo.
-    if edited.is_some() {
+    // Cropping: the crop over the whole frame, its aspect and Done above.
+    if let (Some(_), Some((_, s))) = (&app.develop.crop, edited) {
+        let degrees = app
+            .develop
+            .doc
+            .as_ref()
+            .map_or(0.0, |d| d.settings().geometry.rotate);
+        let (w, h) = (s[0] as f64, s[1] as f64);
+        if let Some(c) = &mut app.develop.crop {
+            c.ui(ui, target, w, h, degrees);
+        }
+        let bar = Rect::from_center_size(
+            rect.center_top() + egui::vec2(0.0, 18.0),
+            egui::vec2(330.0, 26.0),
+        );
+        let mut done = None;
+        ui.scope_builder(egui::UiBuilder::new().max_rect(bar), |ui| {
+            ui.horizontal(|ui| {
+                let Some(c) = &mut app.develop.crop else {
+                    return;
+                };
+                let name = super::crop::ASPECTS
+                    .iter()
+                    .find(|a| a.0 == c.aspect)
+                    .map_or("Free", |a| a.1);
+                let mut chosen = None;
+                egui::ComboBox::from_id_salt("crop-aspect")
+                    .selected_text(format!("Aspect: {name}"))
+                    .show_ui(ui, |ui| {
+                        for (key, label) in super::crop::ASPECTS {
+                            if ui.selectable_label(c.aspect == key, label).clicked() {
+                                chosen = Some(key);
+                            }
+                        }
+                    });
+                if let Some(a) = chosen {
+                    c.set_aspect(a, w, h, degrees);
+                }
+                if ui
+                    .button("Done")
+                    .on_hover_text("Apply the crop (Enter)")
+                    .clicked()
+                {
+                    done = Some(true);
+                }
+                if ui
+                    .button("Cancel")
+                    .on_hover_text("Leave it as it was (Escape)")
+                    .clicked()
+                {
+                    done = Some(false);
+                }
+            });
+        });
+        if let Some(apply) = done {
+            finish_crop(app, apply);
+        }
+    } else if edited.is_some() {
+        // Edited / Original / Split, over the top of the photo.
         let bar = Rect::from_center_size(
             rect.center_top() + egui::vec2(0.0, 18.0),
             egui::vec2(230.0, 26.0),
@@ -673,6 +744,31 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
     }
     if let Some(pos) = app.current_pos() {
         super::photo_menu(app, &resp, pos);
+    }
+}
+
+/// Start drawing a crop (R), from the edit's crop.
+pub fn start_crop(app: &mut ShoeboxApp) {
+    let st = &mut app.develop;
+    if st.read_only || st.crop.is_some() {
+        return;
+    }
+    if let Some(doc) = &st.doc {
+        let g = &doc.settings().geometry;
+        st.crop = Some(super::crop::CropEdit::new(g.crop, &g.aspect));
+    }
+}
+
+/// Finish drawing a crop: apply it as one step, or leave it as it was.
+pub fn finish_crop(app: &mut ShoeboxApp, apply: bool) {
+    let Some(c) = app.develop.crop.take() else {
+        return;
+    };
+    if apply {
+        edit(app, "crop", "Crop".into(), false, |s| {
+            s.geometry.crop = c.rect;
+            s.geometry.aspect = c.aspect.clone();
+        });
     }
 }
 
@@ -974,9 +1070,10 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 }
                 ui.separator();
 
-                // Geometry: rotation, with the largest crop that stays inside.
+                // Geometry: crop, and rotation (with the largest crop that
+                // stays inside).
                 let g = &s.geometry;
-                if module(ui, "Rotate", *g != defaults.geometry) {
+                if module(ui, "Crop & rotate", *g != defaults.geometry) {
                     edit(app, "rotate", "Reset rotation".into(), false, |s| {
                         s.geometry = Default::default()
                     });
@@ -989,8 +1086,23 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                             s.geometry.rotate = v;
                             s.geometry.crop = crop;
                         });
+                        if let Some(c) = &mut app.develop.crop {
+                            c.rect = crop;
+                        }
                     }
                 });
+                let cropping = app.develop.crop.is_some();
+                if ui
+                    .button(if cropping { "Done cropping" } else { "Crop…" })
+                    .on_hover_text("Draw the crop on the photo (R)")
+                    .clicked()
+                {
+                    if cropping {
+                        finish_crop(app, true);
+                    } else {
+                        start_crop(app);
+                    }
+                }
                 ui.separator();
 
                 if display_referred {

@@ -812,6 +812,16 @@ impl ShoeboxApp {
         )
     }
 
+    /// Develop's crop tool is open, and where the photo is drawn (tests).
+    pub fn develop_cropping(&self) -> bool {
+        self.develop.crop.is_some()
+    }
+
+    /// Where Develop drew the photo last frame (tests).
+    pub fn develop_photo_rect(&self) -> Option<egui::Rect> {
+        self.develop.photo_rect
+    }
+
     /// Where Develop's split divider is drawn (tests).
     pub fn develop_divider_x(&self) -> Option<f32> {
         self.develop.divider_x
@@ -3447,7 +3457,22 @@ impl ShoeboxApp {
             if pressed(egui::Key::J) {
                 self.develop.warnings = !self.develop.warnings;
             }
-            if pressed(egui::Key::Escape) && !self.fullscreen && !ctx.any_popup_open() {
+            if pressed(egui::Key::R) {
+                if self.develop.crop.is_some() {
+                    views::develop::finish_crop(self, true);
+                } else {
+                    views::develop::start_crop(self);
+                }
+            }
+            if self.develop.crop.is_some() {
+                // The crop takes Enter and Escape.
+                if pressed(egui::Key::Enter) {
+                    views::develop::finish_crop(self, true);
+                }
+                if pressed(egui::Key::Escape) {
+                    views::develop::finish_crop(self, false);
+                }
+            } else if pressed(egui::Key::Escape) && !self.fullscreen && !ctx.any_popup_open() {
                 self.set_view(self.back_view);
             }
         }

@@ -1172,3 +1172,10 @@ hashes, embeddings, faces).
   custom white is adapted to D65, so Tungsten neutralises warm light). No
   raw module. HEIC comes from ImageIO already upright. GPU and CPU agree
   within 1e-4 here too. Movies can't be edited.
+- **Crop tool** (R, or Crop… under Crop & rotate): the whole rotated frame
+  shows with the crop over it (outside darkened, thirds inside); drag a
+  corner, an edge or the middle; an aspect (Free, Original, 1:1, 3:2, 4:3,
+  16:9, 5:4, either way round) holds while dragging; a step that would
+  take the crop outside the rotated photo is refused. Enter, R or Done
+  applies it as one history step ("Crop"); Escape or Cancel leaves it.
+  Rotating still sets the largest crop for the angle.

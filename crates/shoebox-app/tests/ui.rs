@@ -3205,6 +3205,48 @@ fn develop_a_raw_photo() {
             .ev,
         0.0
     );
+
+    // R: crop. Drag the left edge in a quarter of the way; Enter applies it
+    // as one step, and the render is that much narrower.
+    let wide = h.state().develop_photo_rect().unwrap();
+    h.key_press(egui::Key::R);
+    h.run_steps(3);
+    assert!(h.state().develop_cropping());
+    let frame = h.state().develop_photo_rect().unwrap();
+    let from = egui::pos2(frame.left() + 2.0, frame.center().y);
+    let to = from + egui::vec2(frame.width() / 4.0, 0.0);
+    h.event(egui::Event::PointerMoved(from));
+    h.event(button(from, true));
+    h.run_steps(1);
+    h.event(egui::Event::PointerMoved(from + egui::vec2(20.0, 0.0)));
+    h.run_steps(1);
+    h.event(egui::Event::PointerMoved(to));
+    h.run_steps(1);
+    h.event(button(to, false));
+    h.run_steps(2);
+    snapshot(&mut h, "develop-crop");
+    h.key_press(egui::Key::Enter);
+    h.run_steps(4);
+    assert!(!h.state().develop_cropping());
+    let doc = h.state().develop_doc().unwrap();
+    let crop = doc.settings().geometry.crop;
+    assert!(crop[0] > 0.2 && crop[0] < 0.3, "{crop:?}");
+    assert_eq!(doc.history().last().unwrap().label, "Crop");
+    let narrow = h.state().develop_photo_rect().unwrap();
+    assert!(
+        narrow.aspect_ratio() < wide.aspect_ratio(),
+        "{narrow:?} vs {wide:?}"
+    );
+    // Escape cancels a crop without changing anything.
+    let steps = doc.history().len();
+    h.key_press(egui::Key::R);
+    h.run_steps(2);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert!(!h.state().develop_cropping());
+    assert_eq!(h.state().view_name(), View::Develop);
+    assert_eq!(h.state().develop_doc().unwrap().history().len(), steps);
+
     h.key_press(egui::Key::Escape);
     h.run_steps(3);
     assert_eq!(h.state().view_name(), View::Grid);
