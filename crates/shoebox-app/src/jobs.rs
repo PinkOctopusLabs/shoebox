@@ -865,11 +865,10 @@ fn library_worker(
 
     // Changed paths from the file watcher, re-created when the roots change.
     let (fs_tx, fs_rx) = crossbeam_channel::unbounded::<Vec<PathBuf>>();
-    let watch_roots = |s: &Settings| {
-        let roots: Vec<PathBuf> = s.roots.iter().map(|r| r.path.clone()).collect();
-        crate::watch::watch(&roots, fs_tx.clone())
-    };
-    let mut watcher = watch_roots(&settings);
+    let roots_of =
+        |s: &Settings| -> Vec<PathBuf> { s.roots.iter().map(|r| r.path.clone()).collect() };
+    let mut watched = roots_of(&settings);
+    let mut watcher = crate::watch::watch(&watched, fs_tx.clone());
     let reindex = |catalog: &Catalog| -> HashMap<PathBuf, usize> {
         catalog
             .photos
@@ -1543,8 +1542,15 @@ fn library_worker(
         };
         if settings_changed {
             fileops.set_protected(reference_roots(&settings));
-            drop(watcher.take()); // stop watching before re-watching the roots
-            watcher = watch_roots(&settings);
+            // Re-watch only when the folders change: stopping a watcher
+            // blocks (FSEvents), seconds at a time on a busy system, and
+            // most settings have nothing to do with it.
+            let roots = roots_of(&settings);
+            if roots != watched {
+                drop(watcher.take()); // stop watching before re-watching the roots
+                watcher = crate::watch::watch(&roots, fs_tx.clone());
+                watched = roots;
+            }
             if let Err(e) = settings.save(&paths.settings) {
                 emit(LibraryEvent::Error(format!("saving settings: {e}")));
             }
