@@ -21,6 +21,7 @@
 // Channel and matrix loops read clearer indexed (c, r) than zipped.
 #![allow(clippy::needless_range_loop)]
 
+pub mod detail;
 pub mod look;
 pub mod maps;
 pub mod raw;
@@ -129,8 +130,11 @@ pub struct Demosaiced {
     pub rgb: Rgb,
     pub as_shot: [f32; 3],
     pub referred: Referred,
-    /// Its small copy and last local-adjustment maps (see [`maps`]),
-    /// shared by clones.
+    /// Source pixels per original pixel (a proxy's is below 1): detail
+    /// radii are in the original's pixels.
+    pub scale: f32,
+    /// Its small copy, last local-adjustment maps (see [`maps`]), noise
+    /// estimate and detail-stage result (see [`detail`]), shared by clones.
     pub cache: maps::Cache,
 }
 
@@ -140,8 +144,27 @@ impl Demosaiced {
             rgb,
             as_shot,
             referred,
+            scale: 1.0,
             cache: Default::default(),
         }
+    }
+
+    pub fn with_scale(mut self, scale: f32) -> Self {
+        self.scale = scale;
+        self
+    }
+
+    /// The detail stage's numbers for these settings (None: it does
+    /// nothing). The noise is estimated once per source.
+    pub fn detail(&self, s: &Settings) -> Option<detail::Detail> {
+        detail::Detail::new(s, self.cache.noise(&self.rgb), self.scale)
+    }
+
+    /// The source after the detail stage: None when it does nothing (use
+    /// `rgb`). The last result is kept, so other sliders don't redo it.
+    pub fn detailed(&self, s: &Settings) -> Option<std::sync::Arc<Rgb>> {
+        let d = self.detail(s)?;
+        Some(self.cache.detailed(&d, || detail::process(&self.rgb, &d)))
     }
 }
 
@@ -226,7 +249,8 @@ pub fn demosaic(raw: &RawImage, r: &Raw, long_edge: Option<u32>) -> Demosaiced {
         Some(l) => downscale(&rgb, l as usize),
         None => rgb,
     };
-    Demosaiced::new(rgb, mult, Referred::Scene)
+    let scale = rgb.width as f32 / raw.width.max(1) as f32;
+    Demosaiced::new(rgb, mult, Referred::Scene).with_scale(scale)
 }
 
 /// Box-filter downscale by a whole factor so the long edge fits `long_edge`.
@@ -610,14 +634,35 @@ pub fn apply(src: &Rgb, f: &Frame, display: bool) -> Rgb {
 /// Render for display or export: display-encoded values 0–1 in `target`.
 pub fn render(raw: &RawImage, s: &Settings, o: &Options) -> Rgb {
     let src = demosaic(raw, &s.modules.raw, o.long_edge);
-    apply(&src.rgb, &frame(raw, &src, s, o), true)
+    render_from(raw, &src, s, o, true)
 }
 
 /// The scene-referred render: linear Rec.2020, exposed, upright, rotated
 /// and cropped. Values above 1.0 are kept.
 pub fn scene(raw: &RawImage, s: &Settings, o: &Options) -> Rgb {
     let src = demosaic(raw, &s.modules.raw, o.long_edge);
-    apply(&src.rgb, &frame(raw, &src, s, o), false)
+    render_from(raw, &src, s, o, false)
+}
+
+/// The whole pipe from a prepared source: the detail stage, then
+/// [`apply`].
+pub fn render_from(
+    raw: &RawImage,
+    src: &Demosaiced,
+    s: &Settings,
+    o: &Options,
+    display: bool,
+) -> Rgb {
+    apply_from(src, s, &frame(raw, src, s, o), display)
+}
+
+/// [`apply`] on the source after the detail stage for `s` (the settings
+/// `f` was made from).
+pub fn apply_from(src: &Demosaiced, s: &Settings, f: &Frame, display: bool) -> Rgb {
+    match src.detailed(s) {
+        Some(img) => apply(&img, f, display),
+        None => apply(&src.rgb, f, display),
+    }
 }
 
 /// EXIF orientation applied (the geometry map with nothing else).

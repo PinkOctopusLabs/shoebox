@@ -147,8 +147,12 @@ fn color_image(img: &cpu::Rgb) -> egui::ColorImage {
 struct GpuShared {
     pipe: Pipe,
     source: shoebox_develop::gpu::Source,
-    /// The demosaiced image uploaded (to tell when it changes).
-    from: Arc<cpu::Demosaiced>,
+    /// The image before the detail stage, when there is one (the
+    /// original, for comparing).
+    base: Option<shoebox_develop::gpu::Source>,
+    /// What was uploaded: the demosaiced image, and the detail stage's
+    /// result from it when there was one (to tell when either changes).
+    from: (Arc<cpu::Demosaiced>, Option<Arc<cpu::Rgb>>),
     histogram: Option<shoebox_develop::gpu::Histogram>,
 }
 
@@ -440,13 +444,25 @@ fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_w
     let (Some(ready), Some(doc)) = (&st.ready, &st.doc) else {
         return;
     };
-    // The GPU pipe, with this photo's demosaiced image uploaded.
+    // The settings shown (while cropping, the whole rotated frame).
+    let mut settings = doc.settings().clone();
+    if st.crop.is_some() {
+        settings.geometry.crop = [0.0, 0.0, 1.0, 1.0];
+    }
+    // The GPU pipe, with this photo's demosaiced image uploaded (after the
+    // detail stage: noise reduction, sharpening, texture).
+    let detailed = ready.src.detailed(&settings);
+    let same = |g: &GpuShared| {
+        Arc::ptr_eq(&g.from.0, &ready.src)
+            && match (&g.from.1, &detailed) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            }
+    };
     let mut on_gpu = gpu;
     if let Some(rs) = gpu
-        && st
-            .gpu
-            .as_ref()
-            .is_none_or(|g| !Arc::ptr_eq(&g.from, &ready.src))
+        && st.gpu.as_ref().is_none_or(|g| !same(g))
     {
         let pipe = match st.gpu.take() {
             Some(g) => Ok(g.pipe),
@@ -454,14 +470,22 @@ fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_w
         };
         match pipe {
             Ok(pipe) => {
-                let source = pipe.upload(&rs.device, &rs.queue, &ready.src.rgb);
+                let source = pipe.upload(
+                    &rs.device,
+                    &rs.queue,
+                    detailed.as_deref().unwrap_or(&ready.src.rgb),
+                );
+                let base = detailed
+                    .is_some()
+                    .then(|| pipe.upload(&rs.device, &rs.queue, &ready.src.rgb));
                 let histogram = shoebox_develop::gpu::Histogram::new(&rs.device)
                     .map_err(|e| tracing::warn!("histogram on the GPU: {e}"))
                     .ok();
                 st.gpu = Some(GpuShared {
                     pipe,
                     source,
-                    from: ready.src.clone(),
+                    base,
+                    from: (ready.src.clone(), detailed.clone()),
                     histogram,
                 });
             }
@@ -482,11 +506,6 @@ fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_w
         st.histogram = Some(counts);
     }
 
-    // While cropping, the whole (rotated) frame.
-    let mut settings = doc.settings().clone();
-    if st.crop.is_some() {
-        settings.geometry.crop = [0.0, 0.0, 1.0, 1.0];
-    }
     let mut frame = cpu::frame(&ready.meta, &ready.src, &settings, &o);
     frame.warnings = st.warnings;
     let key = (ready.id, EditDoc::settings_hash(&settings), st.warnings);
@@ -495,7 +514,7 @@ fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_w
             &mut st.edited,
             key,
             &frame,
-            ready,
+            (detailed.as_deref().unwrap_or(&ready.src.rgb), false),
             on_gpu.as_mut(),
             ctx,
             true,
@@ -517,7 +536,7 @@ fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_w
                 &mut st.original,
                 key,
                 &frame,
-                ready,
+                (&ready.src.rgb, true),
                 on_gpu.as_mut(),
                 ctx,
                 false,
@@ -533,7 +552,9 @@ fn render_into(
     slot: &mut Option<Shown>,
     key: (PhotoId, String, bool),
     frame: &Frame,
-    ready: &Ready,
+    // The source on the CPU, and whether it's the unprocessed one (the
+    // GPU's `base`).
+    (img, base): (&cpu::Rgb, bool),
     gpu: Option<&mut (&eframe::egui_wgpu::RenderState, &mut GpuShared)>,
     ctx: &egui::Context,
     count: bool,
@@ -576,7 +597,11 @@ fn render_into(
             };
             let tv = tex.0.create_view(&Default::default());
             let mut enc = device.create_command_encoder(&Default::default());
-            g.pipe.encode(device, &mut enc, &g.source, frame, true, &tv);
+            let source = match (&g.base, base) {
+                (Some(b), true) => b,
+                _ => &g.source,
+            };
+            g.pipe.encode(device, &mut enc, source, frame, true, &tv);
             // Count the render, not the clipping overlay.
             let counted = count
                 && !frame.warnings
@@ -592,7 +617,7 @@ fn render_into(
         }
         None => {
             // No GPU (or it failed): the same pipe on the CPU.
-            let img = cpu::apply(&ready.src.rgb, frame, true);
+            let img = cpu::apply(img, frame, true);
             if count && !frame.warnings {
                 counts = Some(Box::new(cpu::histogram(&img)));
             }

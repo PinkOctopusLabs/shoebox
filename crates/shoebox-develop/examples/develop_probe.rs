@@ -67,13 +67,14 @@ fn main() {
         };
         let src = cpu::demosaic(&raw, &s.modules.raw, o.long_edge);
         let frame = cpu::frame(&raw, &src, &s, &o);
-        let img = cpu::apply(&src.rgb, &frame, true);
+        let img = cpu::apply_from(&src, &s, &frame, true);
         let t_all = t.elapsed();
         if std::env::var_os("SHOEBOX_GPU").is_some() {
             use shoebox_develop::gpu::{Output, Pipe, headless};
             let (device, queue) = headless().expect("a GPU");
             let pipe = Pipe::new(&device, Output::Rgba32Float).unwrap();
-            let gsrc = pipe.upload(&device, &queue, &src.rgb);
+            let detailed = src.detailed(&s);
+            let gsrc = pipe.upload(&device, &queue, detailed.as_deref().unwrap_or(&src.rgb));
             let t = Instant::now();
             let g = pipe.render(&device, &queue, &gsrc, &frame, true).unwrap();
             let d = img

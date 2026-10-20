@@ -438,7 +438,7 @@ fn worker(
                 let x = job.region[0].min(size.0.saturating_sub(1));
                 let y = job.region[1].min(size.1.saturating_sub(1));
                 let (w, h) = (frame.width, frame.height);
-                let rgb = cpu::apply(&f.src.rgb, &frame, true);
+                let rgb = cpu::apply_from(&f.src, &job.settings, &frame, true);
                 emit(Event::Region {
                     id: r.id,
                     key: job.key,
@@ -535,16 +535,14 @@ fn preview(
         target: p.target,
     };
     let src = if ready.src.rgb.width.max(ready.src.rgb.height) > PREVIEW as usize {
-        Arc::new(Demosaiced::new(
-            cpu::downscale(&ready.src.rgb, PREVIEW as usize),
-            ready.src.as_shot,
-            ready.src.referred,
-        ))
+        let small = cpu::downscale(&ready.src.rgb, PREVIEW as usize);
+        let scale = ready.src.scale * small.width as f32 / ready.src.rgb.width as f32;
+        Arc::new(Demosaiced::new(small, ready.src.as_shot, ready.src.referred).with_scale(scale))
     } else {
         ready.src.clone()
     };
     let frame = cpu::frame(&ready.meta, &src, &p.settings, &o);
-    let img = cpu::apply(&src.rgb, &frame, true);
+    let img = cpu::apply_from(&src, &p.settings, &frame, true);
     let bytes = shoebox_develop::encode::jpeg(&img, p.target, Default::default())?;
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     // The app's own cache: written whole, then renamed into place.
@@ -894,7 +892,7 @@ fn export_item(
                         target: preset.space.target(),
                     };
                     let frame = cpu::frame(&ready.meta, &ready.src, &item.settings, &o);
-                    let img = cpu::apply(&ready.src.rgb, &frame, true);
+                    let img = cpu::apply_from(&ready.src, &item.settings, &frame, true);
                     let (w, h) =
                         shoebox_develop::export::output_size(img.width, img.height, preset.size);
                     let img = shoebox_develop::export::resize(&img, w, h);

@@ -3,7 +3,8 @@
 
 use eframe::egui::{self, Color32, RichText, Sense, pos2, vec2};
 use shoebox_develop::edit::{
-    BlackAndWhite, Calibration, Clarity, Colour, Dehaze, HUES, Settings, ToneCurve,
+    BlackAndWhite, Calibration, Clarity, Colour, Dehaze, HUES, NoiseReduction, Settings,
+    Sharpening, ToneCurve,
 };
 
 use super::develop::{edit, slider};
@@ -54,6 +55,7 @@ pub fn modules(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &Settings) {
     presence(app, ui, s);
     tone_curve(app, ui, &s.modules.tone_curve);
     colour(app, ui, &s.modules.colour);
+    detail(app, ui, s);
     black_and_white(app, ui, &s.modules.black_and_white);
     calibration(app, ui, &s.modules.calibration);
 }
@@ -66,6 +68,11 @@ fn presence(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &Settings) {
         egui::Grid::new("presence-grid")
             .num_columns(2)
             .show(ui, |ui| {
+                if let Some((v, dr)) = slider(ui, "Texture", c.texture, -100.0..=100.0, 0.0, 0) {
+                    edit(app, "texture", format!("Texture {v:+.0}"), dr, |s| {
+                        s.modules.clarity.texture = v;
+                    });
+                }
                 if let Some((v, dr)) = slider(ui, "Clarity", c.amount, -100.0..=100.0, 0.0, 0) {
                     edit(app, "clarity", format!("Clarity {v:+.0}"), dr, |s| {
                         s.modules.clarity.amount = v;
@@ -82,6 +89,95 @@ fn presence(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &Settings) {
         edit(app, "presence", "Reset presence".into(), false, |s| {
             s.modules.clarity = Clarity::default();
             s.modules.dehaze = Dehaze::default();
+        });
+    }
+}
+
+/// Sharpening and noise reduction (applied before everything else; best
+/// judged at 100%).
+fn detail(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &Settings) {
+    let (sh, nr) = (&s.modules.sharpening, &s.modules.noise_reduction);
+    let changed = *sh != Sharpening::default() || *nr != NoiseReduction::default();
+    let reset = section(ui, "Detail", changed, false, |ui| {
+        ui.weak("Best judged at 100% (Z).");
+        ui.label(RichText::new("Sharpening").small().strong());
+        egui::Grid::new("sharpen-grid")
+            .num_columns(2)
+            .show(ui, |ui| {
+                if let Some((v, d)) = slider(ui, "Amount", sh.amount, 0.0..=150.0, 0.0, 0) {
+                    edit(app, "sh-amount", format!("Sharpening {v:.0}"), d, |s| {
+                        s.modules.sharpening.amount = v;
+                    });
+                }
+                if let Some((v, d)) = slider(ui, "Radius", sh.radius, 0.5..=3.0, 1.0, 1) {
+                    edit(
+                        app,
+                        "sh-radius",
+                        format!("Sharpening radius {v:.1}"),
+                        d,
+                        |s| {
+                            s.modules.sharpening.radius = v;
+                        },
+                    );
+                }
+                if let Some((v, d)) = slider(ui, "Detail", sh.detail, 0.0..=100.0, 25.0, 0) {
+                    edit(
+                        app,
+                        "sh-detail",
+                        format!("Sharpening detail {v:.0}"),
+                        d,
+                        |s| {
+                            s.modules.sharpening.detail = v;
+                        },
+                    );
+                }
+                if let Some((v, d)) = slider(ui, "Masking", sh.masking, 0.0..=100.0, 0.0, 0) {
+                    edit(
+                        app,
+                        "sh-mask",
+                        format!("Sharpening masking {v:.0}"),
+                        d,
+                        |s| {
+                            s.modules.sharpening.masking = v;
+                        },
+                    );
+                }
+            });
+        ui.label(RichText::new("Noise reduction").small().strong());
+        egui::Grid::new("nr-grid").num_columns(2).show(ui, |ui| {
+            if let Some((v, d)) = slider(ui, "Luminance", nr.luminance, 0.0..=100.0, 0.0, 0) {
+                edit(app, "nr-lum", format!("Noise reduction {v:.0}"), d, |s| {
+                    s.modules.noise_reduction.luminance = v;
+                });
+            }
+            if let Some((v, d)) = slider(ui, "Detail ", nr.detail, 0.0..=100.0, 50.0, 0) {
+                edit(
+                    app,
+                    "nr-detail",
+                    format!("Noise reduction detail {v:.0}"),
+                    d,
+                    |s| {
+                        s.modules.noise_reduction.detail = v;
+                    },
+                );
+            }
+            if let Some((v, d)) = slider(ui, "Colour", nr.chroma, 0.0..=100.0, 0.0, 0) {
+                edit(
+                    app,
+                    "nr-chroma",
+                    format!("Colour noise reduction {v:.0}"),
+                    d,
+                    |s| {
+                        s.modules.noise_reduction.chroma = v;
+                    },
+                );
+            }
+        });
+    });
+    if reset {
+        edit(app, "detail", "Reset detail".into(), false, |s| {
+            s.modules.sharpening = Sharpening::default();
+            s.modules.noise_reduction = NoiseReduction::default();
         });
     }
 }

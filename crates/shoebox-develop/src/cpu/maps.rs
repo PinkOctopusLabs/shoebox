@@ -63,6 +63,34 @@ pub struct Cache(Arc<Mutex<Inner>>);
 struct Inner {
     small: Option<Arc<Rgb>>,
     maps: Option<(u64, Arc<Maps>)>,
+    noise: Option<super::detail::Noise>,
+    detailed: Option<(super::detail::Detail, Arc<Rgb>)>,
+}
+
+impl Cache {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The source's noise, estimated once.
+    pub fn noise(&self, img: &Rgb) -> super::detail::Noise {
+        *self
+            .lock()
+            .noise
+            .get_or_insert_with(|| super::detail::estimate(img))
+    }
+
+    /// The detail stage's result for `d` (`make` runs on a miss).
+    pub fn detailed(&self, d: &super::detail::Detail, make: impl FnOnce() -> Rgb) -> Arc<Rgb> {
+        if let Some((k, img)) = &self.lock().detailed
+            && k == d
+        {
+            return img.clone();
+        }
+        let img = Arc::new(make());
+        self.lock().detailed = Some((*d, img.clone()));
+        img
+    }
 }
 
 impl std::fmt::Debug for Cache {
@@ -135,7 +163,7 @@ pub fn local(src: &Demosaiced, colour: &[[f32; 3]; 3], s: &Settings) -> Local {
         (need.tones, need.clarity, need.dehaze.to_bits()).hash(&mut h);
         h.finish()
     };
-    let mut cache = src.cache.0.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cache = src.cache.lock();
     let small = cache
         .small
         .get_or_insert_with(|| Arc::new(small(&src.rgb)))

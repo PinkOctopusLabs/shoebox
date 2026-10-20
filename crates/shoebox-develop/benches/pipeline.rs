@@ -67,6 +67,13 @@ fn pipeline(c: &mut Criterion) {
             cpu::frame(&raw, &proxy, black_box(&local), &o)
         })
     });
+    let mut nr = Settings::default();
+    nr.modules.noise_reduction.luminance = 50.0;
+    nr.modules.sharpening.amount = 50.0;
+    let d = proxy.detail(&nr).unwrap();
+    g.bench_function("detail stage at proxy (CPU)", |b| {
+        b.iter(|| cpu::detail::process(black_box(&proxy.rgb), &d))
+    });
     let full = cpu::render(&raw, &s, &o);
     g.bench_function("export resize to 2048 (Lanczos)", |b| {
         b.iter(|| shoebox_develop::export::resize(black_box(&full), 2048, 1365))

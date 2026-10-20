@@ -1472,3 +1472,35 @@ files from then on, so they show up in the catalog.
 - Texture, sharpening and the simpler denoiser need fine neighbourhoods at
   the source's own resolution. They come next, as neighbour taps in the
   live pass.
+
+## Phase 2, third chunk: noise reduction, sharpening, texture (2026-10-20)
+
+- **One wavelet stage does all three.** A generalised Anscombe transform
+  per channel stabilises the noise; its gain and read variance are
+  estimated per source from the flattest 8×8 blocks, with a robust line
+  fit. An orthonormal luma/chroma basis keeps the noise at unit variance.
+  Then come five à-trous (B3) scales:
+  - **Noise reduction:** soft thresholds, separate for luma and colour.
+    Detail keeps part of what the luma threshold removed.
+  - **Sharpening:** gain on the luma bands that match its radius, masked
+    by edge strength (Masking), with halos soft-limited (Detail).
+  - **Texture:** gain on the middle bands.
+
+  This follows EDITING-SPEC's tier 1, but runs on the demosaiced source
+  rather than the CFA data, so finished images get it too. Sharpening is an
+  enhancement of the wavelet bands, not Richardson–Lucy deconvolution: that
+  deconvolution is iterative and lens-specific. It can come with lens
+  corrections.
+- **Radii are in the original's pixels.** `Demosaiced::scale` moves the
+  bands, so a proxy shows roughly what the full render will. A radius that
+  falls below a pixel fades out ("best judged at 100%", as in Lightroom). A
+  finished image's proxy currently has scale 1, so its preview sharpening
+  is a little strong; the full size is right.
+- **It runs on the CPU for now, live view included.** 29 ms at proxy size
+  (benchmark `detail stage at proxy`), inside the spec's 50 ms. The result
+  is cached on the source and uploaded as the GPU pass's source, so only
+  dragging a detail slider re-runs it; the live pass doesn't change. The
+  unprocessed image stays uploaded for Original and Split. A GPU version of
+  the stage can come later if drags feel slow.
+- Defaults are zero. Auto (later in Phase 2) will set noise reduction by
+  ISO, as the spec says.

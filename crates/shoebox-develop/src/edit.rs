@@ -214,12 +214,56 @@ pub struct HighlightsShadows {
     pub shadows: f64,
 }
 
-/// Clarity (module 8): midtone local contrast at a coarse scale, −100 to
-/// +100.
+/// Clarity and texture (module 8): local contrast at a coarse scale
+/// (midtones) and a fine one, −100 to +100.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Clarity {
     pub amount: f64,
+    pub texture: f64,
+}
+
+/// Sharpening (module 13): amount 0–150, radius 0.5–3 px (of the
+/// original), detail 0–100 (how much halo is allowed), masking 0–100
+/// (sharpen edges only).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Sharpening {
+    pub amount: f64,
+    pub radius: f64,
+    pub detail: f64,
+    pub masking: f64,
+}
+
+impl Default for Sharpening {
+    fn default() -> Self {
+        Self {
+            amount: 0.0,
+            radius: 1.0,
+            detail: 25.0,
+            masking: 0.0,
+        }
+    }
+}
+
+/// Classic noise reduction: luminance and colour strengths 0–100, and how
+/// much luminance detail to keep (0–100).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NoiseReduction {
+    pub luminance: f64,
+    pub chroma: f64,
+    pub detail: f64,
+}
+
+impl Default for NoiseReduction {
+    fn default() -> Self {
+        Self {
+            luminance: 0.0,
+            chroma: 0.0,
+            detail: 50.0,
+        }
+    }
 }
 
 /// Dehaze (module 5): −100 (add haze) to +100.
@@ -322,6 +366,8 @@ pub struct Modules {
     pub white_balance: WhiteBalance,
     pub input_colour: InputColour,
     pub exposure: Exposure,
+    pub noise_reduction: NoiseReduction,
+    pub sharpening: Sharpening,
     pub dehaze: Dehaze,
     pub highlights_shadows: HighlightsShadows,
     pub clarity: Clarity,
