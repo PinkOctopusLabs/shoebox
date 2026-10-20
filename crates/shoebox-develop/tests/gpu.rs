@@ -81,6 +81,7 @@ fn gpu_matches_the_cpu_reference() {
     let src = Demosaiced {
         rgb: synthetic(160, 120),
         as_shot: [1.1425778, 1.0, 1.7753916],
+        referred: shoebox_develop::cpu::Referred::Scene,
     };
     let pipe = Pipe::new(&device, Output::Rgba32Float).unwrap();
     let gsrc = pipe.upload(&device, &queue, &src.rgb);
@@ -162,6 +163,7 @@ fn a_proxy_frame_renders_quickly() {
     let src = Demosaiced {
         rgb: synthetic(2560, 1707),
         as_shot: [1.1425778, 1.0, 1.7753916],
+        referred: shoebox_develop::cpu::Referred::Scene,
     };
     let pipe = Pipe::new(&device, Output::Rgba16Float).unwrap();
     let gsrc = pipe.upload(&device, &queue, &src.rgb);
@@ -200,6 +202,7 @@ fn histogram_and_clipping_match_the_cpu() {
     let src = Demosaiced {
         rgb: synthetic(200, 150),
         as_shot: [1.1425778, 1.0, 1.7753916],
+        referred: shoebox_develop::cpu::Referred::Scene,
     };
     let pipe = Pipe::new(&device, Output::Rgba32Float).unwrap();
     let gsrc = pipe.upload(&device, &queue, &src.rgb);
@@ -243,4 +246,45 @@ fn histogram_and_clipping_match_the_cpu() {
         red(&a),
         red(&b)
     );
+}
+
+#[test]
+fn display_referred_sources_match_too() {
+    let Some((device, queue)) = headless() else {
+        eprintln!("skipping: no GPU adapter");
+        return;
+    };
+    let px: Vec<u8> = (0..160 * 120 * 3).map(|i| ((i * 37) % 256) as u8).collect();
+    let src = cpu::from_display(160, 120, &px, Target::DisplayP3);
+    let raw = zf();
+    let pipe = Pipe::new(&device, Output::Rgba32Float).unwrap();
+    let gsrc = pipe.upload(&device, &queue, &src.rgb);
+    let mut s = Settings::default();
+    for step in 0..3 {
+        match step {
+            1 => {
+                s.modules.exposure.ev = 0.7;
+                s.modules.display_transform.contrast = 35.0;
+                s.modules.display_transform.black_ev = 1.0;
+            }
+            2 => {
+                s.modules.white_balance.mode = WbMode::Tungsten;
+                s.modules.display_transform.preserve_hue = false;
+            }
+            _ => {}
+        }
+        let f = cpu::frame(
+            &raw,
+            &src,
+            &s,
+            &Options {
+                target: Target::DisplayP3,
+                ..Default::default()
+            },
+        );
+        let want = cpu::apply(&src.rgb, &f, true);
+        let got = pipe.render(&device, &queue, &gsrc, &f, true).unwrap();
+        let (d, at) = max_diff(&want, &got);
+        assert!(d <= 1e-4, "step {step}: {d} at {at}");
+    }
 }

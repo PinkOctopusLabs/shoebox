@@ -103,6 +103,27 @@ impl Camera {
     }
 }
 
+/// White balance for a finished image (JPEG and the like), relative to
+/// how it was shot: as shot is no change (shown as 6500 K, tint 0); another
+/// white is adapted (Bradford) to D65, so "Tungsten" neutralises a warm
+/// light. Returns the temperature, tint and the Rec.2020 matrix.
+pub fn relative(wb: &WhiteBalance) -> (f64, f64, M3) {
+    let (t, tint) = match wb.mode {
+        WbMode::AsShot => return (6500.0, 0.0, colour::IDENTITY),
+        WbMode::Custom => (wb.temp.unwrap_or(6500.0), wb.tint.unwrap_or(0.0)),
+        mode => preset(mode).unwrap_or((6500.0, 0.0)),
+    };
+    let xy = colour::temp_tint_to_xy(t, tint);
+    let m = colour::mul(
+        &colour::xyz_to_rgb(&colour::REC2020, colour::D65),
+        &colour::mul(
+            &colour::bradford(xy, colour::temp_tint_to_xy(6500.0, 0.0)),
+            &colour::rgb_to_xyz(&colour::REC2020, colour::D65),
+        ),
+    );
+    (t, tint, m)
+}
+
 /// White balance worked out for one photo.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Resolved {

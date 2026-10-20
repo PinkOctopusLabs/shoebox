@@ -1,4 +1,5 @@
-//! Develop (`docs/EDITING-SPEC.md`, Develop view): edit a raw photo. D opens
+//! Develop (`docs/EDITING-SPEC.md`, Develop view): edit a photo (raw files
+//! and finished images alike). D opens
 //! it on the current photo; G or Escape goes back; the arrows and the
 //! filmstrip move between photos.
 //!
@@ -242,7 +243,7 @@ fn follow(app: &mut ShoeboxApp) {
         app.develop.reset();
         app.develop.photo = Some(id);
         let p = &app.catalog.photos[idx];
-        if p.format != shoebox_decode::Format::Nef {
+        if p.format.is_movie() {
             app.develop.status = Status::Unsupported;
             return;
         }
@@ -263,18 +264,27 @@ fn follow(app: &mut ShoeboxApp) {
         if st.ready.is_none() {
             st.status = Status::Preparing;
         }
-        let path = app.catalog.photos[idx].path.clone();
-        app.developer.open(Request { id, path, raw });
+        let p = &app.catalog.photos[idx];
+        app.developer.open(Request {
+            id,
+            path: p.path.clone(),
+            format: p.format,
+            raw,
+        });
     }
 }
 
 /// The orientation and output space of the render.
 fn options(app: &ShoeboxApp) -> Options {
-    let orientation = app
-        .develop
-        .photo
-        .and_then(|id| app.index(id))
-        .map_or(1, |i| app.catalog.photos[i].meta.orientation());
+    let upright = app.develop.ready.as_ref().is_some_and(|r| r.upright);
+    let orientation = if upright {
+        1
+    } else {
+        app.develop
+            .photo
+            .and_then(|id| app.index(id))
+            .map_or(1, |i| app.catalog.photos[i].meta.orientation())
+    };
     Options {
         long_edge: None,
         orientation,
@@ -516,8 +526,13 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
             }
         }
     };
-    let fit = (rect.width() / size[0]).min(rect.height() / size[1]);
-    let target = Rect::from_center_size(rect.center(), egui::vec2(size[0], size[1]) * fit);
+    // The photo below a strip for the Edited / Original / Split bar.
+    let area = Rect::from_min_max(
+        rect.min + egui::vec2(0.0, 36.0),
+        rect.max - egui::vec2(0.0, 6.0),
+    );
+    let fit = (area.width() / size[0]).min(area.height() / size[1]);
+    let target = Rect::from_center_size(area.center(), egui::vec2(size[0], size[1]) * fit);
     let full = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
     match (compare, tex, original) {
         (Compare::Original, Some(_), Some((o, _))) => {
@@ -599,7 +614,7 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
     // Edited / Original / Split, over the top of the photo.
     if edited.is_some() {
         let bar = Rect::from_center_size(
-            rect.center_top() + egui::vec2(0.0, 20.0),
+            rect.center_top() + egui::vec2(0.0, 18.0),
             egui::vec2(230.0, 26.0),
         );
         ui.scope_builder(egui::UiBuilder::new().max_rect(bar), |ui| {
@@ -616,7 +631,7 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
     }
     let note = match &app.develop.status {
         Status::Ready => None,
-        Status::Preparing => Some("Preparing raw…".to_owned()),
+        Status::Preparing => Some("Preparing…".to_owned()),
         Status::Converting => Some("Converting to DNG (High efficiency NEF)…".to_owned()),
         Status::NeedsConverter => Some(
             "This NEF uses Nikon's High efficiency compression, which Shoebox can't decode yet. \
@@ -624,7 +639,7 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
              Your original stays untouched."
                 .to_owned(),
         ),
-        Status::Unsupported => Some("Develop edits NEF raw files for now".to_owned()),
+        Status::Unsupported => Some("Movies can't be edited".to_owned()),
         Status::Failed(e) => Some(format!("Can't develop this photo: {e}")),
     };
     if let Some(n) = note {
@@ -819,6 +834,7 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     let defaults = Settings::default();
     let read_only = st.read_only;
     let meta = ready.meta.clone();
+    let display_referred = ready.src.referred == cpu::Referred::Display;
     let src_size = (ready.src.rgb.width, ready.src.rgb.height);
     let orientation = options(app).orientation;
     ui.add_enabled_ui(!read_only, |ui| {
@@ -839,7 +855,13 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                         s.modules.white_balance = WhiteBalance::default();
                     });
                 }
-                let resolved = shoebox_develop::wb::resolve(&meta, wb);
+                let (temp, tint) = if display_referred {
+                    let (t, n, _) = shoebox_develop::wb::relative(wb);
+                    (t, n)
+                } else {
+                    let r = shoebox_develop::wb::resolve(&meta, wb);
+                    (r.temp, r.tint)
+                };
                 let modes = [
                     (WbMode::AsShot, "As shot"),
                     (WbMode::Daylight, "Daylight"),
@@ -860,8 +882,8 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                                     let w = &mut s.modules.white_balance;
                                     w.mode = m;
                                     if m == WbMode::Custom {
-                                        w.temp = Some(resolved.temp.round());
-                                        w.tint = Some(resolved.tint.round());
+                                        w.temp = Some(temp.round());
+                                        w.tint = Some(tint.round());
                                     } else {
                                         w.temp = None;
                                         w.tint = None;
@@ -871,15 +893,10 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                         }
                     });
                 egui::Grid::new("wb-grid").num_columns(2).show(ui, |ui| {
-                    if let Some((t, d)) = slider(
-                        ui,
-                        "Temperature",
-                        resolved.temp.round(),
-                        2000.0..=12000.0,
-                        resolved.temp,
-                        0,
-                    ) {
-                        let tint = resolved.tint.round();
+                    if let Some((t, d)) =
+                        slider(ui, "Temperature", temp.round(), 2000.0..=12000.0, temp, 0)
+                    {
+                        let tint = tint.round();
                         edit(app, "temp", format!("Temperature {t:.0} K"), d, |s| {
                             s.modules.white_balance = WhiteBalance {
                                 mode: WbMode::Custom,
@@ -888,15 +905,9 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                             };
                         });
                     }
-                    if let Some((n, d)) = slider(
-                        ui,
-                        "Tint",
-                        resolved.tint.round(),
-                        -150.0..=150.0,
-                        resolved.tint,
-                        0,
-                    ) {
-                        let temp = resolved.temp.round();
+                    if let Some((n, d)) = slider(ui, "Tint", tint.round(), -150.0..=150.0, tint, 0)
+                    {
+                        let temp = temp.round();
                         edit(app, "tint", format!("Tint {n:+.0}"), d, |s| {
                             s.modules.white_balance = WhiteBalance {
                                 mode: WbMode::Custom,
@@ -982,6 +993,10 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 });
                 ui.separator();
 
+                if display_referred {
+                    // A finished image has no raw stages.
+                    return;
+                }
                 // Raw: how the sensor data becomes RGB (prepared again on change).
                 let r = &s.modules.raw;
                 if module(ui, "Raw", *r != defaults.modules.raw) {

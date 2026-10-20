@@ -8,7 +8,7 @@
 
 struct Params {
     map0: vec4<f32>,      // sx = map0.x·x + map0.y·y + map0.z; w: clipping shown (0/1)
-    map1: vec4<f32>,      // sy = map1.x·x + map1.y·y + map1.z
+    map1: vec4<f32>,      // sy = map1.x·x + map1.y·y + map1.z; w: display-referred (0/1)
     colour0: vec4<f32>,   // colour matrix rows
     colour1: vec4<f32>,
     colour2: vec4<f32>,
@@ -21,7 +21,7 @@ struct Params {
     target0: vec4<f32>,
     target1: vec4<f32>,
     target2: vec4<f32>,
-    curve: vec4<f32>,     // up scale, up hardness, toe a, toe floor
+    curve: vec4<f32>,     // up scale, up hardness, toe a, toe floor; display-referred: black, white, contrast
     misc: vec4<f32>,      // display grey, mid grey, preserve hue (0/1), display (0/1)
     size: vec4<f32>,      // out width, out height, src width, src height
 };
@@ -83,10 +83,30 @@ fn oetf(v: f32) -> f32 {
     return 1.055 * pow(v, 1.0 / 2.4) - 0.055;
 }
 
+// A finished image's tone (see `cpu::Levels`).
+fn levels(v: f32) -> f32 {
+    let x = pow(max(v, 0.0), 1.0 / 2.2);
+    let x1 = clamp((x - p.curve.x) / max(p.curve.y - p.curve.x, 1e-3), 0.0, 1.0);
+    let s = x1 * x1 * (3.0 - 2.0 * x1);
+    let y = clamp(x1 + p.curve.z * (s - x1), 0.0, 1.0);
+    return pow(y, 2.2);
+}
+
 fn display(px: vec3<f32>) -> vec3<f32> {
     let v = mul3(p.inset0, p.inset1, p.inset2, px);
     var shaped: vec3<f32>;
-    if (p.misc.z > 0.5) {
+    if (p.map1.w > 0.5) {
+        if (p.misc.z > 0.5) {
+            let norm = max(max(max(v.x, v.y), v.z), 1e-10);
+            let n = levels(norm);
+            let scaled = (max(v, vec3<f32>(0.0)) / norm) * n;
+            let per = vec3<f32>(levels(v.x), levels(v.y), levels(v.z));
+            let t = clamp(n * n, 0.0, 1.0);
+            shaped = scaled + (per - scaled) * t;
+        } else {
+            shaped = vec3<f32>(levels(v.x), levels(v.y), levels(v.z));
+        }
+    } else if (p.misc.z > 0.5) {
         let norm = max(max(max(v.x, v.y), v.z), 1e-10);
         let n = lin(curve(norm));
         let scaled = (max(v, vec3<f32>(0.0)) / norm) * n;

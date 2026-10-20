@@ -1,8 +1,9 @@
-//! The develop thread (`docs/EDITING-SPEC.md`, Develop view): gets a raw
-//! photo ready to edit off the UI thread. A High efficiency NEF is
-//! converted to a DNG first (Adobe DNG Converter, cached); then the raw
+//! The develop thread (`docs/EDITING-SPEC.md`, Develop view): gets a photo
+//! ready to edit off the UI thread. For a raw file, a High efficiency NEF
+//! is converted to a DNG first (Adobe DNG Converter, cached); then the raw
 //! data is decoded, balanced at as shot, its highlights rebuilt and
-//! demosaiced to the interactive proxy. The newest request wins; the last
+//! demosaiced to the interactive proxy. A finished image (JPEG, TIFF, PNG,
+//! HEIC) is decoded with its colour profile to the proxy size. The newest request wins; the last
 //! few results are kept so stepping back and forth is instant.
 
 use std::path::PathBuf;
@@ -25,6 +26,7 @@ const KEEP: usize = 4;
 pub struct Request {
     pub id: PhotoId,
     pub path: PathBuf,
+    pub format: shoebox_decode::Format,
     pub raw: Raw,
 }
 
@@ -37,6 +39,9 @@ pub struct Ready {
     /// as-shot white balance are needed from here on).
     pub meta: Arc<RawImage>,
     pub src: Arc<Demosaiced>,
+    /// Already upright (decoded by ImageIO, as HEIC is): don't apply the
+    /// EXIF orientation again.
+    pub upright: bool,
 }
 
 pub enum Event {
@@ -114,6 +119,9 @@ fn worker(
 /// Decode and demosaic one photo; None if it needs the converter and it
 /// isn't installed.
 fn prepare(r: &Request, dngs: &DngCache, emit: &dyn Fn(Event)) -> Result<Option<Ready>, String> {
+    if r.format != shoebox_decode::Format::Nef {
+        return finished(r).map(Some);
+    }
     let bytes = std::fs::read(&r.path).map_err(|e| format!("{}: {e}", r.path.display()))?;
     let source = if shoebox_develop::dng::needs_dng(&bytes) {
         let Some(conv) = Converter::find(None) else {
@@ -140,5 +148,36 @@ fn prepare(r: &Request, dngs: &DngCache, emit: &dyn Fn(Event)) -> Result<Option<
         raw: r.raw.clone(),
         meta: Arc::new(raw),
         src: Arc::new(src),
+        upright: false,
     }))
+}
+
+/// A finished image: decoded (colour-managed to Display P3, the widest the
+/// decoder offers) at the proxy size, as a display-referred source.
+fn finished(r: &Request) -> Result<Ready, String> {
+    use shoebox_decode::{Format, Target};
+    let img = shoebox_decode::render_path(r.format, &r.path, Some(PROXY), 1, Target::DisplayP3)
+        .map_err(|e| e.to_string())?;
+    let src = cpu::from_display(
+        img.width as usize,
+        img.height as usize,
+        &img.px,
+        cpu::Target::DisplayP3,
+    );
+    Ok(Ready {
+        id: r.id,
+        raw: r.raw.clone(),
+        meta: Arc::new(RawImage {
+            width: 0,
+            height: 0,
+            cfa: [[0, 1], [1, 2]],
+            data: Vec::new(),
+            as_shot: None,
+            matrices: Vec::new(),
+            make: String::new(),
+            model: String::new(),
+        }),
+        src: Arc::new(src),
+        upright: r.format == Format::Heic,
+    })
 }

@@ -281,3 +281,47 @@ fn the_proxy_is_a_downscale_of_the_same_render() {
     s.modules.raw.highlights = Highlights::Clip;
     assert_eq!(cpu::render(&raw, &s, &Options::default()).width, 64);
 }
+
+/// A finished image at default settings comes out exactly as it went in.
+#[test]
+fn a_finished_image_is_unchanged_by_default() {
+    let (w, h) = (64, 48);
+    let px: Vec<u8> = (0..w * h * 3).map(|i| ((i * 53) % 256) as u8).collect();
+    for space in [Target::Srgb, Target::DisplayP3] {
+        let src = cpu::from_display(w, h, &px, space);
+        let raw = grey_card(0.1); // metadata unused for finished images
+        let o = Options {
+            target: space,
+            ..Default::default()
+        };
+        let f = cpu::frame(&raw, &src, &Settings::default(), &o);
+        let out = cpu::to_u8(&cpu::apply(&src.rgb, &f, true));
+        let worst = out
+            .iter()
+            .zip(&px)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap();
+        assert!(worst <= 1, "{space:?}: off by {worst}");
+        // Exposure brightens; contrast and blacks move away from identity.
+        let mut s = Settings::default();
+        s.modules.exposure.ev = 1.0;
+        let brighter = cpu::to_u8(&cpu::apply(&src.rgb, &cpu::frame(&raw, &src, &s, &o), true));
+        assert!(brighter.iter().zip(&px).filter(|(a, b)| a > b).count() > px.len() / 2);
+    }
+}
+
+#[test]
+fn relative_white_balance() {
+    use shoebox_develop::edit::{WbMode, WhiteBalance};
+    let (t, n, m) = shoebox_develop::wb::relative(&WhiteBalance::default());
+    assert_eq!((t, n), (6500.0, 0.0));
+    assert_eq!(m, shoebox_develop::colour::IDENTITY);
+    // Saying the light was tungsten makes a neutral bluer.
+    let (_, _, m) = shoebox_develop::wb::relative(&WhiteBalance {
+        mode: WbMode::Tungsten,
+        ..Default::default()
+    });
+    let grey = shoebox_develop::colour::mulv(&m, [0.5, 0.5, 0.5]);
+    assert!(grey[2] > grey[0], "{grey:?}");
+}

@@ -1160,3 +1160,15 @@ hashes, embeddings, faces).
   crop, rotation and raw settings so the halves line up; both renders
   share the GPU pipe and the uploaded image. Editing while the original
   shows goes back to the edit; a split stays, to watch the change.
+- **Every still image is editable**, not only raw files. A finished image
+  (JPEG, TIFF, PNG, HEIC) is decoded with its colour profile to Display P3
+  at the proxy size (8 bits a channel for now), linearised into Rec.2020,
+  and marked display-referred: the defaults reproduce it exactly (within
+  one 8-bit step), with no scene curve, AgX inset or baseline exposure.
+  Exposure is a linear gain; contrast, whites and blacks are a levels and
+  S-curve on 2.2-encoded values that's the identity at its defaults (same
+  directions as for raws); white balance is relative, as Lightroom's is
+  for JPEGs (as shot is no change, shown as 6500 K and tint 0; a preset or
+  custom white is adapted to D65, so Tungsten neutralises warm light). No
+  raw module. HEIC comes from ImageIO already upright. GPU and CPU agree
+  within 1e-4 here too. Movies can't be edited.

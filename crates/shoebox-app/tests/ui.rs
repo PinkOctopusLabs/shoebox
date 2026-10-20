@@ -3220,3 +3220,34 @@ fn develop_a_raw_photo() {
         bytes
     );
 }
+
+/// Develop edits finished images too: a JPEG opens, renders, and has no
+/// raw module.
+#[test]
+fn develop_a_jpeg() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(&root).unwrap();
+    let img = shoebox_fixtures::scene(3, 800, 600);
+    std::fs::write(
+        root.join("holiday.jpg"),
+        shoebox_fixtures::jpeg(&img, 92).unwrap(),
+    )
+    .unwrap();
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+    h.get_by_label("holiday.jpg").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(30), "develop", |a| {
+        a.develop_ready()
+    });
+    h.run_steps(2);
+    assert!(h.query_all_by_label("Exposure").next().is_some());
+    assert!(
+        h.query_by_label("Demosaic").is_none(),
+        "no raw module for a JPEG"
+    );
+    snapshot(&mut h, "develop-jpeg");
+}

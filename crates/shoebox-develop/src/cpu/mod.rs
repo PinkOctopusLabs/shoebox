@@ -68,12 +68,61 @@ impl Default for Options {
     }
 }
 
-/// Demosaiced camera RGB, white-balanced at as shot (the multipliers it was
-/// balanced with are kept).
+/// What the source's values mean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Referred {
+    /// Raw sensor data: scene light, toned by the display transform.
+    Scene,
+    /// A finished image (JPEG, TIFF, PNG, HEIC): already toned for display,
+    /// so the defaults leave it exactly as it is and the sliders adjust
+    /// from there.
+    Display,
+}
+
+/// The image the live pipe starts from: for a raw file, demosaiced camera
+/// RGB white-balanced at as shot (`as_shot` keeps the multipliers); for a
+/// finished image, its pixels as linear Rec.2020.
 #[derive(Debug, Clone)]
 pub struct Demosaiced {
     pub rgb: Rgb,
     pub as_shot: [f32; 3],
+    pub referred: Referred,
+}
+
+/// A finished image (8-bit, `space`'s primaries and the sRGB transfer
+/// curve) as a display-referred source in linear Rec.2020.
+pub fn from_display(width: usize, height: usize, px: &[u8], space: Target) -> Demosaiced {
+    let to_2020 = f32m(&colour::mul(
+        &colour::xyz_to_rgb(&colour::REC2020, colour::D65),
+        &colour::rgb_to_xyz(space.primaries(), colour::D65),
+    ));
+    let lut: Vec<f32> = (0..256).map(|v| srgb_eotf(v as f32 / 255.0)).collect();
+    let mut rgb = Rgb::new(width, height);
+    rgb.data
+        .par_chunks_mut(3)
+        .zip(px.par_chunks(3))
+        .for_each(|(o, p)| {
+            let lin = [
+                lut[usize::from(p[0])],
+                lut[usize::from(p[1])],
+                lut[usize::from(p[2])],
+            ];
+            o.copy_from_slice(&mul3(&to_2020, lin));
+        });
+    Demosaiced {
+        rgb,
+        as_shot: [1.0; 3],
+        referred: Referred::Display,
+    }
+}
+
+/// The inverse of [`srgb_oetf`].
+pub fn srgb_eotf(v: f32) -> f32 {
+    if v <= 0.040_45 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 /// The raw stages: balance the mosaic at as shot, rebuild clipped
@@ -110,7 +159,11 @@ pub fn demosaic(raw: &RawImage, r: &Raw, long_edge: Option<u32>) -> Demosaiced {
         Some(l) => downscale(&rgb, l as usize),
         None => rgb,
     };
-    Demosaiced { rgb, as_shot: mult }
+    Demosaiced {
+        rgb,
+        as_shot: mult,
+        referred: Referred::Scene,
+    }
 }
 
 /// Box-filter downscale by a whole factor so the long edge fits `long_edge`.
@@ -175,6 +228,40 @@ pub struct Display {
     pub outset: [[f32; 3]; 3],
     pub to_target: [[f32; 3]; 3],
     pub preserve_hue: bool,
+    /// A finished image's tone instead of the scene curve: black and white
+    /// points and contrast on 2.2-encoded values (identity at defaults).
+    pub referred: Option<Levels>,
+}
+
+/// Tone for a display-referred image: `x' = (x − black) / (white − black)`,
+/// then contrast bending it towards (or, negative, away from) a smoothstep
+/// S-curve; on 2.2-encoded values. All defaults: the identity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Levels {
+    pub black: f32,
+    pub white: f32,
+    pub contrast: f32,
+}
+
+impl Levels {
+    pub fn new(d: &DisplayTransform) -> Self {
+        // Blacks and whites keep the raw sliders' sense: positive blacks
+        // deepen them, positive whites dim the highlights.
+        Self {
+            black: (d.black_ev * 0.05) as f32,
+            white: (1.0 + d.white_ev * 0.05) as f32,
+            contrast: (d.contrast / 100.0) as f32,
+        }
+    }
+
+    /// Linear display value → toned linear value, 0–1.
+    pub fn apply(&self, v: f32) -> f32 {
+        let x = v.max(0.0).powf(1.0 / 2.2);
+        let x1 = ((x - self.black) / (self.white - self.black).max(1e-3)).clamp(0.0, 1.0);
+        let s = x1 * x1 * (3.0 - 2.0 * x1);
+        let y = (x1 + self.contrast * (s - x1)).clamp(0.0, 1.0);
+        y.powf(2.2)
+    }
 }
 
 impl Display {
@@ -188,6 +275,18 @@ impl Display {
                 &colour::rgb_to_xyz(&colour::REC2020, colour::D65),
             )),
             preserve_hue: d.preserve_hue,
+            referred: None,
+        }
+    }
+
+    /// The tone for a display-referred image (no scene curve, no AgX
+    /// inset).
+    pub fn for_display_referred(d: &DisplayTransform, target: Target) -> Self {
+        Self {
+            referred: Some(Levels::new(d)),
+            inset: f32m(&colour::IDENTITY),
+            outset: f32m(&colour::IDENTITY),
+            ..Self::new(d, target)
         }
     }
 }
@@ -250,13 +349,26 @@ pub const BASELINE_EV: f64 = 0.75;
 
 /// Work out a frame: `src` is the demosaiced image (proxy or full size).
 pub fn frame(raw: &RawImage, src: &Demosaiced, s: &Settings, o: &Options) -> Frame {
-    let w = wb::resolve(raw, &s.modules.white_balance);
-    // From as-shot-balanced to this white balance, per channel.
-    let ratio = [0, 1, 2].map(|c| f64::from(w.multipliers[c]) / f64::from(src.as_shot[c]));
     let e = &s.modules.exposure;
-    let ev = BASELINE_EV + if e.enabled { e.ev } else { 0.0 };
+    let slider = if e.enabled { e.ev } else { 0.0 };
+    let (m, ev, display) = match src.referred {
+        Referred::Scene => {
+            let w = wb::resolve(raw, &s.modules.white_balance);
+            // From as-shot-balanced to this white balance, per channel.
+            let ratio = [0, 1, 2].map(|c| f64::from(w.multipliers[c]) / f64::from(src.as_shot[c]));
+            (
+                colour::mul(&w.cam_to_rec2020, &colour::diag(ratio)),
+                BASELINE_EV + slider,
+                Display::new(&s.modules.display_transform, o.target),
+            )
+        }
+        Referred::Display => (
+            wb::relative(&s.modules.white_balance).2,
+            slider,
+            Display::for_display_referred(&s.modules.display_transform, o.target),
+        ),
+    };
     let gain = 2f64.powf(ev);
-    let m = colour::mul(&w.cam_to_rec2020, &colour::diag(ratio));
     let colour = f32m(&m.map(|r| r.map(|v| v * gain)));
     let (map, width, height) =
         geometry_map(src.rgb.width, src.rgb.height, o.orientation, &s.geometry);
@@ -265,7 +377,7 @@ pub fn frame(raw: &RawImage, src: &Demosaiced, s: &Settings, o: &Options) -> Fra
         height,
         map: map.map(|r| r.map(|v| v as f32)),
         colour,
-        display: Display::new(&s.modules.display_transform, o.target),
+        display,
         warnings: false,
     }
 }
@@ -515,7 +627,18 @@ fn toward_grey(amount: f64) -> M3 {
 pub fn display_pixel(d: &Display, p: [f32; 3]) -> [f32; 3] {
     let curve = &d.curve;
     let v = mul3(&d.inset, p);
-    let shaped = if d.preserve_hue {
+    let shaped = if let Some(l) = &d.referred {
+        if d.preserve_hue {
+            let norm = v[0].max(v[1]).max(v[2]).max(1e-10);
+            let n = l.apply(norm);
+            let scaled = v.map(|c| (c.max(0.0) / norm) * n);
+            let per = v.map(|c| l.apply(c));
+            let t = (n * n).clamp(0.0, 1.0);
+            [0, 1, 2].map(|i| scaled[i] + (per[i] - scaled[i]) * t)
+        } else {
+            v.map(|c| l.apply(c))
+        }
+    } else if d.preserve_hue {
         // Tone-map the brightest channel and scale the others with it, so
         // hues hold; blend to the per-channel result as it nears white so
         // highlights still reach white.

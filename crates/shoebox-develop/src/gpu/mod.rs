@@ -513,7 +513,12 @@ fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
         f.map[0][2],
         if f.warnings { 1.0 } else { 0.0 },
     ]);
-    v.extend(row(f.map[1]));
+    v.extend([
+        f.map[1][0],
+        f.map[1][1],
+        f.map[1][2],
+        if d.referred.is_some() { 1.0 } else { 0.0 },
+    ]);
     for r in f.colour {
         v.extend(row(r));
     }
@@ -522,7 +527,10 @@ fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
             v.extend(row(r));
         }
     }
-    v.extend([d.curve.up.0, d.curve.up.1, d.curve.a, d.curve.floor]);
+    match &d.referred {
+        Some(l) => v.extend([l.black, l.white, l.contrast, 0.0]),
+        None => v.extend([d.curve.up.0, d.curve.up.1, d.curve.a, d.curve.floor]),
+    }
     v.extend([
         DISPLAY_GREY,
         MID_GREY,
