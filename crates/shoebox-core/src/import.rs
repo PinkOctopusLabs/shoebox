@@ -394,9 +394,14 @@ pub fn scan(
         .collect();
 
     // Already in the library? Only same-size files can match, so only
-    // those are hashed.
+    // those are hashed. A source file in a reference folder doesn't match
+    // itself: importing from there copies it in, to be edited.
+    let own: HashSet<&Path> = sources.iter().map(|s| s.file.path.as_path()).collect();
     let mut by_size: HashMap<u64, Vec<&Path>> = HashMap::new();
-    for p in &library.photos {
+    for (i, p) in library.photos.iter().enumerate() {
+        if library.is_reference(i) && own.contains(p.path.as_path()) {
+            continue;
+        }
         by_size.entry(p.size).or_default().push(&p.path);
     }
     let wanted: HashSet<u64> = sources.iter().map(|s| s.file.size).collect();

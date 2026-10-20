@@ -2811,6 +2811,7 @@ impl ShoeboxApp {
 
     pub fn set_import_source(&mut self, dir: PathBuf) {
         self.import.source = Some(dir);
+        self.import.volume = None;
         self.import.plan = None;
     }
 

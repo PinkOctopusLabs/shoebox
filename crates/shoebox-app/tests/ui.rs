@@ -3438,6 +3438,49 @@ fn develop_a_jpeg() {
     assert!(!h.state().loupe_drawn().unwrap().0);
 }
 
+/// A photo in a reference folder opens in Develop read-only, with an offer
+/// to import its folder: that plans an import of it (nothing copied yet).
+#[test]
+fn develop_offers_to_import_a_reference_photo() {
+    let t = tempfile::tempdir().unwrap();
+    let (lib, old) = (t.path().join("lib"), t.path().join("old"));
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::create_dir_all(old.join("trip")).unwrap();
+    for (n, name) in [(1, "a.jpg"), (2, "b.jpg")] {
+        let img = shoebox_fixtures::scene(n, 400, 300);
+        std::fs::write(
+            old.join("trip").join(name),
+            shoebox_fixtures::jpeg(&img, 90).unwrap(),
+        )
+        .unwrap();
+    }
+    let p = paths(t.path(), &[lib.clone(), old.clone()]);
+    let mut s = Settings::load(&p.settings).unwrap();
+    s.set_reference(&old.canonicalize().unwrap(), true);
+    s.save(&p.settings).unwrap();
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+    h.get_by_label("a.jpg").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(30), "develop", |a| {
+        a.develop_ready()
+    });
+    h.run_steps(2);
+    h.get_by_label("Import this folder…").click();
+    h.run_steps(2);
+    assert_eq!(h.state().view_name(), View::Import);
+    wait_for(&mut h, Duration::from_secs(30), "import plan", |a| {
+        a.import_counts().is_some()
+    });
+    assert_eq!(h.state().import_counts(), Some((2, 0)));
+    assert_eq!(
+        std::fs::read_dir(&lib).unwrap().count(),
+        0,
+        "nothing copied"
+    );
+}
+
 /// A photo renamed in Finder keeps its edit: after the scan the edit is
 /// found by content and moved beside the photo's new name (journaled);
 /// an edit whose photo is gone stays, listed in Settings → Raw.

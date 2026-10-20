@@ -297,6 +297,39 @@ fn live_photo_pair_keeps_one_name() {
 /// the copies' new sidecars; dates and generic names start as nothing; a
 /// picture in two folders joins both; one already in the library gets the
 /// name too. Undo takes it all back.
+/// Importing from a reference folder copies its photos in (they don't
+/// count as already in the library because they're themselves), but a
+/// card's photo that a reference folder has is left out as before.
+#[test]
+fn importing_from_a_reference_folder() {
+    let t = tempfile::tempdir().unwrap();
+    let base = t.path().canonicalize().unwrap();
+    let (old, lib, card) = (base.join("old"), base.join("lib"), base.join("card"));
+    let a = jpeg(&scene(1, 320, 240), 85).unwrap();
+    let b = jpeg(&scene(2, 320, 240), 85).unwrap();
+    put(&old.join("trip/a.jpg"), &a);
+    put(&old.join("trip/b.jpg"), &b);
+    put(&card.join("DCIM/b.jpg"), &b);
+    std::fs::create_dir_all(&lib).unwrap();
+    let roots = vec![
+        Root::new(&lib, Role::Scan).unwrap(),
+        Root::new(&old, Role::Reference).unwrap(),
+    ];
+    let mut cache = Cache::open_in_memory().unwrap();
+    let (catalog, _) = Catalog::refresh(&mut cache, roots, &|_, _| {}).unwrap();
+    let tpl = Template::parse(DEFAULT_IMPORT).unwrap();
+
+    let plan =
+        shoebox_core::import::plan(&old.join("trip"), &lib, &tpl, &catalog, &|_, _| {}).unwrap();
+    assert_eq!(plan.copies.len(), 2);
+    assert!(plan.skipped.is_empty());
+
+    let plan = shoebox_core::import::plan(&card, &lib, &tpl, &catalog, &|_, _| {}).unwrap();
+    assert!(plan.copies.is_empty());
+    assert_eq!(plan.skipped.len(), 1);
+    assert_eq!(plan.skipped[0].other, old.join("trip/b.jpg"));
+}
+
 #[test]
 fn folder_names_become_events_and_keywords() {
     use shoebox_core::import::FolderUse;

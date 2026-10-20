@@ -1315,3 +1315,14 @@ snapshot. So:
   Lightroom, rather than a jump: nothing is discarded and ⌘Z undoes it.
 - Snapshots live in the left panel above History: + names the edit as it is
   now (the name is editable straight away); right-click renames or deletes.
+
+## Importing a reference photo to edit it (2026-10-20)
+
+Develop opens a photo in a reference folder read-only and offers "Import
+this folder…" (EDITING-SPEC: "offers to import them"). Import works on
+folders, so it imports the photo's folder; the Import view shows the plan and
+nothing is copied until Import is clicked, as for any import. Import used to
+leave every such file out as "already in the library", because each matched
+itself. Now a source file in a reference root doesn't count as its own match.
+A copy elsewhere in the library still does, and so does a card's photo that a
+reference folder already has.

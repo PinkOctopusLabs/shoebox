@@ -10,7 +10,7 @@
 //! library worker's catalog (kept a moment after a slider settles) and its
 //! `.shoebox/edits` file (written after 2 s idle and on leaving a photo).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1295,6 +1295,33 @@ fn trim(v: f64) -> String {
     s.strip_suffix(".0").map_or(s.clone(), str::to_owned)
 }
 
+/// A photo in a reference folder can't be edited: offer to import its
+/// folder (Import shows what it would copy first).
+fn offer_import(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    ui.weak("In a reference folder: shown as edited, but not editable.");
+    let dir = app
+        .develop
+        .photo
+        .and_then(|id| app.photo(id))
+        .and_then(|p| p.path.parent().map(Path::to_path_buf));
+    let into = app.settings.writable_roots().first().cloned();
+    if let (Some(dir), Some(into)) = (dir, into)
+        && ui
+            .button("Import this folder…")
+            .on_hover_text(
+                "Copy this photo's folder into your library, where it can be edited. \
+                 You'll see what would be copied first.",
+            )
+            .clicked()
+    {
+        app.set_view(crate::app::View::Import);
+        app.set_import_source(dir);
+        app.import.root.get_or_insert(into);
+        app.plan_import();
+    }
+    ui.add_space(6.0);
+}
+
 /// The right panel in Develop: the modules.
 pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     if let Some(h) = &app.develop.histogram {
@@ -1344,17 +1371,15 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     let display_referred = ready.src.referred == cpu::Referred::Display;
     let src_size = (ready.src.rgb.width, ready.src.rgb.height);
     let orientation = options(app).orientation;
+    if read_only {
+        offer_import(app, ui);
+    }
     ui.add_enabled_ui(!read_only, |ui| {
         // Sliders fill the panel beside their names and values.
         ui.spacing_mut().slider_width = (ui.available_width() - 170.0).max(80.0);
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                if read_only {
-                    ui.weak("In a reference folder: shown as edited, but not editable.");
-                    ui.add_space(6.0);
-                }
-
                 // White balance.
                 let wb = &s.modules.white_balance;
                 if module(ui, "White balance", *wb != WhiteBalance::default()) {
