@@ -1994,7 +1994,7 @@ pub(crate) fn human_size(b: u64) -> String {
     }
 }
 
-fn histogram(ui: &mut egui::Ui, h: &[[u32; 256]; 4]) {
+pub(crate) fn histogram(ui: &mut egui::Ui, h: &[[u32; 256]; 4]) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 70.0), egui::Sense::hover());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);

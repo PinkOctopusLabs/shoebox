@@ -1145,3 +1145,12 @@ hashes, embeddings, faces).
 - Still to come in Phase 1: the histogram and clipping warnings, a crop
   tool drawn on the image (crop is set by rotation only so far), JPEG/TIFF
   export, edited previews in the other views, and Settings → Raw.
+
+- **Histogram and clipping** (Develop): a second compute pass counts the
+  render (R, G, B and luma, 256 bins of 8-bit values, luma weighted as the
+  library's thumbnails are) into atomic bins, read back without stalling
+  a frame (mapped, then polled on later frames). It sits at the top of the
+  right panel, as Lightroom's does, rather than in the top bar the spec
+  names, with the share of clipped highlights and shadows. J (or the
+  Clipping toggle) paints blown highlights red and crushed shadows blue,
+  in the shader and the CPU pipe alike. Checked against `cpu::histogram`.

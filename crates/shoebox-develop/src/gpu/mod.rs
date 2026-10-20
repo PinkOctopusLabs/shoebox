@@ -14,6 +14,7 @@
 use crate::cpu::{DISPLAY_GREY, Frame, MID_GREY, Rgb};
 
 const SHADER: &str = include_str!("develop.wgsl");
+const HISTOGRAM: &str = include_str!("histogram.wgsl");
 
 /// The output texture formats the pipe can write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -329,12 +330,189 @@ impl Pipe {
     }
 }
 
+/// Histograms of a rendered texture on the GPU (`cpu::histogram`'s
+/// numbers), read back without stalling: [`Histogram::encode`] after the
+/// render, then [`Histogram::poll`] on later frames until it answers.
+pub struct Histogram {
+    layout: wgpu::BindGroupLayout,
+    pipeline: wgpu::ComputePipeline,
+    bins: wgpu::Buffer,
+    read: wgpu::Buffer,
+    /// Set by the map callback when the read-back is ready.
+    ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pending: bool,
+}
+
+const BINS_BYTES: u64 = 4 * 256 * 4;
+
+impl Histogram {
+    pub fn new(device: &wgpu::Device) -> Result<Self, String> {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("histogram"),
+            source: wgpu::ShaderSource::Wgsl(HISTOGRAM.into()),
+        });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("histogram"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("histogram"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("histogram"),
+            layout: Some(&pl),
+            module: &module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let bins = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("histogram bins"),
+            size: BINS_BYTES,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("histogram read-back"),
+            size: BINS_BYTES,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        if let Some(e) = block_on(scope.pop()) {
+            return Err(format!("the histogram shader failed to build: {e}"));
+        }
+        Ok(Self {
+            layout,
+            pipeline,
+            bins,
+            read,
+            ready: Default::default(),
+            pending: false,
+        })
+    }
+
+    /// Count `texture` (a render's output, `width`×`height`). Skipped while
+    /// an earlier count is still being read back.
+    pub fn encode(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        texture: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        if self.pending {
+            return false;
+        }
+        encoder.clear_buffer(&self.bins, 0, None);
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("histogram"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(texture),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.bins.as_entire_binding(),
+                },
+            ],
+        });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("histogram"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            pass.dispatch_workgroups(width.div_ceil(WORKGROUP), height.div_ceil(WORKGROUP), 1);
+        }
+        encoder.copy_buffer_to_buffer(&self.bins, 0, &self.read, 0, BINS_BYTES);
+        true
+    }
+
+    /// After the encoder with [`Self::encode`] is submitted: start reading.
+    pub fn start_read(&mut self) {
+        let flag = self.ready.clone();
+        flag.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.read
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |r| {
+                if r.is_ok() {
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            });
+        self.pending = true;
+    }
+
+    /// The counts, once the GPU has them (never blocks; `wait` blocks, for
+    /// tests).
+    pub fn poll(&mut self, device: &wgpu::Device, wait: bool) -> Option<Box<[[u32; 256]; 4]>> {
+        if !self.pending {
+            return None;
+        }
+        let kind = if wait {
+            wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            }
+        } else {
+            wgpu::PollType::Poll
+        };
+        let _ = device.poll(kind);
+        if !self.ready.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
+        let mut h = Box::new([[0u32; 256]; 4]);
+        if let Ok(view) = self.read.slice(..).get_mapped_range() {
+            for (i, b) in view.as_chunks::<4>().0.iter().enumerate() {
+                h[i / 256][i % 256] = u32::from_le_bytes(*b);
+            }
+        }
+        self.read.unmap();
+        self.pending = false;
+        Some(h)
+    }
+}
+
 /// The uniform block (`Params` in the shader), as 17 vec4s.
 fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
     let row = |r: [f32; 3]| [r[0], r[1], r[2], 0.0];
     let d = &f.display;
     let mut v = Vec::with_capacity(68);
-    v.extend(row(f.map[0]));
+    v.extend([
+        f.map[0][0],
+        f.map[0][1],
+        f.map[0][2],
+        if f.warnings { 1.0 } else { 0.0 },
+    ]);
     v.extend(row(f.map[1]));
     for r in f.colour {
         v.extend(row(r));

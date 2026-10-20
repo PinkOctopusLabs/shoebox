@@ -3113,6 +3113,16 @@ fn develop_a_raw_photo() {
     wait_for(&mut h, Duration::from_secs(30), "develop", |a| {
         a.develop_ready()
     });
+    // The render's histogram arrives (every pixel counted); J shows clipping.
+    wait_for(&mut h, Duration::from_secs(10), "histogram", |a| {
+        a.develop_histogram().0.is_some_and(|n| n > 0)
+    });
+    h.key_press(egui::Key::J);
+    h.run_steps(2);
+    assert!(h.state().develop_histogram().1);
+    snapshot(&mut h, "develop-clipping");
+    h.key_press(egui::Key::J);
+    h.run_steps(3);
     snapshot(&mut h, "develop");
 
     // Drag Exposure (the third slider: temperature, tint, exposure).

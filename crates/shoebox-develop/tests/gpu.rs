@@ -189,3 +189,58 @@ fn a_proxy_frame_renders_quickly() {
     // The spec's target is 33 ms per frame for the whole slider path.
     assert!(per.as_millis() < 33, "{per:?}");
 }
+
+#[test]
+fn histogram_and_clipping_match_the_cpu() {
+    let Some((device, queue)) = headless() else {
+        eprintln!("skipping: no GPU adapter");
+        return;
+    };
+    let raw = zf();
+    let src = Demosaiced {
+        rgb: synthetic(200, 150),
+        as_shot: [1.1425778, 1.0, 1.7753916],
+    };
+    let pipe = Pipe::new(&device, Output::Rgba32Float).unwrap();
+    let gsrc = pipe.upload(&device, &queue, &src.rgb);
+    let mut f = cpu::frame(&raw, &src, &Settings::default(), &Options::default());
+    let (w, h) = (f.width as u32, f.height as u32);
+
+    // Histogram: the same counts, give or take a value on a rounding edge.
+    let out = pipe.output_texture(&device, w, h);
+    let view = out.create_view(&Default::default());
+    let mut hist = shoebox_develop::gpu::Histogram::new(&device).unwrap();
+    let mut enc = device.create_command_encoder(&Default::default());
+    pipe.encode(&device, &mut enc, &gsrc, &f, true, &view);
+    assert!(hist.encode(&device, &mut enc, &view, w, h));
+    queue.submit([enc.finish()]);
+    hist.start_read();
+    let got = hist.poll(&device, true).expect("histogram read back");
+    let want = cpu::histogram(&cpu::apply(&src.rgb, &f, true));
+    for c in 0..4 {
+        let total: u32 = got[c].iter().sum();
+        assert_eq!(total, w * h, "channel {c}");
+        let off: u32 = (0..256).map(|i| got[c][i].abs_diff(want[c][i])).sum();
+        assert!(off <= w * h / 500, "channel {c}: {off} counts differ");
+    }
+
+    // Clipping shown the same way on both.
+    f.warnings = true;
+    let a = cpu::apply(&src.rgb, &f, true);
+    let b = pipe.render(&device, &queue, &gsrc, &f, true).unwrap();
+    let red = |img: &Rgb| {
+        img.data
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .filter(|p| **p == [1.0, 0.1, 0.1])
+            .count()
+    };
+    assert!(red(&a) > 0, "the synthetic image clips");
+    assert!(
+        red(&a).abs_diff(red(&b)) <= (w * h / 500) as usize,
+        "{} vs {}",
+        red(&a),
+        red(&b)
+    );
+}

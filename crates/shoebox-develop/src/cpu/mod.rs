@@ -163,6 +163,8 @@ pub struct Frame {
     /// white balance change and exposure folded in.
     pub colour: [[f32; 3]; 3],
     pub display: Display,
+    /// Show clipping: blown highlights red, crushed shadows blue (J).
+    pub warnings: bool,
 }
 
 /// The display transform's numbers.
@@ -264,7 +266,36 @@ pub fn frame(raw: &RawImage, src: &Demosaiced, s: &Settings, o: &Options) -> Fra
         map: map.map(|r| r.map(|v| v as f32)),
         colour,
         display: Display::new(&s.modules.display_transform, o.target),
+        warnings: false,
     }
+}
+
+/// Clipping shown: any channel at white → red, every channel at black →
+/// blue (display values).
+pub fn warn(p: [f32; 3]) -> [f32; 3] {
+    let hi = p[0].max(p[1]).max(p[2]);
+    if hi >= 0.999 {
+        [1.0, 0.1, 0.1]
+    } else if hi <= 0.001 {
+        [0.1, 0.3, 1.0]
+    } else {
+        p
+    }
+}
+
+/// Histograms of display values: R, G, B and luma, 256 bins each, counted
+/// as 8-bit values (luma as the library's thumbnails count it).
+pub fn histogram(img: &Rgb) -> [[u32; 256]; 4] {
+    let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+    let mut h = [[0u32; 256]; 4];
+    for p in img.data.as_chunks::<3>().0 {
+        let (r, g, b) = (q(p[0]), q(p[1]), q(p[2]));
+        h[0][r as usize] += 1;
+        h[1][g as usize] += 1;
+        h[2][b as usize] += 1;
+        h[3][((77 * r + 150 * g + 29 * b) >> 8) as usize] += 1;
+    }
+    h
 }
 
 /// Bilinear sample at a fractional position (black outside the image).
@@ -316,7 +347,8 @@ pub fn apply(src: &Rgb, f: &Frame, display: bool) -> Rgb {
                 let sy = f.map[1][0] * xf + f.map[1][1] * yf + f.map[1][2];
                 let lin = mul3(&f.colour, sample(src, sx, sy));
                 let px = if display {
-                    display_pixel(&f.display, lin)
+                    let d = display_pixel(&f.display, lin);
+                    if f.warnings { warn(d) } else { d }
                 } else {
                     lin
                 };
@@ -358,6 +390,7 @@ fn resample(img: &Rgb, map: [[f64; 3]; 2], w: usize, h: usize) -> Rgb {
         map: map.map(|r| r.map(|v| v as f32)),
         colour: f32m(&colour::IDENTITY),
         display: Display::new(&DisplayTransform::default(), Target::Srgb),
+        warnings: false,
     };
     apply(img, &f, false)
 }

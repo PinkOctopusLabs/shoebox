@@ -7,7 +7,7 @@
 // pipeline is built (rgba32float for read-back, rgba16float for display).
 
 struct Params {
-    map0: vec4<f32>,      // sx = map0.x·x + map0.y·y + map0.z
+    map0: vec4<f32>,      // sx = map0.x·x + map0.y·y + map0.z; w: clipping shown (0/1)
     map1: vec4<f32>,      // sy = map1.x·x + map1.y·y + map1.z
     colour0: vec4<f32>,   // colour matrix rows
     colour1: vec4<f32>,
@@ -113,6 +113,14 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     var px = mul3(p.colour0, p.colour1, p.colour2, bilinear(sx, sy));
     if (p.misc.w > 0.5) {
         px = display(px);
+        if (p.map0.w > 0.5) {
+            let hi = max(max(px.x, px.y), px.z);
+            if (hi >= 0.999) {
+                px = vec3<f32>(1.0, 0.1, 0.1);
+            } else if (hi <= 0.001) {
+                px = vec3<f32>(0.1, 0.3, 1.0);
+            }
+        }
     }
     textureStore(dst, vec2<i32>(i32(id.x), i32(id.y)), vec4<f32>(px, 1.0));
 }

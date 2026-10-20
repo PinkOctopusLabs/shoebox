@@ -60,12 +60,16 @@ pub struct State {
     dragging: Option<&'static str>,
     /// Show the photo as shot (\\).
     pub before: bool,
+    /// Show clipped highlights and shadows (J).
+    pub warnings: bool,
+    /// The render's histogram (R, G, B, luma).
+    pub histogram: Option<Box<[[u32; 256]; 4]>>,
     view: Option<Rendered>,
 }
 
 /// What's on screen: the texture and what it was rendered from.
 struct Rendered {
-    key: (PhotoId, String, bool),
+    key: (PhotoId, String, bool, bool),
     size: [usize; 2],
     gpu: Option<GpuView>,
     cpu: Option<egui::TextureHandle>,
@@ -77,6 +81,7 @@ struct GpuView {
     /// The demosaiced image uploaded (to tell when it changes).
     from: Arc<cpu::Demosaiced>,
     out: Option<(eframe::wgpu::Texture, egui::TextureId, [usize; 2])>,
+    histogram: Option<shoebox_develop::gpu::Histogram>,
 }
 
 impl State {
@@ -88,9 +93,10 @@ impl State {
     }
 
     fn reset(&mut self) {
-        let view = self.view.take();
+        let (view, warnings) = (self.view.take(), self.warnings);
         *self = State {
             view,
+            warnings,
             ..Default::default()
         };
     }
@@ -245,11 +251,23 @@ fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_w
     } else {
         doc.settings().clone()
     };
-    let key = (ready.id, doc.render_hash(), st.before);
+    let key = (ready.id, doc.render_hash(), st.before, st.warnings);
     if st.view.as_ref().is_some_and(|v| v.key == key) {
+        // A histogram on its way back from the GPU.
+        if let (Some(rs), Some(h)) = (
+            gpu,
+            st.view
+                .as_mut()
+                .and_then(|v| v.gpu.as_mut())
+                .and_then(|g| g.histogram.as_mut()),
+        ) && let Some(counts) = h.poll(&rs.device, false)
+        {
+            st.histogram = Some(counts);
+        }
         return;
     }
-    let frame = cpu::frame(&ready.meta, &ready.src, &settings, &o);
+    let mut frame = cpu::frame(&ready.meta, &ready.src, &settings, &o);
+    frame.warnings = st.warnings;
     let size = [frame.width, frame.height];
     let mut view = st.view.take().unwrap_or(Rendered {
         key: key.clone(),
@@ -263,6 +281,9 @@ fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_w
     if on_gpu.is_none() {
         // No GPU (or it failed): the same pipe on the CPU.
         let img = cpu::apply(&ready.src.rgb, &frame, true);
+        if !st.warnings {
+            st.histogram = Some(Box::new(cpu::histogram(&img)));
+        }
         let pixels: Vec<Color32> = img
             .data
             .as_chunks::<3>()
@@ -310,11 +331,15 @@ fn render_gpu(
         };
         let source = pipe.upload(device, &rs.queue, &ready.src.rgb);
         let old = view.gpu.take().and_then(|g| g.out);
+        let histogram = shoebox_develop::gpu::Histogram::new(device)
+            .map_err(|e| tracing::warn!("histogram on the GPU: {e}"))
+            .ok();
         view.gpu = Some(GpuView {
             pipe,
             source,
             from: ready.src.clone(),
             out: old,
+            histogram,
         });
     }
     let g = view.gpu.as_mut()?;
@@ -345,7 +370,15 @@ fn render_gpu(
     let tv = out.0.create_view(&Default::default());
     let mut enc = device.create_command_encoder(&Default::default());
     g.pipe.encode(device, &mut enc, &g.source, frame, true, &tv);
+    // Count the render (not the clipping overlay).
+    let counted = !frame.warnings
+        && g.histogram
+            .as_mut()
+            .is_some_and(|h| h.encode(device, &mut enc, &tv, size[0] as u32, size[1] as u32));
     rs.queue.submit([enc.finish()]);
+    if counted && let Some(h) = &mut g.histogram {
+        h.start_read();
+    }
     g.out = Some((out.0, out.1, size));
     Some(())
 }
@@ -547,6 +580,30 @@ fn module(ui: &mut egui::Ui, title: &str, reset: bool) -> bool {
 
 /// The right panel in Develop: the modules.
 pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    if let Some(h) = &app.develop.histogram {
+        ui.add_space(4.0);
+        crate::panels::histogram(ui, h);
+        let total: u32 = h[3].iter().sum::<u32>().max(1);
+        let pct = |n: u32| 100.0 * n as f32 / total as f32;
+        let hi = (0..3).map(|c| h[c][255]).max().unwrap_or(0);
+        let lo = h[3][0];
+        ui.horizontal(|ui| {
+            let mut w = app.develop.warnings;
+            if ui
+                .toggle_value(&mut w, "Clipping")
+                .on_hover_text("Show clipped highlights (red) and shadows (blue) (J)")
+                .changed()
+            {
+                app.develop.warnings = w;
+            }
+            ui.weak(format!(
+                "highlights {:.1}% · shadows {:.1}%",
+                pct(hi),
+                pct(lo)
+            ));
+        });
+        ui.separator();
+    }
     let st = &app.develop;
     let (Some(doc), Some(ready)) = (&st.doc, &st.ready) else {
         ui.add_space(40.0);

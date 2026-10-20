@@ -793,6 +793,15 @@ impl ShoeboxApp {
         self.develop.doc.as_ref()
     }
 
+    /// Develop's histogram of the render, and whether clipping is shown
+    /// (tests).
+    pub fn develop_histogram(&self) -> (Option<u32>, bool) {
+        (
+            self.develop.histogram.as_ref().map(|h| h[3].iter().sum()),
+            self.develop.warnings,
+        )
+    }
+
     /// Develop is showing the photo rendered from its raw data (tests).
     pub fn develop_ready(&self) -> bool {
         self.develop.ready.is_some() && self.develop.rendered()
@@ -3405,6 +3414,9 @@ impl ShoeboxApp {
         if self.view == View::Develop {
             if pressed(egui::Key::Backslash) {
                 self.develop.before = !self.develop.before;
+            }
+            if pressed(egui::Key::J) {
+                self.develop.warnings = !self.develop.warnings;
             }
             if pressed(egui::Key::Escape) && !self.fullscreen && !ctx.any_popup_open() {
                 self.set_view(self.back_view);
