@@ -505,8 +505,12 @@ impl Cache {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Record a file exported from `photo`.
+    /// Record a file exported from `photo` (replacing any record of the
+    /// same file).
     pub fn add_export(&self, e: &ExportRow) -> Result<()> {
+        // A file replaced by a new export is one export, not two.
+        self.conn
+            .execute("DELETE FROM exports WHERE path = ?1", params![e.path])?;
         self.conn.execute(
             "INSERT INTO exports(photo, copy_id, path, preset_name, preset_json, edit_key, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",

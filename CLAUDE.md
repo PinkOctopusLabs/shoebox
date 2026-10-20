@@ -70,7 +70,7 @@ A Rust + egui photo library app for macOS. **`docs/SPEC.md` is the source of tru
 1. Never delete files outside the app's own cache directories. "Remove" means move to `_rejected/`/`_duplicates/`, or the macOS Trash on explicit command.
 2. Journal every move, rename and copy, with a batch id, *before* it runs.
 3. Never write to image files. Marks go to XMP sidecars only; the only other files Shoebox writes in a library are `<root>/.shoebox/**/*.json` (its own files, and photo edits in `.shoebox/edits/`).
-4. Never overwrite: collisions get `-1`, `-2` suffixes.
+4. Never overwrite: collisions get `-1`, `-2` suffixes. The one exception: an export (always outside the library) may replace an earlier file when the person chooses Replace when asked; it's written beside it first, then renamed over it.
 5. Reference roots are read-only.
 6. Multi-file operations show a dry-run table and need confirmation.
 7. **Never run anything against the real photo library during development.** Use fixtures or an APFS clone (`cp -cR Photos Photos-test`).

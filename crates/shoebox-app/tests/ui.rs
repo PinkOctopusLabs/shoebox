@@ -1207,13 +1207,16 @@ fn marks_skip_reference_photos() {
     assert!(!lib.join("ref/2026/2026-04-24/DSC_0001.NEF.xmp").exists());
 }
 
-/// Step until `cond` holds (or fail after `timeout`).
+/// Step until `cond` holds (or fail after `timeout`). The whole suite runs
+/// in parallel with GPU and export work, so the limit is three times the
+/// one given: a passing test still returns as soon as `cond` holds.
 fn wait_for(
     h: &mut Harness<'_, ShoeboxApp>,
     timeout: Duration,
     what: &str,
     cond: impl Fn(&ShoeboxApp) -> bool,
 ) {
+    let timeout = timeout * 3;
     let start = Instant::now();
     while !cond(h.state()) {
         assert!(start.elapsed() < timeout, "timed out waiting for {what}");
@@ -3395,13 +3398,53 @@ fn export_a_photo() {
         a.export_state().2 == Some(1)
     });
 
+    // Exporting again lands on that file: asked first. Cancel writes
+    // nothing; "Save as a new file" keeps both.
+    let opt_shift_cmd = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT | egui::Modifiers::ALT;
+    h.key_press_modifiers(opt_shift_cmd, egui::Key::E);
+    wait_for(&mut h, Duration::from_secs(30), "asked", |a| {
+        a.export_asking()
+    });
+    snapshot(&mut h, "export-clash");
+    h.get_by_label("Cancel").click();
+    h.run_steps(3);
+    assert!(!h.state().export_asking());
+    assert_eq!(walk(&out).len(), 1);
+    h.key_press_modifiers(opt_shift_cmd, egui::Key::E);
+    wait_for(&mut h, Duration::from_secs(30), "asked", |a| {
+        a.export_asking()
+    });
+    h.get_by_label("Save as a new file").click();
+    wait_for(&mut h, Duration::from_secs(30), "kept both", |_| {
+        walk(&out).len() == 2
+    });
+
+    // Re-export from the Info panel: asked, and "Replace" overwrites that
+    // file in place (still two files; the record isn't doubled).
+    wait_for(&mut h, Duration::from_secs(10), "listed", |a| {
+        a.export_state().2 == Some(2)
+    });
+    let first = f.clone();
+    let before = std::fs::metadata(&first).unwrap().modified().unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    h.get_all_by_label("Re-export").last().unwrap().click();
+    wait_for(&mut h, Duration::from_secs(30), "asked", |a| {
+        a.export_asking()
+    });
+    h.get_by_label("Replace").click();
+    wait_for(&mut h, Duration::from_secs(30), "replaced", |_| {
+        std::fs::metadata(&first).unwrap().modified().unwrap() > before
+    });
+    settle(&mut h, Duration::from_secs(30));
+    assert_eq!(walk(&out).len(), 2, "{:?}", walk(&out));
+    wait_for(&mut h, Duration::from_secs(10), "listed once", |a| {
+        a.export_state().2 == Some(2)
+    });
+
     // Inside the library: refused, nothing written there (even given by a
     // path through a symlink: the temp folder is /var, the root /private/var).
     h.state_mut().set_export_folder(&root.join("exports"));
-    h.key_press_modifiers(
-        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT | egui::Modifiers::ALT,
-        egui::Key::E,
-    );
+    h.key_press_modifiers(opt_shift_cmd, egui::Key::E);
     wait_for(&mut h, Duration::from_secs(30), "refused", |a| {
         a.export_state()
             .4

@@ -1241,8 +1241,14 @@ hashes, embeddings, faces).
   the catalog (`exports`, outside the rebuildable set, following photo
   moves) with the preset and the edit it came from; the Info panel lists a
   photo's exports, flagged stale (the edit changed) or missing.
-- Not built: re-export. The spec replaces the old file once the new one is
-  written, but safety rule 1 forbids deleting outside the app's caches;
-  needs a decision (overwrite-in-place exception for exports, the Trash,
-  or a new name). Output sharpening and the PNG, AVIF and JPEG XL formats
-  are later phases' items.
+- **Files already there** (decided: ask). Before writing anything, the
+  export thread works out every destination; if any exist, the export
+  waits and the app asks once for the batch: Replace, Save as new files
+  (`-1`, `-2`), or Cancel. Replacing writes the new file beside the old and
+  renames it over, so a failed export leaves the old file whole; two photos
+  in one batch landing on one name keep both. Safety rule 4 now says so
+  (exports only, never in the library). Re-export (Info panel, per export)
+  renders again with the recorded preset to the same name, so the same
+  question comes up; the catalog keeps one record per file. Output
+  sharpening and the PNG, AVIF and JPEG XL formats are later phases'
+  items.

@@ -5,7 +5,7 @@
 use shoebox_develop::cpu::Rgb;
 use shoebox_develop::export::{
     FileFormat, OutputSize, Preset, TiffCompression, encode, file_stem, output_size, resize,
-    starters, write_new,
+    starters, write_new, write_replacing,
 };
 
 #[test]
@@ -120,4 +120,18 @@ fn presets_are_json() {
         v["size"],
         serde_json::json!({ "kind": "long_edge", "px": 2048 })
     );
+}
+
+#[test]
+fn replacing_when_chosen() {
+    let t = tempfile::tempdir().unwrap();
+    let a = write_new(t.path(), "photo", "jpg", b"one").unwrap();
+    let b = write_replacing(t.path(), "photo", "jpg", b"two").unwrap();
+    assert_eq!(a, b);
+    assert_eq!(std::fs::read(&a).unwrap(), b"two");
+    // Nothing else left behind.
+    assert_eq!(std::fs::read_dir(t.path()).unwrap().count(), 1);
+    // And it creates when there's nothing to replace.
+    let c = write_replacing(t.path(), "other", "jpg", b"three").unwrap();
+    assert_eq!(std::fs::read(c).unwrap(), b"three");
 }

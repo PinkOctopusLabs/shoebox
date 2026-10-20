@@ -71,13 +71,26 @@ enum Message {
 }
 
 /// Export these photos with these presets.
+#[derive(Clone)]
 pub struct ExportJob {
     pub items: Vec<ExportItem>,
     pub presets: Vec<Preset>,
     /// Library folders: exports never go inside them.
     pub roots: Vec<PathBuf>,
+    /// What to do where a file is already there; None: ask first.
+    pub on_clash: Option<Clash>,
 }
 
+/// An export onto a file that's already there, as the person chose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Clash {
+    /// Save a new file beside it (`-1`, `-2`).
+    NewFile,
+    /// Replace it.
+    Replace,
+}
+
+#[derive(Clone)]
 pub struct ExportItem {
     pub id: PhotoId,
     pub path: PathBuf,
@@ -119,6 +132,12 @@ pub enum Event {
         done: usize,
         total: usize,
         last: Option<PathBuf>,
+    },
+    /// Files this export would land on are already there: it hasn't
+    /// started; ask, then send it again with `on_clash` set.
+    ExportClashes {
+        job: Box<ExportJob>,
+        files: Vec<PathBuf>,
     },
     /// An export finished: the files written, and what failed.
     ExportDone {
@@ -511,12 +530,70 @@ pub fn default_folder(preset: &str) -> Option<PathBuf> {
 
 /// Run an export: each photo rendered once at full size, then written for
 /// each preset.
+/// Where an item goes with a preset: the folder and file name (without
+/// `-1`, `-2`), or why it can't go there.
+fn destination(
+    job: &ExportJob,
+    item: &ExportItem,
+    preset: &Preset,
+    seq: usize,
+) -> Result<(PathBuf, String), String> {
+    let folder = match &preset.folder {
+        Some(f) => f.clone(),
+        None => default_folder(&preset.name).ok_or("no home folder")?,
+    };
+    // Compared as real paths: /var is /private/var on macOS, and a symlink
+    // mustn't sneak an export into the library.
+    let real = real_path(&folder);
+    if job.roots.iter().any(|r| real.starts_with(real_path(r))) {
+        return Err(format!(
+            "{} is inside your library; exports go elsewhere",
+            folder.display()
+        ));
+    }
+    let name = item
+        .path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let stem = shoebox_develop::export::file_stem(
+        &preset.naming,
+        &name,
+        &preset.name,
+        item.date.as_deref(),
+        seq + 1,
+    );
+    Ok((folder, format!("{stem}.{}", preset.format.extension())))
+}
+
 fn run_export(
     job: &ExportJob,
     converter: Option<&std::path::Path>,
     dngs: &DngCache,
     emit: &dyn Fn(Event),
 ) {
+    // Before anything is written: files already there? Ask first.
+    if job.on_clash.is_none() {
+        let mut clashes = Vec::new();
+        for (seq, item) in job.items.iter().enumerate() {
+            for preset in &job.presets {
+                if let Ok((folder, file)) = destination(job, item, preset, seq) {
+                    let p = folder.join(file);
+                    if p.exists() && !clashes.contains(&p) {
+                        clashes.push(p);
+                    }
+                }
+            }
+        }
+        if !clashes.is_empty() {
+            emit(Event::ExportClashes {
+                job: Box::new(job.clone()),
+                files: clashes,
+            });
+            return;
+        }
+    }
+    let mut taken: std::collections::HashSet<PathBuf> = Default::default();
     let total = job.items.len() * job.presets.len();
     let mut done = 0;
     let mut written = Vec::new();
@@ -549,19 +626,7 @@ fn run_export(
         };
         for preset in &job.presets {
             let result = (|| -> Result<PathBuf, String> {
-                let folder = match &preset.folder {
-                    Some(f) => f.clone(),
-                    None => default_folder(&preset.name).ok_or("no home folder")?,
-                };
-                // Compared as real paths: /var is /private/var on macOS,
-                // and a symlink mustn't sneak an export into the library.
-                let real = real_path(&folder);
-                if job.roots.iter().any(|r| real.starts_with(real_path(r))) {
-                    return Err(format!(
-                        "{} is inside your library; exports go elsewhere",
-                        folder.display()
-                    ));
-                }
+                let (folder, file) = destination(job, item, preset, seq)?;
                 let o = cpu::Options {
                     long_edge: None,
                     orientation: if ready.upright { 1 } else { item.orientation },
@@ -573,19 +638,17 @@ fn run_export(
                     shoebox_develop::export::output_size(img.width, img.height, preset.size);
                 let img = shoebox_develop::export::resize(&img, w, h);
                 let bytes = shoebox_develop::export::encode(&img, preset)?;
-                let stem = shoebox_develop::export::file_stem(
-                    &preset.naming,
-                    &name,
-                    &preset.name,
-                    item.date.as_deref(),
-                    seq + 1,
-                );
-                let out = shoebox_develop::export::write_new(
-                    &folder,
-                    &stem,
-                    preset.format.extension(),
-                    &bytes,
-                )?;
+                let ext = preset.format.extension();
+                let stem = file.strip_suffix(&format!(".{ext}")).unwrap_or(&file);
+                // Replace only what was there before this export: two
+                // photos landing on one name keep both.
+                let target = folder.join(&file);
+                let out = if job.on_clash == Some(Clash::Replace) && !taken.contains(&target) {
+                    shoebox_develop::export::write_replacing(&folder, stem, ext, &bytes)?
+                } else {
+                    shoebox_develop::export::write_new(&folder, stem, ext, &bytes)?
+                };
+                taken.insert(out.clone());
                 if let Some(tool) = &exiftool {
                     copy_metadata(tool, item, preset, &out);
                 }

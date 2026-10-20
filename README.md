@@ -53,7 +53,8 @@ These are hard rules in the code, with tests:
 3. Image files are never written. Marks go to XMP sidecars; the only other
    files Shoebox writes in a library are its own `<root>/.shoebox/**/*.json`
    (photo edits live in `.shoebox/edits/`).
-4. Nothing is overwritten: name collisions get `-1`, `-2` suffixes.
+4. Nothing is overwritten: name collisions get `-1`, `-2` suffixes. (Exports,
+   which never go in your library, ask whether to replace an earlier one.)
 5. Folders marked **Reference** are read-only.
 
 Please still point it at a copy first. On APFS that costs no space:

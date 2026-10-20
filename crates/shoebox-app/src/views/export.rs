@@ -11,7 +11,7 @@ use eframe::egui::{self, RichText};
 use shoebox_develop::export::{FileFormat, Metadata, OutputSize, Preset, Space, TiffCompression};
 
 use crate::app::ShoeboxApp;
-use crate::develop::{ExportItem, ExportJob};
+use crate::develop::{Clash, ExportItem, ExportJob};
 use crate::jobs::{LibraryCommand, PhotoId};
 
 #[derive(Default)]
@@ -30,6 +30,8 @@ pub struct State {
     /// Exports of the photo the Info panel shows: (photo, rows).
     pub of_photo: Option<(PathBuf, Vec<(shoebox_core::cache::ExportRow, bool)>)>,
     asked_for: Option<PathBuf>,
+    /// An export waiting for an answer: files it would land on are there.
+    pub clashes: Option<(Box<ExportJob>, Vec<PathBuf>)>,
 }
 
 /// The photos to export: the selection, else the current photo.
@@ -47,6 +49,31 @@ pub fn export(app: &mut ShoeboxApp, ids: &[PhotoId], presets: Vec<Preset>) {
     if presets.is_empty() || ids.is_empty() {
         return;
     }
+    app.export.last = presets.iter().map(|p| p.name.clone()).collect();
+    send(app, ids, presets);
+}
+
+/// Export one photo again with the preset it was exported with, to the
+/// same file name (so the question of replacing it comes up).
+pub fn reexport(app: &mut ShoeboxApp, row: &shoebox_core::cache::ExportRow) {
+    let Ok(mut preset) = serde_json::from_str::<Preset>(&row.preset_json) else {
+        app.error = Some(format!(
+            "Can't re-export {}: its preset can't be read",
+            row.path
+        ));
+        return;
+    };
+    let file = std::path::Path::new(&row.path);
+    preset.folder = file.parent().map(PathBuf::from);
+    if let Some(stem) = file.file_stem() {
+        // The name as it was (braces can't be read as placeholders here).
+        preset.naming = stem.to_string_lossy().replace('{', "(").replace('}', ")");
+    }
+    let id = crate::jobs::photo_id(std::path::Path::new(&row.photo));
+    send(app, &[id], vec![preset]);
+}
+
+fn send(app: &mut ShoeboxApp, ids: &[PhotoId], presets: Vec<Preset>) {
     let mut items = Vec::new();
     for &id in ids {
         let Some(idx) = app.index(id) else { continue };
@@ -81,13 +108,13 @@ pub fn export(app: &mut ShoeboxApp, ids: &[PhotoId], presets: Vec<Preset>) {
     if items.is_empty() {
         return;
     }
-    app.export.last = presets.iter().map(|p| p.name.clone()).collect();
     app.export.progress = Some((0, items.len() * presets.len()));
     let roots = app.catalog.roots.iter().map(|r| r.path.clone()).collect();
     app.developer.export(ExportJob {
         items,
         presets,
         roots,
+        on_clash: None,
     });
 }
 
@@ -186,8 +213,83 @@ fn summary(p: &Preset) -> String {
     format!("{format} · {} · {size}", p.space.label())
 }
 
+/// Files an export would land on are there: replace them, or save new
+/// files beside them?
+pub fn clashes(app: &mut ShoeboxApp, ctx: &egui::Context) {
+    let Some((_, files)) = &app.export.clashes else {
+        return;
+    };
+    let n = files.len();
+    let shown: Vec<String> = files
+        .iter()
+        .take(5)
+        .map(|f| f.display().to_string())
+        .collect();
+    let mut choice: Option<Option<Clash>> = None;
+    egui::Window::new(if n == 1 {
+        "The file is already there"
+    } else {
+        "Files are already there"
+    })
+    .collapsible(false)
+    .resizable(false)
+    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+    .show(ctx, |ui| {
+        ui.label(if n == 1 {
+            "This export would save over a file that's already there:".to_owned()
+        } else {
+            format!("This export would save over {n} files that are already there:")
+        });
+        for f in &shown {
+            ui.weak(f);
+        }
+        if n > shown.len() {
+            ui.weak(format!("and {} more", n - shown.len()));
+        }
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if ui
+                .button(if n == 1 { "Replace" } else { "Replace them" })
+                .on_hover_text("Overwrite with the new export (once it's written)")
+                .clicked()
+            {
+                choice = Some(Some(Clash::Replace));
+            }
+            if ui
+                .button(if n == 1 {
+                    "Save as a new file"
+                } else {
+                    "Save as new files"
+                })
+                .on_hover_text("Keep what's there; the new export's name gets -1, -2")
+                .clicked()
+            {
+                choice = Some(Some(Clash::NewFile));
+            }
+            if ui.button("Cancel").clicked() {
+                choice = Some(None);
+            }
+        });
+    });
+    match choice {
+        Some(Some(c)) => {
+            if let Some((mut job, _)) = app.export.clashes.take() {
+                job.on_clash = Some(c);
+                app.export.progress = Some((0, job.items.len() * job.presets.len()));
+                app.developer.export(*job);
+            }
+        }
+        Some(None) => {
+            app.export.clashes = None;
+            app.export.progress = None;
+        }
+        None => {}
+    }
+}
+
 /// The dialog.
 pub fn dialog(app: &mut ShoeboxApp, ctx: &egui::Context) {
+    clashes(app, ctx);
     if !app.export.open {
         return;
     }
@@ -490,6 +592,7 @@ pub fn info_section(app: &mut ShoeboxApp, ui: &mut egui::Ui, photo: &std::path::
             .color(ui.visuals().weak_text_color()),
     );
     let mut reveal = None;
+    let mut again = None;
     for (r, there) in rows.clone() {
         ui.horizontal_wrapped(|ui| {
             ui.label(&r.preset_name);
@@ -505,10 +608,20 @@ pub fn info_section(app: &mut ShoeboxApp, ui: &mut egui::Ui, photo: &std::path::
             if there && ui.small_button("Show").on_hover_text(&r.path).clicked() {
                 reveal = Some(PathBuf::from(&r.path));
             }
+            if ui
+                .small_button("Re-export")
+                .on_hover_text("Export again with the same preset and name")
+                .clicked()
+            {
+                again = Some(r.clone());
+            }
         });
     }
     if let Some(p) = reveal {
         crate::app::reveal(&p);
+    }
+    if let Some(r) = again {
+        reexport(app, &r);
     }
 }
 

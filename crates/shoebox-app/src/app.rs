@@ -856,6 +856,12 @@ impl ShoeboxApp {
         )
     }
 
+    /// An export is waiting to be told what to do with files already there
+    /// (tests).
+    pub fn export_asking(&self) -> bool {
+        self.export.clashes.is_some()
+    }
+
     /// Edited photos, and previews of edits ready (tests).
     pub fn edited_previews(&self) -> (usize, usize) {
         (self.edited.len(), self.previews_ready.len())

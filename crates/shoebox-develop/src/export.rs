@@ -2,8 +2,8 @@
 //! writing new files. Rendering is the CPU pipe at full resolution; this
 //! module takes it from there.
 //!
-//! Files are only ever created, never replaced: a name that's taken gets
-//! `-1`, `-2`.
+//! A name that's taken gets `-1`, `-2`, unless the person chose to
+//! replace it ([`write_replacing`]): exports only, outside the library.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -363,4 +363,24 @@ pub fn write_new(dir: &Path, stem: &str, ext: &str, bytes: &[u8]) -> Result<Path
         }
     }
     Err(format!("no free name for {stem} in {}", dir.display()))
+}
+
+/// Write `bytes` as `<dir>/<stem>.<ext>`, replacing a file already there
+/// (the person chose to): written beside it first, then renamed over it, so
+/// a failed write leaves the old file as it was.
+pub fn write_replacing(dir: &Path, stem: &str, ext: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let path = dir.join(format!("{stem}.{ext}"));
+    let tmp = dir.join(format!(".{stem}.{ext}.shoebox-export"));
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&tmp)
+        .and_then(|mut f| f.write_all(bytes).and_then(|()| f.sync_all()));
+    if let Err(e) = written.and_then(|()| std::fs::rename(&tmp, &path)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("{}: {e}", path.display()));
+    }
+    Ok(path)
 }

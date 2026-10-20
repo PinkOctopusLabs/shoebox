@@ -241,6 +241,11 @@ pub fn poll(app: &mut ShoeboxApp) {
                 app.export.presets = list;
                 continue;
             }
+            Event::ExportClashes { job, files } => {
+                app.export.progress = None;
+                app.export.clashes = Some((job, files));
+                continue;
+            }
             Event::ExportProgress { done, total, .. } => {
                 app.export.progress = Some((done, total));
                 continue;
