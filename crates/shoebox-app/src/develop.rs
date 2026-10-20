@@ -656,6 +656,28 @@ fn exiftool() -> Option<PathBuf> {
     .find(|p| p.is_file())
 }
 
+/// Every tag that can say where a photo was taken, deleted for "all but
+/// location": coordinates (EXIF, XMP), place names (IPTC, XMP Photoshop and
+/// IPTC Core/Extension), and maker notes (Nikon's can hold location info).
+const LOCATION_TAGS: [&str; 16] = [
+    "-GPS:all=",
+    "-XMP-exif:GPS*=",
+    "-XMP:Location*=",
+    "-IPTC:City=",
+    "-IPTC:Sub-location=",
+    "-IPTC:Province-State=",
+    "-IPTC:Country-PrimaryLocationName=",
+    "-IPTC:Country-PrimaryLocationCode=",
+    "-XMP-photoshop:City=",
+    "-XMP-photoshop:State=",
+    "-XMP-photoshop:Country=",
+    "-XMP-iptcCore:CountryCode=",
+    "-XMP-iptcCore:Location=",
+    "-XMP-iptcExt:LocationShown*=",
+    "-XMP-iptcExt:LocationCreated*=",
+    "-MakerNotes:all=",
+];
+
 /// Copy the original's metadata (and its sidecar's) into an exported file,
 /// with exiftool. The pixels are already upright, so Orientation is 1; the
 /// export's own colour profile is kept.
@@ -686,7 +708,7 @@ fn copy_metadata(
                 cmd.arg("-TagsFromFile").arg(s).arg("-XMP:all");
             }
             if preset.metadata == Metadata::AllButLocation {
-                cmd.args(["-GPS:all=", "-XMP:Location*=", "-XMP-exif:GPS*="]);
+                cmd.args(LOCATION_TAGS);
             }
         }
     }
@@ -699,5 +721,82 @@ fn copy_metadata(
             String::from_utf8_lossy(&o.stderr)
         ),
         Err(e) => tracing::warn!("exiftool: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// "All but location" leaves nothing that says where: coordinates or
+    /// place names, in EXIF, IPTC or XMP. Needs exiftool (skipped without).
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn all_but_location_strips_every_location_tag() {
+        let Some(tool) = exiftool() else {
+            eprintln!("skipping: no exiftool");
+            return;
+        };
+        let t = tempfile::tempdir().unwrap();
+        let img = shoebox_fixtures::scene(1, 64, 48);
+        let src = t.path().join("src.jpg");
+        std::fs::write(&src, shoebox_fixtures::jpeg(&img, 90).unwrap()).unwrap();
+        let tag = |args: &[&str], file: &std::path::Path| {
+            let o = std::process::Command::new(&tool)
+                .args(["-q", "-overwrite_original"])
+                .args(args)
+                .arg(file)
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        };
+        tag(
+            &[
+                "-GPSLatitude=35.0",
+                "-GPSLatitudeRef=N",
+                "-GPSLongitude=135.7",
+                "-GPSLongitudeRef=E",
+                "-IPTC:City=Kyoto",
+                "-IPTC:Country-PrimaryLocationName=Japan",
+                "-XMP-photoshop:City=Kyoto",
+                "-XMP-photoshop:Country=Japan",
+                "-XMP-iptcCore:Location=Gion",
+                "-XMP-iptcExt:LocationShownCity=Kyoto",
+                "-Artist=Someone",
+                "-Copyright=Pink Octopus",
+            ],
+            &src,
+        );
+        let out = t.path().join("out.jpg");
+        std::fs::write(&out, shoebox_fixtures::jpeg(&img, 90).unwrap()).unwrap();
+        let item = ExportItem {
+            id: 1,
+            path: src,
+            format: shoebox_decode::Format::Jpeg,
+            orientation: 1,
+            settings: Default::default(),
+            edit_key: None,
+            date: None,
+            sidecar: None,
+        };
+        let preset = Preset {
+            metadata: shoebox_develop::export::Metadata::AllButLocation,
+            ..shoebox_develop::export::starters()[0].clone()
+        };
+        copy_metadata(&tool, &item, &preset, &out);
+        let dump = std::process::Command::new(&tool)
+            .args(["-a", "-G1", "-s"])
+            .arg(&out)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&dump.stdout);
+        for word in ["Kyoto", "Japan", "Gion", "GPS"] {
+            assert!(!text.contains(word), "{word} survived:\n{text}");
+        }
+        // The rest came across.
+        assert!(
+            text.contains("Pink Octopus") && text.contains("Someone"),
+            "{text}"
+        );
     }
 }
