@@ -18,11 +18,14 @@ Shoebox gains a Develop view that turns Nikon NEF files into finished images goo
 - Feature parity with PhotoLab: RAW colour, exposure and tone, white balance, AI denoise (DeepPRIME equivalent), lens corrections, dehaze (ClearView equivalent), local tone mapping (Smart Lighting equivalent), perspective (ViewPoint equivalent), local adjustments, crop and export. FilmPack-style looks, U Point-style control points and ViewPoint's volume fix follow as Phase 4 options.
 - Presets and preset packs, including film-look LUTs and imported Lightroom presets.
 - Batch workflow: copy/paste settings, sync across a selection, virtual copies.
+- The standard tools Lightroom Classic and darktable share beyond PhotoLab's set (see Tools beyond PhotoLab), plus photo merges and Lens Blur in Phase 4.
+- Every still image is editable (NEF, DNG, JPEG, TIFF, PNG, HEIC), not only raw files.
 - Edits stored so they survive the app, the catalog, or a move to another machine.
 
 **Non-goals (v1)**
 
 - Layers, compositing, generative fill or anything Photoshop-shaped.
+- AI Super Resolution (upscaling), and darktable's niche modules: liquify, tone equalizer, film-negative inversion, enlarge canvas.
 - Print module, tethered shooting, video.
 - Reading DxO `.dop` files, or round-tripping edits with Lightroom. Importing Lightroom *presets* is in scope. Ratings, labels and keywords still go through standard XMP.
 - Cameras other than the Nikon Z f and any older Nikon bodies in the archive. The decoder supports others, but they are not tested targets.
@@ -418,6 +421,32 @@ A local adjustment is a mask plus a small set of slider values, applied in linea
 - **Object removal:** an inpainting model for larger areas (power lines, people). Big-LaMa needs FFT, which candle lacks, so pick a convolution-only model in Phase 4 or use Core ML. Check the model's licence.
 - Healing runs after denoise and lens correction so patches match, and before tone, so blends happen in linear light.
 
+## Tools beyond PhotoLab
+
+A comparison with Lightroom Classic's Develop module and darktable 5.x (October 2026) found these standard tools missing from the sections above. They join the phases shown; each gets the CPU reference and shader treatment, the CPU-versus-GPU test, and a place in the edit document like any other module.
+
+| Tool | What it does | As in | Phase |
+| --- | --- | --- | --- |
+| Rotate 90° and flip | Quarter turns and mirror, folded into the geometry map (no extra resample) | Both | 1 |
+| White balance eyedropper | Averages a 5×5 proxy-pixel patch to neutral (already in Colour science) | Both | 1 |
+| Black and white | A monochrome treatment with a per-colour mix (8 hues, as HSL), before the display transform | Lightroom B&W, darktable colour calibration (gray) | 2 |
+| Defringe | Purple and green fringe removal by hue range and amount, after lens CA correction | Both | 2 |
+| Sharpening detail and masking | Detail (halo suppression) and an edge mask so flat areas aren't sharpened | Lightroom Detail, darktable diffuse or sharpen | 2 |
+| Manual transform | Vertical, horizontal, aspect, scale and X/Y offset, in the geometry homography | Both | 2 |
+| Calibration | Hue and saturation of the red, green and blue primaries, and shadows tint | Lightroom Calibration, darktable colour calibration | 2 |
+| Soft proofing | Preview in an export space with out-of-gamut warning (moxcms) | Both | 2 |
+| Hot and dead pixels; raw black and white point | Raw-stage fixes and overrides | darktable | 2 |
+| Watermark and borders | Text or image watermark and a border, as export preset options | Lightroom watermark, darktable watermark and framing | 2 |
+| Point Color | Pick a colour on the photo and shift its hue, saturation and luminance within a range | Lightroom Point Color, darktable colour zones | 3 |
+| Red-eye | Detect and correct red (and pet) eyes in a box | Both | 3 |
+| Reference view; match total exposures | Edit beside another photo; match exposure across a selection | Lightroom | 3 |
+| Finer AI masks | People parts (face, skin, eyes, lips, hair, clothes; Vision landmarks and segmentation), landscape categories, background | Lightroom Masking | 3–4 |
+
+**Phase 4 additions**
+
+- **Photo merges.** HDR (bracketed raws aligned and merged into one linear DNG-like source with extended range), panorama (feature matching, a spherical, cylindrical or perspective projection, seam blending) and focus stacking (aligned frames combined by local sharpness). Each makes a new file next to the sources, through `fileops` (journaled), whose edit starts from defaults. Read darktable-adjacent tools (Hugin, enfuse) for the algorithms; these need safety rule 3 to cover merge results.
+- **Lens Blur.** A depth estimate (a monocular depth model on candle, or Apple's depth data where a photo has it) drives a synthetic depth of field with a focus point and range, bokeh shape and highlight boost. A local adjustment can refine the depth map.
+
 ## Develop view
 
 The Develop view is a mode of the existing library window. D enters it from any selected photo, G returns to the grid, and the filmstrip, selection and ratings stay shared.
@@ -502,10 +531,10 @@ Build in four phases. Shoebox is a usable everyday editor after Phase 2 and can 
 ```mermaid
 flowchart LR
   P0["Before Phase 1<br/>Task 0.1 GPL relicense<br/>Task 0.2 layout<br/>Task 0.3 ML plan"] --> P1
-  P1["Phase 1 · Foundations · ≈4–6 weeks<br/>rawler decode, RCD<br/>Matrix colour, WB<br/>Exposure, crop<br/>Display transform<br/>Edit docs in .shoebox<br/>JPEG and TIFF export"] --> G1{"Gate: 30 NEFs clean<br/>ColorChecker ΔE ≤ 3"}
-  G1 --> P2["Phase 2 · Everyday editor · ≈6–8 weeks<br/>Tone, curve, HSL<br/>Dehaze, clarity<br/>Classic denoise<br/>Lens corrections<br/>Auto, presets, copy/paste<br/>Virtual copies"] --> G2{"Gate: daily driver<br/>for low-ISO shots"}
-  G2 --> P3["Phase 3 · Replace PhotoLab · ≈8–12 weeks<br/>AI raw denoise<br/>Auto-upright<br/>Local adjustments<br/>AI masks: SAM, Vision<br/>Smart-light tone<br/>Spot heal"] --> G3{"Gate: 27 of 30 pass<br/>side-by-side review"}
-  G3 --> P4["Phase 4 · Polish · ongoing<br/>Custom DCP profiles<br/>AI sky masks<br/>Object removal<br/>AVIF and JPEG XL"]
+  P1["Phase 1 · Foundations · ≈4–6 weeks<br/>rawler decode, RCD<br/>Matrix colour, WB<br/>Exposure, crop, rotate/flip<br/>Display transform<br/>Edit docs in .shoebox<br/>JPEG and TIFF export"] --> G1{"Gate: 30 NEFs clean<br/>ColorChecker ΔE ≤ 3"}
+  G1 --> P2["Phase 2 · Everyday editor · ≈6–8 weeks<br/>Tone, curve, HSL<br/>Dehaze, clarity<br/>Classic denoise<br/>Lens corrections<br/>Auto, presets, copy/paste<br/>Virtual copies<br/>B&W, defringe, calibration<br/>Transform sliders, soft proof"] --> G2{"Gate: daily driver<br/>for low-ISO shots"}
+  G2 --> P3["Phase 3 · Replace PhotoLab · ≈8–12 weeks<br/>AI raw denoise<br/>Auto-upright<br/>Local adjustments<br/>AI masks: SAM, Vision<br/>Smart-light tone<br/>Spot heal, red-eye<br/>Point Color, reference view"] --> G3{"Gate: 27 of 30 pass<br/>side-by-side review"}
+  G3 --> P4["Phase 4 · Polish · ongoing<br/>Custom DCP profiles<br/>AI sky masks<br/>Object removal<br/>AVIF and JPEG XL<br/>Photo merges, Lens Blur"]
 ```
 
 Nothing from Phase 4 starts before the Phase 3 gate passes; that gate is the definition of done from Goals.
