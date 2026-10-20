@@ -73,6 +73,48 @@ pub fn decode_rgb(data: &[u8]) -> Result<(crate::Rgb8, Option<Vec<u8>>), DecodeE
     Ok((crate::Rgb8::new(info.width, info.height, rgb)?, icc))
 }
 
+/// Decode to 16-bit RGB if the PNG has 16-bit samples (None otherwise),
+/// with its ICC profile.
+#[allow(clippy::type_complexity)]
+pub fn decode_rgb16(
+    data: &[u8],
+) -> Result<Option<(crate::rgb16::Rgb16, Option<Vec<u8>>)>, DecodeError> {
+    let mut dec = png::Decoder::new(Cursor::new(data));
+    dec.set_transformations(png::Transformations::EXPAND);
+    let mut reader = dec
+        .read_info()
+        .map_err(|e| DecodeError::Format(format!("PNG: {e}")))?;
+    if reader.info().bit_depth != png::BitDepth::Sixteen {
+        return Ok(None);
+    }
+    crate::check_dimensions(reader.info().width, reader.info().height)?;
+    let icc = reader.info().icc_profile.as_ref().map(|c| c.to_vec());
+    let size = reader.output_buffer_size().ok_or(DecodeError::Truncated)?;
+    let mut buf = vec![0u8; size];
+    let info = reader
+        .next_frame(&mut buf)
+        .map_err(|e| DecodeError::Format(format!("PNG: {e}")))?;
+    buf.truncate(info.buffer_size());
+    let px: Vec<u16> = buf
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|b| u16::from_be_bytes(*b))
+        .collect();
+    let channels = match info.color_type {
+        png::ColorType::Grayscale => 1,
+        png::ColorType::GrayscaleAlpha => 2,
+        png::ColorType::Rgb => 3,
+        png::ColorType::Rgba => 4,
+        png::ColorType::Indexed => return Ok(None),
+    };
+    let rgb = crate::tiff::expand(&px, channels);
+    Ok(Some((
+        crate::rgb16::Rgb16::new(info.width, info.height, rgb)?,
+        icc,
+    )))
+}
+
 /// The XMP packet in an uncompressed `iTXt` chunk keyed `XML:com.adobe.xmp`.
 pub fn itxt_xmp(data: &[u8]) -> Option<Range<usize>> {
     const KEY: &[u8] = b"XML:com.adobe.xmp\0";

@@ -139,7 +139,7 @@ impl Gray {
 
 /// Weights for mapping `src_len` input samples onto `dst_len` output samples
 /// by area: each output sample is the mean of the input interval it covers.
-fn area_weights(src_len: u32, dst_len: u32) -> Vec<Vec<(usize, f32)>> {
+pub(crate) fn area_weights(src_len: u32, dst_len: u32) -> Vec<Vec<(usize, f32)>> {
     let scale = f64::from(src_len) / f64::from(dst_len);
     (0..dst_len)
         .map(|o| {

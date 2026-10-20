@@ -14,6 +14,7 @@ pub mod nef;
 pub mod png;
 pub mod raw;
 pub mod rgb;
+pub mod rgb16;
 pub mod tiff;
 pub mod tiffparse;
 

@@ -592,14 +592,28 @@ fn prepare(
 /// decoder offers) at the proxy size, as a display-referred source.
 fn finished(r: &Request, long_edge: Option<u32>) -> Result<Ready, String> {
     use shoebox_decode::{Format, Target};
-    let img = shoebox_decode::render_path(r.format, &r.path, long_edge, 1, Target::DisplayP3)
+    let data = std::fs::read(&r.path).map_err(|e| format!("{}: {e}", r.path.display()))?;
+    // 16-bit TIFFs and PNGs keep their precision.
+    let deep = shoebox_decode::rgb16::render16(r.format, &data, long_edge, 1, Target::DisplayP3)
         .map_err(|e| e.to_string())?;
-    let src = cpu::from_display(
-        img.width as usize,
-        img.height as usize,
-        &img.px,
-        cpu::Target::DisplayP3,
-    );
+    let src = match deep {
+        Some(img) => cpu::from_display16(
+            img.width as usize,
+            img.height as usize,
+            &img.px,
+            cpu::Target::DisplayP3,
+        ),
+        None => {
+            let img = shoebox_decode::render(r.format, &data, long_edge, 1, Target::DisplayP3)
+                .map_err(|e| e.to_string())?;
+            cpu::from_display(
+                img.width as usize,
+                img.height as usize,
+                &img.px,
+                cpu::Target::DisplayP3,
+            )
+        }
+    };
     Ok(Ready {
         id: r.id,
         raw: r.raw.clone(),

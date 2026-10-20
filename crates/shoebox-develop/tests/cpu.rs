@@ -491,3 +491,20 @@ fn a_region_is_that_part_of_the_render() {
     let edge = f.region([f.width - 5, 0, 50, 50]);
     assert_eq!((edge.width, edge.height), (5, 50.min(f.height)));
 }
+
+/// 16-bit samples land where their 8-bit equivalents do, and keep the
+/// steps between.
+#[test]
+fn sixteen_bit_sources_match_and_refine_eight_bit() {
+    for space in [Target::Srgb, Target::DisplayP3] {
+        let px8: Vec<u8> = (0..=255u8).flat_map(|v| [v, 255 - v, v / 2]).collect();
+        let px16: Vec<u16> = px8.iter().map(|&v| u16::from(v) * 257).collect();
+        let a = cpu::from_display(256, 1, &px8, space);
+        let b = cpu::from_display16(256, 1, &px16, space);
+        for (x, y) in a.rgb.data.iter().zip(&b.rgb.data) {
+            assert!((x - y).abs() < 1e-5, "{x} {y}");
+        }
+        let fine = cpu::from_display16(2, 1, &[32768, 32768, 32768, 32769, 32769, 32769], space);
+        assert!(fine.rgb.data[3] > fine.rgb.data[0]);
+    }
+}

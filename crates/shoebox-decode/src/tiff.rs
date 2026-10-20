@@ -81,6 +81,49 @@ pub fn decode_rgb(data: &[u8]) -> Result<(crate::Rgb8, Option<Vec<u8>>), DecodeE
     Ok((crate::Rgb8::new(w, h, rgb)?, icc_profile(data)))
 }
 
+/// Decode the first image to 16-bit RGB if it has 16-bit samples (None
+/// otherwise), with its ICC profile.
+#[allow(clippy::type_complexity)]
+pub fn decode_rgb16(
+    data: &[u8],
+) -> Result<Option<(crate::rgb16::Rgb16, Option<Vec<u8>>)>, DecodeError> {
+    let mut d = Decoder::new(Cursor::new(data))
+        .map_err(tiff_err)?
+        .with_limits(limits());
+    let (w, h) = d.dimensions().map_err(tiff_err)?;
+    crate::check_dimensions(w, h)?;
+    let channels = match d.colortype().map_err(tiff_err)? {
+        ColorType::Gray(16) => 1,
+        ColorType::GrayA(16) => 2,
+        ColorType::RGB(16) => 3,
+        ColorType::RGBA(16) => 4,
+        _ => return Ok(None),
+    };
+    let DecodingResult::U16(px) = d.read_image().map_err(tiff_err)? else {
+        return Ok(None);
+    };
+    let rgb = expand(&px, channels);
+    Ok(Some((
+        crate::rgb16::Rgb16::new(w, h, rgb)?,
+        icc_profile(data),
+    )))
+}
+
+/// Grey (with or without alpha), RGB or RGBA samples as RGB.
+pub(crate) fn expand<T: Copy>(px: &[T], channels: usize) -> Vec<T> {
+    match channels {
+        1 | 2 => px
+            .chunks_exact(channels)
+            .flat_map(|p| [p[0], p[0], p[0]])
+            .collect(),
+        3 => px.to_vec(),
+        n => px
+            .chunks_exact(n)
+            .flat_map(|p| [p[0], p[1], p[2]])
+            .collect(),
+    }
+}
+
 /// Decode the first image to 8-bit luma.
 pub fn decode_luma(data: &[u8]) -> Result<Gray, DecodeError> {
     let mut d = Decoder::new(Cursor::new(data))

@@ -132,21 +132,36 @@ pub struct Demosaiced {
 /// A finished image (8-bit, `space`'s primaries and the sRGB transfer
 /// curve) as a display-referred source in linear Rec.2020.
 pub fn from_display(width: usize, height: usize, px: &[u8], space: Target) -> Demosaiced {
+    let lut: Vec<f32> = (0..256).map(|v| srgb_eotf(v as f32 / 255.0)).collect();
+    display_source(width, height, px, &lut, space)
+}
+
+/// [`from_display`] for 16-bit samples (16-bit TIFFs and PNGs), kept at
+/// their precision.
+pub fn from_display16(width: usize, height: usize, px: &[u16], space: Target) -> Demosaiced {
+    let lut: Vec<f32> = (0..=u16::MAX)
+        .map(|v| srgb_eotf(f32::from(v) / 65535.0))
+        .collect();
+    display_source(width, height, px, &lut, space)
+}
+
+fn display_source<T: Copy + Into<usize> + Sync>(
+    width: usize,
+    height: usize,
+    px: &[T],
+    lut: &[f32],
+    space: Target,
+) -> Demosaiced {
     let to_2020 = f32m(&colour::mul(
         &colour::xyz_to_rgb(&colour::REC2020, colour::D65),
         &colour::rgb_to_xyz(space.primaries(), colour::D65),
     ));
-    let lut: Vec<f32> = (0..256).map(|v| srgb_eotf(v as f32 / 255.0)).collect();
     let mut rgb = Rgb::new(width, height);
     rgb.data
         .par_chunks_mut(3)
         .zip(px.par_chunks(3))
         .for_each(|(o, p)| {
-            let lin = [
-                lut[usize::from(p[0])],
-                lut[usize::from(p[1])],
-                lut[usize::from(p[2])],
-            ];
+            let lin = [lut[p[0].into()], lut[p[1].into()], lut[p[2].into()]];
             o.copy_from_slice(&mul3(&to_2020, lin));
         });
     Demosaiced {
