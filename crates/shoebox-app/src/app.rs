@@ -461,6 +461,8 @@ pub struct ShoeboxApp {
     /// being converted since (Settings → Raw: idle pre-convert).
     last_input: Instant,
     converting_idle: bool,
+    /// The catalog changed since the likely edits were listed.
+    idle_stale: bool,
     /// How long without input counts as idle (tests shorten it).
     idle_after: Duration,
     pub(crate) compare: CompareState,
@@ -599,6 +601,7 @@ impl ShoeboxApp {
             raw_config: None,
             last_input: Instant::now(),
             converting_idle: false,
+            idle_stale: false,
             idle_after: Duration::from_secs(60),
             events: Vec::new(),
             event_members: HashMap::new(),
@@ -1279,6 +1282,8 @@ impl ShoeboxApp {
         self.all_keywords = p.keywords;
         self.cameras = p.cameras;
         self.lenses = p.lenses;
+        // Likely edits are worked out again from the new catalog.
+        self.idle_stale = true;
         // Drop what belongs to photos that are gone, and the images of
         // files that changed on disk so they reload.
         let stale = p.stale;
@@ -1345,7 +1350,13 @@ impl ShoeboxApp {
             }
             return;
         }
-        if !self.settings.preconvert || self.converting_idle {
+        if !self.settings.preconvert {
+            return;
+        }
+        if self.converting_idle {
+            if std::mem::take(&mut self.idle_stale) {
+                self.developer.convert_ahead(self.likely_edits());
+            }
             return;
         }
         let wait = self.idle_after.saturating_sub(self.last_input.elapsed());
@@ -1354,6 +1365,7 @@ impl ShoeboxApp {
             return;
         }
         self.converting_idle = true;
+        self.idle_stale = false;
         let list = self.likely_edits();
         tracing::info!("idle: converting up to {} likely edits", list.len());
         self.developer.convert_ahead(list);
