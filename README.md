@@ -51,7 +51,8 @@ These are hard rules in the code, with tests:
 2. Every move, rename and copy is journaled before it runs, and can be undone
    (or, if the app quit part-way, resumed or rolled back).
 3. Image files are never written. Marks go to XMP sidecars; the only other
-   files Shoebox writes in a library are `<root>/.shoebox/*.json`.
+   files Shoebox writes in a library are its own `<root>/.shoebox/**/*.json`
+   (photo edits live in `.shoebox/edits/`).
 4. Nothing is overwritten: name collisions get `-1`, `-2` suffixes.
 5. Folders marked **Reference** are read-only.
 

@@ -6,6 +6,7 @@ pub mod changes;
 pub mod cloud;
 pub mod collections;
 pub mod dupes;
+pub mod edits;
 pub mod embeddings;
 pub mod error;
 pub mod events;

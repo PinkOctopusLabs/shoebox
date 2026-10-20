@@ -103,6 +103,13 @@ pub fn suffixed(path: &Path, n: u32) -> PathBuf {
     path.with_file_name(name)
 }
 
+/// The `.shoebox` folder `p` is inside (at any depth), if any.
+fn app_dir_of(p: &Path) -> Option<&Path> {
+    p.ancestors()
+        .skip(1)
+        .find(|a| a.file_name().is_some_and(|n| n == ".shoebox"))
+}
+
 fn is_xmp(p: &Path) -> bool {
     p.extension().is_some_and(|e| e.eq_ignore_ascii_case("xmp"))
 }
@@ -183,6 +190,7 @@ pub fn plan_moves(files: &[(PathBuf, PathBuf)]) -> Result<Plan> {
     let mut plan = Plan::default();
     for (src, want) in files {
         let cars = sidecars(src)?;
+        let edits = crate::edits::of_image(src);
         let mut n = 0;
         let dst = loop {
             let cand = if n == 0 {
@@ -192,6 +200,7 @@ pub fn plan_moves(files: &[(PathBuf, PathBuf)]) -> Result<Plan> {
             };
             let all_free = std::iter::once(cand.clone())
                 .chain(cars.iter().map(|(p, k)| sidecar_dst(&cand, *k, p)))
+                .chain(edit_dsts(&edits, src, &cand).into_iter().map(|(_, d)| d))
                 .all(|p| !exists(&p) && !taken.contains(&p));
             if all_free {
                 break cand;
@@ -211,8 +220,22 @@ pub fn plan_moves(files: &[(PathBuf, PathBuf)]) -> Result<Plan> {
                 dst: cdst,
             });
         }
+        for (e, edst) in edit_dsts(&edits, src, &dst) {
+            taken.insert(edst.clone());
+            plan.moves.push(PlannedMove { src: e, dst: edst });
+        }
     }
     Ok(plan)
+}
+
+/// Where each of a photo's edit files goes when it moves from `src` to
+/// `dst` (edits that would leave every library root stay put).
+fn edit_dsts(edits: &[(PathBuf, PathBuf)], src: &Path, dst: &Path) -> Vec<(PathBuf, PathBuf)> {
+    edits
+        .iter()
+        .filter_map(|(root, e)| Some((e.clone(), crate::edits::moved(root, e, src, dst)?)))
+        .filter(|(e, d)| e != d)
+        .collect()
 }
 
 /// Where an import's copying is.
@@ -354,6 +377,10 @@ pub fn plan_group_moves(groups: &[Vec<(PathBuf, PathBuf)>]) -> Result<Plan> {
         }
         // Per-file sidecars, and stem sidecars that can move with the group.
         let mut per_file: Vec<Vec<PathBuf>> = Vec::new();
+        let edits: Vec<Vec<(PathBuf, PathBuf)>> = group
+            .iter()
+            .map(|(src, _)| crate::edits::of_image(src))
+            .collect();
         let mut stem_cars: Vec<(PathBuf, usize)> = Vec::new(); // (sidecar, member it follows)
         for (k, (src, _)) in group.iter().enumerate() {
             let cars = sidecars(src)?;
@@ -426,6 +453,13 @@ pub fn plan_group_moves(groups: &[Vec<(PathBuf, PathBuf)>]) -> Result<Plan> {
                     .iter()
                     .map(|(c, k)| sidecar_dst(&cand[*k], SidecarKind::PerStem, c)),
             );
+            for (k, (src, _)) in group.iter().enumerate() {
+                all.extend(
+                    edit_dsts(&edits[k], src, &cand[k])
+                        .into_iter()
+                        .map(|(_, d)| d),
+                );
+            }
             let srcs: HashSet<&PathBuf> = group.iter().map(|(s, _)| s).collect();
             let unique = all.iter().collect::<HashSet<_>>().len() == all.len();
             // A destination that is itself one of the group's sources frees up
@@ -451,6 +485,9 @@ pub fn plan_group_moves(groups: &[Vec<(PathBuf, PathBuf)>]) -> Result<Plan> {
                     src: c.clone(),
                     dst: sidecar_dst(&dsts[k], SidecarKind::PerFile, c),
                 });
+            }
+            for (e, edst) in edit_dsts(&edits[k], src, &dsts[k]) {
+                plan.moves.push(PlannedMove { src: e, dst: edst });
             }
         }
         for (c, k) in stem_cars {
@@ -779,16 +816,35 @@ impl FileOps {
         self.run("sidecar", label, None, &ops, |_| Ok(()))
     }
 
+    /// Save edit documents (`<root>/.shoebox/edits/…json`) as one journaled
+    /// batch of kind `edit`. An edit's own history is how edits are undone,
+    /// so these batches are left out of [`Self::last_undoable`].
+    pub fn write_edits(&self, label: &str, writes: Vec<(PathBuf, Vec<u8>)>) -> Result<i64> {
+        for (path, _) in &writes {
+            let in_edits = app_dir_of(path).is_some_and(|d| path.starts_with(d.join("edits")));
+            if !in_edits {
+                return Err(CoreError::Refused(format!(
+                    "{} is not in a .shoebox/edits folder",
+                    path.display()
+                )));
+            }
+            self.check_sidecar_target(path)?;
+        }
+        let ops: Vec<Planned> = writes
+            .into_iter()
+            .map(|(path, bytes)| Planned::Sidecar { path, bytes })
+            .collect();
+        self.run("edit", label, None, &ops, |_| Ok(()))
+    }
+
     fn check_sidecar_target(&self, path: &Path) -> Result<()> {
         let is_xmp = path
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("xmp"));
-        // The app's own files in a root (`.shoebox/events.json` etc.).
-        let is_app_file = path.extension().is_some_and(|e| e == "json")
-            && path
-                .parent()
-                .and_then(Path::file_name)
-                .is_some_and(|d| d == ".shoebox");
+        // The app's own files in a root (`.shoebox/events.json`,
+        // `.shoebox/edits/…/DSC_1234.NEF.json`).
+        let app_dir = app_dir_of(path);
+        let is_app_file = path.extension().is_some_and(|e| e == "json") && app_dir.is_some();
         if !is_xmp && !is_app_file {
             return Err(CoreError::Refused(format!(
                 "{} is not an .xmp sidecar or a .shoebox file; image files are never written",
@@ -804,11 +860,16 @@ impl FileOps {
                 path.display()
             )));
         }
-        let parent = path.parent().unwrap_or(Path::new("/"));
-        if !parent.is_dir() {
+        // Folders inside `.shoebox` are made as needed; anywhere else the
+        // file's folder must exist (a sidecar sits beside its photo).
+        let must_exist = match app_dir {
+            Some(d) => d.parent().unwrap_or(Path::new("/")).to_path_buf(),
+            None => path.parent().unwrap_or(Path::new("/")).to_path_buf(),
+        };
+        if !must_exist.is_dir() {
             return Err(CoreError::Refused(format!(
                 "{} does not exist",
-                parent.display()
+                must_exist.display()
             )));
         }
         Ok(())
@@ -942,6 +1003,8 @@ impl FileOps {
                     j.record_hashed(batch, seq, Op::Trash, path, &dst, size, hash)?;
                 }
                 Planned::Sidecar { path, bytes } => {
+                    // Only `.shoebox/…` writes can need folders (edits).
+                    mkdirs(path, &mut seq, &mut owners)?;
                     let before = match std::fs::read(path) {
                         Ok(b) => Some(b),
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -1313,7 +1376,7 @@ impl FileOps {
             .batches()?
             .into_iter()
             .rev()
-            .find(|b| b.kind != "undo" && b.status != "undone"))
+            .find(|b| b.kind != "undo" && b.kind != "edit" && b.status != "undone"))
     }
 }
 

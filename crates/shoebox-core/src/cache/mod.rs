@@ -64,6 +64,24 @@ pub struct Cache {
     conn: Connection,
 }
 
+/// Which edit: a photo (its root's path and its path within it) and copy.
+#[derive(Debug, Clone, Copy)]
+pub struct EditKey<'a> {
+    pub root: &'a str,
+    pub rel: &'a str,
+    pub copy: &'a str,
+}
+
+/// An edit's working copy in the catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedEdit {
+    pub json: String,
+    pub hash: String,
+    /// When it last changed, and when it was written to its file (ns).
+    pub updated_ns: i64,
+    pub saved_ns: Option<i64>,
+}
+
 /// Browsing metadata for one file, ready to be written to the cache.
 pub struct MetaEntry<'a> {
     pub root_id: i64,
@@ -413,6 +431,69 @@ impl Cache {
         self.conn.execute(
             "UPDATE OR REPLACE files SET root_id = ?3, rel_path = ?4
              WHERE root_id = ?1 AND rel_path = ?2",
+            params![from.0, from.1, to.0, to.1],
+        )?;
+        Ok(())
+    }
+
+    /// Store the working copy of an edit, not yet saved to its file.
+    pub fn put_edit(&self, key: &EditKey<'_>, json: &str, hash: &str, at_ns: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO edits(root, rel_path, copy_id, doc_json, doc_hash, updated_at, saved_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)
+             ON CONFLICT(root, rel_path, copy_id) DO UPDATE SET
+               doc_json = excluded.doc_json, doc_hash = excluded.doc_hash,
+               updated_at = excluded.updated_at, saved_at = NULL",
+            params![key.root, key.rel, key.copy, json, hash, at_ns],
+        )?;
+        Ok(())
+    }
+
+    pub fn edit(&self, key: &EditKey<'_>) -> Result<Option<CachedEdit>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT doc_json, doc_hash, updated_at, saved_at FROM edits
+                 WHERE root = ?1 AND rel_path = ?2 AND copy_id = ?3",
+                params![key.root, key.rel, key.copy],
+                |r| {
+                    Ok(CachedEdit {
+                        json: r.get(0)?,
+                        hash: r.get(1)?,
+                        updated_ns: r.get(2)?,
+                        saved_ns: r.get(3)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// The edit as written to its file at `at_ns` (only if it hasn't changed
+    /// since `updated_ns`).
+    pub fn mark_edit_saved(&self, key: &EditKey<'_>, updated_ns: i64, at_ns: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE edits SET saved_at = ?5
+             WHERE root = ?1 AND rel_path = ?2 AND copy_id = ?3 AND updated_at = ?4",
+            params![key.root, key.rel, key.copy, updated_ns, at_ns],
+        )?;
+        Ok(())
+    }
+
+    /// Edits changed since they were last written to their files:
+    /// `(root, rel, copy)`.
+    pub fn unsaved_edits(&self) -> Result<Vec<(String, String, String)>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT root, rel_path, copy_id FROM edits WHERE saved_at IS NULL ORDER BY updated_at",
+        )?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// A photo Shoebox moved takes its edits' rows along.
+    pub fn move_edits(&self, from: (&str, &str), to: (&str, &str)) -> Result<()> {
+        self.conn.execute(
+            "UPDATE OR REPLACE edits SET root = ?3, rel_path = ?4
+             WHERE root = ?1 AND rel_path = ?2",
             params![from.0, from.1, to.0, to.1],
         )?;
         Ok(())

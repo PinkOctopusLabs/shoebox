@@ -707,6 +707,12 @@ impl Catalog {
                 continue;
             }
             let old_id = self.root_id(i, cache)?;
+            if let (Some(from), Some(to)) = (
+                self.roots[self.photos[i].root].path.to_str(),
+                self.roots[new_root].path.to_str(),
+            ) {
+                cache.move_edits((from, &self.photos[i].rel), (to, &rel))?;
+            }
             let new = &self.roots[new_root];
             let new_id = cache.root_id(&new.path, new.role == Role::Reference)?;
             cache.move_file((old_id, &self.photos[i].rel), (new_id, &rel))?;

@@ -8,6 +8,7 @@ fn doc() -> EditDoc {
     EditDoc::new(Source {
         path: "2026/2026-10/DSC_1234.NEF".into(),
         blake3: "9f2c".into(),
+        size: None,
         camera: Some("NIKON Z f".into()),
         lens: None,
     })

@@ -44,6 +44,10 @@ pub struct Source {
     /// BLAKE3 of the original's contents (hex), so an edit left behind by a
     /// move in Finder finds its photo again.
     pub blake3: String,
+    /// The original's size in bytes: narrows the search for a moved photo
+    /// before anything is hashed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

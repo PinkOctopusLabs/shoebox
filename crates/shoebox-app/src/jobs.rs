@@ -728,7 +728,10 @@ fn library_worker(
     )> = None;
     let batches = |fileops: &FileOps| {
         if let Ok(b) = fileops.journal().batches() {
-            emit(LibraryEvent::Batches(b));
+            // Edit saves are undone in Develop's own history, not here.
+            emit(LibraryEvent::Batches(
+                b.into_iter().filter(|b| b.kind != "edit").collect(),
+            ));
         }
     };
     batches(&fileops);

@@ -1006,3 +1006,31 @@ hashes, embeddings, faces).
     (matrix), `exposure`, `display_transform` (contrast, white and black
     EV offsets, preserve hue), and `geometry` (rotate, crop as fractions of
     the upright rotated frame, aspect).
+
+## Develop, Phase 1: where edits are stored (2026-10-20)
+
+- Safety rule 3 is widened (as EDITING-SPEC asks) from `.shoebox/*.json`
+  to `.shoebox/**/*.json`: `fileops` takes JSON anywhere inside a root's
+  `.shoebox`, makes (and journals) missing folders there only, and
+  `write_edits` takes only `.shoebox/edits/…`.
+- Edit files: `<root>/.shoebox/edits/<rel>.json` (master) and
+  `<rel>.<copy id>.json` (virtual copies; ids have no dots). The file's
+  location says which photo it belongs to; `source.path` inside is a note
+  brought up to date on the next save, so a move never has to rewrite it.
+- Saves are journaled like every other write, as batches of kind `edit`
+  (previous contents kept). Library ⌘Z and the History list skip them:
+  edits are undone in Develop's own history. Undoing a first save leaves
+  `{}`, which reads as "no edit".
+- `plan_moves` and `plan_group_moves` find a photo's edit files the way
+  they find its sidecars, so every move, rename, organise and duplicate
+  clean-up carries them in the same batch, under the same `-N` suffix.
+  A photo moved out of every library root leaves its edit where it is.
+- Photos moved in Finder: an edit whose photo is gone is matched by
+  `source.size` (added to the document for this), then BLAKE3, and moved
+  to its photo's edit path. Unmatched edits are kept, never deleted.
+- Catalog: `edits(root, rel_path, copy_id, doc_json, doc_hash, updated_at,
+  saved_at)` in `cache.sqlite`, keyed by paths rather than file ids and
+  outside the rebuildable set, so a cache rebuild can't lose an unsaved
+  edit. `save_pending` writes every unsaved row as one batch (the app
+  calls it after 2 s idle and on leaving a photo); `load` takes the file
+  when it was written after the row (another Mac, a restore).

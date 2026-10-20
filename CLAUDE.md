@@ -7,6 +7,7 @@ A Rust + egui photo library app for macOS. **`docs/SPEC.md` is the source of tru
   M3: `xmp` (read any form, edit by splicing original bytes), `marks`, `sidecar` (precedence + write planning), `stacks`, `query` (filters, sort, smart filters), `events`, `changes` (unseen-change tracking).
   M4: `review` (duplicate groups for the app, auto-select, decisions → one batch).
   M5: `template` (naming), `import` (plan verified copies), `organise` (stack moves, renames, reject, reference rewrites), `collections`, `cloud` (cloud-only placeholders: detect, download).
+  Develop: `edits` (`.shoebox/edits/<rel>[.<copy>].json`: paths, moves carry them, reattach by size + BLAKE3, catalog working copy vs file, `save_pending` as one `edit` batch).
   M6: `timeline` (days, calendar maths, heat levels), `embeddings` (semantic search store + 8-bit exhaustive search + tag rule; own `embeddings.sqlite`, rows by kind), `people` (face rows, grouping, `people.json`).
 - `crates/shoebox-decode`: JPEG/TIFF/PNG decoding, NEF embedded-preview extraction, grayscale thumbnails, `mov` (MOV/MP4 movie headers), movie poster frames through AVFoundation (`imageio.rs`; `render_path`).
   NEFs are shown without decoding raw data: `nef.rs` finds the embedded JPEGs and `render()` decodes the smallest big enough (`JpgFromRaw` in the loupe) with zune-jpeg, converts with moxcms and orients. That path (it reads High efficiency NEFs too) stays: it is Develop's instant first paint and the library's thumbnail source. The raw decoder sits beside it in `raw` (rawler, inside `catch_unwind`: Lossless/uncompressed NEFs and DNGs, cropped, black-subtracted, normalised); `nef::compression` reads `NEFCompression` (High efficiency needs a DNG). `examples/raw_probe.rs` shows what it makes of files.
@@ -68,7 +69,7 @@ A Rust + egui photo library app for macOS. **`docs/SPEC.md` is the source of tru
 ## Safety rules (hard requirements)
 1. Never delete files outside the app's own cache directories. "Remove" means move to `_rejected/`/`_duplicates/`, or the macOS Trash on explicit command.
 2. Journal every move, rename and copy, with a batch id, *before* it runs.
-3. Never write to image files. Marks go to XMP sidecars only; the only other files Shoebox writes in a library are `<root>/.shoebox/*.json`.
+3. Never write to image files. Marks go to XMP sidecars only; the only other files Shoebox writes in a library are `<root>/.shoebox/**/*.json` (its own files, and photo edits in `.shoebox/edits/`).
 4. Never overwrite: collisions get `-1`, `-2` suffixes.
 5. Reference roots are read-only.
 6. Multi-file operations show a dry-run table and need confirmation.

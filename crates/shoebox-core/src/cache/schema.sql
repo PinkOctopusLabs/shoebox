@@ -81,3 +81,18 @@ CREATE TABLE IF NOT EXISTS dupe_ignores (
     hash_b BLOB NOT NULL,
     PRIMARY KEY (hash_a, hash_b)
 );
+
+-- Working copies of photo edits. The durable copy is the root's
+-- `.shoebox/edits/<rel>.json`, written a moment later (`saved_at`); a newer
+-- file wins over this row. Keyed by paths, not file ids, and not in the
+-- rebuildable set: a cache rebuild must not lose an unsaved edit.
+CREATE TABLE IF NOT EXISTS edits (
+    root       TEXT NOT NULL,
+    rel_path   TEXT NOT NULL,
+    copy_id    TEXT NOT NULL,
+    doc_json   TEXT NOT NULL,
+    doc_hash   TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    saved_at   INTEGER,
+    PRIMARY KEY (root, rel_path, copy_id)
+);
