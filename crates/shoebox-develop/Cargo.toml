@@ -20,8 +20,10 @@ serde_json = "1.0.154"
 shoebox-decode.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+wgpu = "30.0.1"
 
 [dev-dependencies]
 png = "0.18.1"
 shoebox-fixtures = { path = "../shoebox-fixtures" }
 tempfile = "3.27.0"
+wgpu = "30.0.1"

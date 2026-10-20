@@ -3,7 +3,9 @@
 //! A High efficiency NEF goes through Adobe DNG Converter first (cached in
 //! `<out dir>/cache`). Writes `<name>.png` (sRGB) and prints stage timings.
 //! `SHOEBOX_LONG_EDGE` renders a proxy; `SHOEBOX_EV`, `SHOEBOX_CONTRAST`,
-//! `SHOEBOX_WHITE_EV` and `SHOEBOX_BLACK_EV` set those sliders.
+//! `SHOEBOX_WHITE_EV` and `SHOEBOX_BLACK_EV` set those sliders; with
+//! `SHOEBOX_GPU=1` the live pipe also runs on the GPU and the largest
+//! difference from the CPU render is printed.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::Path;
@@ -58,8 +60,28 @@ fn main() {
             orientation,
             target: Target::Srgb,
         };
-        let img = cpu::render(&raw, &s, &o);
+        let src = cpu::demosaic(&raw, &s.modules.raw, o.long_edge);
+        let frame = cpu::frame(&raw, &src, &s, &o);
+        let img = cpu::apply(&src.rgb, &frame, true);
         let t_all = t.elapsed();
+        if std::env::var_os("SHOEBOX_GPU").is_some() {
+            use shoebox_develop::gpu::{Output, Pipe, headless};
+            let (device, queue) = headless().expect("a GPU");
+            let pipe = Pipe::new(&device, Output::Rgba32Float).unwrap();
+            let gsrc = pipe.upload(&device, &queue, &src.rgb);
+            let t = Instant::now();
+            let g = pipe.render(&device, &queue, &gsrc, &frame, true).unwrap();
+            let d = img
+                .data
+                .iter()
+                .zip(&g.data)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            println!(
+                "  gpu: {:?} with read-back; largest difference from cpu {d:.2e}",
+                t.elapsed()
+            );
+        }
         let name = path.file_stem().unwrap().to_string_lossy();
         let dst = out.join(format!("{name}.png"));
         let f = std::fs::File::create(&dst).unwrap();

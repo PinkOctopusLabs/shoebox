@@ -292,6 +292,36 @@ fn interp(a: f32, b: f32, c: f32) -> f32 {
     a * (b - c) + c
 }
 
+/// Run `f(row, line)` for the rows `rows` of `buf` (rows of `w`), in
+/// parallel. Each RCD step writes one buffer and reads others, so rows are
+/// independent.
+fn par_rows(
+    buf: &mut [f32],
+    w: usize,
+    rows: std::ops::Range<usize>,
+    f: impl Fn(usize, &mut [f32]) + Sync + Send,
+) {
+    buf.par_chunks_mut(w)
+        .enumerate()
+        .filter(|(r, _)| rows.contains(r))
+        .for_each(|(r, line)| f(r, line));
+}
+
+/// The refined discrimination: the centre's, or its diagonal neighbours'
+/// mean when that is more decided.
+#[inline]
+fn refined(dir: &[f32], i: usize, w1: usize) -> f32 {
+    let central = dir[i];
+    let neighbourhood =
+        0.25 * (dir[i - w1 - 1] + dir[i - w1 + 1] + dir[i + w1 - 1] + dir[i + w1 + 1]);
+    let disc = if (0.5 - central).abs() < (0.5 - neighbourhood).abs() {
+        neighbourhood
+    } else {
+        central
+    };
+    disc.clamp(0.0, 1.0)
+}
+
 /// Ratio Corrected Demosaicing (see the module notes).
 pub fn rcd(m: &Mosaic<'_>) -> Rgb {
     let mut out = bilinear(m);
@@ -302,7 +332,8 @@ pub fn rcd(m: &Mosaic<'_>) -> Rgb {
     let scaler = m.data.iter().copied().fold(0.0f32, f32::max).max(1e-6);
     let rev = 1.0 / scaler;
     let n = w * h;
-    let cfa: Vec<f32> = m.data.iter().map(|v| v.max(0.0) * rev).collect();
+    let cfa: Vec<f32> = m.data.par_iter().map(|v| v.max(0.0) * rev).collect();
+    let cfa = &cfa[..];
     let fc = |r: usize, c: usize| m.fc(r, c);
     let is_rb = |r: usize, c: usize| fc(r, c) != 1;
     let (w1, w2, w3, w4) = (w, 2 * w, 3 * w, 4 * w);
@@ -310,13 +341,12 @@ pub fn rcd(m: &Mosaic<'_>) -> Rgb {
     // Step 0: each channel starts as the photosite values of the colours
     // in its row (the rest is filled below).
     let mut rgb = [vec![0.0f32; n], vec![0.0f32; n], vec![0.0f32; n]];
-    for row in 0..h {
-        let (c0, c1) = (fc(row, 0), fc(row, 1));
-        for col in 0..w {
-            let i = row * w + col;
-            rgb[c0][i] = cfa[i];
-            rgb[c1][i] = cfa[i];
-        }
+    for (c, chan) in rgb.iter_mut().enumerate() {
+        par_rows(chan, w, 0..h, |row, line| {
+            if fc(row, 0) == c || fc(row, 1) == c {
+                line.copy_from_slice(&cfa[row * w..(row + 1) * w]);
+            }
+        });
     }
 
     // Step 1: vertical / horizontal discrimination.
@@ -326,45 +356,43 @@ pub fn rcd(m: &Mosaic<'_>) -> Rgb {
             + 6.0 * cfa[i])
     };
     let mut vhpf = vec![0.0f32; n];
-    let mut hhpf = vec![0.0f32; n];
-    for row in 3..h - 3 {
+    par_rows(&mut vhpf, w, 3..h - 3, |row, line| {
         for col in 4..w - 4 {
-            let i = row * w + col;
-            vhpf[i] = hpf(i, w1);
+            line[col] = hpf(row * w + col, w1);
         }
-    }
-    for row in 4..h - 4 {
+    });
+    let mut hhpf = vec![0.0f32; n];
+    par_rows(&mut hhpf, w, 4..h - 4, |row, line| {
         for col in 3..w - 3 {
-            let i = row * w + col;
-            hhpf[i] = hpf(i, 1);
+            line[col] = hpf(row * w + col, 1);
         }
-    }
+    });
     let mut vh_dir = vec![0.0f32; n];
-    for row in 4..h - 4 {
+    par_rows(&mut vh_dir, w, 4..h - 4, |row, line| {
         for col in 4..w - 4 {
             let i = row * w + col;
             let v = EPSSQ.max(vhpf[i - w1] + vhpf[i] + vhpf[i + w1]);
             let hs = EPSSQ.max(hhpf[i - 1] + hhpf[i] + hhpf[i + 1]);
-            vh_dir[i] = v / (v + hs);
+            line[col] = v / (v + hs);
         }
-    }
+    });
 
     // Step 2: low-pass filter at red and blue photosites.
     let mut lpf = vec![0.0f32; n];
-    for row in 2..h - 2 {
+    par_rows(&mut lpf, w, 2..h - 2, |row, line| {
         for col in 2..w - 2 {
             if !is_rb(row, col) {
                 continue;
             }
             let i = row * w + col;
-            lpf[i] = cfa[i]
+            line[col] = cfa[i]
                 + 0.5 * (cfa[i - w1] + cfa[i + w1] + cfa[i - 1] + cfa[i + 1])
                 + 0.25 * (cfa[i - w1 - 1] + cfa[i - w1 + 1] + cfa[i + w1 - 1] + cfa[i + w1 + 1]);
         }
-    }
+    });
 
     // Step 3: green at red and blue photosites.
-    for row in 4..h - 4 {
+    par_rows(&mut rgb[1], w, 4..h - 4, |row, line| {
         for col in 4..w - 4 {
             if !is_rb(row, col) {
                 continue;
@@ -398,42 +426,36 @@ pub fn rcd(m: &Mosaic<'_>) -> Rgb {
             let e_est = cfa[i + 1] * (lpfi + lpfi) / (EPS + lpfi + lpf[i + 2]);
             let v_est = (s_grad * n_est + n_grad * s_est) / (n_grad + s_grad);
             let h_est = (w_grad * e_est + e_grad * w_est) / (e_grad + w_grad);
-            let central = vh_dir[i];
-            let neighbourhood = 0.25
-                * (vh_dir[i - w1 - 1]
-                    + vh_dir[i - w1 + 1]
-                    + vh_dir[i + w1 - 1]
-                    + vh_dir[i + w1 + 1]);
-            let disc = if (0.5 - central).abs() < (0.5 - neighbourhood).abs() {
-                neighbourhood
-            } else {
-                central
-            };
-            rgb[1][i] = interp(disc.clamp(0.0, 1.0), h_est, v_est);
+            line[col] = interp(refined(&vh_dir, i, w1), h_est, v_est);
         }
-    }
+    });
 
     // Step 4.0: diagonal high-pass, P (NW–SE) and Q (NE–SW).
     let mut p_hpf = vec![0.0f32; n];
-    let mut q_hpf = vec![0.0f32; n];
-    for row in 3..h - 3 {
+    par_rows(&mut p_hpf, w, 3..h - 3, |row, line| {
         for col in 3..w - 3 {
             let i = row * w + col;
-            p_hpf[i] = sq(
+            line[col] = sq(
                 (cfa[i - w3 - 3] - cfa[i - w1 - 1] - cfa[i + w1 + 1] + cfa[i + w3 + 3])
                     - 3.0 * (cfa[i - w2 - 2] + cfa[i + w2 + 2])
                     + 6.0 * cfa[i],
             );
-            q_hpf[i] = sq(
+        }
+    });
+    let mut q_hpf = vec![0.0f32; n];
+    par_rows(&mut q_hpf, w, 3..h - 3, |row, line| {
+        for col in 3..w - 3 {
+            let i = row * w + col;
+            line[col] = sq(
                 (cfa[i - w3 + 3] - cfa[i - w1 + 1] - cfa[i + w1 - 1] + cfa[i + w3 - 3])
                     - 3.0 * (cfa[i - w2 + 2] + cfa[i + w2 - 2])
                     + 6.0 * cfa[i],
             );
         }
-    }
+    });
     // Step 4.1: diagonal discrimination at red and blue photosites.
     let mut pq_dir = vec![0.0f32; n];
-    for row in 4..h - 4 {
+    par_rows(&mut pq_dir, w, 4..h - 4, |row, line| {
         for col in 4..w - 4 {
             if !is_rb(row, col) {
                 continue;
@@ -441,107 +463,98 @@ pub fn rcd(m: &Mosaic<'_>) -> Rgb {
             let i = row * w + col;
             let p = EPSSQ.max(p_hpf[i - w1 - 1] + p_hpf[i] + p_hpf[i + w1 + 1]);
             let q = EPSSQ.max(q_hpf[i - w1 + 1] + q_hpf[i] + q_hpf[i + w1 - 1]);
-            pq_dir[i] = p / (p + q);
+            line[col] = p / (p + q);
         }
-    }
-    // Step 4.2: red at blue photosites and blue at red ones.
-    for row in 4..h - 4 {
-        for col in 4..w - 4 {
-            if !is_rb(row, col) {
-                continue;
+    });
+
+    // Step 4.2: red at blue photosites and blue at red ones. Each reads its
+    // own channel only at the other kind of photosite, so a channel can be
+    // written from a copy of itself.
+    for c in [0usize, 2] {
+        let rc = rgb[c].clone();
+        let g = &rgb[1];
+        let rc = &rc[..];
+        let mut next = rgb[c].clone();
+        par_rows(&mut next, w, 4..h - 4, |row, line| {
+            for col in 4..w - 4 {
+                if fc(row, col) != 2 - c {
+                    continue;
+                }
+                let i = row * w + col;
+                let nw_grad = EPS
+                    + (rc[i - w1 - 1] - rc[i + w1 + 1]).abs()
+                    + (rc[i - w1 - 1] - rc[i - w3 - 3]).abs()
+                    + (g[i] - g[i - w2 - 2]).abs();
+                let ne_grad = EPS
+                    + (rc[i - w1 + 1] - rc[i + w1 - 1]).abs()
+                    + (rc[i - w1 + 1] - rc[i - w3 + 3]).abs()
+                    + (g[i] - g[i - w2 + 2]).abs();
+                let sw_grad = EPS
+                    + (rc[i - w1 + 1] - rc[i + w1 - 1]).abs()
+                    + (rc[i + w1 - 1] - rc[i + w3 - 3]).abs()
+                    + (g[i] - g[i + w2 - 2]).abs();
+                let se_grad = EPS
+                    + (rc[i - w1 - 1] - rc[i + w1 + 1]).abs()
+                    + (rc[i + w1 + 1] - rc[i + w3 + 3]).abs()
+                    + (g[i] - g[i + w2 + 2]).abs();
+                let nw_est = rc[i - w1 - 1] - g[i - w1 - 1];
+                let ne_est = rc[i - w1 + 1] - g[i - w1 + 1];
+                let sw_est = rc[i + w1 - 1] - g[i + w1 - 1];
+                let se_est = rc[i + w1 + 1] - g[i + w1 + 1];
+                let p_est = (nw_grad * se_est + se_grad * nw_est) / (nw_grad + se_grad);
+                let q_est = (ne_grad * sw_est + sw_grad * ne_est) / (ne_grad + sw_grad);
+                line[col] = g[i] + interp(refined(&pq_dir, i, w1), q_est, p_est);
             }
-            let i = row * w + col;
-            let c = 2 - fc(row, col);
-            let central = pq_dir[i];
-            let neighbourhood = 0.25
-                * (pq_dir[i - w1 - 1]
-                    + pq_dir[i - w1 + 1]
-                    + pq_dir[i + w1 - 1]
-                    + pq_dir[i + w1 + 1]);
-            let disc = if (0.5 - central).abs() < (0.5 - neighbourhood).abs() {
-                neighbourhood
-            } else {
-                central
-            };
-            let (rc, g) = (&rgb[c], &rgb[1]);
-            let nw_grad = EPS
-                + (rc[i - w1 - 1] - rc[i + w1 + 1]).abs()
-                + (rc[i - w1 - 1] - rc[i - w3 - 3]).abs()
-                + (g[i] - g[i - w2 - 2]).abs();
-            let ne_grad = EPS
-                + (rc[i - w1 + 1] - rc[i + w1 - 1]).abs()
-                + (rc[i - w1 + 1] - rc[i - w3 + 3]).abs()
-                + (g[i] - g[i - w2 + 2]).abs();
-            let sw_grad = EPS
-                + (rc[i - w1 + 1] - rc[i + w1 - 1]).abs()
-                + (rc[i + w1 - 1] - rc[i + w3 - 3]).abs()
-                + (g[i] - g[i + w2 - 2]).abs();
-            let se_grad = EPS
-                + (rc[i - w1 - 1] - rc[i + w1 + 1]).abs()
-                + (rc[i + w1 + 1] - rc[i + w3 + 3]).abs()
-                + (g[i] - g[i + w2 + 2]).abs();
-            let nw_est = rc[i - w1 - 1] - g[i - w1 - 1];
-            let ne_est = rc[i - w1 + 1] - g[i - w1 + 1];
-            let sw_est = rc[i + w1 - 1] - g[i + w1 - 1];
-            let se_est = rc[i + w1 + 1] - g[i + w1 + 1];
-            let p_est = (nw_grad * se_est + se_grad * nw_est) / (nw_grad + se_grad);
-            let q_est = (ne_grad * sw_est + sw_grad * ne_est) / (ne_grad + sw_grad);
-            let v = g[i] + interp(disc.clamp(0.0, 1.0), q_est, p_est);
-            rgb[c][i] = v;
-        }
+        });
+        rgb[c] = next;
     }
-    // Step 4.3: red and blue at green photosites.
-    for row in 4..h - 4 {
-        for col in 4..w - 4 {
-            if is_rb(row, col) {
-                continue;
-            }
-            let i = row * w + col;
-            let central = vh_dir[i];
-            let neighbourhood = 0.25
-                * (vh_dir[i - w1 - 1]
-                    + vh_dir[i - w1 + 1]
-                    + vh_dir[i + w1 - 1]
-                    + vh_dir[i + w1 + 1]);
-            let disc = if (0.5 - central).abs() < (0.5 - neighbourhood).abs() {
-                neighbourhood
-            } else {
-                central
-            };
-            let g = &rgb[1];
-            let rgb1 = g[i];
-            let n1 = EPS + (rgb1 - g[i - w2]).abs();
-            let s1 = EPS + (rgb1 - g[i + w2]).abs();
-            let w1g = EPS + (rgb1 - g[i - 2]).abs();
-            let e1 = EPS + (rgb1 - g[i + 2]).abs();
-            let (gm, gp, gl, gr) = (g[i - w1], g[i + w1], g[i - 1], g[i + 1]);
-            for c in [0usize, 2] {
-                let rc = &rgb[c];
+    // Step 4.3: red and blue at green photosites (reading them only at red
+    // and blue ones).
+    for c in [0usize, 2] {
+        let rc = rgb[c].clone();
+        let g = &rgb[1];
+        let rc = &rc[..];
+        let mut next = rgb[c].clone();
+        par_rows(&mut next, w, 4..h - 4, |row, line| {
+            for col in 4..w - 4 {
+                if is_rb(row, col) {
+                    continue;
+                }
+                let i = row * w + col;
+                let rgb1 = g[i];
+                let n1 = EPS + (rgb1 - g[i - w2]).abs();
+                let s1 = EPS + (rgb1 - g[i + w2]).abs();
+                let w1g = EPS + (rgb1 - g[i - 2]).abs();
+                let e1 = EPS + (rgb1 - g[i + 2]).abs();
                 let sn = (rc[i - w1] - rc[i + w1]).abs();
                 let ew = (rc[i - 1] - rc[i + 1]).abs();
                 let n_grad = n1 + sn + (rc[i - w1] - rc[i - w3]).abs();
                 let s_grad = s1 + sn + (rc[i + w1] - rc[i + w3]).abs();
                 let w_grad = w1g + ew + (rc[i - 1] - rc[i - 3]).abs();
                 let e_grad = e1 + ew + (rc[i + 1] - rc[i + 3]).abs();
-                let n_est = rc[i - w1] - gm;
-                let s_est = rc[i + w1] - gp;
-                let w_est = rc[i - 1] - gl;
-                let e_est = rc[i + 1] - gr;
+                let n_est = rc[i - w1] - g[i - w1];
+                let s_est = rc[i + w1] - g[i + w1];
+                let w_est = rc[i - 1] - g[i - 1];
+                let e_est = rc[i + 1] - g[i + 1];
                 let v_est = (n_grad * s_est + s_grad * n_est) / (n_grad + s_grad);
                 let h_est = (e_grad * w_est + w_grad * e_est) / (e_grad + w_grad);
-                let v = rgb1 + interp(disc.clamp(0.0, 1.0), h_est, v_est);
-                rgb[c][i] = v;
+                line[col] = rgb1 + interp(refined(&vh_dir, i, w1), h_est, v_est);
             }
-        }
+        });
+        rgb[c] = next;
     }
 
-    for row in RCD_MARGIN..h - RCD_MARGIN {
-        for col in RCD_MARGIN..w - RCD_MARGIN {
-            let i = row * w + col;
-            for c in 0..3 {
-                out.data[i * 3 + c] = scaler * rgb[c][i].max(0.0);
+    out.data
+        .par_chunks_mut(w * 3)
+        .enumerate()
+        .filter(|(row, _)| (RCD_MARGIN..h - RCD_MARGIN).contains(row))
+        .for_each(|(row, line)| {
+            for col in RCD_MARGIN..w - RCD_MARGIN {
+                let i = row * w + col;
+                for c in 0..3 {
+                    line[col * 3 + c] = scaler * rgb[c][i].max(0.0);
+                }
             }
-        }
-    }
+        });
     out
 }

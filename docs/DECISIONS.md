@@ -1075,3 +1075,41 @@ hashes, embeddings, faces).
   30-NEF set; Auto exposure (Phase 2) refines it per photo.
 - `examples/develop_probe.rs` renders files (HE NEFs through the
   converter) with slider values from the environment, for tuning.
+
+## Develop, Phase 1: the GPU live pipe (2026-10-20)
+
+- `shoebox-develop::gpu`: one wgpu compute pass (`develop.wgsl`) that runs
+  the live pipe per output pixel from the demosaiced image in an
+  `rgba32float` texture: geometry map → bilinear sample → colour matrix →
+  display transform → output. It takes any `wgpu::Device`, so the app
+  shares eframe's (wgpu 30, the same features). Output `rgba32float` for
+  read-back (tests, export) or `rgba16float` for display.
+- **White balance moved after demosaic** (darktable's "late correction"):
+  the mosaic is balanced at as shot for highlights and demosaic, cached,
+  and a different white balance is a per-channel ratio folded into the
+  colour matrix. Without it every white balance move re-ran highlights and
+  RCD (0.34 s); now it's instant. The CPU reference was restructured the
+  same way (`cpu::demosaic` once, then `cpu::frame` + `cpu::apply`), so
+  both pipes run the same numbers.
+- Orientation, rotation and crop are one affine map (`geometry_map`),
+  worked out in f64 and shared; one bilinear sample per pixel.
+- **Checked against the CPU** within 1e-4 on gradients, colour ramps, a
+  checkerboard and values up to 8, across settings, display and scene
+  output. Rotated cases are allowed 1e-3: the GPU fuses the map's
+  multiply-adds, moving a sample position by ~1e-6 px, which a
+  checkerboard edge amplifies (a quarter of an 8-bit step). On the real
+  HE★ fixture the largest difference is 5.4e-7. Tests skip without an
+  adapter (Linux CI).
+- **Speed** (M2 Max): a 2560×1707 proxy renders in 1.4 ms per frame (the
+  spec allows 33). Opening a photo: decode 0.11 s + highlights 0.14 s +
+  RCD 0.24 s (now parallel by rows; was 0.59 s single-threaded), so about
+  0.5 s to a sharp proxy for a Lossless NEF or a converted DNG (0.5–1.4 s
+  more for a first conversion).
+- **Stage cache**: with one cheap pass, a slider re-renders the whole live
+  pipe; the expensive part (demosaic) is the cached `cpu::Demosaiced`.
+  Stages that cost more (dehaze, local tone, Phase 2) will get their own
+  passes and cached textures.
+- `Pipe::new` returns validation errors (a driver rejecting the shader)
+  instead of wgpu's default panic.
+- RCD is still on the CPU; the spec's GPU RCD waits until the open-time
+  target needs it.

@@ -2,9 +2,21 @@
 //! stages in their fixed order, in plain Rust. It renders exports until the
 //! GPU pipe exists, and afterwards every shader is tested against it.
 //!
-//! Raw (CFA, normalised) → white balance → highlights → demosaic → proxy
-//! downscale → camera → linear Rec.2020 → exposure → orientation → rotate
-//! and crop → display transform → output space and transfer curve.
+//! Two parts, as on the GPU:
+//! - [`demosaic`], once per file (and per raw settings): white balance at
+//!   the as-shot multipliers on the mosaic → highlights → demosaic → proxy
+//!   downscale. Cached; seconds at most.
+//! - [`apply`], the live pipe, per pixel from a [`Frame`] worked out from
+//!   the settings: geometry (orientation, rotation and crop as one affine
+//!   map, one bilinear sample) → colour (a white balance change relative to
+//!   as shot, camera → linear Rec.2020, exposure: one matrix) → display
+//!   transform → output space and transfer curve. The GPU runs exactly
+//!   this (`crate::gpu`).
+//!
+//! White balance changes after demosaic, as darktable's "late correction":
+//! the mosaic is balanced at as shot for highlights and demosaic, and a
+//! different white balance is a per-channel ratio folded into the matrix,
+//! so moving it is instant.
 
 // Channel and matrix loops read clearer indexed (c, r) than zipped.
 #![allow(clippy::needless_range_loop)]
@@ -15,7 +27,7 @@ use rayon::prelude::*;
 use shoebox_decode::raw::RawImage;
 
 use crate::colour::{self, M3};
-use crate::edit::{Demosaic, DisplayTransform, Geometry, Highlights, Settings};
+use crate::edit::{Demosaic, DisplayTransform, Geometry, Highlights, Raw, Settings};
 use crate::wb;
 
 pub use raw::Rgb;
@@ -56,11 +68,18 @@ impl Default for Options {
     }
 }
 
-/// Linear, white-balanced, demosaiced camera RGB, cached per file and
-/// settings of the raw stages (white balance, highlights, demosaic).
-pub fn demosaiced(raw: &RawImage, s: &Settings, long_edge: Option<u32>) -> (Rgb, wb::Resolved) {
-    let w = wb::resolve(raw, &s.modules.white_balance);
-    let mult = w.multipliers;
+/// Demosaiced camera RGB, white-balanced at as shot (the multipliers it was
+/// balanced with are kept).
+#[derive(Debug, Clone)]
+pub struct Demosaiced {
+    pub rgb: Rgb,
+    pub as_shot: [f32; 3],
+}
+
+/// The raw stages: balance the mosaic at as shot, rebuild clipped
+/// highlights, demosaic, and downscale to `long_edge` (the proxy) if given.
+pub fn demosaic(raw: &RawImage, r: &Raw, long_edge: Option<u32>) -> Demosaiced {
+    let mult = wb::resolve(raw, &Default::default()).multipliers;
     let balanced: Vec<f32> = raw
         .data
         .par_chunks(raw.width)
@@ -78,12 +97,12 @@ pub fn demosaiced(raw: &RawImage, s: &Settings, long_edge: Option<u32>) -> (Rgb,
         cfa: raw.cfa,
         data: &balanced,
     };
-    let healed = match s.modules.raw.highlights {
+    let healed = match r.highlights {
         Highlights::InpaintOpposed => raw::inpaint_opposed(&m, clips),
         Highlights::Clip => raw::clip(&m, clips),
     };
     let m = raw::Mosaic { data: &healed, ..m };
-    let rgb = match s.modules.raw.demosaic {
+    let rgb = match r.demosaic {
         Demosaic::Rcd => raw::rcd(&m),
         Demosaic::Bilinear => raw::bilinear(&m),
     };
@@ -91,7 +110,7 @@ pub fn demosaiced(raw: &RawImage, s: &Settings, long_edge: Option<u32>) -> (Rgb,
         Some(l) => downscale(&rgb, l as usize),
         None => rgb,
     };
-    (rgb, w)
+    Demosaiced { rgb, as_shot: mult }
 }
 
 /// Box-filter downscale by a whole factor so the long edge fits `long_edge`.
@@ -130,70 +149,126 @@ fn f32m(m: &M3) -> [[f32; 3]; 3] {
     m.map(|r| r.map(|v| v as f32))
 }
 
-/// Apply a 3×3 matrix and a gain to every pixel.
-pub fn transform(img: &mut Rgb, m: &M3, gain: f32) {
-    let m = f32m(m);
-    img.data.par_chunks_mut(3).for_each(|p| {
-        let (r, g, b) = (p[0], p[1], p[2]);
-        for c in 0..3 {
-            p[c] = gain * (m[c][0] * r + m[c][1] * g + m[c][2] * b);
-        }
-    });
+/// Everything the live pipe needs for one render, worked out once from the
+/// settings: the same numbers drive the CPU reference and the shader.
+#[derive(Debug, Clone, Copy)]
+pub struct Frame {
+    /// Output size.
+    pub width: usize,
+    pub height: usize,
+    /// Output pixel `(x, y)` → source position `(sx, sy)` in source pixel
+    /// indices: `sx = map[0]·(x, y, 1)`, `sy = map[1]·(x, y, 1)`.
+    pub map: [[f32; 3]; 2],
+    /// Source (camera RGB balanced at as shot) → linear Rec.2020, with the
+    /// white balance change and exposure folded in.
+    pub colour: [[f32; 3]; 3],
+    pub display: Display,
 }
 
-/// The scene-referred image: linear Rec.2020, exposed, upright, rotated
-/// and cropped. Values above 1.0 are kept.
-pub fn scene(raw: &RawImage, s: &Settings, o: &Options) -> Rgb {
-    let (mut img, w) = demosaiced(raw, s, o.long_edge);
+/// The display transform's numbers.
+#[derive(Debug, Clone, Copy)]
+pub struct Display {
+    pub curve: Curve,
+    pub inset: [[f32; 3]; 3],
+    pub outset: [[f32; 3]; 3],
+    pub to_target: [[f32; 3]; 3],
+    pub preserve_hue: bool,
+}
+
+impl Display {
+    pub fn new(d: &DisplayTransform, target: Target) -> Self {
+        Self {
+            curve: Curve::new(d),
+            inset: f32m(&toward_grey(INSET)),
+            outset: f32m(&colour::inv(&toward_grey(OUTSET)).unwrap_or(colour::IDENTITY)),
+            to_target: f32m(&colour::mul(
+                &colour::xyz_to_rgb(target.primaries(), colour::D65),
+                &colour::rgb_to_xyz(&colour::REC2020, colour::D65),
+            )),
+            preserve_hue: d.preserve_hue,
+        }
+    }
+}
+
+/// The upright size of a `w`×`h` source with this EXIF orientation.
+pub fn upright(w: usize, h: usize, orientation: u16) -> (usize, usize) {
+    if matches!(orientation, 5..=8) {
+        (h, w)
+    } else {
+        (w, h)
+    }
+}
+
+/// The affine map from output pixels to source pixels: crop in the rotated
+/// upright frame, rotation about its centre (degrees, clockwise), then the
+/// EXIF orientation back to the stored image. Pixel centres are at +0.5.
+pub fn geometry_map(
+    src_w: usize,
+    src_h: usize,
+    orientation: u16,
+    g: &Geometry,
+) -> ([[f64; 3]; 2], usize, usize) {
+    let (uw, uh) = upright(src_w, src_h, orientation);
+    let (uwf, uhf) = (uw as f64, uh as f64);
+    let [l, t, r, b] = g.crop.map(|v| v.clamp(0.0, 1.0));
+    let ow = ((r - l) * uwf).round().max(1.0) as usize;
+    let oh = ((b - t) * uhf).round().max(1.0) as usize;
+    // Output index (x, y) → centre in the rotated upright frame, relative
+    // to its centre: (x + 0.5 + l·W − W/2, …).
+    let (ox, oy) = (l * uwf + 0.5 - uwf / 2.0, t * uhf + 0.5 - uhf / 2.0);
+    let a = g.rotate.to_radians();
+    let (sin, cos) = (a.sin(), a.cos());
+    // Un-rotate: upright centre coords u = cos·px + sin·py + W/2, v = −sin·px + cos·py + H/2.
+    let u = [cos, sin, cos * ox + sin * oy + uwf / 2.0];
+    let v = [-sin, cos, -sin * ox + cos * oy + uhf / 2.0];
+    // Upright (continuous) → stored (continuous), per the EXIF definitions.
+    let (w, h) = (src_w as f64, src_h as f64);
+    let neg = |p: [f64; 3], k: f64| [-p[0], -p[1], k - p[2]];
+    let (sx, sy) = match orientation {
+        2 => (neg(u, w), v),
+        3 => (neg(u, w), neg(v, h)),
+        4 => (u, neg(v, h)),
+        5 => (v, u),
+        6 => (v, neg(u, h)),
+        7 => (neg(v, w), neg(u, h)),
+        8 => (neg(v, w), u),
+        _ => (u, v),
+    };
+    // Continuous → sample index (centres at +0.5).
+    let to_index = |p: [f64; 3]| [p[0], p[1], p[2] - 0.5];
+    ([to_index(sx), to_index(sy)], ow, oh)
+}
+
+/// Exposure added to every render before the slider's: cameras place mid
+/// grey this much brighter than the raw matrix alone does (Adobe's DNG of
+/// the Z f records 0.2; the Z f's own JPEGs sit about 0.75 above, judged by
+/// luminance percentiles). Tuned on the definition-of-done set; Auto
+/// exposure (Phase 2) refines it per photo.
+pub const BASELINE_EV: f64 = 0.75;
+
+/// Work out a frame: `src` is the demosaiced image (proxy or full size).
+pub fn frame(raw: &RawImage, src: &Demosaiced, s: &Settings, o: &Options) -> Frame {
+    let w = wb::resolve(raw, &s.modules.white_balance);
+    // From as-shot-balanced to this white balance, per channel.
+    let ratio = [0, 1, 2].map(|c| f64::from(w.multipliers[c]) / f64::from(src.as_shot[c]));
     let e = &s.modules.exposure;
     let ev = BASELINE_EV + if e.enabled { e.ev } else { 0.0 };
-    let gain = 2f64.powf(ev) as f32;
-    transform(&mut img, &w.cam_to_rec2020, gain);
-    let img = orient(&img, o.orientation);
-    rotate_crop(&img, &s.geometry)
-}
-
-/// Render for display or export: display-encoded values 0–1 in `target`.
-pub fn render(raw: &RawImage, s: &Settings, o: &Options) -> Rgb {
-    let mut img = scene(raw, s, o);
-    display(&mut img, &s.modules.display_transform, o.target);
-    img
-}
-
-/// EXIF orientation (1–8) applied, so the image is upright.
-pub fn orient(img: &Rgb, orientation: u16) -> Rgb {
-    let (w, h) = (img.width, img.height);
-    let swap = matches!(orientation, 5..=8);
-    let (ow, oh) = if swap { (h, w) } else { (w, h) };
-    if orientation <= 1 || orientation > 8 {
-        return img.clone();
+    let gain = 2f64.powf(ev);
+    let m = colour::mul(&w.cam_to_rec2020, &colour::diag(ratio));
+    let colour = f32m(&m.map(|r| r.map(|v| v * gain)));
+    let (map, width, height) =
+        geometry_map(src.rgb.width, src.rgb.height, o.orientation, &s.geometry);
+    Frame {
+        width,
+        height,
+        map: map.map(|r| r.map(|v| v as f32)),
+        colour,
+        display: Display::new(&s.modules.display_transform, o.target),
     }
-    let mut out = Rgb::new(ow, oh);
-    out.data
-        .par_chunks_mut(ow * 3)
-        .enumerate()
-        .for_each(|(y, line)| {
-            for x in 0..ow {
-                // Source pixel for output (x, y), per the EXIF definitions.
-                let (sx, sy) = match orientation {
-                    2 => (w - 1 - x, y),
-                    3 => (w - 1 - x, h - 1 - y),
-                    4 => (x, h - 1 - y),
-                    5 => (y, x),
-                    6 => (y, h - 1 - x),
-                    7 => (w - 1 - y, h - 1 - x),
-                    8 => (w - 1 - y, x),
-                    _ => (x, y),
-                };
-                let p = img.px(sx, sy);
-                line[x * 3..x * 3 + 3].copy_from_slice(&p);
-            }
-        });
-    out
 }
 
 /// Bilinear sample at a fractional position (black outside the image).
-fn sample(img: &Rgb, x: f32, y: f32) -> [f32; 3] {
+pub fn sample(img: &Rgb, x: f32, y: f32) -> [f32; 3] {
     let (x0, y0) = (x.floor(), y.floor());
     let (fx, fy) = (x - x0, y - y0);
     let get = |xi: f32, yi: f32| -> [f32; 3] {
@@ -218,36 +293,73 @@ fn sample(img: &Rgb, x: f32, y: f32) -> [f32; 3] {
     out
 }
 
-/// Rotate about the centre (degrees, clockwise) and crop to
-/// `geometry.crop` (fractions of the frame), resampling once.
-pub fn rotate_crop(img: &Rgb, g: &Geometry) -> Rgb {
-    let (w, h) = (img.width as f64, img.height as f64);
-    let [l, t, r, b] = g.crop.map(|v| v.clamp(0.0, 1.0));
-    if g.rotate == 0.0 && [l, t, r, b] == [0.0, 0.0, 1.0, 1.0] {
-        return img.clone();
-    }
-    let (x0, y0) = (l * w, t * h);
-    let ow = ((r - l) * w).round().max(1.0) as usize;
-    let oh = ((b - t) * h).round().max(1.0) as usize;
-    let a = g.rotate.to_radians();
-    let (sin, cos) = (a.sin(), a.cos());
-    let (cx, cy) = (w / 2.0, h / 2.0);
-    let mut out = Rgb::new(ow, oh);
+fn mul3(m: &[[f32; 3]; 3], p: [f32; 3]) -> [f32; 3] {
+    [
+        m[0][0] * p[0] + m[0][1] * p[1] + m[0][2] * p[2],
+        m[1][0] * p[0] + m[1][1] * p[1] + m[1][2] * p[2],
+        m[2][0] * p[0] + m[2][1] * p[1] + m[2][2] * p[2],
+    ]
+}
+
+/// The live pipe on the CPU: display values (0–1, `target`'s transfer
+/// curve) of every output pixel; with `display` false, the scene-linear
+/// Rec.2020 values before the display transform.
+pub fn apply(src: &Rgb, f: &Frame, display: bool) -> Rgb {
+    let mut out = Rgb::new(f.width, f.height);
     out.data
-        .par_chunks_mut(ow * 3)
+        .par_chunks_mut(f.width * 3)
         .enumerate()
         .for_each(|(y, line)| {
-            for x in 0..ow {
-                // The output pixel's centre in the rotated frame, back into
-                // the source by the inverse rotation.
-                let (px, py) = (x0 + x as f64 + 0.5 - cx, y0 + y as f64 + 0.5 - cy);
-                let sx = cos * px + sin * py + cx - 0.5;
-                let sy = -sin * px + cos * py + cy - 0.5;
-                let p = sample(img, sx as f32, sy as f32);
-                line[x * 3..x * 3 + 3].copy_from_slice(&p);
+            for x in 0..f.width {
+                let (xf, yf) = (x as f32, y as f32);
+                let sx = f.map[0][0] * xf + f.map[0][1] * yf + f.map[0][2];
+                let sy = f.map[1][0] * xf + f.map[1][1] * yf + f.map[1][2];
+                let lin = mul3(&f.colour, sample(src, sx, sy));
+                let px = if display {
+                    display_pixel(&f.display, lin)
+                } else {
+                    lin
+                };
+                line[x * 3..x * 3 + 3].copy_from_slice(&px);
             }
         });
     out
+}
+
+/// Render for display or export: display-encoded values 0–1 in `target`.
+pub fn render(raw: &RawImage, s: &Settings, o: &Options) -> Rgb {
+    let src = demosaic(raw, &s.modules.raw, o.long_edge);
+    apply(&src.rgb, &frame(raw, &src, s, o), true)
+}
+
+/// The scene-referred render: linear Rec.2020, exposed, upright, rotated
+/// and cropped. Values above 1.0 are kept.
+pub fn scene(raw: &RawImage, s: &Settings, o: &Options) -> Rgb {
+    let src = demosaic(raw, &s.modules.raw, o.long_edge);
+    apply(&src.rgb, &frame(raw, &src, s, o), false)
+}
+
+/// EXIF orientation applied (the geometry map with nothing else).
+pub fn orient(img: &Rgb, orientation: u16) -> Rgb {
+    let (map, w, h) = geometry_map(img.width, img.height, orientation, &Geometry::default());
+    resample(img, map, w, h)
+}
+
+/// Rotate and crop an upright image (the geometry map without orientation).
+pub fn rotate_crop(img: &Rgb, g: &Geometry) -> Rgb {
+    let (map, w, h) = geometry_map(img.width, img.height, 1, g);
+    resample(img, map, w, h)
+}
+
+fn resample(img: &Rgb, map: [[f64; 3]; 2], w: usize, h: usize) -> Rgb {
+    let f = Frame {
+        width: w,
+        height: h,
+        map: map.map(|r| r.map(|v| v as f32)),
+        colour: f32m(&colour::IDENTITY),
+        display: Display::new(&DisplayTransform::default(), Target::Srgb),
+    };
+    apply(img, &f, false)
 }
 
 /// The largest crop of the frame's own aspect that stays inside the image
@@ -262,18 +374,11 @@ pub fn max_crop(width: f64, height: f64, degrees: f64) -> [f64; 4] {
     [mx, my, 1.0 - mx, 1.0 - my]
 }
 
-/// Exposure added to every render before the slider's: cameras place mid
-/// grey this much brighter than the raw matrix alone does (Adobe's DNG of
-/// the Z f records 0.2; the Z f's own JPEGs sit about 0.75 above, judged by
-/// luminance percentiles). Tuned on the definition-of-done set; Auto
-/// exposure (Phase 2) refines it per photo.
-pub const BASELINE_EV: f64 = 0.75;
-
 /// Scene-linear mid grey, which the display transform keeps at display
 /// mid grey.
 pub const MID_GREY: f32 = 0.18;
 /// Display mid grey, encoded with a 2.2 power (0.18 linear).
-const DISPLAY_GREY: f32 = 0.459_565;
+pub(crate) const DISPLAY_GREY: f32 = 0.459_565;
 /// Default stops above mid grey that reach white: the sensor clips about
 /// 2.5 stops up, plus room for reconstructed highlights.
 const WHITE_EV: f32 = 4.0;
@@ -314,10 +419,11 @@ fn hardness(t: f32) -> f32 {
 #[derive(Debug, Clone, Copy)]
 pub struct Curve {
     slope: f32,
-    up: (f32, f32),
+    /// Highlights: stops per unit of the shoulder, and its hardness.
+    pub(crate) up: (f32, f32),
     /// Shadows: `grey · 2^(a·ev)`, less the value at the black point.
-    a: f32,
-    floor: f32,
+    pub(crate) a: f32,
+    pub(crate) floor: f32,
 }
 
 impl Curve {
@@ -371,44 +477,26 @@ fn toward_grey(amount: f64) -> M3 {
     m
 }
 
-/// The display transform and output: scene-linear Rec.2020 in, display
-/// values (0–1, the target space's transfer curve) out.
-pub fn display(img: &mut Rgb, d: &DisplayTransform, target: Target) {
-    let curve = Curve::new(d);
-    let inset = f32m(&toward_grey(INSET));
-    let outset = f32m(&colour::inv(&toward_grey(OUTSET)).unwrap_or(colour::IDENTITY));
-    let to_target = f32m(&colour::mul(
-        &colour::xyz_to_rgb(target.primaries(), colour::D65),
-        &colour::rgb_to_xyz(&colour::REC2020, colour::D65),
-    ));
-    let preserve = d.preserve_hue;
-    let mul = |m: &[[f32; 3]; 3], p: [f32; 3]| -> [f32; 3] {
-        [
-            m[0][0] * p[0] + m[0][1] * p[1] + m[0][2] * p[2],
-            m[1][0] * p[0] + m[1][1] * p[1] + m[1][2] * p[2],
-            m[2][0] * p[0] + m[2][1] * p[1] + m[2][2] * p[2],
-        ]
+/// The display transform and output for one scene-linear Rec.2020 pixel:
+/// display values (0–1, the target space's transfer curve).
+pub fn display_pixel(d: &Display, p: [f32; 3]) -> [f32; 3] {
+    let curve = &d.curve;
+    let v = mul3(&d.inset, p);
+    let shaped = if d.preserve_hue {
+        // Tone-map the brightest channel and scale the others with it, so
+        // hues hold; blend to the per-channel result as it nears white so
+        // highlights still reach white.
+        let norm = v[0].max(v[1]).max(v[2]).max(1e-10);
+        let n = curve.apply(norm).powf(2.2);
+        let scaled = v.map(|c| (c.max(0.0) / norm) * n);
+        let per = v.map(|c| curve.apply(c).powf(2.2));
+        let t = (n * n).clamp(0.0, 1.0);
+        [0, 1, 2].map(|i| scaled[i] + (per[i] - scaled[i]) * t)
+    } else {
+        v.map(|c| curve.apply(c).powf(2.2))
     };
-    img.data.par_chunks_mut(3).for_each(|p| {
-        let v = mul(&inset, [p[0], p[1], p[2]]);
-        let shaped = if preserve {
-            // Tone-map the brightest channel and scale the others with it,
-            // so hues hold; blend to the per-channel result as it nears
-            // white so highlights still reach white.
-            let norm = v[0].max(v[1]).max(v[2]).max(1e-10);
-            let n = curve.apply(norm).powf(2.2);
-            let scaled = v.map(|c| (c.max(0.0) / norm) * n);
-            let per = v.map(|c| curve.apply(c).powf(2.2));
-            let t = (n * n).clamp(0.0, 1.0);
-            [0, 1, 2].map(|i| scaled[i] + (per[i] - scaled[i]) * t)
-        } else {
-            v.map(|c| curve.apply(c).powf(2.2))
-        };
-        let lin = mul(&to_target, mul(&outset, shaped));
-        for c in 0..3 {
-            p[c] = srgb_oetf(lin[c].clamp(0.0, 1.0));
-        }
-    });
+    let lin = mul3(&d.to_target, mul3(&d.outset, shaped));
+    lin.map(|c| srgb_oetf(c.clamp(0.0, 1.0)))
 }
 
 /// The sRGB transfer curve (Display P3 uses the same one).

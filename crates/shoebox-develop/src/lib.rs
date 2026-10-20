@@ -9,6 +9,7 @@ pub mod colour;
 pub mod cpu;
 pub mod dng;
 pub mod edit;
+pub mod gpu;
 pub mod wb;
 
 use std::path::PathBuf;

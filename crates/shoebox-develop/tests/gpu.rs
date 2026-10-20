@@ -1,0 +1,191 @@
+//! The GPU live pipe against the CPU reference: within 1e-4 on synthetic
+//! inputs (gradients, colour ramps, a checkerboard, highlights above 1),
+//! across settings. Skipped where there's no GPU adapter (Linux CI).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use shoebox_decode::raw::{ColorMatrix, RawImage};
+use shoebox_develop::cpu::{self, Demosaiced, Options, Rgb, Target};
+use shoebox_develop::edit::{Settings, WbMode};
+use shoebox_develop::gpu::{Output, Pipe, headless};
+
+fn zf() -> RawImage {
+    let m = |v: [f32; 9]| [[v[0], v[1], v[2]], [v[3], v[4], v[5]], [v[6], v[7], v[8]]];
+    RawImage {
+        width: 2,
+        height: 2,
+        cfa: [[0, 1], [1, 2]],
+        data: vec![0.0; 4],
+        as_shot: Some([1.1425778, 1.0, 1.7753916]),
+        matrices: vec![
+            ColorMatrix {
+                temperature: 2856.0,
+                xyz_to_cam: m([
+                    1.3904, -0.7947, 0.0654, -0.432, 1.2105, 0.2497, -0.0235, 0.083, 0.9243,
+                ]),
+            },
+            ColorMatrix {
+                temperature: 6504.0,
+                xyz_to_cam: m([
+                    1.1607, -0.4491, -0.0977, -0.4522, 1.246, 0.2304, -0.0458, 0.1519, 0.7616,
+                ]),
+            },
+        ],
+        make: "Nikon".into(),
+        model: "Z f".into(),
+    }
+}
+
+/// Gradients, colour ramps and a checkerboard, from black to well above 1.
+fn synthetic(w: usize, h: usize) -> Rgb {
+    let mut img = Rgb::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let (u, v) = (x as f32 / w as f32, y as f32 / h as f32);
+            let px = match (y * 4) / h {
+                0 => [u * u * 4.0; 3],                    // grey ramp up to 4
+                1 => [u * 2.0, v * 1.5, (1.0 - u) * 0.8], // colour ramps
+                2 => {
+                    let on = ((x / 4) + (y / 4)) % 2 == 0; // checkerboard
+                    if on {
+                        [0.9, 0.2, 0.05]
+                    } else {
+                        [0.01, 0.05, 0.3]
+                    }
+                }
+                _ => [u.powf(3.0) * 8.0, 0.0, u * 0.001], // saturated, tiny
+            };
+            let i = (y * w + x) * 3;
+            img.data[i..i + 3].copy_from_slice(&px);
+        }
+    }
+    img
+}
+
+fn max_diff(a: &Rgb, b: &Rgb) -> (f32, usize) {
+    assert_eq!((a.width, a.height), (b.width, b.height));
+    a.data
+        .iter()
+        .zip(&b.data)
+        .enumerate()
+        .map(|(i, (x, y))| ((x - y).abs(), i / 3))
+        .fold((0.0, 0), |m, d| if d.0 > m.0 { d } else { m })
+}
+
+#[test]
+fn gpu_matches_the_cpu_reference() {
+    let Some((device, queue)) = headless() else {
+        eprintln!("skipping: no GPU adapter");
+        return;
+    };
+    let raw = zf();
+    let src = Demosaiced {
+        rgb: synthetic(160, 120),
+        as_shot: [1.1425778, 1.0, 1.7753916],
+    };
+    let pipe = Pipe::new(&device, Output::Rgba32Float).unwrap();
+    let gsrc = pipe.upload(&device, &queue, &src.rgb);
+
+    let mut cases: Vec<(&str, Settings, Options)> = Vec::new();
+    let base = Settings::default();
+    let o = Options::default();
+    cases.push(("defaults", base.clone(), o));
+    let mut s = base.clone();
+    s.modules.exposure.ev = 1.3;
+    s.modules.display_transform.contrast = 40.0;
+    s.modules.display_transform.white_ev = -1.0;
+    s.modules.display_transform.black_ev = 2.0;
+    cases.push(("exposure and curve", s, o));
+    let mut s = base.clone();
+    s.modules.display_transform.preserve_hue = false;
+    cases.push(("per-channel", s, o));
+    let mut s = base.clone();
+    s.modules.white_balance.mode = WbMode::Custom;
+    s.modules.white_balance.temp = Some(3400.0);
+    s.modules.white_balance.tint = Some(15.0);
+    cases.push(("white balance", s, o));
+    let mut s = base.clone();
+    s.geometry.rotate = -4.5;
+    s.geometry.crop = [0.1, 0.05, 0.85, 0.9];
+    cases.push((
+        "rotate and crop",
+        s,
+        Options {
+            orientation: 6,
+            ..o
+        },
+    ));
+    cases.push((
+        "display p3, orientation 3",
+        base.clone(),
+        Options {
+            orientation: 3,
+            target: Target::DisplayP3,
+            ..o
+        },
+    ));
+
+    for (name, s, o) in &cases {
+        let f = cpu::frame(&raw, &src, s, o);
+        for display in [true, false] {
+            let want = cpu::apply(&src.rgb, &f, display);
+            let got = pipe.render(&device, &queue, &gsrc, &f, display).unwrap();
+            let (d, at) = max_diff(&want, &got);
+            // Scene values reach ~30; compare them relatively.
+            let scale = if display {
+                1.0
+            } else {
+                want.data.iter().fold(1.0f32, |m, v| m.max(v.abs()))
+            };
+            // A rotated sample position differs by float rounding (the GPU
+            // fuses the map's multiply-adds), and a checkerboard edge
+            // amplifies that: 1e-3 there, a quarter of an 8-bit step.
+            let tolerance = if s.geometry.rotate != 0.0 { 1e-3 } else { 1e-4 };
+            assert!(
+                d / scale <= tolerance,
+                "{name} (display {display}): differs by {d} at pixel {at} (scale {scale}): cpu {:?} gpu {:?}",
+                want.px(at % want.width, at / want.width),
+                got.px(at % got.width, at / got.width)
+            );
+        }
+    }
+}
+
+#[test]
+fn a_proxy_frame_renders_quickly() {
+    let Some((device, queue)) = headless() else {
+        eprintln!("skipping: no GPU adapter");
+        return;
+    };
+    // A 2560×1707 proxy (a 24 MP frame's), rendered repeatedly: the slider
+    // path. Warm up once, then time.
+    let raw = zf();
+    let src = Demosaiced {
+        rgb: synthetic(2560, 1707),
+        as_shot: [1.1425778, 1.0, 1.7753916],
+    };
+    let pipe = Pipe::new(&device, Output::Rgba16Float).unwrap();
+    let gsrc = pipe.upload(&device, &queue, &src.rgb);
+    let f = cpu::frame(&raw, &src, &Settings::default(), &Options::default());
+    let out = pipe.output_texture(&device, f.width as u32, f.height as u32);
+    let view = out.create_view(&Default::default());
+    let run = || {
+        let mut enc = device.create_command_encoder(&Default::default());
+        pipe.encode(&device, &mut enc, &gsrc, &f, true, &view);
+        queue.submit([enc.finish()]);
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .unwrap();
+    };
+    run();
+    let t = std::time::Instant::now();
+    for _ in 0..10 {
+        run();
+    }
+    let per = t.elapsed() / 10;
+    eprintln!("proxy render: {per:?} per frame");
+    // The spec's target is 33 ms per frame for the whole slider path.
+    assert!(per.as_millis() < 33, "{per:?}");
+}
