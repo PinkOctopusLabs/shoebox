@@ -67,6 +67,9 @@ pub struct Job {
     pub mtime_ns: i64,
     pub orientation: u16,
     pub target: shoebox_decode::Target,
+    /// The edited preview to show instead of the original (a JPEG made by
+    /// Develop), if the photo has one.
+    pub edited: Option<PathBuf>,
     /// In the cloud only and not to be downloaded: cached thumbnails only.
     pub cloud: bool,
     /// Keep thumbnails in the on-disk cache (not for import previews,
@@ -200,6 +203,29 @@ fn next_job(q: &Queue) -> Option<(Key, Job)> {
 
 fn worker(q: &Queue, tx: &Sender<Loaded>, thumbs: &ThumbCache, repaint: &(dyn Fn() + Send + Sync)) {
     while let Some((key, job)) = next_job(q) {
+        // An edited photo shows its preview (the original if that fails).
+        if let Some(preview) = &job.edited {
+            let px = match key.size {
+                Size::Small => thumbs::SMALL,
+                Size::Large => thumbs::LARGE,
+                Size::Full => 1 << 14,
+            };
+            if let Ok(img) =
+                shoebox_decode::render_path(Format::Jpeg, preview, Some(px), 1, job.target)
+            {
+                let histogram = (key.size == Size::Small).then(|| Box::new(img.histogram()));
+                let _ = tx.send(Loaded {
+                    key,
+                    result: Ok(img),
+                    histogram,
+                });
+                if let Ok(mut s) = q.state.lock() {
+                    s.in_flight.remove(&key);
+                }
+                repaint();
+                continue;
+            }
+        }
         let src = Source {
             path: &job.path,
             format: job.format,
@@ -566,6 +592,9 @@ pub enum LibraryEvent {
         redo_at: Option<i64>,
         fresh: bool,
     },
+    /// Photos' edits, for their previews elsewhere: every one after the
+    /// library opens, then each as it changes.
+    Edits(Vec<EditInfo>),
     /// A photo's edit, if it has one (answer to `LoadEdit`).
     EditLoaded {
         root: PathBuf,
@@ -573,6 +602,36 @@ pub enum LibraryEvent {
         json: Option<String>,
     },
     Error(String),
+}
+
+/// A photo's edit, as the rest of the app sees it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EditInfo {
+    pub path: PathBuf,
+    /// Names its rendered preview (the photo's content and the edit's
+    /// render hash); None when the edit changes nothing.
+    pub key: Option<String>,
+    pub json: String,
+}
+
+/// Bumped when previews must be rendered again (a new process version).
+const PREVIEW_VERSION: &str = "1";
+
+fn edit_info(root: &Path, rel: &str, json: String) -> Option<EditInfo> {
+    let doc = shoebox_develop::edit::EditDoc::from_json(&json).ok()?;
+    let key = (!doc.settings().is_default()).then(|| {
+        let id = format!(
+            "{}:{}:{PREVIEW_VERSION}",
+            doc.source.blake3,
+            doc.render_hash()
+        );
+        blake3::hash(id.as_bytes()).to_hex()[..32].to_owned()
+    });
+    Some(EditInfo {
+        path: root.join(rel),
+        key,
+        json,
+    })
 }
 
 pub struct Library {
@@ -864,6 +923,17 @@ fn library_worker(
                         .map(|(i, p)| (p.path.clone(), i))
                         .collect();
                     publish(&catalog, &settings, false);
+                }
+                match cache.edits() {
+                    Ok(rows) => emit(LibraryEvent::Edits(
+                        rows.into_iter()
+                            .filter(|r| r.2 == shoebox_core::edits::MAIN)
+                            .filter_map(|(root, rel, _, json)| {
+                                edit_info(Path::new(&root), &rel, json)
+                            })
+                            .collect(),
+                    )),
+                    Err(e) => tracing::warn!("listing edits: {e}"),
                 }
                 (false, true)
             }
@@ -1379,6 +1449,9 @@ fn library_worker(
                             &hash,
                         ) {
                             emit(LibraryEvent::Error(format!("keeping the edit: {e}")));
+                        }
+                        if let Some(info) = edit_info(&root, &rel, json) {
+                            emit(LibraryEvent::Edits(vec![info]));
                         }
                     }
                     Err(e) => emit(LibraryEvent::Error(e)),

@@ -489,6 +489,15 @@ impl Cache {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Every edit's working copy: `(root, rel, copy, json)`.
+    pub fn edits(&self) -> Result<Vec<(String, String, String, String)>> {
+        let mut st = self
+            .conn
+            .prepare_cached("SELECT root, rel_path, copy_id, doc_json FROM edits")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// A photo Shoebox moved takes its edits' rows along.
     pub fn move_edits(&self, from: (&str, &str), to: (&str, &str)) -> Result<()> {
         self.conn.execute(

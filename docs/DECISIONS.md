@@ -1179,3 +1179,18 @@ hashes, embeddings, faces).
   take the crop outside the rotated photo is refused. Enter, R or Done
   applies it as one history step ("Crop"); Escape or Cancel leaves it.
   Rotating still sets the largest crop for the angle.
+- **Edited previews everywhere else**: the library worker lists photos'
+  edits (when the library opens, then each change), keyed by the photo's
+  BLAKE3 and the edit's render hash (an edit that changes nothing has no
+  key). The develop thread renders each edit at 2560 px into
+  `<cache>/edited/<key>.jpg` (Display P3 on macOS, with its ICC profile),
+  behind any photo being opened, and skips ones already there. The loader
+  then shows that JPEG instead of the original for every size in every
+  view (falling back to the original if it can't be read), and the tile's
+  badge reads "· EDITED". Duplicates and semantic search still use the
+  original. JPEGs are written by the pure-Rust `jpeg-encoder` (the spec
+  names mozjpeg, a C library) with profiles from `moxcms`; a round trip
+  through the library's decoder keeps colours within 3/255.
+- Not yet: the loupe's `\` to show the original (the loupe keys textures
+  by photo and size only), and 100% zoom on an edited photo shows the
+  2560 px preview, not a full-resolution render.

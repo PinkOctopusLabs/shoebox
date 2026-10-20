@@ -273,6 +273,15 @@ pub fn cell(
     } else {
         photo.format.label().to_owned()
     };
+    // Edited in Develop (any of the stack): the tile shows the edit.
+    let label = if st
+        .all()
+        .any(|i| app.edited.contains_key(&app.catalog.photos[i].path))
+    {
+        format!("{label} · EDITED")
+    } else {
+        label
+    };
     // In the cloud only (the whole stack, as it's what opening fetches).
     let label = if st.all().any(|i| app.catalog.photos[i].cloud) {
         format!("{} {label}", crate::icons::CLOUD)

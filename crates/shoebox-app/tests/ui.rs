@@ -3262,6 +3262,19 @@ fn develop_a_raw_photo() {
         std::fs::read(root.join("2026/DSC_0001.NEF")).unwrap(),
         bytes
     );
+
+    // The grid shows the edit (it's cropped): a preview is made in the
+    // cache, and the tile is badged.
+    wait_for(&mut h, Duration::from_secs(30), "edited preview", |a| {
+        a.edited_previews() == (1, 1)
+    });
+    let previews: Vec<_> = std::fs::read_dir(t.path().join("cache/edited"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(previews.len(), 1);
+    settle(&mut h, Duration::from_secs(30));
+    snapshot(&mut h, "develop-edited-grid");
 }
 
 /// Develop edits finished images too: a JPEG opens, renders, and has no

@@ -44,7 +44,29 @@ pub struct Ready {
     pub upright: bool,
 }
 
+/// Render an edit's preview (for the grid, loupe and the rest) unless it's
+/// already there.
+pub struct PreviewJob {
+    pub id: PhotoId,
+    pub path: PathBuf,
+    pub format: shoebox_decode::Format,
+    pub orientation: u16,
+    pub settings: shoebox_develop::edit::Settings,
+    pub key: String,
+    pub target: cpu::Target,
+}
+
+enum Message {
+    Open(Request),
+    Preview(Box<PreviewJob>),
+}
+
+/// Edited previews' long edge (as the loupe's "large" size and the proxy).
+const PREVIEW: u32 = PROXY;
+
 pub enum Event {
+    /// An edit's preview is in the previews folder.
+    PreviewReady(PhotoId, String),
     /// Converting a High efficiency NEF (the first time it's opened).
     Converting(PhotoId),
     Ready(Ready),
@@ -54,14 +76,16 @@ pub enum Event {
 }
 
 pub struct Develop {
-    requests: Sender<Request>,
+    requests: Sender<Message>,
     pub events: Receiver<Event>,
+    previews: PathBuf,
 }
 
 impl Develop {
     pub fn new(cache_dir: PathBuf, repaint: impl Fn() + Send + Sync + 'static) -> Self {
-        let (rtx, rrx) = crossbeam_channel::unbounded::<Request>();
+        let (rtx, rrx) = crossbeam_channel::unbounded::<Message>();
         let (etx, erx) = crossbeam_channel::unbounded();
+        let previews = cache_dir.join("edited");
         let spawned = std::thread::Builder::new()
             .name("develop".into())
             .spawn(move || worker(&cache_dir, &rrx, &etx, &repaint));
@@ -71,17 +95,32 @@ impl Develop {
         Self {
             requests: rtx,
             events: erx,
+            previews,
         }
     }
 
     pub fn open(&self, r: Request) {
-        let _ = self.requests.send(r);
+        let _ = self.requests.send(Message::Open(r));
     }
+
+    /// Queue an edit's preview (after any photo being opened).
+    pub fn preview(&self, p: PreviewJob) {
+        let _ = self.requests.send(Message::Preview(Box::new(p)));
+    }
+
+    /// Where an edit's preview is (or will be).
+    pub fn preview_path(&self, key: &str) -> PathBuf {
+        preview_path(&self.previews, key)
+    }
+}
+
+fn preview_path(dir: &std::path::Path, key: &str) -> PathBuf {
+    dir.join(format!("{key}.jpg"))
 }
 
 fn worker(
     cache_dir: &std::path::Path,
-    requests: &Receiver<Request>,
+    requests: &Receiver<Message>,
     events: &Sender<Event>,
     repaint: &(dyn Fn() + Send + Sync),
 ) {
@@ -90,30 +129,111 @@ fn worker(
         repaint();
     };
     let dngs = DngCache::new(cache_dir, shoebox_develop::dng::DEFAULT_LIMIT);
+    let previews = cache_dir.join("edited");
     let mut kept: Vec<Ready> = Vec::new();
-    while let Ok(mut r) = requests.recv() {
-        // Only the newest request matters.
-        while let Ok(newer) = requests.try_recv() {
-            r = newer;
+    let mut open: Option<Request> = None;
+    let mut queue: std::collections::VecDeque<PreviewJob> = Default::default();
+    loop {
+        // Take everything waiting; with nothing to do, wait.
+        let first = if open.is_none() && queue.is_empty() {
+            match requests.recv() {
+                Ok(m) => Some(m),
+                Err(_) => return,
+            }
+        } else {
+            None
+        };
+        for m in first.into_iter().chain(requests.try_iter()) {
+            match m {
+                // Only the newest photo opened matters.
+                Message::Open(r) => open = Some(r),
+                Message::Preview(p) => {
+                    queue.retain(|q| q.id != p.id);
+                    queue.push_back(*p);
+                }
+            }
         }
-        if let Some(hit) = kept.iter().position(|k| k.id == r.id && k.raw == r.raw) {
-            let k = kept.remove(hit);
-            kept.push(k.clone());
-            emit(Event::Ready(k));
+        if let Some(r) = open.take() {
+            let ready = match kept.iter().position(|k| k.id == r.id && k.raw == r.raw) {
+                Some(hit) => {
+                    let k = kept.remove(hit);
+                    Ok(Some(k))
+                }
+                None => prepare(&r, &dngs, &emit),
+            };
+            match ready {
+                Ok(Some(ready)) => {
+                    kept.push(ready.clone());
+                    if kept.len() > KEEP {
+                        kept.remove(0);
+                    }
+                    emit(Event::Ready(ready));
+                }
+                Ok(None) => emit(Event::NeedsConverter(r.id)),
+                Err(e) => emit(Event::Failed(r.id, e)),
+            }
             continue;
         }
-        match prepare(&r, &dngs, &emit) {
-            Ok(Some(ready)) => {
-                kept.push(ready.clone());
-                if kept.len() > KEEP {
-                    kept.remove(0);
-                }
-                emit(Event::Ready(ready));
+        if let Some(p) = queue.pop_front() {
+            match preview(&p, &previews, &dngs, &kept) {
+                Ok(true) => emit(Event::PreviewReady(p.id, p.key)),
+                Ok(false) => {}
+                Err(e) => tracing::warn!("previewing the edit of {}: {e}", p.path.display()),
             }
-            Ok(None) => emit(Event::NeedsConverter(r.id)),
-            Err(e) => emit(Event::Failed(r.id, e)),
         }
     }
+}
+
+/// Render an edit's preview JPEG unless it exists. False when it can't be
+/// made yet (a High efficiency NEF without the converter).
+fn preview(
+    p: &PreviewJob,
+    dir: &std::path::Path,
+    dngs: &DngCache,
+    kept: &[Ready],
+) -> Result<bool, String> {
+    let out = preview_path(dir, &p.key);
+    if out.is_file() {
+        return Ok(true);
+    }
+    let raw = p.settings.modules.raw.clone();
+    let ready = match kept.iter().find(|k| k.id == p.id && k.raw == raw) {
+        Some(k) => k.clone(),
+        None => {
+            let r = Request {
+                id: p.id,
+                path: p.path.clone(),
+                format: p.format,
+                raw,
+            };
+            match prepare(&r, dngs, &|_| {})? {
+                Some(k) => k,
+                None => return Ok(false),
+            }
+        }
+    };
+    let o = cpu::Options {
+        long_edge: None,
+        orientation: if ready.upright { 1 } else { p.orientation },
+        target: p.target,
+    };
+    let src = if ready.src.rgb.width.max(ready.src.rgb.height) > PREVIEW as usize {
+        Arc::new(Demosaiced {
+            rgb: cpu::downscale(&ready.src.rgb, PREVIEW as usize),
+            ..(*ready.src).clone()
+        })
+    } else {
+        ready.src.clone()
+    };
+    let frame = cpu::frame(&ready.meta, &src, &p.settings, &o);
+    let img = cpu::apply(&src.rgb, &frame, true);
+    let bytes = shoebox_develop::encode::jpeg(&img, p.target, Default::default())?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    // The app's own cache: written whole, then renamed into place.
+    let tmp = dir.join(format!(".{}.tmp", p.key));
+    std::fs::write(&tmp, &bytes).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &out).map_err(|e| format!("{}: {e}", out.display()))?;
+    Ok(true)
 }
 
 /// Decode and demosaic one photo; None if it needs the converter and it

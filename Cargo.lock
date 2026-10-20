@@ -6044,7 +6044,9 @@ version = "0.2.3"
 dependencies = [
  "blake3",
  "jiff",
+ "jpeg-encoder",
  "json-patch",
+ "moxcms 0.9.1",
  "png 0.18.1",
  "rayon",
  "serde",

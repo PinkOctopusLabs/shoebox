@@ -216,13 +216,17 @@ pub fn edit_loaded(app: &mut ShoeboxApp, root: PathBuf, rel: String, json: Optio
 /// Start of a frame in Develop (before the panels draw): take the develop
 /// thread's news and follow the current photo.
 pub fn tick(app: &mut ShoeboxApp) {
-    poll(app);
     follow(app);
 }
 
-/// Take the develop thread's news.
-fn poll(app: &mut ShoeboxApp) {
+/// Take the develop thread's news (every frame: previews arrive in any
+/// view).
+pub fn poll(app: &mut ShoeboxApp) {
     while let Ok(ev) = app.developer.events.try_recv() {
+        if let Event::PreviewReady(id, key) = ev {
+            app.preview_ready(id, key);
+            continue;
+        }
         let st = &mut app.develop;
         match ev {
             Event::Ready(r) if Some(r.id) == st.photo => {

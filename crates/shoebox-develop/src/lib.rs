@@ -9,6 +9,7 @@ pub mod colour;
 pub mod cpu;
 pub mod dng;
 pub mod edit;
+pub mod encode;
 pub mod gpu;
 pub mod wb;
 

@@ -435,6 +435,10 @@ pub struct ShoeboxApp {
     pub(crate) develop: views::develop::State,
     /// The develop thread (prepares raw photos).
     pub(crate) developer: crate::develop::Develop,
+    /// Edited photos: photo path → its preview's key.
+    pub(crate) edited: HashMap<PathBuf, String>,
+    /// Previews rendered and on disk, by key.
+    previews_ready: HashSet<String>,
     pub(crate) compare: CompareState,
     /// Photos in Survey, in order.
     pub(crate) survey: Vec<PhotoId>,
@@ -558,6 +562,8 @@ impl ShoeboxApp {
             target,
             develop: Default::default(),
             developer,
+            edited: HashMap::new(),
+            previews_ready: HashSet::new(),
             events: Vec::new(),
             event_members: HashMap::new(),
             event_spans: HashMap::new(),
@@ -812,6 +818,11 @@ impl ShoeboxApp {
         )
     }
 
+    /// Edited photos, and previews of edits ready (tests).
+    pub fn edited_previews(&self) -> (usize, usize) {
+        (self.edited.len(), self.previews_ready.len())
+    }
+
     /// Develop's crop tool is open, and where the photo is drawn (tests).
     pub fn develop_cropping(&self) -> bool {
         self.develop.crop.is_some()
@@ -927,6 +938,7 @@ impl ShoeboxApp {
     fn apply_events(&mut self, ctx: &egui::Context) {
         while let Ok(ev) = self.library.events.try_recv() {
             match ev {
+                LibraryEvent::Edits(list) => self.note_edits(list),
                 LibraryEvent::EditLoaded { root, rel, json } => {
                     views::develop::edit_loaded(self, root, rel, json);
                 }
@@ -3068,6 +3080,58 @@ impl ShoeboxApp {
     // --- loading -----------------------------------------------------------
 
     /// Ask for an image this frame (no-op if loaded or failed).
+    /// Photos' edits changed (or were listed): show their previews, made
+    /// first if need be.
+    fn note_edits(&mut self, list: Vec<crate::jobs::EditInfo>) {
+        for info in list {
+            let id = crate::jobs::photo_id(&info.path);
+            let before = self.edited.get(&info.path).cloned();
+            if before == info.key {
+                continue;
+            }
+            // What shows of it changes: load it again.
+            self.textures.retain_photos(|p| *p != id);
+            self.histograms.remove(&id);
+            let Some(key) = info.key else {
+                self.edited.remove(&info.path);
+                continue;
+            };
+            self.edited.insert(info.path.clone(), key.clone());
+            if self.previews_ready.contains(&key) {
+                continue;
+            }
+            let Some(idx) = self.index(id) else { continue };
+            let Ok(doc) = shoebox_develop::edit::EditDoc::from_json(&info.json) else {
+                continue;
+            };
+            let p = &self.catalog.photos[idx];
+            self.developer.preview(crate::develop::PreviewJob {
+                id,
+                path: p.path.clone(),
+                format: p.format,
+                orientation: p.meta.orientation(),
+                settings: doc.settings().clone(),
+                key,
+                target: match self.target {
+                    shoebox_decode::Target::DisplayP3 => shoebox_develop::cpu::Target::DisplayP3,
+                    _ => shoebox_develop::cpu::Target::Srgb,
+                },
+            });
+        }
+    }
+
+    /// An edit's preview is ready: photos showing that edit load it.
+    pub(crate) fn preview_ready(&mut self, id: PhotoId, key: String) {
+        let current = self
+            .index(id)
+            .and_then(|i| self.edited.get(&self.catalog.photos[i].path));
+        if current == Some(&key) {
+            self.textures.retain_photos(|p| *p != id);
+            self.histograms.remove(&id);
+        }
+        self.previews_ready.insert(key);
+    }
+
     pub(crate) fn want(&mut self, idx: usize, size: Size, priority: Priority) {
         self.want_job(idx, size, priority, false);
     }
@@ -3100,6 +3164,11 @@ impl ShoeboxApp {
                 mtime_ns: p.mtime_ns,
                 orientation: p.meta.orientation(),
                 target: self.target,
+                edited: self
+                    .edited
+                    .get(&p.path)
+                    .filter(|k| self.previews_ready.contains(*k))
+                    .map(|k| self.developer.preview_path(k)),
                 cloud: p.cloud && !open,
                 keep: true,
             },
@@ -3188,6 +3257,7 @@ impl ShoeboxApp {
                 mtime_ns: p.mtime_ns,
                 orientation: p.orientation,
                 target: self.target,
+                edited: None,
                 cloud: false,
                 keep: false,
             },
@@ -3579,6 +3649,7 @@ impl eframe::App for ShoeboxApp {
         self.tick_quit(&ctx);
         crate::updater::tick(&ctx, crate::jobs::working());
         self.handle_keys(&ctx);
+        views::develop::poll(self);
         if self.view == View::Develop {
             views::develop::tick(self);
         }
