@@ -96,6 +96,8 @@ pub struct State {
     pub crop: Option<super::crop::CropEdit>,
     /// The render's histogram (R, G, B, luma).
     pub histogram: Option<Box<[[u32; 256]; 4]>>,
+    /// The snapshot being renamed, and its name so far.
+    renaming: Option<(usize, String)>,
     gpu: Option<GpuShared>,
     edited: Option<Shown>,
     original: Option<Shown>,
@@ -1580,12 +1582,9 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
 pub fn history(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     ui.set_min_width(200.0);
     ui.add_space(6.0);
-    ui.label(
-        RichText::new("HISTORY")
-            .size(11.0)
-            .strong()
-            .color(ui.visuals().weak_text_color()),
-    );
+    snapshots(app, ui);
+    ui.add_space(10.0);
+    heading(ui, "HISTORY");
     let st = &app.develop;
     let Some(doc) = &st.doc else { return };
     let at = doc.at();
@@ -1610,10 +1609,117 @@ pub fn history(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             && !st.read_only
             && doc.jump(n)
         {
-            st.changed = Some(Instant::now());
-            st.unsaved.get_or_insert_with(Instant::now);
+            touched(st);
         }
     }
+}
+
+fn heading(ui: &mut egui::Ui, text: &str) {
+    ui.label(
+        RichText::new(text)
+            .size(11.0)
+            .strong()
+            .color(ui.visuals().weak_text_color()),
+    );
+}
+
+/// The edit changed outside a slider: show it and save it.
+fn touched(st: &mut State) {
+    st.changed = Some(Instant::now());
+    st.unsaved.get_or_insert_with(Instant::now);
+}
+
+/// What a click in the snapshot list does.
+enum SnapshotAction {
+    New,
+    Restore(usize),
+    Rename(usize),
+    Renamed(usize, String),
+    Remove(usize),
+}
+
+/// Named settings to come back to: + names the edit as it is now; a click
+/// goes back to one (a history step, so it undoes); right-click renames or
+/// deletes.
+fn snapshots(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    let st = &mut app.develop;
+    let Some(doc) = &st.doc else { return };
+    let read_only = st.read_only;
+    let names: Vec<String> = doc.snapshots.iter().map(|s| s.name.clone()).collect();
+    let mut action = None;
+    ui.horizontal(|ui| {
+        heading(ui, "SNAPSHOTS");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add_enabled(!read_only, egui::Button::new("+").small())
+                .on_hover_text("New snapshot of the edit as it is now")
+                .clicked()
+            {
+                action = Some(SnapshotAction::New);
+            }
+        });
+    });
+    if names.is_empty() {
+        ui.weak("None");
+    }
+    for (i, name) in names.iter().enumerate() {
+        if let Some((at, text)) = &mut st.renaming
+            && *at == i
+        {
+            let r = ui.text_edit_singleline(text);
+            if r.lost_focus() {
+                let done = ui.input(|i| !i.key_pressed(egui::Key::Escape));
+                action = Some(if done {
+                    SnapshotAction::Renamed(i, text.trim().to_owned())
+                } else {
+                    SnapshotAction::Renamed(i, name.clone())
+                });
+            } else if !r.has_focus() {
+                r.request_focus();
+            }
+            continue;
+        }
+        let r = ui
+            .add_enabled(!read_only, egui::Button::selectable(false, name))
+            .on_hover_text("Go back to this snapshot");
+        if r.clicked() {
+            action = Some(SnapshotAction::Restore(i));
+        }
+        r.context_menu(|ui| {
+            if ui.button("Rename…").clicked() {
+                action = Some(SnapshotAction::Rename(i));
+            }
+            if ui.button("Delete").clicked() {
+                action = Some(SnapshotAction::Remove(i));
+            }
+        });
+    }
+    let Some(action) = action else { return };
+    let Some(doc) = &mut st.doc else { return };
+    match action {
+        SnapshotAction::New => {
+            let n = doc.snapshots.len() + 1;
+            doc.snapshot(&format!("Snapshot {n}"));
+            st.renaming = Some((n - 1, format!("Snapshot {n}")));
+        }
+        SnapshotAction::Restore(i) => {
+            if doc.restore(i) && st.compare == Compare::Original {
+                st.compare = Compare::Edited;
+            }
+        }
+        SnapshotAction::Rename(i) => st.renaming = Some((i, names[i].clone())),
+        SnapshotAction::Renamed(i, name) => {
+            if !name.is_empty() {
+                doc.rename_snapshot(i, &name);
+            }
+            st.renaming = None;
+        }
+        SnapshotAction::Remove(i) => {
+            doc.remove_snapshot(i);
+            st.renaming = None;
+        }
+    }
+    touched(st);
 }
 
 #[cfg(test)]

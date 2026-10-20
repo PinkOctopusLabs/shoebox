@@ -89,6 +89,45 @@ fn undo_redo_jump_and_branching() {
 }
 
 #[test]
+fn snapshots_outlive_the_history_they_were_taken_in() {
+    let mut d = doc();
+    d.change("A", |s| s.modules.exposure.ev = 1.0);
+    d.change("B", |s| s.modules.white_balance.mode = WbMode::Daylight);
+    d.snapshot("A and B");
+    let ab = d.settings().clone();
+    // Back to A and a different B: the snapshot's steps are gone, its
+    // settings aren't.
+    d.undo();
+    d.change("B'", |s| s.geometry.rotate = 2.0);
+    assert_eq!(d.history().len(), 2);
+    assert_eq!(d.snapshot_settings(0).as_ref(), Some(&ab));
+    let saved = EditDoc::from_json(&d.to_json()).unwrap();
+    assert_eq!(saved.snapshot_settings(0).as_ref(), Some(&ab));
+    // Restoring is a step of its own, so it can be undone.
+    assert!(d.restore(0));
+    assert_eq!(d.settings(), &ab);
+    assert_eq!(d.history().last().unwrap().label, "Snapshot: A and B");
+    assert!(!d.restore(0), "already there");
+    assert!(d.undo());
+    assert_eq!(d.settings().geometry.rotate, 2.0);
+
+    d.rename_snapshot(0, "Warm");
+    assert_eq!(d.snapshots[0].name, "Warm");
+    d.remove_snapshot(0);
+    assert!(d.snapshots.is_empty());
+}
+
+#[test]
+fn a_drag_after_a_snapshot_is_a_new_step() {
+    let mut d = doc();
+    d.change("Exposure", |s| s.modules.exposure.ev = 0.1);
+    d.snapshot("one");
+    d.amend("Exposure", |s| s.modules.exposure.ev = 0.4);
+    assert_eq!(d.history().len(), 2);
+    assert_eq!(d.snapshot_settings(0).unwrap().modules.exposure.ev, 0.1);
+}
+
+#[test]
 fn a_drag_is_one_step() {
     let mut d = doc();
     d.change("Exposure", |s| s.modules.exposure.ev = 0.1);

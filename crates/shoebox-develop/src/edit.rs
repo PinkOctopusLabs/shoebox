@@ -358,6 +358,10 @@ pub struct Snapshot {
     pub name: String,
     /// Steps applied at that point (0: the defaults).
     pub history_index: usize,
+    /// Its settings, once the steps it pointed to were discarded (a change
+    /// after an undo): a snapshot outlives the history it was taken in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<Value>,
 }
 
 /// One photo's edit.
@@ -413,8 +417,11 @@ impl EditDoc {
             );
             doc.history.clear();
             doc.history_at = None;
-            doc.snapshots.clear();
+            doc.snapshots.retain(|s| s.settings.is_some());
         }
+        let n = doc.history.len();
+        doc.snapshots
+            .retain(|s| s.settings.is_some() || s.history_index <= n);
         Ok(doc)
     }
 
@@ -512,9 +519,9 @@ impl EditDoc {
             return false;
         }
         let at = self.at();
+        self.detach_snapshots(at);
         self.history.truncate(at);
         self.history_at = None;
-        self.snapshots.retain(|s| s.history_index <= at);
         self.history.push(Step {
             t: now(),
             label: label.to_owned(),
@@ -528,10 +535,17 @@ impl EditDoc {
     /// relabel it. With no step to fold into, or after an undo, it's a new
     /// step.
     pub fn amend(&mut self, label: &str, f: impl FnOnce(&mut Settings)) -> bool {
-        if !self.can_undo() || self.can_redo() {
+        let n = self.history.len();
+        // A snapshot of the step keeps it as it was.
+        if !self.can_undo()
+            || self.can_redo()
+            || self
+                .snapshots
+                .iter()
+                .any(|s| s.settings.is_none() && s.history_index == n)
+        {
             return self.change(label, f);
         }
-        let n = self.history.len();
         let Some(base) = self.replay(n - 1) else {
             return self.change(label, f);
         };
@@ -541,7 +555,6 @@ impl EditDoc {
         if patch.0.is_empty() {
             // Back where the step started: it undoes itself.
             self.history.pop();
-            self.snapshots.retain(|s| s.history_index < n);
         } else if let Some(last) = self.history.last_mut() {
             last.t = now();
             last.label = label.to_owned();
@@ -578,7 +591,53 @@ impl EditDoc {
         self.snapshots.push(Snapshot {
             name: name.to_owned(),
             history_index: self.at(),
+            settings: None,
         });
+    }
+
+    /// Snapshots pointing past step `keep` hold their settings from now on,
+    /// so discarding those steps doesn't lose them.
+    fn detach_snapshots(&mut self, keep: usize) {
+        let mut held = std::mem::take(&mut self.snapshots);
+        for s in &mut held {
+            if s.settings.is_none() && s.history_index > keep {
+                s.settings = self.replay(s.history_index).map(|x| x.to_value());
+                s.history_index = keep;
+            }
+        }
+        held.retain(|s| s.settings.is_some() || s.history_index <= keep);
+        self.snapshots = held;
+    }
+
+    /// The settings snapshot `i` names.
+    pub fn snapshot_settings(&self, i: usize) -> Option<Settings> {
+        let s = self.snapshots.get(i)?;
+        match &s.settings {
+            Some(v) => Settings::from_value(v).ok(),
+            None => self.replay(s.history_index),
+        }
+    }
+
+    /// Go back to snapshot `i`, as a new step (history is kept). False if
+    /// there's no such snapshot or it's what's shown already.
+    pub fn restore(&mut self, i: usize) -> bool {
+        let (Some(to), Some(s)) = (self.snapshot_settings(i), self.snapshots.get(i)) else {
+            return false;
+        };
+        let label = format!("Snapshot: {}", s.name);
+        self.change(&label, |x| *x = to)
+    }
+
+    pub fn rename_snapshot(&mut self, i: usize, name: &str) {
+        if let Some(s) = self.snapshots.get_mut(i) {
+            name.clone_into(&mut s.name);
+        }
+    }
+
+    pub fn remove_snapshot(&mut self, i: usize) {
+        if i < self.snapshots.len() {
+            self.snapshots.remove(i);
+        }
     }
 }
 

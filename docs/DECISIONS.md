@@ -1299,3 +1299,19 @@ hashes, embeddings, faces).
   "Edits without a photo" in Settings → Raw, with Show in Finder. They're
   matched again on every scan, so a photo that comes back gets its edit.
   Empty edits (`{}`, an undone first save) aren't listed.
+
+## Snapshots (2026-10-20)
+
+EDITING-SPEC calls snapshots "named pointers into history". A pointer alone
+is lost when a change after an undo discards the steps it points to, and a
+slider drag folded into the step a snapshot points at would change the
+snapshot. So:
+
+- A snapshot points into history while those steps exist. When they're about
+  to be discarded, it takes a copy of its settings (`settings`, defaults left
+  out) and keeps that from then on. A drag right after a snapshot starts a
+  new step instead of amending the snapshotted one.
+- Going back to a snapshot is a new history step ("Snapshot: name"), as in
+  Lightroom, rather than a jump: nothing is discarded and ⌘Z undoes it.
+- Snapshots live in the left panel above History: + names the edit as it is
+  now (the name is editable straight away); right-click renames or deletes.

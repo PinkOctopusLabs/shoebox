@@ -3385,6 +3385,33 @@ fn develop_a_jpeg() {
         h.state().develop_doc().unwrap().settings().geometry.quarter,
         0
     );
+
+    // A snapshot, named as it's made; turn the photo; the snapshot brings
+    // it back, as a step of its own.
+    h.get_by_label("+").click();
+    h.run_steps(3);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.event(egui::Event::Text("Upright".into()));
+    h.run_steps(1);
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert_eq!(
+        h.state().develop_doc().unwrap().snapshots[0].name,
+        "Upright"
+    );
+    assert_eq!(
+        h.state().view_name(),
+        View::Develop,
+        "typing stayed in the field"
+    );
+    snapshot(&mut h, "develop-snapshots");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::CloseBracket);
+    h.run_steps(4);
+    h.get_by_label("Upright").click();
+    h.run_steps(4);
+    let doc = h.state().develop_doc().unwrap();
+    assert_eq!(doc.settings().geometry.quarter, 0);
+    assert_eq!(doc.history().last().unwrap().label, "Snapshot: Upright");
 }
 
 /// A photo renamed in Finder keeps its edit: after the scan the edit is
