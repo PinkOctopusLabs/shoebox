@@ -19,6 +19,11 @@ use serde_json::Value;
 /// rather than half-read.
 pub const SCHEMA: u32 = 1;
 
+/// History longer than this, or a step with more operations, isn't
+/// replayed (and is dropped on load): far beyond any real edit.
+const MAX_STEPS: usize = 10_000;
+const MAX_OPS: usize = 10_000;
+
 /// The rendering behaviour. Any change to an algorithm that alters output
 /// bumps it; older edits keep rendering the old way until updated.
 pub const PROCESS_VERSION: u32 = 1;
@@ -414,10 +419,26 @@ impl EditDoc {
         self.at() < self.history.len()
     }
 
-    /// The settings after the first `n` steps.
+    /// The settings after the first `n` steps. Only `add`, `remove`,
+    /// `replace` and `test` are replayed (what [`json_patch::diff`] makes):
+    /// `copy` can double the document each step, so a crafted file could
+    /// exhaust memory. With those, the result is no bigger than the file.
     fn replay(&self, n: usize) -> Option<Settings> {
+        use json_patch::PatchOperation as Op;
+        if n > MAX_STEPS {
+            return None;
+        }
         let mut v = Settings::default().to_value();
         for step in self.history.get(..n)? {
+            if step.patch.0.len() > MAX_OPS
+                || step
+                    .patch
+                    .0
+                    .iter()
+                    .any(|op| matches!(op, Op::Copy(_) | Op::Move(_)))
+            {
+                return None;
+            }
             json_patch::patch(&mut v, &step.patch).ok()?;
         }
         Settings::from_value(&v).ok()

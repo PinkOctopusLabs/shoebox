@@ -164,3 +164,20 @@ fn render_hash_ignores_history_and_names() {
     assert_ne!(a.render_hash(), b.render_hash());
     assert_eq!(Settings::default().to_value(), json!({}));
 }
+
+#[test]
+fn copy_operations_are_not_replayed() {
+    // Each step would double the document; replay refuses, history goes.
+    let mut d = doc();
+    d.change("A", |s| s.modules.exposure.ev = 1.0);
+    let mut v = parsed(&d.to_json());
+    let bomb = json!([{ "op": "copy", "from": "/modules", "path": "/modules/x" }]);
+    let mut steps = v["history"].as_array().unwrap().clone();
+    for _ in 0..64 {
+        steps.push(json!({ "t": "", "label": "x", "patch": bomb }));
+    }
+    v["history"] = json!(steps);
+    let back = EditDoc::from_json(&v.to_string()).unwrap();
+    assert!(back.history().is_empty());
+    assert_eq!(back.settings().modules.exposure.ev, 1.0);
+}
