@@ -62,7 +62,16 @@ pub struct Settings {
     /// Things listed most photos first (else A to Z).
     #[serde(default)]
     pub things_by_count: bool,
+    /// Adobe DNG Converter, when it isn't in /Applications.
+    #[serde(default)]
+    pub dng_converter: Option<std::path::PathBuf>,
+    /// The DNG cache's limit in GB (0: the default).
+    #[serde(default)]
+    pub dng_cache_gb: u32,
 }
+
+/// Default for [`Settings::dng_cache_gb`].
+pub const DEFAULT_DNG_CACHE_GB: u32 = 20;
 
 /// Default for [`Settings::image_memory_mb`].
 pub const DEFAULT_IMAGE_MEMORY_MB: u32 = 768;

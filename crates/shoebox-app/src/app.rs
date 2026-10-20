@@ -439,6 +439,10 @@ pub struct ShoeboxApp {
     pub(crate) edited: HashMap<PathBuf, String>,
     /// Previews rendered and on disk, by key.
     previews_ready: HashSet<String>,
+    /// The DNG converter and cache, as last checked (Settings → Raw).
+    pub(crate) raw_status: Option<crate::develop::RawStatus>,
+    /// What the develop thread was last told (converter, cache limit).
+    raw_config: Option<(Option<PathBuf>, u64)>,
     pub(crate) compare: CompareState,
     /// Photos in Survey, in order.
     pub(crate) survey: Vec<PhotoId>,
@@ -564,6 +568,8 @@ impl ShoeboxApp {
             developer,
             edited: HashMap::new(),
             previews_ready: HashSet::new(),
+            raw_status: None,
+            raw_config: None,
             events: Vec::new(),
             event_members: HashMap::new(),
             event_spans: HashMap::new(),
@@ -1247,6 +1253,16 @@ impl ShoeboxApp {
     /// Apply the settings the UI uses directly.
     fn apply_settings(&mut self) {
         self.textures.set_budget(self.settings.image_memory_bytes());
+        let gb = match self.settings.dng_cache_gb {
+            0 => shoebox_core::settings::DEFAULT_DNG_CACHE_GB,
+            g => g,
+        };
+        let raw = (self.settings.dng_converter.clone(), u64::from(gb) << 30);
+        if self.raw_config.as_ref() != Some(&raw) {
+            self.developer.configure(raw.0.clone(), raw.1);
+            self.raw_config = Some(raw);
+            self.raw_status = None;
+        }
         let tiles = if self.settings.offline_map {
             None
         } else {

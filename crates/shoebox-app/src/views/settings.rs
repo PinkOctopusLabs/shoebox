@@ -2,7 +2,7 @@
 //! and updates. Changes apply and save as they're made.
 
 use eframe::egui;
-use shoebox_core::settings::{DEFAULT_IMAGE_MEMORY_MB, Settings};
+use shoebox_core::settings::{DEFAULT_DNG_CACHE_GB, DEFAULT_IMAGE_MEMORY_MB, Settings};
 use shoebox_core::template::{DEFAULT_IMPORT, DEFAULT_RENAME};
 
 use crate::app::ShoeboxApp;
@@ -18,11 +18,12 @@ pub enum Tab {
     People,
     Map,
     Memory,
+    Raw,
     Updates,
 }
 
 impl Tab {
-    const ALL: [Tab; 8] = [
+    const ALL: [Tab; 9] = [
         Tab::Library,
         Tab::Sidecars,
         Tab::Naming,
@@ -30,6 +31,7 @@ impl Tab {
         Tab::People,
         Tab::Map,
         Tab::Memory,
+        Tab::Raw,
         Tab::Updates,
     ];
 
@@ -42,6 +44,7 @@ impl Tab {
             Tab::People => "People",
             Tab::Map => "Map",
             Tab::Memory => "Memory",
+            Tab::Raw => "Raw",
             Tab::Updates => "Updates",
         }
     }
@@ -95,6 +98,7 @@ pub fn show(app: &mut ShoeboxApp, ctx: &egui::Context) {
                 Tab::People => people(app, ui, &mut s),
                 Tab::Map => map(ui, &mut s),
                 Tab::Memory => memory(app, ui, &mut s),
+                Tab::Raw => raw(app, ui, &mut s),
                 Tab::Updates => updates(ui),
             }
             if s != app.settings {
@@ -431,6 +435,110 @@ fn memory(app: &ShoeboxApp, ui: &mut egui::Ui, s: &mut Settings) {
         ui,
         "Graphics memory for thumbnails and full images. More keeps more of them \
          ready when you scroll back; the least recently seen are dropped first.",
+    );
+}
+
+/// The DNG converter for High efficiency NEFs, and the DNG cache.
+fn raw(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &mut Settings) {
+    if app.raw_status.is_none() {
+        app.developer.check();
+        app.raw_status = Some(Default::default());
+        ui.ctx().request_repaint();
+    }
+    let status = app.raw_status.clone().unwrap_or_default();
+    ui.label(egui::RichText::new("Adobe DNG Converter").strong());
+    match &status.converter {
+        Some((path, version)) => {
+            ui.label(format!(
+                "Found{}: {}",
+                version
+                    .as_deref()
+                    .map(|v| format!(" (version {v})"))
+                    .unwrap_or_default(),
+                path.display()
+            ));
+        }
+        None => {
+            ui.label("Not found.");
+        }
+    }
+    ui.horizontal(|ui| {
+        if ui.button("Download Adobe DNG Converter").clicked() {
+            ui.ctx().open_url(egui::OpenUrl::new_tab(
+                "https://helpx.adobe.com/camera-raw/using/adobe-dng-converter.html",
+            ));
+        }
+        if ui.button("Check again").clicked() {
+            app.raw_status = None;
+        }
+    });
+    let mut path = s
+        .dng_converter
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    ui.horizontal(|ui| {
+        ui.label("Installed elsewhere:");
+        if ui
+            .add(
+                egui::TextEdit::singleline(&mut path)
+                    .hint_text("/Applications/Adobe DNG Converter.app")
+                    .desired_width(300.0),
+            )
+            .changed()
+        {
+            s.dng_converter =
+                (!path.trim().is_empty()).then(|| std::path::PathBuf::from(path.trim()));
+        }
+    });
+    let he = app
+        .catalog
+        .photos
+        .iter()
+        .filter(|p| {
+            p.meta
+                .exif
+                .nef_compression
+                .is_some_and(|c| shoebox_decode::nef::NefCompression::from_tag(c).needs_dng())
+        })
+        .count();
+    note(
+        ui,
+        &format!(
+            "{he} of your photos use Nikon's High efficiency compression, which no open decoder \
+             reads yet. Shoebox converts each to a DNG with Adobe's free converter the first \
+             time you edit it (your original is only read). Setting the camera's RAW recording \
+             to Lossless compression avoids this for new photos."
+        ),
+    );
+    ui.add_space(8.0);
+    ui.label(egui::RichText::new("DNG cache").strong());
+    let mut gb = match s.dng_cache_gb {
+        0 => DEFAULT_DNG_CACHE_GB,
+        g => g,
+    };
+    ui.horizontal(|ui| {
+        ui.label("Keep up to");
+        ui.add(egui::Slider::new(&mut gb, 2..=200).suffix(" GB"));
+    });
+    s.dng_cache_gb = if gb == DEFAULT_DNG_CACHE_GB { 0 } else { gb };
+    ui.horizontal(|ui| {
+        ui.weak(format!(
+            "In use: {}",
+            crate::panels::human_size(status.cache_bytes)
+        ));
+        if ui
+            .button("Clear")
+            .on_hover_text("Remove the converted DNGs (made again when needed)")
+            .clicked()
+        {
+            app.developer.clear_cache();
+        }
+    });
+    note(
+        ui,
+        "Converted DNGs are kept in Shoebox's cache, never in your library; the least \
+         recently used go first beyond the limit.",
     );
 }
 

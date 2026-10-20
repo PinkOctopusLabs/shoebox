@@ -1194,3 +1194,12 @@ hashes, embeddings, faces).
 - Not yet: the loupe's `\` to show the original (the loupe keys textures
   by photo and size only), and 100% zoom on an edited photo shows the
   2560 px preview, not a full-resolution render.
+- **Settings → Raw**: Adobe DNG Converter's status (found, with its
+  version, or not), Download and Check again, a path for a converter
+  installed elsewhere (a text field: macOS's folder picker treats `.app`
+  bundles as files), how many photos in the library are High efficiency
+  (from the catalog), and the DNG cache: its limit (2–200 GB, default
+  20), the space in use, and Clear. Finding the converter and measuring
+  or clearing the cache run on the develop thread, so the UI thread never
+  touches the disk. The spec's "pre-convert likely edits when idle" option
+  isn't built yet.

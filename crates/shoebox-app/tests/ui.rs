@@ -3307,3 +3307,29 @@ fn develop_a_jpeg() {
     );
     snapshot(&mut h, "develop-jpeg");
 }
+
+/// Settings → Raw: the converter's status, the High efficiency count, and
+/// the DNG cache.
+#[test]
+fn settings_raw_tab() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("DSC_0001.NEF"),
+        shoebox_fixtures::nikon_compression_stub(14, true),
+    )
+    .unwrap();
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Comma);
+    h.run_steps(2);
+    h.get_by_label("Raw").click();
+    wait_for(&mut h, Duration::from_secs(10), "raw status", |_| true);
+    h.run_steps(5);
+    assert!(h.query_by_label_contains("1 of your photos use").is_some());
+    assert!(h.query_by_label_contains("In use:").is_some());
+    assert!(h.query_by_label("Download Adobe DNG Converter").is_some());
+    snapshot(&mut h, "settings-raw");
+}

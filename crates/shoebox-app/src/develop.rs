@@ -59,12 +59,28 @@ pub struct PreviewJob {
 enum Message {
     Open(Request),
     Preview(Box<PreviewJob>),
+    /// The converter's location (None: where Adobe installs it) and the
+    /// DNG cache's limit in bytes.
+    Configure(Option<PathBuf>, u64),
+    /// Find the converter and measure the cache (Settings → Raw).
+    Check,
+    ClearCache,
+}
+
+/// What Settings → Raw shows.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RawStatus {
+    /// The converter found: its executable and version.
+    pub converter: Option<(PathBuf, Option<String>)>,
+    pub cache_bytes: u64,
 }
 
 /// Edited previews' long edge (as the loupe's "large" size and the proxy).
 const PREVIEW: u32 = PROXY;
 
 pub enum Event {
+    /// The converter and cache, as checked.
+    Status(RawStatus),
     /// An edit's preview is in the previews folder.
     PreviewReady(PhotoId, String),
     /// Converting a High efficiency NEF (the first time it's opened).
@@ -103,6 +119,23 @@ impl Develop {
         let _ = self.requests.send(Message::Open(r));
     }
 
+    /// Where the converter is (None: the usual place), and the cache limit.
+    pub fn configure(&self, converter: Option<PathBuf>, limit_bytes: u64) {
+        let _ = self
+            .requests
+            .send(Message::Configure(converter, limit_bytes));
+    }
+
+    /// Check the converter and the cache's size (answered by `Status`).
+    pub fn check(&self) {
+        let _ = self.requests.send(Message::Check);
+    }
+
+    /// Empty the DNG cache (they're made again as needed).
+    pub fn clear_cache(&self) {
+        let _ = self.requests.send(Message::ClearCache);
+    }
+
     /// Queue an edit's preview (after any photo being opened).
     pub fn preview(&self, p: PreviewJob) {
         let _ = self.requests.send(Message::Preview(Box::new(p)));
@@ -128,7 +161,8 @@ fn worker(
         let _ = events.send(e);
         repaint();
     };
-    let dngs = DngCache::new(cache_dir, shoebox_develop::dng::DEFAULT_LIMIT);
+    let mut dngs = DngCache::new(cache_dir, shoebox_develop::dng::DEFAULT_LIMIT);
+    let mut converter: Option<PathBuf> = None;
     let previews = cache_dir.join("edited");
     let mut kept: Vec<Ready> = Vec::new();
     let mut open: Option<Request> = None;
@@ -151,6 +185,20 @@ fn worker(
                     queue.retain(|q| q.id != p.id);
                     queue.push_back(*p);
                 }
+                Message::Configure(path, limit) => {
+                    converter = path;
+                    dngs = DngCache::new(cache_dir, limit);
+                    if let Err(e) = dngs.evict(None) {
+                        tracing::warn!("DNG cache: {e}");
+                    }
+                }
+                Message::Check => emit(Event::Status(status(converter.as_deref(), &dngs))),
+                Message::ClearCache => {
+                    if let Err(e) = dngs.clear() {
+                        tracing::warn!("clearing the DNG cache: {e}");
+                    }
+                    emit(Event::Status(status(converter.as_deref(), &dngs)));
+                }
             }
         }
         if let Some(r) = open.take() {
@@ -159,7 +207,7 @@ fn worker(
                     let k = kept.remove(hit);
                     Ok(Some(k))
                 }
-                None => prepare(&r, &dngs, &emit),
+                None => prepare(&r, converter.as_deref(), &dngs, &emit),
             };
             match ready {
                 Ok(Some(ready)) => {
@@ -175,7 +223,7 @@ fn worker(
             continue;
         }
         if let Some(p) = queue.pop_front() {
-            match preview(&p, &previews, &dngs, &kept) {
+            match preview(&p, &previews, converter.as_deref(), &dngs, &kept) {
                 Ok(true) => emit(Event::PreviewReady(p.id, p.key)),
                 Ok(false) => {}
                 Err(e) => tracing::warn!("previewing the edit of {}: {e}", p.path.display()),
@@ -186,9 +234,17 @@ fn worker(
 
 /// Render an edit's preview JPEG unless it exists. False when it can't be
 /// made yet (a High efficiency NEF without the converter).
+fn status(converter: Option<&std::path::Path>, dngs: &DngCache) -> RawStatus {
+    RawStatus {
+        converter: Converter::find(converter).map(|c| (c.program().to_path_buf(), c.version())),
+        cache_bytes: dngs.size().unwrap_or(0),
+    }
+}
+
 fn preview(
     p: &PreviewJob,
     dir: &std::path::Path,
+    converter: Option<&std::path::Path>,
     dngs: &DngCache,
     kept: &[Ready],
 ) -> Result<bool, String> {
@@ -206,7 +262,7 @@ fn preview(
                 format: p.format,
                 raw,
             };
-            match prepare(&r, dngs, &|_| {})? {
+            match prepare(&r, converter, dngs, &|_| {})? {
                 Some(k) => k,
                 None => return Ok(false),
             }
@@ -238,13 +294,18 @@ fn preview(
 
 /// Decode and demosaic one photo; None if it needs the converter and it
 /// isn't installed.
-fn prepare(r: &Request, dngs: &DngCache, emit: &dyn Fn(Event)) -> Result<Option<Ready>, String> {
+fn prepare(
+    r: &Request,
+    converter: Option<&std::path::Path>,
+    dngs: &DngCache,
+    emit: &dyn Fn(Event),
+) -> Result<Option<Ready>, String> {
     if r.format != shoebox_decode::Format::Nef {
         return finished(r).map(Some);
     }
     let bytes = std::fs::read(&r.path).map_err(|e| format!("{}: {e}", r.path.display()))?;
     let source = if shoebox_develop::dng::needs_dng(&bytes) {
-        let Some(conv) = Converter::find(None) else {
+        let Some(conv) = Converter::find(converter) else {
             return Ok(None);
         };
         let key = DngCache::key(&bytes);

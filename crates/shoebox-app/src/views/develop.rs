@@ -227,6 +227,10 @@ pub fn poll(app: &mut ShoeboxApp) {
             app.preview_ready(id, key);
             continue;
         }
+        if let Event::Status(s) = ev {
+            app.raw_status = Some(s);
+            continue;
+        }
         let st = &mut app.develop;
         match ev {
             Event::Ready(r) if Some(r.id) == st.photo => {
