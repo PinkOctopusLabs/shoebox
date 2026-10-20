@@ -319,6 +319,10 @@ pub struct LoupeState {
     pub pan: egui::Vec2,
     /// The photo the zoom belongs to: another photo starts at Fit.
     pub photo: Option<PhotoId>,
+    /// Showing an edited photo as it was before the edit (\).
+    pub original: bool,
+    /// What was last drawn: the original or not, and the image's size.
+    pub drawn: Option<(bool, [usize; 2])>,
 }
 
 /// A folder in the left panel, with the recursive count of photos (stacks
@@ -863,6 +867,12 @@ impl ShoeboxApp {
     /// (tests).
     pub fn export_asking(&self) -> bool {
         self.export.clashes.is_some()
+    }
+
+    /// What the loupe last drew: the photo before its edit or not, and the
+    /// image's size (tests).
+    pub fn loupe_drawn(&self) -> Option<(bool, [usize; 2])> {
+        self.loupe.drawn
     }
 
     /// Edit files the last scan couldn't find a photo for (tests).
@@ -3209,18 +3219,34 @@ impl ShoeboxApp {
     }
 
     pub(crate) fn want(&mut self, idx: usize, size: Size, priority: Priority) {
-        self.want_job(idx, size, priority, false);
+        self.want_job(idx, size, priority, false, false);
     }
 
     /// Like [`Self::want`] for the photo being opened: one in the cloud only
     /// is downloaded (elsewhere only its cached thumbnails show).
     pub(crate) fn want_open(&mut self, idx: usize, size: Size) {
-        self.want_job(idx, size, Priority::Visible, true);
+        self.want_job(idx, size, Priority::Visible, true, false);
     }
 
-    fn want_job(&mut self, idx: usize, size: Size, priority: Priority, open: bool) {
+    /// The photo being opened as it was before its edit, under
+    /// [`crate::jobs::original_id`].
+    pub(crate) fn want_original(&mut self, idx: usize, size: Size) {
+        self.want_job(idx, size, Priority::Visible, true, true);
+    }
+
+    /// Whether this photo shows an edit.
+    pub(crate) fn is_edited(&self, idx: usize) -> bool {
+        self.edited.contains_key(&self.catalog.photos[idx].path)
+    }
+
+    fn want_job(&mut self, idx: usize, size: Size, priority: Priority, open: bool, original: bool) {
+        let id = self.ids[idx];
         let key = Key {
-            photo: self.ids[idx],
+            photo: if original {
+                crate::jobs::original_id(id)
+            } else {
+                id
+            },
             size,
         };
         if self.textures.contains(&key) || self.textures.failed.contains_key(&key) {
@@ -3243,7 +3269,7 @@ impl ShoeboxApp {
                 edited: self
                     .edited
                     .get(&p.path)
-                    .filter(|k| self.previews_ready.contains(*k))
+                    .filter(|k| !original && self.previews_ready.contains(*k))
                     .map(|k| self.developer.preview_path(k)),
                 cloud: p.cloud && !open,
                 keep: true,
@@ -3594,6 +3620,9 @@ impl ShoeboxApp {
         }
         if pressed(egui::Key::Enter) && self.current.is_some() && self.view != View::Develop {
             self.set_view(View::Loupe);
+        }
+        if pressed(egui::Key::Backslash) && self.view == View::Loupe {
+            self.loupe.original = !self.loupe.original;
         }
         if pressed(egui::Key::D) && self.view != View::Develop {
             self.set_view(View::Develop);

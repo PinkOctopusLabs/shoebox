@@ -34,6 +34,14 @@ pub fn photo_id(path: &std::path::Path) -> PhotoId {
     h.finish()
 }
 
+/// The id an edited photo's unedited image is kept under (the loupe's \).
+pub fn original_id(id: PhotoId) -> PhotoId {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (id, "original").hash(&mut h);
+    h.finish()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Size {
     /// 256 px, cached on disk.

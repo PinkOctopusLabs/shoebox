@@ -3412,6 +3412,30 @@ fn develop_a_jpeg() {
     let doc = h.state().develop_doc().unwrap();
     assert_eq!(doc.settings().geometry.quarter, 0);
     assert_eq!(doc.history().last().unwrap().label, "Snapshot: Upright");
+
+    // Turned, and back in the library: the loupe shows the edit (portrait);
+    // \ shows the photo before it (landscape), and again the edit.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::CloseBracket);
+    h.run_steps(4);
+    h.key_press(egui::Key::Escape);
+    wait_for(&mut h, Duration::from_secs(30), "edited preview", |a| {
+        a.edited_previews() == (1, 1)
+    });
+    h.key_press(egui::Key::Enter);
+    wait_for(&mut h, Duration::from_secs(20), "edit in the loupe", |a| {
+        a.loupe_drawn().is_some_and(|(_, [w, h])| w < h)
+    });
+    h.key_press(egui::Key::Backslash);
+    wait_for(
+        &mut h,
+        Duration::from_secs(20),
+        "original in the loupe",
+        |a| a.loupe_drawn() == Some((true, [800, 600])),
+    );
+    snapshot(&mut h, "loupe-original");
+    h.key_press(egui::Key::Backslash);
+    h.run_steps(2);
+    assert!(!h.state().loupe_drawn().unwrap().0);
 }
 
 /// A photo renamed in Finder keeps its edit: after the scan the edit is

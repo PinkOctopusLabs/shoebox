@@ -1,7 +1,7 @@
 //! Loupe: one image, fit to the window. Shows the 1024 px thumbnail at once,
 //! then the full decode. Space/Z toggles fit and 100%; pinch or ⌘-scroll
 //! zooms about the cursor; scroll or drag pans; arrows move (handled in app).
-//! Each photo opens at Fit.
+//! Each photo opens at Fit. \ shows an edited photo as it was before.
 
 use eframe::egui::{self, Color32, Rect, RichText, pos2, vec2};
 
@@ -38,8 +38,26 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, Color32::from_gray(18));
 
+    let original = app.loupe.original && app.is_edited(idx);
+    if original {
+        app.want_original(idx, Size::Large);
+        app.want_original(idx, Size::Full);
+    }
     let photo = &app.catalog.photos[idx];
-    let tex = app.textures.best(id, Size::Full);
+    let before = original
+        .then(|| app.textures.best(crate::jobs::original_id(id), Size::Full))
+        .flatten();
+    app.loupe.drawn = None;
+    let tex = match before {
+        Some(t) => {
+            app.loupe.drawn = Some((true, t.size()));
+            Some(t)
+        }
+        // The edit stays until the original arrives.
+        None => app.textures.best(id, Size::Full).inspect(|t| {
+            app.loupe.drawn = Some((false, t.size()));
+        }),
+    };
     // Full-resolution size in image pixels: from metadata, else the texture.
     let full = match (photo.meta.width, photo.meta.height, &tex) {
         (Some(w), Some(h), _) => vec2(w as f32, h as f32),
@@ -122,6 +140,20 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 Color32::GRAY,
             );
         }
+    }
+    if original {
+        let failed = [Size::Large, Size::Full].iter().any(|&size| {
+            app.textures.failed.contains_key(&crate::jobs::Key {
+                photo: crate::jobs::original_id(id),
+                size,
+            })
+        });
+        let text = if failed {
+            "Original can't be shown: showing the edit"
+        } else {
+            "Original"
+        };
+        super::develop::chip(&painter, rect.left_top() + vec2(10.0, 10.0), text);
     }
     let pct = scale * ppp * 100.0;
     let label = if app.loupe.zoom == Zoom::Fit {

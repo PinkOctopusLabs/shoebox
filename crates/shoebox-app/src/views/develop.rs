@@ -1125,7 +1125,7 @@ fn zoomed_region(
 }
 
 /// A small label over the photo.
-fn chip(painter: &egui::Painter, at: egui::Pos2, text: &str) {
+pub(crate) fn chip(painter: &egui::Painter, at: egui::Pos2, text: &str) {
     let galley = painter.layout_no_wrap(
         text.to_owned(),
         egui::FontId::proportional(12.0),
