@@ -60,6 +60,8 @@ pub struct Ready {
     /// Already upright (decoded by ImageIO, as HEIC is): don't apply the
     /// EXIF orientation again.
     pub upright: bool,
+    /// What Auto measured (raw photos prepared for Develop).
+    pub auto: Option<shoebox_develop::auto::Stats>,
 }
 
 /// Render an edit's preview (for the grid, loupe and the rest) unless it's
@@ -645,16 +647,29 @@ fn prepare(
             ..(**shot).clone()
         })
     });
+    // For Auto (when preparing for Develop): the camera's own JPEG.
+    let camera_jpeg = long_edge.and_then(|_| {
+        shoebox_decode::render(
+            shoebox_decode::Format::Nef,
+            &bytes,
+            Some(512),
+            1,
+            shoebox_decode::Target::Srgb,
+        )
+        .ok()
+    });
     drop(bytes);
     let mut raw = shoebox_decode::raw::decode_path(&source).map_err(|e| e.to_string())?;
     let src = cpu::demosaic(&raw, &r.raw, long_edge).with_lens(lens);
     raw.data = Vec::new();
+    let auto = long_edge.map(|_| shoebox_develop::auto::measure(&raw, &src, camera_jpeg.as_ref()));
     Ok(Some(Ready {
         id: r.id,
         raw: r.raw.clone(),
         meta: Arc::new(raw),
         src: Arc::new(src),
         upright: false,
+        auto,
     }))
 }
 
@@ -706,6 +721,7 @@ fn finished_image(r: &Request, long_edge: Option<u32>) -> Result<Ready, String> 
         }),
         src: Arc::new(src),
         upright: r.format == Format::Heic,
+        auto: None,
     })
 }
 

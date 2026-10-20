@@ -1606,3 +1606,39 @@ with the frame. Auto-upright (line detection) is Phase 3.
   follow on top of this.
 - The two "+" buttons in Develop's left panel now have their own names for
   VoiceOver ("New snapshot", "New preset").
+
+## Auto (2026-10-20)
+
+- **Measured as the photo is prepared, applied as numbers.** The develop
+  thread measures each raw photo as it prepares it, using the proxy and,
+  for a NEF, its embedded camera JPEG decoded from bytes it has already
+  read. `auto::settings` turns those measurements into ordinary slider
+  values. A photo with no edit gets them as its first history step
+  ("Auto"), and the Auto button runs it again. A preset chosen in Settings
+  → Raw replaces Auto for new photos, and Auto can be turned off there.
+  Finished images (JPEG, TIFF, PNG) get no Auto: they're already rendered.
+- **The rules,** tuned by eye so far (the 30-NEF review in MANUAL-CHECKS
+  will refine them):
+  - **Exposure:** brings the 99.5th percentile to where the default curve
+    shows 0.95 (clamped to ±2 stops), then halfway towards the exposure
+    that matches the camera JPEG's median.
+  - **Noise reduction by ISO:** luminance 10 per stop above ISO 400 (up to
+    60); colour 20 + 6 per stop above ISO 100 (up to 50).
+  - **Sharpening:** 30, masking 20.
+  - **Dehaze:** only when the darkest channel's median is over a quarter
+    of the highlights.
+  - **Shadows +15:** when over 30% of the frame is four stops under mid
+    grey, standing in for Smart Lighting until Phase 3.
+  - **Lens corrections:** on when there's a profile.
+- **Two fixes found on the real NEF.**
+  - The noise estimate fitted its line with bins spaced linearly up to the
+    brightest block, so a night scene's blocks all fell in one bin. Bright
+    bins then set the read noise to σ ≈ 3% of white, and Auto's noise
+    reduction turned the shadows into a grey veil with no colour. Bins are
+    now in stops, and the fit is weighted by relative error: σ ≈ 0.03%
+    there.
+  - A slider holding a value finer than its decimals (Auto's 0.35 is
+    0.35000000000000003) "changed" on display, adding a spurious history
+    step. Changes below half a displayed step are now ignored unless the
+    slider is in use. And a press that moves a slider is now part of the
+    drag that follows, so they make one step, not two.

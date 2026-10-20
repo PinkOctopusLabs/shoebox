@@ -72,6 +72,12 @@ pub struct Settings {
     /// is idle.
     #[serde(default)]
     pub preconvert: bool,
+    /// Develop: don't apply Auto to a photo the first time it's opened.
+    #[serde(default)]
+    pub develop_auto_off: bool,
+    /// Develop: this preset (by name) instead of Auto for new photos.
+    #[serde(default)]
+    pub new_photo_preset: Option<String>,
 }
 
 /// Default for [`Settings::dng_cache_gb`].

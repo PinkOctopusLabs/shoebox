@@ -79,6 +79,25 @@ fn main() {
             })
         });
         let src = cpu::demosaic(&raw, &s.modules.raw, o.long_edge).with_lens(shot);
+        // `SHOEBOX_AUTO=1`: Auto's measurements (with the embedded camera
+        // JPEG) and settings, printed and used.
+        if std::env::var("SHOEBOX_AUTO").is_ok_and(|v| v == "1") {
+            let jpeg = shoebox_decode::render(
+                shoebox_decode::Format::Nef,
+                &bytes,
+                Some(512),
+                1,
+                shoebox_decode::Target::Srgb,
+            )
+            .ok();
+            let stats = shoebox_develop::auto::measure(&raw, &src, jpeg.as_ref());
+            let iso = std::env::var("SHOEBOX_ISO")
+                .ok()
+                .and_then(|v| v.parse().ok());
+            s = shoebox_develop::auto::settings(&s, &stats, iso, src.lens.is_some());
+            println!("auto: {stats:?}");
+            println!("      {}", s.to_value());
+        }
         let frame = cpu::frame(&raw, &src, &s, &o);
         let img = cpu::apply_from(&src, &s, &frame, true);
         let t_all = t.elapsed();

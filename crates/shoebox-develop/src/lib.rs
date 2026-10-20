@@ -5,6 +5,7 @@
 //! - [`edit`]: the edit document: settings that differ from the defaults,
 //!   with undoable history.
 
+pub mod auto;
 pub mod colour;
 pub mod cpu;
 pub mod dng;

@@ -446,6 +446,34 @@ fn raw(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &mut Settings) {
         ui.ctx().request_repaint();
     }
     let status = app.raw_status.clone().unwrap_or_default();
+    ui.label(egui::RichText::new("New photos in Develop").strong());
+    let mut auto = !s.develop_auto_off;
+    ui.checkbox(&mut auto, "Apply Auto the first time a raw photo is opened");
+    s.develop_auto_off = !auto;
+    ui.horizontal(|ui| {
+        ui.label("Or start them from the preset");
+        let chosen = s.new_photo_preset.clone();
+        egui::ComboBox::from_id_salt("new-photo-preset")
+            .selected_text(chosen.as_deref().unwrap_or("(none)"))
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(chosen.is_none(), "(none)").clicked() {
+                    s.new_photo_preset = None;
+                }
+                for p in &app.develop.looks {
+                    let on = chosen.as_deref() == Some(p.name.as_str());
+                    if ui.selectable_label(on, &p.name).clicked() {
+                        s.new_photo_preset = Some(p.name.clone());
+                    }
+                }
+            });
+    });
+    note(
+        ui,
+        "Auto sets exposure, noise reduction, sharpening, dehaze and lens corrections from \
+         the photo itself, as ordinary slider values you can change. A preset chosen here \
+         replaces it.",
+    );
+    ui.add_space(8.0);
     ui.label(egui::RichText::new("Adobe DNG Converter").strong());
     match &status.converter {
         Some((path, version)) => {

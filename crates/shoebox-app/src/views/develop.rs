@@ -98,6 +98,9 @@ pub struct State {
     pub histogram: Option<Box<[[u32; 256]; 4]>>,
     /// The snapshot being renamed, and its name so far.
     renaming: Option<(usize, String)>,
+    /// A new photo (no edit yet): its first look (Auto, or the chosen
+    /// preset) is applied once it's prepared.
+    auto_due: bool,
     /// Edit presets (loaded once; kept from photo to photo).
     pub looks: Vec<shoebox_develop::preset::Preset>,
     /// Settings shown instead of the edit while a preset is hovered.
@@ -290,13 +293,69 @@ pub fn edit_loaded(app: &mut ShoeboxApp, root: PathBuf, rel: String, json: Optio
         }
         None => fresh(),
     };
+    app.develop.auto_due = json.is_none();
     app.develop.doc = Some(doc);
+}
+
+/// A new photo's first look, once its edit and its preparation are both
+/// in: the preset chosen for new photos, else Auto (unless turned off).
+fn first_look(app: &mut ShoeboxApp) {
+    let st = &app.develop;
+    if !st.auto_due || st.read_only {
+        return;
+    }
+    let (Some(ready), Some(_)) = (&st.ready, &st.doc) else {
+        return;
+    };
+    if Some(ready.id) != st.photo {
+        return;
+    }
+    app.develop.auto_due = false;
+    if let Some(name) = app.settings.new_photo_preset.clone()
+        && let Some(p) = app.develop.looks.iter().find(|p| p.name == name).cloned()
+    {
+        edit(app, "preset", format!("Preset {name}"), false, |s| {
+            *s = p.apply(s, 1.0)
+        });
+        return;
+    }
+    if !app.settings.develop_auto_off {
+        run_auto(app);
+    }
+}
+
+/// Auto on the photo in Develop, as a step (raw photos: it's measured as
+/// they're prepared).
+pub fn run_auto(app: &mut ShoeboxApp) {
+    let st = &app.develop;
+    let Some(ready) = &st.ready else { return };
+    let Some(stats) = ready.auto else { return };
+    let iso = st
+        .photo
+        .and_then(|id| app.photo(id))
+        .and_then(|p| p.meta.exif.iso);
+    let size = if ready.meta.width > 0 {
+        (ready.meta.width, ready.meta.height)
+    } else {
+        (ready.src.rgb.width, ready.src.rgb.height)
+    };
+    let lens = ready.src.lens.as_ref().is_some_and(|shot| {
+        let on = shoebox_develop::edit::LensCorrection {
+            enabled: true,
+            ..Default::default()
+        };
+        shoebox_develop::lens::grid(shot, &on, size.0, size.1).is_some()
+    });
+    edit(app, "auto", "Auto".into(), false, |s| {
+        *s = shoebox_develop::auto::settings(s, &stats, iso, lens);
+    });
 }
 
 /// Start of a frame in Develop (before the panels draw): take the develop
 /// thread's news and follow the current photo.
 pub fn tick(app: &mut ShoeboxApp) {
     follow(app);
+    first_look(app);
 }
 
 /// Take the develop thread's news (every frame: previews arrive in any
@@ -1295,7 +1354,18 @@ pub(super) fn slider(
     if r.dragged() && ui.input(|i| i.modifiers.shift_only()) {
         v = fine(value, r.drag_delta().x, range, width, decimals);
     }
-    ((r.changed() || r.dragged()) && v != value).then_some((v, r.dragged()))
+    // Held down counts as dragging, so a press that moves the value and the
+    // drag after it are one step.
+    let held = r.dragged()
+        || r.is_pointer_button_down_on()
+        || (r.contains_pointer() && ui.input(|i| i.pointer.any_down()));
+    // The slider rounds a value it shows to its decimals (Auto's 0.35 is
+    // 0.35000000000000003): that's no edit unless someone is using it.
+    let tiny = (v - value).abs() < 0.5 * 10f64.powi(-(decimals as i32));
+    if tiny && !held && !r.has_focus() {
+        return None;
+    }
+    ((r.changed() || r.dragged()) && v != value).then_some((v, held))
 }
 
 /// `value` moved by a drag of `dx` points at a tenth of the slider's speed,
@@ -1420,9 +1490,22 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         ui.separator();
     }
     let st = &app.develop;
-    let (Some(doc), Some(ready)) = (&st.doc, &st.ready) else {
+    let (Some(_), Some(ready)) = (&st.doc, &st.ready) else {
         ui.add_space(40.0);
         ui.vertical_centered(|ui| ui.weak("Preparing…"));
+        return;
+    };
+    let can_auto = ready.auto.is_some() && !st.read_only;
+    if ui
+        .add_enabled(can_auto, egui::Button::new("Auto"))
+        .on_hover_text("Exposure, noise reduction, sharpening, dehaze and lens corrections from the photo itself")
+        .clicked()
+    {
+        run_auto(app);
+        return;
+    }
+    let st = &app.develop;
+    let (Some(doc), Some(ready)) = (&st.doc, &st.ready) else {
         return;
     };
     let s = doc.settings().clone();

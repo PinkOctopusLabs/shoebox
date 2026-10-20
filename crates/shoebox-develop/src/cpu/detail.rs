@@ -249,17 +249,24 @@ fn fit(pts: &[(f64, f64)]) -> Option<(f64, f64)> {
     if pts.len() < 2 {
         return None;
     }
-    let n = pts.len() as f64;
-    let (sx, sy) = pts.iter().fold((0.0, 0.0), |s, p| (s.0 + p.0, s.1 + p.1));
-    let (mx, my) = (sx / n, sy / n);
-    let cov: f64 = pts.iter().map(|p| (p.0 - mx) * (p.1 - my)).sum();
-    let var: f64 = pts.iter().map(|p| (p.0 - mx).powi(2)).sum();
-    let slope = if var > 0.0 {
-        (cov / var).max(1e-8)
+    // Weighted by relative error (1/v²), so the dark bins, where read
+    // noise shows, count as much as the bright ones.
+    let (mut s, mut sx, mut sy, mut sxx, mut sxy) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    for &(x, y) in pts {
+        let w = 1.0 / (y * y).max(1e-30);
+        s += w;
+        sx += w * x;
+        sy += w * y;
+        sxx += w * x * x;
+        sxy += w * x * y;
+    }
+    let det = s * sxx - sx * sx;
+    let slope = if det > 0.0 {
+        ((s * sxy - sx * sy) / det).max(1e-8)
     } else {
         1e-8
     };
-    Some((slope, (my - slope * mx).max(1e-10)))
+    Some((slope, ((sy - slope * sx) / s).max(1e-10)))
 }
 
 /// Estimate the noise from the flattest blocks: per channel, local means
@@ -307,7 +314,10 @@ pub fn estimate(img: &Rgb) -> Noise {
             if *m <= 0.0 || *v <= 1e-12 {
                 continue; // black or clipped: no noise to see
             }
-            let i = ((m / hi) * BINS as f32).min(BINS as f32 - 1.0) as usize;
+            // Bins by stops below the brightest block (a night scene's
+            // blocks are mostly a hundredth of its lights).
+            let stops = (hi / m).log2().clamp(0.0, BINS as f32 - 1.0);
+            let i = stops as usize;
             bins[i].push(*v);
             means[i] += f64::from(*m);
         }

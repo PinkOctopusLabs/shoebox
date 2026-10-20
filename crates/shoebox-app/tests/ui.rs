@@ -3130,6 +3130,15 @@ fn develop_a_raw_photo() {
     h.run_steps(3);
     snapshot(&mut h, "develop");
 
+    // What Auto set as the photo opened.
+    let auto_ev = h
+        .state()
+        .develop_doc()
+        .unwrap()
+        .settings()
+        .modules
+        .exposure
+        .ev;
     // Drag Exposure (the third slider: temperature, tint, exposure).
     let r = h
         .get_all_by_role(egui::accesskit::Role::Slider)
@@ -3154,7 +3163,10 @@ fn develop_a_raw_photo() {
     let doc = h.state().develop_doc().unwrap();
     let ev = doc.settings().modules.exposure.ev;
     assert!(ev > 0.1, "{ev}");
-    assert_eq!(doc.history().len(), 1, "one drag, one step");
+    // Auto ran as the photo opened (a step of its own); the drag is one more.
+    let labels: Vec<_> = doc.history().iter().map(|s| s.label.clone()).collect();
+    assert_eq!(labels.len(), 2, "one drag, one step: {labels:?}");
+    assert_eq!(labels[0], "Auto");
     snapshot(&mut h, "develop-brighter");
 
     // Y: the original on the left, the edit on the right; drag the divider.
@@ -3208,7 +3220,7 @@ fn develop_a_raw_photo() {
             .modules
             .exposure
             .ev,
-        0.0
+        auto_ev
     );
 
     // R: crop. Drag the left edge in a quarter of the way; Enter applies it
@@ -3260,7 +3272,7 @@ fn develop_a_raw_photo() {
         std::fs::read_to_string(&file)
             .ok()
             .and_then(|s| shoebox_develop::edit::EditDoc::from_json(&s).ok())
-            .is_some_and(|d| d.settings().modules.exposure.ev == 0.0)
+            .is_some_and(|d| d.settings().modules.exposure.ev == auto_ev)
     });
     assert_eq!(
         std::fs::read(root.join("2026/DSC_0001.NEF")).unwrap(),
@@ -3269,14 +3281,16 @@ fn develop_a_raw_photo() {
 
     // The grid shows the edit (it's cropped): a preview is made in the
     // cache, and the tile is badged.
+    // (One per state the edit settled in: Auto's, the drag's, the undo's.)
     wait_for(&mut h, Duration::from_secs(30), "edited preview", |a| {
-        a.edited_previews() == (1, 1)
+        let (edited, ready) = a.edited_previews();
+        edited == 1 && ready >= 1
     });
     let previews: Vec<_> = std::fs::read_dir(t.path().join("cache/edited"))
         .unwrap()
         .filter_map(|e| e.ok())
         .collect();
-    assert_eq!(previews.len(), 1);
+    assert_eq!(previews.len(), h.state().edited_previews().1);
     settle(&mut h, Duration::from_secs(30));
     snapshot(&mut h, "develop-edited-grid");
 }
