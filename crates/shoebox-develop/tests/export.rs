@@ -135,3 +135,26 @@ fn replacing_when_chosen() {
     let c = write_replacing(t.path(), "other", "jpg", b"three").unwrap();
     assert_eq!(std::fs::read(c).unwrap(), b"three");
 }
+
+/// A link planted in the export folder is never written through.
+#[cfg(unix)]
+#[test]
+fn replacing_never_writes_through_a_link() {
+    let t = tempfile::tempdir().unwrap();
+    let victim = t.path().join("victim.txt");
+    std::fs::write(&victim, b"keep me").unwrap();
+    let dir = t.path().join("exports");
+    std::fs::create_dir_all(&dir).unwrap();
+    // The old fixed temporary name, and the destination itself, as links.
+    std::os::unix::fs::symlink(&victim, dir.join(".photo.jpg.shoebox-export")).unwrap();
+    std::os::unix::fs::symlink(&victim, dir.join("photo.jpg")).unwrap();
+    let out = write_replacing(&dir, "photo", "jpg", b"new").unwrap();
+    assert_eq!(std::fs::read(&victim).unwrap(), b"keep me");
+    assert!(
+        !std::fs::symlink_metadata(&out)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(std::fs::read(&out).unwrap(), b"new");
+}

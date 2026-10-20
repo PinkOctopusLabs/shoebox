@@ -367,20 +367,21 @@ pub fn write_new(dir: &Path, stem: &str, ext: &str, bytes: &[u8]) -> Result<Path
 
 /// Write `bytes` as `<dir>/<stem>.<ext>`, replacing a file already there
 /// (the person chose to): written beside it first, then renamed over it, so
-/// a failed write leaves the old file as it was.
+/// a failed write leaves the old file as it was. The temporary file has a
+/// random name and is created exclusively, so nothing already in the folder
+/// (a symlink, say) is ever opened or written through; the rename replaces
+/// a link at the destination itself, not what it points to.
 pub fn write_replacing(dir: &Path, stem: &str, ext: &str, bytes: &[u8]) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let path = dir.join(format!("{stem}.{ext}"));
-    let tmp = dir.join(format!(".{stem}.{ext}.shoebox-export"));
-    let written = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&tmp)
-        .and_then(|mut f| f.write_all(bytes).and_then(|()| f.sync_all()));
-    if let Err(e) = written.and_then(|()| std::fs::rename(&tmp, &path)) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("{}: {e}", path.display()));
-    }
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".shoebox-export-")
+        .tempfile_in(dir)
+        .map_err(|e| format!("{}: {e}", dir.display()))?;
+    tmp.write_all(bytes)
+        .and_then(|()| tmp.as_file().sync_all())
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    tmp.persist(&path)
+        .map_err(|e| format!("{}: {}", path.display(), e.error))?;
     Ok(path)
 }
