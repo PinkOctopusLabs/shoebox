@@ -6044,6 +6044,7 @@ name = "shoebox-develop"
 version = "0.2.3"
 dependencies = [
  "blake3",
+ "criterion",
  "jiff",
  "jpeg-encoder",
  "json-patch",

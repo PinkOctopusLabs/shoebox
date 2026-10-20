@@ -11,6 +11,7 @@ pub mod dng;
 pub mod edit;
 pub mod encode;
 pub mod export;
+pub mod golden;
 pub mod gpu;
 pub mod wb;
 

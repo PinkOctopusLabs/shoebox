@@ -1356,3 +1356,30 @@ are planned before anything is written, in the photos' order, so the
 `-1`, `-2` suffixes don't depend on which thread finishes first. Writes still
 never overwrite (rule 4); Replace replaces only files that were there before
 the export.
+
+## Golden images and benchmarks (2026-10-20)
+
+- **Goldens are 16-bit TIFFs, not EXR.** They are display-encoded renders,
+  which is what the ΔE2000 comparison measures, and 16 bits is far finer
+  than the 0.5 mean limit. `tiff` is already a dependency; an EXR writer
+  would add one for nothing. The comparison treats both sRGB and Display P3
+  with the sRGB curve.
+- **Two sets.** A synthetic set (three edits of a generated DNG) is
+  committed under `crates/shoebox-develop/tests/golden/` and runs in CI. The
+  real set (the 30 definition-of-done NEFs and their edit documents) stays
+  outside git and runs with `SHOEBOX_GOLDEN_DIR`. Real files are rendered on
+  the CPU at a 2048 px long edge, to keep the run short; the GPU pipe is
+  already held to the CPU one within 1e-4. Each set's `manifest.json`
+  records the process version, and a mismatch fails until the goldens are
+  blessed again (`SHOEBOX_GOLDEN_BLESS=1`). That makes a process-version
+  bump a deliberate regeneration, as the spec asks.
+- **Benchmarks aren't a CI gate yet.** `benches/pipeline.rs` covers decode,
+  demosaic (proxy and full), the proxy render and export. The spec's "fail
+  CI on a >20% regression" needs a stable machine and a stored baseline;
+  GitHub's shared runners vary by more than 20% from run to run. For now
+  the check is local: save a baseline on main, run the branch against it,
+  then `examples/bench_check.rs` fails on any mean more than 20% slower.
+  First numbers on this Mac (synthetic 24 MP): decode 28 ms, RCD 187 ms
+  (proxy and full alike: it demosaics at full size, then downscales), CPU
+  proxy render 55 ms (the live GPU pipe is the one held to 33 ms), Lanczos
+  to 2048 px 23 ms, JPEG encode 184 ms.

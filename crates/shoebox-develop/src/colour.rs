@@ -1,6 +1,7 @@
 //! Colour maths shared by the CPU reference pipe and the shaders' setup:
 //! 3×3 matrices, RGB spaces from their primaries, Bradford adaptation, and
-//! colour temperature and tint (Robertson's method, as the DNG SDK uses it).
+//! colour temperature and tint (Robertson's method, as the DNG SDK uses it),
+//! CIELAB and ΔE2000 (golden-image and colour-accuracy tests).
 
 // Channel and matrix loops read clearer indexed (c, r) than zipped.
 #![allow(clippy::needless_range_loop)]
@@ -214,6 +215,81 @@ pub fn temp_tint_to_xy(temp: f64, tint: f64) -> Xy {
     D50
 }
 
+/// CIELAB from XYZ, relative to `white` (Y of 1).
+pub fn xyz_to_lab(xyz: V3, white: Xy) -> V3 {
+    let w = xy_to_xyz(white);
+    let f = |t: f64| {
+        const D: f64 = 6.0 / 29.0;
+        if t > D * D * D {
+            t.cbrt()
+        } else {
+            t / (3.0 * D * D) + 4.0 / 29.0
+        }
+    };
+    let (fx, fy, fz) = (f(xyz[0] / w[0]), f(xyz[1] / w[1]), f(xyz[2] / w[2]));
+    [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
+}
+
+/// CIEDE2000 colour difference between two CIELAB colours (Sharma, Wu
+/// and Dalal 2005, with their test data).
+pub fn delta_e2000(a: V3, b: V3) -> f64 {
+    use std::f64::consts::PI;
+    let deg = |r: f64| r * 180.0 / PI;
+    let rad = |d: f64| d * PI / 180.0;
+    let (l1, a1, b1) = (a[0], a[1], a[2]);
+    let (l2, a2, b2) = (b[0], b[1], b[2]);
+    let c_bar = (a1.hypot(b1) + a2.hypot(b2)) / 2.0;
+    let c7 = c_bar.powi(7);
+    let g = 0.5 * (1.0 - (c7 / (c7 + 25f64.powi(7))).sqrt());
+    let (a1p, a2p) = ((1.0 + g) * a1, (1.0 + g) * a2);
+    let (c1p, c2p) = (a1p.hypot(b1), a2p.hypot(b2));
+    let hue = |b: f64, a: f64| {
+        if b == 0.0 && a == 0.0 {
+            0.0
+        } else {
+            deg(b.atan2(a)).rem_euclid(360.0)
+        }
+    };
+    let (h1p, h2p) = (hue(b1, a1p), hue(b2, a2p));
+    let dl = l2 - l1;
+    let dc = c2p - c1p;
+    let dh = if c1p * c2p == 0.0 {
+        0.0
+    } else if (h2p - h1p).abs() <= 180.0 {
+        h2p - h1p
+    } else if h2p - h1p > 180.0 {
+        h2p - h1p - 360.0
+    } else {
+        h2p - h1p + 360.0
+    };
+    let dh_big = 2.0 * (c1p * c2p).sqrt() * (rad(dh) / 2.0).sin();
+    let l_bar = (l1 + l2) / 2.0;
+    let c_bar_p = (c1p + c2p) / 2.0;
+    let h_bar = if c1p * c2p == 0.0 {
+        h1p + h2p
+    } else if (h1p - h2p).abs() <= 180.0 {
+        (h1p + h2p) / 2.0
+    } else if h1p + h2p < 360.0 {
+        (h1p + h2p + 360.0) / 2.0
+    } else {
+        (h1p + h2p - 360.0) / 2.0
+    };
+    let t = 1.0 - 0.17 * rad(h_bar - 30.0).cos()
+        + 0.24 * rad(2.0 * h_bar).cos()
+        + 0.32 * rad(3.0 * h_bar + 6.0).cos()
+        - 0.20 * rad(4.0 * h_bar - 63.0).cos();
+    let d_theta = 30.0 * (-((h_bar - 275.0) / 25.0).powi(2)).exp();
+    let cp7 = c_bar_p.powi(7);
+    let rc = 2.0 * (cp7 / (cp7 + 25f64.powi(7))).sqrt();
+    let l50 = (l_bar - 50.0).powi(2);
+    let sl = 1.0 + 0.015 * l50 / (20.0 + l50).sqrt();
+    let sc = 1.0 + 0.045 * c_bar_p;
+    let sh = 1.0 + 0.015 * c_bar_p * t;
+    let rt = -rad(2.0 * d_theta).sin() * rc;
+    let (x, y, z) = (dl / sl, dc / sc, dh_big / sh);
+    (x * x + y * y + z * z + rt * y * z).sqrt()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,6 +307,29 @@ mod tests {
                 "{temp} {tint}: {t2} {n2}"
             );
         }
+    }
+
+    /// Pairs from Sharma, Wu and Dalal's CIEDE2000 test data.
+    #[test]
+    fn delta_e2000_matches_the_published_pairs() {
+        for (a, b, want) in [
+            ([50.0, 2.6772, -79.7751], [50.0, 0.0, -82.7485], 2.0425),
+            ([50.0, 3.1571, -77.2803], [50.0, 0.0, -82.7485], 2.8615),
+            ([50.0, 2.8361, -74.0200], [50.0, 0.0, -82.7485], 3.4412),
+            ([50.0, 0.0, 0.0], [50.0, -1.0, 2.0], 2.3669),
+            ([50.0, 2.5, 0.0], [73.0, 25.0, -18.0], 27.1492),
+            (
+                [60.2574, -34.0099, 36.2677],
+                [60.4626, -34.1751, 39.4387],
+                1.2644,
+            ),
+        ] {
+            let d = delta_e2000(a, b);
+            assert!((d - want).abs() < 1e-4, "{a:?} {b:?}: {d} (want {want})");
+            assert!((delta_e2000(b, a) - d).abs() < 1e-9);
+        }
+        let white = xyz_to_lab(xy_to_xyz(D65), D65);
+        assert!((white[0] - 100.0).abs() < 1e-9 && white[1].abs() < 1e-9);
     }
 
     #[test]
