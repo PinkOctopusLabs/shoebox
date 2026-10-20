@@ -1720,3 +1720,17 @@ So the larger frame is the correction doing what the camera does: the
 edit is framed like the Z f's JPEG, and the Original shows the raw
 uncorrected. Chosen with the user: the camera's distortion stays first.
 Lensfun covers chromatic aberration, and anything the camera doesn't give.
+
+## History: one line per setting (2026-10-21)
+
+Every release of a slider, and every click of a checkbox, used to add a
+history line, so toggling lens corrections a few times filled the list.
+Now a change to the same control as the last step folds into that step
+(`EditDoc::amend`), whether or not the mouse was let go in between. A step
+that folds back to where it began is removed, so switching something off
+and on again leaves no line at all. The run ends when anything else
+changes, on undo or redo, on a jump in the history list, and when another
+photo or copy opens. Presets, Auto and Paste settings are always new steps,
+because each is an action of its own; a preset's Amount slider folds into
+the preset it scales. The tone curve counts as one setting, so dragging
+several points is one line.

@@ -121,7 +121,7 @@ pub fn panel(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         let before = current.clone();
         let label = format!("Preset {}", preset.name);
         let p = preset.clone();
-        edit(app, "preset", label, false, |s| *s = p.apply(&before, 1.0));
+        edit(app, "preset", label, |s| *s = p.apply(&before, 1.0));
         let at = app.develop.doc.as_ref().map_or(0, |d| d.at());
         app.develop.applied = Some(Applied {
             preset,
@@ -157,7 +157,7 @@ pub fn panel(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                     let amount = v / 100.0;
                     let label = format!("Preset {} {v:.0}%", a.preset.name);
                     let (p, before) = (a.preset.clone(), a.before.clone());
-                    edit(app, "preset-amount", label, r.dragged(), |s| {
+                    edit(app, "preset-amount", label, |s| {
                         *s = p.apply(&before, amount);
                     });
                     let at = app.develop.doc.as_ref().map_or(0, |d| d.at());
@@ -321,7 +321,7 @@ pub fn paste(app: &mut ShoeboxApp) {
     }
     if here && !app.develop.read_only {
         let p = preset.clone();
-        edit(app, "paste", "Paste settings".into(), false, |s| {
+        edit(app, "paste", "Paste settings".into(), |s| {
             *s = p.apply(s, 1.0)
         });
     }

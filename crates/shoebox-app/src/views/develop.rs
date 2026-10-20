@@ -67,8 +67,10 @@ pub struct State {
     /// Changed since the catalog was last given it / since the last save.
     changed: Option<Instant>,
     unsaved: Option<Instant>,
-    /// The slider being dragged: one drag is one history step.
-    dragging: Option<&'static str>,
+    /// The control that made the last history step, and the history's
+    /// length after it: more changes to the same setting fold into that
+    /// step rather than adding lines.
+    last: Option<(&'static str, usize)>,
     pub compare: Compare,
     /// Where the split's divider is, as a fraction of the image's width
     /// (0: not moved yet, the middle).
@@ -314,6 +316,7 @@ pub fn edit_loaded(
     // Only the master gets a first look; a copy starts as made.
     app.develop.auto_due = json.is_none() && copy == shoebox_core::edits::MAIN;
     app.develop.doc = Some(doc);
+    app.develop.last = None;
 }
 
 impl State {
@@ -498,7 +501,7 @@ fn first_look(app: &mut ShoeboxApp) {
     if let Some(name) = app.settings.new_photo_preset.clone()
         && let Some(p) = app.develop.looks.iter().find(|p| p.name == name).cloned()
     {
-        edit(app, "preset", format!("Preset {name}"), false, |s| {
+        edit(app, "preset", format!("Preset {name}"), |s| {
             *s = p.apply(s, 1.0)
         });
         return;
@@ -531,7 +534,7 @@ pub fn run_auto(app: &mut ShoeboxApp) {
         shoebox_develop::lens::grid(shot, &on, size.0, size.1).is_some()
     });
     let profile = shoebox_develop::auto::profile_for(&ready.meta.model);
-    edit(app, "auto", "Auto".into(), false, |s| {
+    edit(app, "auto", "Auto".into(), |s| {
         *s = shoebox_develop::auto::settings(s, &stats, iso, lens);
         s.modules.input_colour.profile = profile;
     });
@@ -1245,9 +1248,7 @@ pub fn turn(app: &mut ShoeboxApp, clockwise: bool) {
     } else {
         "Rotate left"
     };
-    edit(app, "turn", label.into(), false, |s| {
-        s.geometry.turn(clockwise)
-    });
+    edit(app, "turn", label.into(), |s| s.geometry.turn(clockwise));
     if let (Some(c), Some(doc)) = (&mut app.develop.crop, &app.develop.doc) {
         let g = &doc.settings().geometry;
         *c = super::crop::CropEdit::new(g.crop, &g.aspect);
@@ -1293,7 +1294,6 @@ fn pick_neutral(app: &mut ShoeboxApp, at: egui::Pos2) {
         app,
         "wb",
         format!("White balance picked ({temp:.0} K, {tint:+.0})"),
-        false,
         |s| {
             s.modules.white_balance = WhiteBalance {
                 mode: WbMode::Custom,
@@ -1322,7 +1322,7 @@ pub fn finish_crop(app: &mut ShoeboxApp, apply: bool) {
         return;
     };
     if apply {
-        edit(app, "crop", "Crop".into(), false, |s| {
+        edit(app, "crop", "Crop".into(), |s| {
             s.geometry.crop = c.rect;
             s.geometry.aspect = c.aspect.clone();
         });
@@ -1449,9 +1449,6 @@ pub(crate) fn chip(painter: &egui::Painter, at: egui::Pos2, text: &str) {
 /// Keep the edit after sliders settle, write it after a pause.
 fn tick_saving(app: &mut ShoeboxApp, ctx: &egui::Context) {
     let held = ctx.input(|i| i.pointer.any_down());
-    if !held {
-        app.develop.dragging = None;
-    }
     let st = &app.develop;
     if let Some(t) = st.changed
         && !held
@@ -1473,13 +1470,14 @@ fn tick_saving(app: &mut ShoeboxApp, ctx: &egui::Context) {
     }
 }
 
-/// Change the edit as one step (or, while `key`'s slider is dragged, fold
-/// into the step the drag began).
+/// Change the edit as one step, or, when the last step was the same
+/// setting's (`key`), fold into it: dragging a slider, or nudging it again,
+/// is one history line. Presets, Auto and pasting are always steps of their
+/// own.
 pub(super) fn edit(
     app: &mut ShoeboxApp,
     key: &'static str,
     label: String,
-    dragging: bool,
     f: impl FnOnce(&mut Settings),
 ) {
     let st = &mut app.develop;
@@ -1487,15 +1485,23 @@ pub(super) fn edit(
         return;
     }
     let Some(doc) = &mut st.doc else { return };
-    let changed = if st.dragging == Some(key) {
+    let before = doc.history().len();
+    // A preset's Amount folds into the preset it scales.
+    let fold = st.last.is_some_and(|(k, n)| {
+        n == before
+            && (k == key && !matches!(key, "preset" | "auto" | "paste")
+                || (k == "preset" && key == "preset-amount"))
+    });
+    let changed = if fold {
         doc.amend(&label, f)
     } else {
         doc.change(&label, f)
     };
-    if dragging {
-        st.dragging = Some(key);
-    }
     if changed {
+        // A step that folded back to where it began is gone: nothing to
+        // fold into.
+        let after = doc.history().len();
+        st.last = (after >= before).then_some((key, after));
         st.changed = Some(Instant::now());
         st.unsaved.get_or_insert_with(Instant::now);
         // Editing shows the edit (a split stays, to watch the change).
@@ -1513,14 +1519,14 @@ pub fn undo(app: &mut ShoeboxApp, redo: bool) {
         return;
     }
     let moved = if redo { doc.redo() } else { doc.undo() };
+    st.last = None;
     if moved {
         st.changed = Some(Instant::now());
         st.unsaved.get_or_insert_with(Instant::now);
     }
 }
 
-/// A slider row; double-click resets it. Returns the new value when moved,
-/// and whether it's being dragged.
+/// A slider row; double-click resets it. Returns the new value when moved.
 pub(super) fn slider(
     ui: &mut egui::Ui,
     name: &str,
@@ -1528,31 +1534,29 @@ pub(super) fn slider(
     range: std::ops::RangeInclusive<f64>,
     default: f64,
     decimals: usize,
-) -> Option<(f64, bool)> {
+) -> Option<f64> {
     let mut v = value;
     ui.label(name);
     let width = ui.spacing().slider_width;
     let r = ui.add(egui::Slider::new(&mut v, range.clone()).fixed_decimals(decimals));
     ui.end_row();
     if r.double_clicked() {
-        return Some((default, false));
+        return Some(default);
     }
     // Shift-drag: a tenth of the speed, from where the value was.
     if r.dragged() && ui.input(|i| i.modifiers.shift_only()) {
         v = fine(value, r.drag_delta().x, range, width, decimals);
     }
-    // Held down counts as dragging, so a press that moves the value and the
-    // drag after it are one step.
+    // The slider rounds a value it shows to its decimals (Auto's 0.35 is
+    // 0.35000000000000003): that's no edit unless someone is using it.
     let held = r.dragged()
         || r.is_pointer_button_down_on()
         || (r.contains_pointer() && ui.input(|i| i.pointer.any_down()));
-    // The slider rounds a value it shows to its decimals (Auto's 0.35 is
-    // 0.35000000000000003): that's no edit unless someone is using it.
     let tiny = (v - value).abs() < 0.5 * 10f64.powi(-(decimals as i32));
     if tiny && !held && !r.has_focus() {
         return None;
     }
-    ((r.changed() || r.dragged()) && v != value).then_some((v, held))
+    ((r.changed() || r.dragged()) && v != value).then_some(v)
 }
 
 /// `value` moved by a drag of `dx` points at a tenth of the slider's speed,
@@ -1729,7 +1733,7 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             shoebox_develop::edit::Profile::CameraMatch => "Profile Camera match",
             shoebox_develop::edit::Profile::Matrix => "Profile Matrix",
         };
-        edit(app, "profile", label.into(), false, |s| {
+        edit(app, "profile", label.into(), |s| {
             s.modules.input_colour.profile = p;
         });
     }
@@ -1756,7 +1760,7 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 // White balance.
                 let wb = &s.modules.white_balance;
                 if module(ui, "White balance", *wb != WhiteBalance::default()) {
-                    edit(app, "wb", "Reset white balance".into(), false, |s| {
+                    edit(app, "wb", "Reset white balance".into(), |s| {
                         s.modules.white_balance = WhiteBalance::default();
                     });
                 }
@@ -1783,7 +1787,7 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                     .show_ui(ui, |ui| {
                         for (m, label) in modes {
                             if ui.selectable_label(wb.mode == m, label).clicked() && wb.mode != m {
-                                edit(app, "wb", format!("White balance {label}"), false, |s| {
+                                edit(app, "wb", format!("White balance {label}"), |s| {
                                     let w = &mut s.modules.white_balance;
                                     w.mode = m;
                                     if m == WbMode::Custom {
@@ -1806,11 +1810,11 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                     app.develop.picking = picking;
                 }
                 egui::Grid::new("wb-grid").num_columns(2).show(ui, |ui| {
-                    if let Some((t, d)) =
+                    if let Some(t) =
                         slider(ui, "Temperature", temp.round(), 2000.0..=12000.0, temp, 0)
                     {
                         let tint = tint.round();
-                        edit(app, "temp", format!("Temperature {t:.0} K"), d, |s| {
+                        edit(app, "temp", format!("Temperature {t:.0} K"), |s| {
                             s.modules.white_balance = WhiteBalance {
                                 mode: WbMode::Custom,
                                 temp: Some(t),
@@ -1818,10 +1822,9 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                             };
                         });
                     }
-                    if let Some((n, d)) = slider(ui, "Tint", tint.round(), -150.0..=150.0, tint, 0)
-                    {
+                    if let Some(n) = slider(ui, "Tint", tint.round(), -150.0..=150.0, tint, 0) {
                         let temp = temp.round();
-                        edit(app, "tint", format!("Tint {n:+.0}"), d, |s| {
+                        edit(app, "tint", format!("Tint {n:+.0}"), |s| {
                             s.modules.white_balance = WhiteBalance {
                                 mode: WbMode::Custom,
                                 temp: Some(temp),
@@ -1835,13 +1838,13 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 // Exposure.
                 let e = &s.modules.exposure;
                 if module(ui, "Exposure", *e != defaults.modules.exposure) {
-                    edit(app, "ev", "Reset exposure".into(), false, |s| {
+                    edit(app, "ev", "Reset exposure".into(), |s| {
                         s.modules.exposure = Default::default();
                     });
                 }
                 egui::Grid::new("ev-grid").num_columns(2).show(ui, |ui| {
-                    if let Some((v, d)) = slider(ui, "Exposure", e.ev, -5.0..=5.0, 0.0, 2) {
-                        edit(app, "ev", format!("Exposure {v:+.2}"), d, |s| {
+                    if let Some(v) = slider(ui, "Exposure", e.ev, -5.0..=5.0, 0.0, 2) {
+                        edit(app, "ev", format!("Exposure {v:+.2}"), |s| {
                             s.modules.exposure.ev = v
                         });
                     }
@@ -1854,38 +1857,35 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 let toned = *t != defaults.modules.display_transform
                     || *hs != defaults.modules.highlights_shadows;
                 if module(ui, "Tone", toned) {
-                    edit(app, "tone", "Reset tone".into(), false, |s| {
+                    edit(app, "tone", "Reset tone".into(), |s| {
                         s.modules.display_transform = Default::default();
                         s.modules.highlights_shadows = Default::default();
                     });
                 }
                 egui::Grid::new("tone-grid").num_columns(2).show(ui, |ui| {
-                    if let Some((v, d)) = slider(ui, "Contrast", t.contrast, -100.0..=100.0, 0.0, 0)
-                    {
-                        edit(app, "contrast", format!("Contrast {v:+.0}"), d, |s| {
+                    if let Some(v) = slider(ui, "Contrast", t.contrast, -100.0..=100.0, 0.0, 0) {
+                        edit(app, "contrast", format!("Contrast {v:+.0}"), |s| {
                             s.modules.display_transform.contrast = v;
                         });
                     }
-                    if let Some((v, d)) =
-                        slider(ui, "Highlights", hs.highlights, -100.0..=100.0, 0.0, 0)
+                    if let Some(v) = slider(ui, "Highlights", hs.highlights, -100.0..=100.0, 0.0, 0)
                     {
-                        edit(app, "highlights", format!("Highlights {v:+.0}"), d, |s| {
+                        edit(app, "highlights", format!("Highlights {v:+.0}"), |s| {
                             s.modules.highlights_shadows.highlights = v;
                         });
                     }
-                    if let Some((v, d)) = slider(ui, "Shadows", hs.shadows, -100.0..=100.0, 0.0, 0)
-                    {
-                        edit(app, "shadows", format!("Shadows {v:+.0}"), d, |s| {
+                    if let Some(v) = slider(ui, "Shadows", hs.shadows, -100.0..=100.0, 0.0, 0) {
+                        edit(app, "shadows", format!("Shadows {v:+.0}"), |s| {
                             s.modules.highlights_shadows.shadows = v;
                         });
                     }
-                    if let Some((v, d)) = slider(ui, "Whites", t.white_ev, -3.0..=3.0, 0.0, 2) {
-                        edit(app, "whites", format!("Whites {v:+.2}"), d, |s| {
+                    if let Some(v) = slider(ui, "Whites", t.white_ev, -3.0..=3.0, 0.0, 2) {
+                        edit(app, "whites", format!("Whites {v:+.2}"), |s| {
                             s.modules.display_transform.white_ev = v;
                         });
                     }
-                    if let Some((v, d)) = slider(ui, "Blacks", t.black_ev, -3.0..=3.0, 0.0, 2) {
-                        edit(app, "blacks", format!("Blacks {v:+.2}"), d, |s| {
+                    if let Some(v) = slider(ui, "Blacks", t.black_ev, -3.0..=3.0, 0.0, 2) {
+                        edit(app, "blacks", format!("Blacks {v:+.2}"), |s| {
                             s.modules.display_transform.black_ev = v;
                         });
                     }
@@ -1896,7 +1896,6 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                         app,
                         "hue",
                         format!("Preserve hue {}", if hue { "on" } else { "off" }),
-                        false,
                         |s| {
                             s.modules.display_transform.preserve_hue = hue;
                         },
@@ -1910,7 +1909,7 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 // stays inside).
                 let g = &s.geometry;
                 if module(ui, "Crop & rotate", *g != defaults.geometry) {
-                    edit(app, "rotate", "Reset rotation".into(), false, |s| {
+                    edit(app, "rotate", "Reset rotation".into(), |s| {
                         s.geometry = Default::default()
                     });
                 }
@@ -1934,14 +1933,14 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                         .on_hover_text("Mirror left to right")
                         .clicked()
                     {
-                        edit(app, "flip", "Flip".into(), false, |s| s.geometry.mirror());
+                        edit(app, "flip", "Flip".into(), |s| s.geometry.mirror());
                     }
                 });
                 egui::Grid::new("geo-grid").num_columns(2).show(ui, |ui| {
-                    if let Some((v, d)) = slider(ui, "Angle", g.rotate, -45.0..=45.0, 0.0, 1) {
+                    if let Some(v) = slider(ui, "Angle", g.rotate, -45.0..=45.0, 0.0, 1) {
                         let (w, h) = cpu::upright(src_size.0, src_size.1, orientation);
                         let crop = cpu::max_crop(w as f64, h as f64, v);
-                        edit(app, "rotate", format!("Rotate {v:+.1}°"), d, |s| {
+                        edit(app, "rotate", format!("Rotate {v:+.1}°"), |s| {
                             s.geometry.rotate = v;
                             s.geometry.crop = crop;
                         });
@@ -1971,7 +1970,7 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 // Raw: how the sensor data becomes RGB (prepared again on change).
                 let r = &s.modules.raw;
                 if module(ui, "Raw", *r != defaults.modules.raw) {
-                    edit(app, "raw", "Reset raw".into(), false, |s| {
+                    edit(app, "raw", "Reset raw".into(), |s| {
                         s.modules.raw = Default::default()
                     });
                 }
@@ -2002,30 +2001,30 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                     ui.end_row();
                 });
                 if hl != r.highlights {
-                    edit(app, "raw", format!("Highlights {hl:?}"), false, |s| {
+                    edit(app, "raw", format!("Highlights {hl:?}"), |s| {
                         s.modules.raw.highlights = hl
                     });
                 }
                 if dm != r.demosaic {
-                    edit(app, "raw", format!("Demosaic {dm:?}"), false, |s| {
+                    edit(app, "raw", format!("Demosaic {dm:?}"), |s| {
                         s.modules.raw.demosaic = dm
                     });
                 }
                 let mut hot = r.hot_pixels;
                 if ui.checkbox(&mut hot, "Fix hot and dead pixels").changed() {
                     let label = format!("Hot pixels {}", if hot { "on" } else { "off" });
-                    edit(app, "raw", label, false, |s| s.modules.raw.hot_pixels = hot);
+                    edit(app, "raw", label, |s| s.modules.raw.hot_pixels = hot);
                 }
                 // Levels re-prepare the photo (the develop thread takes the
                 // newest, so a drag doesn't queue them up).
                 egui::Grid::new("raw-levels").num_columns(2).show(ui, |ui| {
-                    if let Some((v, d)) = slider(ui, "Black point", r.black, -0.05..=0.05, 0.0, 3) {
-                        edit(app, "raw-black", format!("Raw black {v:+.3}"), d, |s| {
+                    if let Some(v) = slider(ui, "Black point", r.black, -0.05..=0.05, 0.0, 3) {
+                        edit(app, "raw-black", format!("Raw black {v:+.3}"), |s| {
                             s.modules.raw.black = v;
                         });
                     }
-                    if let Some((v, d)) = slider(ui, "White point", r.white, 0.5..=1.2, 1.0, 2) {
-                        edit(app, "raw-white", format!("Raw white {v:.2}"), d, |s| {
+                    if let Some(v) = slider(ui, "White point", r.white, 0.5..=1.2, 1.0, 2) {
+                        edit(app, "raw-white", format!("Raw white {v:.2}"), |s| {
                             s.modules.raw.white = v;
                         });
                     }
@@ -2069,6 +2068,7 @@ pub fn history(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             && !st.read_only
             && doc.jump(n)
         {
+            st.last = None;
             touched(st);
         }
     }

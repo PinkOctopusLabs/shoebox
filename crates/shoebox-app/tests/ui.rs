@@ -3167,6 +3167,20 @@ fn develop_a_raw_photo() {
     let labels: Vec<_> = doc.history().iter().map(|s| s.label.clone()).collect();
     assert_eq!(labels.len(), 2, "one drag, one step: {labels:?}");
     assert_eq!(labels[0], "Auto");
+    // A second go at the same slider is the same step.
+    let from = r.center() + egui::vec2(30.0, 0.0);
+    h.event(egui::Event::PointerMoved(from));
+    h.event(button(from, true));
+    h.run_steps(1);
+    h.event(egui::Event::PointerMoved(from + egui::vec2(15.0, 0.0)));
+    h.run_steps(1);
+    h.event(button(from + egui::vec2(15.0, 0.0), false));
+    h.run_steps(3);
+    let doc = h.state().develop_doc().unwrap();
+    assert!(doc.settings().modules.exposure.ev > ev, "{ev}");
+    let labels: Vec<_> = doc.history().iter().map(|s| s.label.clone()).collect();
+    assert_eq!(labels.len(), 2, "same setting, same step: {labels:?}");
+    let ev = doc.settings().modules.exposure.ev;
     snapshot(&mut h, "develop-brighter");
 
     // Y: the original on the left, the edit on the right; drag the divider.
@@ -3519,7 +3533,8 @@ fn develop_look_modules() {
     let steps = doc.history().len();
     assert_eq!(doc.history().last().unwrap().label, "Curve RGB");
     snapshot(&mut h, "develop-look");
-    // Right-click the point: gone, as one more step.
+    // Right-click the point: gone, and with it the step that added it (the
+    // same setting, back where it began).
     let right = |pressed| egui::Event::PointerButton {
         pos: end,
         button: egui::PointerButton::Secondary,
@@ -3534,7 +3549,7 @@ fn develop_look_modules() {
     h.run_steps(3);
     let doc = h.state().develop_doc().unwrap();
     assert!(doc.settings().modules.tone_curve.rgb.is_empty());
-    assert_eq!(doc.history().len(), steps + 1);
+    assert_eq!(doc.history().len(), steps - 1);
     // Black and white on (its section starts closed; clicking the title
     // opens it).
     h.get_by_label("Black & white").click();

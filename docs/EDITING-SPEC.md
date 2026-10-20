@@ -201,7 +201,7 @@ Each photo's edit is one versioned JSON document. The catalog holds it for speed
   - **Reference roots** are read-only, so photos in them can't be edited; Develop opens them read-only and offers to import them.
 - **Catalog.** SQLite table `edits(photo_id, copy_id, doc_json, doc_hash, updated_at)`. The catalog is the working copy; the .shoebox file is written on a 2-second debounce and on leaving the photo. On startup, a .shoebox file newer than the catalog row wins.
 - **Virtual copies.** Several edit documents per source file, each with its own `copy.id`, shown as a stack in the library.
-- **History.** Each change appends a JSON Patch (RFC 6902) against the previous state, so undo/redo and "jump to step 12" are cheap. Snapshots are named pointers into history.
+- **History.** Each change appends a JSON Patch (RFC 6902) against the previous state, so undo/redo and "jump to step 12" are cheap. Snapshots are named pointers into history. Consecutive changes to the same setting (a slider dragged twice, a checkbox toggled back and forth) fold into one step, and a step that returns to where it began disappears; presets, Auto and pasted settings are always steps of their own.
 - **Presets.** A preset is a partial edit document (any subset of modules) saved as JSON in `~/Library/Application Support/Shoebox/presets/`. Applying one merges only its modules.
 - **Masks.** Store the recipe, not pixels: brush strokes as vector paths, gradients as endpoints, AI masks as model name plus prompt points. Rasterised masks live only in the cache and are regenerated when missing.
 
