@@ -3152,6 +3152,35 @@ fn develop_a_raw_photo() {
     assert_eq!(doc.history().len(), 1, "one drag, one step");
     snapshot(&mut h, "develop-brighter");
 
+    // Y: the original on the left, the edit on the right; drag the divider.
+    use shoebox_app::views::develop::Compare;
+    h.key_press(egui::Key::Y);
+    wait_for(&mut h, Duration::from_secs(10), "original", |a| {
+        a.develop_compare().2
+    });
+    assert_eq!(h.state().develop_compare().0, Compare::Split);
+    let photo = h.get_by_label("Split").rect().center_bottom().y;
+    // The divider sits in the middle of the photo, below the bar.
+    let mid = egui::pos2(h.state().develop_divider_x().unwrap(), photo + 200.0);
+    h.event(egui::Event::PointerMoved(mid));
+    h.event(button(mid, true));
+    h.run_steps(1);
+    h.event(egui::Event::PointerMoved(mid - egui::vec2(200.0, 0.0)));
+    h.run_steps(1);
+    h.event(button(mid - egui::vec2(200.0, 0.0), false));
+    h.run_steps(2);
+    let split = h.state().develop_compare().1;
+    assert!(split < 0.4, "{split}");
+    snapshot(&mut h, "develop-split");
+    // \ flicks to the original and back; an edit shows the edit again.
+    h.key_press(egui::Key::Backslash);
+    h.run_steps(2);
+    assert_eq!(h.state().develop_compare().0, Compare::Original);
+    snapshot(&mut h, "develop-original");
+    h.key_press(egui::Key::Backslash);
+    h.run_steps(2);
+    assert_eq!(h.state().develop_compare().0, Compare::Edited);
+
     // Kept, then written to the library's .shoebox/edits after a pause.
     let file = root.join(".shoebox/edits/2026/DSC_0001.NEF.json");
     wait_for(&mut h, Duration::from_secs(15), "edit file", |_| {

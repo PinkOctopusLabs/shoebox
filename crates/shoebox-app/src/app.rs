@@ -802,6 +802,21 @@ impl ShoeboxApp {
         )
     }
 
+    /// Develop's comparison: the mode, the split's divider, and whether the
+    /// original is rendered (tests).
+    pub fn develop_compare(&self) -> (views::develop::Compare, f32, bool) {
+        (
+            self.develop.compare,
+            self.develop.split(),
+            self.develop.original_rendered(),
+        )
+    }
+
+    /// Where Develop's split divider is drawn (tests).
+    pub fn develop_divider_x(&self) -> Option<f32> {
+        self.develop.divider_x
+    }
+
     /// Develop is showing the photo rendered from its raw data (tests).
     pub fn develop_ready(&self) -> bool {
         self.develop.ready.is_some() && self.develop.rendered()
@@ -3412,8 +3427,22 @@ impl ShoeboxApp {
             self.set_view(View::Develop);
         }
         if self.view == View::Develop {
+            use views::develop::Compare;
             if pressed(egui::Key::Backslash) {
-                self.develop.before = !self.develop.before;
+                let c = &mut self.develop.compare;
+                *c = if *c == Compare::Original {
+                    Compare::Edited
+                } else {
+                    Compare::Original
+                };
+            }
+            if pressed(egui::Key::Y) {
+                let c = &mut self.develop.compare;
+                *c = if *c == Compare::Split {
+                    Compare::Edited
+                } else {
+                    Compare::Split
+                };
             }
             if pressed(egui::Key::J) {
                 self.develop.warnings = !self.develop.warnings;

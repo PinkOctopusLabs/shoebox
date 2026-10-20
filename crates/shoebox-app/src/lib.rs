@@ -13,7 +13,7 @@ mod platform;
 pub mod semantic;
 pub mod textures;
 pub mod updater;
-mod views;
+pub mod views;
 mod watch;
 
 pub use app::{AppPaths, ShoeboxApp, View};

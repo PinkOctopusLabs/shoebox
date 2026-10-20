@@ -41,6 +41,16 @@ pub enum Status {
     Ready,
 }
 
+/// How the original is shown: flick between it and the edit (\\), or a
+/// split with a divider to drag, original on the left (Y).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Compare {
+    #[default]
+    Edited,
+    Original,
+    Split,
+}
+
 #[derive(Default)]
 pub struct State {
     pub photo: Option<PhotoId>,
@@ -58,45 +68,81 @@ pub struct State {
     unsaved: Option<Instant>,
     /// The slider being dragged: one drag is one history step.
     dragging: Option<&'static str>,
-    /// Show the photo as shot (\\).
-    pub before: bool,
+    pub compare: Compare,
+    /// Where the split's divider is, as a fraction of the image's width
+    /// (0: not moved yet, the middle).
+    split_at: f32,
+    /// Where the divider was last drawn (screen x; tests find it there).
+    pub divider_x: Option<f32>,
     /// Show clipped highlights and shadows (J).
     pub warnings: bool,
     /// The render's histogram (R, G, B, luma).
     pub histogram: Option<Box<[[u32; 256]; 4]>>,
-    view: Option<Rendered>,
+    gpu: Option<GpuShared>,
+    edited: Option<Shown>,
+    original: Option<Shown>,
 }
 
-/// What's on screen: the texture and what it was rendered from.
-struct Rendered {
-    key: (PhotoId, String, bool, bool),
-    size: [usize; 2],
-    gpu: Option<GpuView>,
-    cpu: Option<egui::TextureHandle>,
-}
-
-struct GpuView {
+/// The GPU side, shared by the edited and original renders.
+struct GpuShared {
     pipe: Pipe,
     source: shoebox_develop::gpu::Source,
     /// The demosaiced image uploaded (to tell when it changes).
     from: Arc<cpu::Demosaiced>,
-    out: Option<(eframe::wgpu::Texture, egui::TextureId, [usize; 2])>,
     histogram: Option<shoebox_develop::gpu::Histogram>,
+}
+
+/// A render on screen and what it was rendered from.
+struct Shown {
+    key: (PhotoId, String, bool),
+    size: [usize; 2],
+    /// On the GPU: the texture egui draws.
+    gpu: Option<(eframe::wgpu::Texture, egui::TextureId)>,
+    /// Without a GPU: a CPU render.
+    cpu: Option<egui::TextureHandle>,
+}
+
+impl Shown {
+    fn texture(&self) -> Option<egui::TextureId> {
+        self.gpu
+            .as_ref()
+            .map(|g| g.1)
+            .or_else(|| self.cpu.as_ref().map(egui::TextureHandle::id))
+    }
 }
 
 impl State {
     /// Something rendered from the raw data is on screen.
     pub fn rendered(&self) -> bool {
-        self.view
+        self.edited
             .as_ref()
             .is_some_and(|v| Some(v.key.0) == self.photo)
     }
 
+    /// The original is rendered for comparing.
+    pub fn original_rendered(&self) -> bool {
+        self.original
+            .as_ref()
+            .is_some_and(|v| Some(v.key.0) == self.photo)
+    }
+
+    /// The split's divider (fraction of the image's width).
+    pub fn split(&self) -> f32 {
+        if self.split_at <= 0.0 {
+            0.5
+        } else {
+            self.split_at
+        }
+    }
+
     fn reset(&mut self) {
-        let (view, warnings) = (self.view.take(), self.warnings);
         *self = State {
-            view,
-            warnings,
+            gpu: self.gpu.take(),
+            edited: self.edited.take(),
+            original: self.original.take(),
+            warnings: self.warnings,
+            compare: self.compare,
+            split_at: self.split_at,
             ..Default::default()
         };
     }
@@ -239,148 +285,201 @@ fn options(app: &ShoeboxApp) -> Options {
     }
 }
 
-/// Render the edit if it changed since the last render.
+/// The original for comparing: no adjustments, but the edit's crop and
+/// rotation (so a split lines up) and raw settings (the same demosaic).
+fn original_settings(doc: &EditDoc) -> Settings {
+    let s = doc.settings();
+    let mut o = Settings {
+        geometry: s.geometry.clone(),
+        ..Default::default()
+    };
+    o.modules.raw = s.modules.raw.clone();
+    o
+}
+
+/// Render the edit (and the original when it's shown) if they changed.
 fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_wgpu::RenderState>) {
     let o = options(app);
     let st = &mut app.develop;
     let (Some(ready), Some(doc)) = (&st.ready, &st.doc) else {
         return;
     };
-    let settings = if st.before {
-        Settings::default()
-    } else {
-        doc.settings().clone()
-    };
-    let key = (ready.id, doc.render_hash(), st.before, st.warnings);
-    if st.view.as_ref().is_some_and(|v| v.key == key) {
-        // A histogram on its way back from the GPU.
-        if let (Some(rs), Some(h)) = (
-            gpu,
-            st.view
-                .as_mut()
-                .and_then(|v| v.gpu.as_mut())
-                .and_then(|g| g.histogram.as_mut()),
-        ) && let Some(counts) = h.poll(&rs.device, false)
-        {
-            st.histogram = Some(counts);
+    // The GPU pipe, with this photo's demosaiced image uploaded.
+    let mut on_gpu = gpu;
+    if let Some(rs) = gpu
+        && st
+            .gpu
+            .as_ref()
+            .is_none_or(|g| !Arc::ptr_eq(&g.from, &ready.src))
+    {
+        let pipe = match st.gpu.take() {
+            Some(g) => Ok(g.pipe),
+            None => Pipe::new(&rs.device, Output::Rgba16Float),
+        };
+        match pipe {
+            Ok(pipe) => {
+                let source = pipe.upload(&rs.device, &rs.queue, &ready.src.rgb);
+                let histogram = shoebox_develop::gpu::Histogram::new(&rs.device)
+                    .map_err(|e| tracing::warn!("histogram on the GPU: {e}"))
+                    .ok();
+                st.gpu = Some(GpuShared {
+                    pipe,
+                    source,
+                    from: ready.src.clone(),
+                    histogram,
+                });
+            }
+            Err(e) => {
+                tracing::warn!("develop on the GPU: {e}; using the CPU");
+                on_gpu = None;
+            }
         }
-        return;
     }
-    let mut frame = cpu::frame(&ready.meta, &ready.src, &settings, &o);
+    let on_gpu = on_gpu.zip(st.gpu.as_mut());
+
+    // A histogram on its way back from the GPU.
+    let mut on_gpu = on_gpu;
+    if let Some((rs, g)) = &mut on_gpu
+        && let Some(h) = &mut g.histogram
+        && let Some(counts) = h.poll(&rs.device, false)
+    {
+        st.histogram = Some(counts);
+    }
+
+    let mut frame = cpu::frame(&ready.meta, &ready.src, doc.settings(), &o);
     frame.warnings = st.warnings;
+    let key = (ready.id, doc.render_hash(), st.warnings);
+    if st.edited.as_ref().is_none_or(|v| v.key != key) {
+        let h = render_into(
+            &mut st.edited,
+            key,
+            &frame,
+            ready,
+            on_gpu.as_mut(),
+            ctx,
+            true,
+        );
+        if h.is_some() {
+            st.histogram = h;
+        }
+    }
+    if st.compare != Compare::Edited {
+        let s = original_settings(doc);
+        let frame = cpu::frame(&ready.meta, &ready.src, &s, &o);
+        let key = (
+            ready.id,
+            format!("original {}", EditDoc::settings_hash(&s)),
+            false,
+        );
+        if st.original.as_ref().is_none_or(|v| v.key != key) {
+            render_into(
+                &mut st.original,
+                key,
+                &frame,
+                ready,
+                on_gpu.as_mut(),
+                ctx,
+                false,
+            );
+        }
+    }
+}
+
+/// Render `frame` into `slot` (on the GPU when there's one). With `count`,
+/// also count its histogram: on the GPU it arrives on a later frame; on the
+/// CPU it's returned.
+fn render_into(
+    slot: &mut Option<Shown>,
+    key: (PhotoId, String, bool),
+    frame: &Frame,
+    ready: &Ready,
+    gpu: Option<&mut (&eframe::egui_wgpu::RenderState, &mut GpuShared)>,
+    ctx: &egui::Context,
+    count: bool,
+) -> Option<Box<[[u32; 256]; 4]>> {
     let size = [frame.width, frame.height];
-    let mut view = st.view.take().unwrap_or(Rendered {
+    let mut shown = slot.take().unwrap_or(Shown {
         key: key.clone(),
         size,
         gpu: None,
         cpu: None,
     });
-    view.key = key;
-    view.size = size;
-    let on_gpu = gpu.and_then(|rs| render_gpu(&mut view, rs, ready, &frame));
-    if on_gpu.is_none() {
-        // No GPU (or it failed): the same pipe on the CPU.
-        let img = cpu::apply(&ready.src.rgb, &frame, true);
-        if !st.warnings {
-            st.histogram = Some(Box::new(cpu::histogram(&img)));
-        }
-        let pixels: Vec<Color32> = img
-            .data
-            .as_chunks::<3>()
-            .0
-            .iter()
-            .map(|p| {
-                let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-                Color32::from_rgb(q(p[0]), q(p[1]), q(p[2]))
-            })
-            .collect();
-        let image = egui::ColorImage::new(size, pixels);
-        match &mut view.cpu {
-            Some(t) => t.set(image, egui::TextureOptions::LINEAR),
-            None => {
-                view.cpu = Some(ctx.load_texture("develop", image, egui::TextureOptions::LINEAR))
-            }
-        }
-        view.gpu = None;
-    }
-    st.view = Some(view);
-}
-
-/// Run the pipe on eframe's device into a texture egui shows.
-fn render_gpu(
-    view: &mut Rendered,
-    rs: &eframe::egui_wgpu::RenderState,
-    ready: &Ready,
-    frame: &Frame,
-) -> Option<()> {
-    let device = &rs.device;
-    if view
-        .gpu
-        .as_ref()
-        .is_none_or(|g| !Arc::ptr_eq(&g.from, &ready.src))
-    {
-        let pipe = match view.gpu.take() {
-            Some(g) => g.pipe,
-            None => match Pipe::new(device, Output::Rgba16Float) {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!("develop on the GPU: {e}; using the CPU");
-                    return None;
+    let mut counts = None;
+    match gpu {
+        Some((rs, g)) => {
+            let device = &rs.device;
+            let tex = match shown.gpu.take() {
+                Some((t, id)) if shown.size == size => (t, id),
+                old => {
+                    let t = g
+                        .pipe
+                        .output_texture(device, size[0] as u32, size[1] as u32);
+                    let tv = t.create_view(&Default::default());
+                    let mut r = rs.renderer.write();
+                    let id = match old {
+                        Some((_, id)) => {
+                            r.update_egui_texture_from_wgpu_texture(
+                                device,
+                                &tv,
+                                eframe::wgpu::FilterMode::Linear,
+                                id,
+                            );
+                            id
+                        }
+                        None => {
+                            r.register_native_texture(device, &tv, eframe::wgpu::FilterMode::Linear)
+                        }
+                    };
+                    (t, id)
                 }
-            },
-        };
-        let source = pipe.upload(device, &rs.queue, &ready.src.rgb);
-        let old = view.gpu.take().and_then(|g| g.out);
-        let histogram = shoebox_develop::gpu::Histogram::new(device)
-            .map_err(|e| tracing::warn!("histogram on the GPU: {e}"))
-            .ok();
-        view.gpu = Some(GpuView {
-            pipe,
-            source,
-            from: ready.src.clone(),
-            out: old,
-            histogram,
-        });
-    }
-    let g = view.gpu.as_mut()?;
-    let size = [frame.width, frame.height];
-    let out = match g.out.take() {
-        Some((t, id, s)) if s == size => (t, id),
-        old => {
-            let t = g
-                .pipe
-                .output_texture(device, size[0] as u32, size[1] as u32);
-            let tv = t.create_view(&Default::default());
-            let mut r = rs.renderer.write();
-            let id = match old {
-                Some((_, id, _)) => {
-                    r.update_egui_texture_from_wgpu_texture(
-                        device,
-                        &tv,
-                        eframe::wgpu::FilterMode::Linear,
-                        id,
-                    );
-                    id
-                }
-                None => r.register_native_texture(device, &tv, eframe::wgpu::FilterMode::Linear),
             };
-            (t, id)
+            let tv = tex.0.create_view(&Default::default());
+            let mut enc = device.create_command_encoder(&Default::default());
+            g.pipe.encode(device, &mut enc, &g.source, frame, true, &tv);
+            // Count the render, not the clipping overlay.
+            let counted = count
+                && !frame.warnings
+                && g.histogram.as_mut().is_some_and(|h| {
+                    h.encode(device, &mut enc, &tv, size[0] as u32, size[1] as u32)
+                });
+            rs.queue.submit([enc.finish()]);
+            if counted && let Some(h) = &mut g.histogram {
+                h.start_read();
+            }
+            shown.gpu = Some(tex);
+            shown.cpu = None;
         }
-    };
-    let tv = out.0.create_view(&Default::default());
-    let mut enc = device.create_command_encoder(&Default::default());
-    g.pipe.encode(device, &mut enc, &g.source, frame, true, &tv);
-    // Count the render (not the clipping overlay).
-    let counted = !frame.warnings
-        && g.histogram
-            .as_mut()
-            .is_some_and(|h| h.encode(device, &mut enc, &tv, size[0] as u32, size[1] as u32));
-    rs.queue.submit([enc.finish()]);
-    if counted && let Some(h) = &mut g.histogram {
-        h.start_read();
+        None => {
+            // No GPU (or it failed): the same pipe on the CPU.
+            let img = cpu::apply(&ready.src.rgb, frame, true);
+            if count && !frame.warnings {
+                counts = Some(Box::new(cpu::histogram(&img)));
+            }
+            let pixels: Vec<Color32> = img
+                .data
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|p| {
+                    let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+                    Color32::from_rgb(q(p[0]), q(p[1]), q(p[2]))
+                })
+                .collect();
+            let image = egui::ColorImage::new(size, pixels);
+            match &mut shown.cpu {
+                Some(t) => t.set(image, egui::TextureOptions::LINEAR),
+                None => {
+                    shown.cpu =
+                        Some(ctx.load_texture("develop", image, egui::TextureOptions::LINEAR))
+                }
+            }
+            shown.gpu = None;
+        }
     }
-    g.out = Some((out.0, out.1, size));
-    Some(())
+    shown.key = key;
+    shown.size = size;
+    *slot = Some(shown);
+    counts
 }
 
 /// The centre: the photo as edited (the embedded preview until then).
@@ -398,15 +497,16 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, Color32::from_gray(18));
     let st = &app.develop;
-    let shown: Option<(egui::TextureId, [usize; 2])> =
-        st.view.as_ref().filter(|v| v.key.0 == id).and_then(|v| {
-            v.gpu
-                .as_ref()
-                .and_then(|g| g.out.as_ref().map(|(_, t, s)| (*t, *s)))
-                .or_else(|| v.cpu.as_ref().map(|t| (t.id(), v.size)))
-        });
-    let (tex, size) = match shown {
-        Some(s) => (Some(s.0), [s.1[0] as f32, s.1[1] as f32]),
+    let current = |s: &Option<Shown>| {
+        s.as_ref()
+            .filter(|v| v.key.0 == id)
+            .and_then(|v| v.texture().map(|t| (t, v.size)))
+    };
+    let edited = current(&st.edited);
+    let original = current(&st.original).filter(|o| edited.is_some_and(|e| e.1 == o.1));
+    let compare = st.compare;
+    let (tex, size) = match edited {
+        Some((t, s)) => (Some(t), [s[0] as f32, s[1] as f32]),
         None => {
             // The embedded preview while the raw is prepared.
             app.want_open(idx, Size::Full);
@@ -418,16 +518,103 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
     };
     let fit = (rect.width() / size[0]).min(rect.height() / size[1]);
     let target = Rect::from_center_size(rect.center(), egui::vec2(size[0], size[1]) * fit);
-    if let Some(t) = tex {
-        painter.image(
-            t,
-            target,
-            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-            Color32::WHITE,
+    let full = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+    match (compare, tex, original) {
+        (Compare::Original, Some(_), Some((o, _))) => {
+            painter.image(o, target, full, Color32::WHITE);
+            chip(
+                &painter,
+                target.left_top() + egui::vec2(10.0, 10.0),
+                "Original",
+            );
+        }
+        (Compare::Split, Some(e), Some((o, _))) => {
+            // Original left of the divider, the edit right of it.
+            let s = app.develop.split();
+            let x = target.left() + target.width() * s;
+            let left = Rect::from_min_max(target.min, pos2(x, target.bottom()));
+            let right = Rect::from_min_max(pos2(x, target.top()), target.max);
+            painter.image(
+                o,
+                left,
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(s, 1.0)),
+                Color32::WHITE,
+            );
+            painter.image(
+                e,
+                right,
+                Rect::from_min_max(pos2(s, 0.0), pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+            app.develop.divider_x = Some(x);
+            let line =
+                Rect::from_min_max(pos2(x - 6.0, target.top()), pos2(x + 6.0, target.bottom()));
+            let drag = ui
+                .interact(
+                    line,
+                    ui.scope_id().with("split-divider"),
+                    egui::Sense::drag(),
+                )
+                .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+            if drag.dragged()
+                && let Some(p) = drag.interact_pointer_pos()
+            {
+                app.develop.split_at = ((p.x - target.left()) / target.width()).clamp(0.02, 0.98);
+            }
+            // A white line with a dark edge shows on light and dark photos.
+            let ends = [pos2(x, target.top()), pos2(x, target.bottom())];
+            painter.line_segment(ends, egui::Stroke::new(4.0, Color32::from_black_alpha(140)));
+            painter.line_segment(ends, egui::Stroke::new(2.0, Color32::WHITE));
+            let knob = pos2(x, target.center().y);
+            painter.circle(
+                knob,
+                12.0,
+                Color32::WHITE,
+                egui::Stroke::new(1.5, Color32::from_black_alpha(160)),
+            );
+            painter.text(
+                knob,
+                egui::Align2::CENTER_CENTER,
+                "↔",
+                egui::FontId::proportional(13.0),
+                Color32::BLACK,
+            );
+            chip(
+                &painter,
+                target.left_top() + egui::vec2(10.0, 10.0),
+                "Original",
+            );
+            let w = 64.0;
+            chip(
+                &painter,
+                pos2(target.right() - w - 10.0, target.top() + 10.0),
+                "Edited",
+            );
+        }
+        (_, Some(t), _) => {
+            painter.image(t, target, full, Color32::WHITE);
+        }
+        _ => {}
+    }
+    // Edited / Original / Split, over the top of the photo.
+    if edited.is_some() {
+        let bar = Rect::from_center_size(
+            rect.center_top() + egui::vec2(0.0, 20.0),
+            egui::vec2(230.0, 26.0),
         );
+        ui.scope_builder(egui::UiBuilder::new().max_rect(bar), |ui| {
+            ui.horizontal(|ui| {
+                let c = &mut app.develop.compare;
+                ui.selectable_value(c, Compare::Edited, "Edited")
+                    .on_hover_text("The photo as edited");
+                ui.selectable_value(c, Compare::Original, "Original")
+                    .on_hover_text("The photo before any edits (\\)");
+                ui.selectable_value(c, Compare::Split, "Split")
+                    .on_hover_text("Original on the left, edited on the right; drag the line (Y)");
+            });
+        });
     }
     let note = match &app.develop.status {
-        Status::Ready if app.develop.before => Some("Before".to_owned()),
         Status::Ready => None,
         Status::Preparing => Some("Preparing raw…".to_owned()),
         Status::Converting => Some("Converting to DNG (High efficiency NEF)…".to_owned()),
@@ -472,6 +659,21 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
     if let Some(pos) = app.current_pos() {
         super::photo_menu(app, &resp, pos);
     }
+}
+
+/// A small label over the photo.
+fn chip(painter: &egui::Painter, at: egui::Pos2, text: &str) {
+    let galley = painter.layout_no_wrap(
+        text.to_owned(),
+        egui::FontId::proportional(12.0),
+        Color32::WHITE,
+    );
+    painter.rect_filled(
+        Rect::from_min_size(at, galley.size()).expand(5.0),
+        4.0,
+        Color32::from_black_alpha(160),
+    );
+    painter.galley(at, galley, Color32::WHITE);
 }
 
 /// Keep the edit after sliders settle, write it after a pause.
@@ -526,7 +728,10 @@ fn edit(
     if changed {
         st.changed = Some(Instant::now());
         st.unsaved.get_or_insert_with(Instant::now);
-        st.before = false;
+        // Editing shows the edit (a split stays, to watch the change).
+        if st.compare == Compare::Original {
+            st.compare = Compare::Edited;
+        }
     }
 }
 

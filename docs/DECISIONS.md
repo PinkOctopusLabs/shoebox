@@ -1154,3 +1154,9 @@ hashes, embeddings, faces).
   names, with the share of clipped highlights and shadows. J (or the
   Clipping toggle) paints blown highlights red and crushed shadows blue,
   in the shader and the CPU pipe alike. Checked against `cpu::histogram`.
+- **Before and after**: Edited / Original / Split over the photo, `\`
+  flicking to the original and back, Y for the split (original left of a
+  divider to drag, the edit right of it). The original keeps the edit's
+  crop, rotation and raw settings so the halves line up; both renders
+  share the GPU pipe and the uploaded image. Editing while the original
+  shows goes back to the edit; a split stays, to watch the change.

@@ -406,6 +406,17 @@ impl EditDoc {
         blake3::hash(&bytes).to_hex().to_string()
     }
 
+    /// [`Self::render_hash`] for settings outside a document.
+    pub fn settings_hash(s: &Settings) -> String {
+        let v = serde_json::json!({
+            "process_version": PROCESS_VERSION,
+            "settings": s.to_value(),
+        });
+        blake3::hash(&serde_json::to_vec(&v).unwrap_or_default())
+            .to_hex()
+            .to_string()
+    }
+
     /// Steps applied now.
     pub fn at(&self) -> usize {
         self.history_at.unwrap_or(self.history.len())
