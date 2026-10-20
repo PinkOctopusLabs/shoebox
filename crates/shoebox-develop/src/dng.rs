@@ -10,6 +10,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -141,7 +142,7 @@ fn default_app() -> Option<PathBuf> {
 /// The cache of converted DNGs: `<cache>/dng/<blake3 of the NEF>.dng`.
 pub struct DngCache {
     dir: PathBuf,
-    limit: u64,
+    limit: AtomicU64,
     /// Keys being converted, and how many conversions are running.
     busy: Mutex<(HashSet<String>, usize)>,
     changed: Condvar,
@@ -152,7 +153,7 @@ impl DngCache {
     pub fn new(cache_dir: &Path, limit: u64) -> Self {
         Self {
             dir: cache_dir.join("dng"),
-            limit,
+            limit: AtomicU64::new(limit),
             busy: Mutex::new((HashSet::new(), 0)),
             changed: Condvar::new(),
         }
@@ -160,6 +161,11 @@ impl DngCache {
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// Change the size limit (Settings → Raw); [`Self::evict`] applies it.
+    pub fn set_limit(&self, limit: u64) {
+        self.limit.store(limit, Ordering::Relaxed);
     }
 
     /// The cache key for a NEF's contents.
@@ -171,6 +177,11 @@ impl DngCache {
 
     fn path_of(&self, key: &str) -> PathBuf {
         self.dir.join(format!("{key}.dng"))
+    }
+
+    /// Whether `key` is cached (not marking it used).
+    pub fn has(&self, key: &str) -> bool {
+        self.path_of(key).is_file()
     }
 
     /// The cached DNG for `key`, marked as just used.
@@ -281,8 +292,9 @@ impl DngCache {
         let mut total: u64 = entries.iter().map(|e| e.1).sum();
         entries.sort_by_key(|e| e.2);
         let mut removed = 0;
+        let limit = self.limit.load(Ordering::Relaxed);
         for (path, size, _) in entries {
-            if total <= self.limit {
+            if total <= limit {
                 break;
             }
             if Some(path.as_path()) == keep {

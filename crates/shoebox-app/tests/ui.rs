@@ -3570,6 +3570,86 @@ fn settings_raw_tab() {
     snapshot(&mut h, "settings-raw");
 }
 
+/// Idle pre-convert (Settings → Raw, off by default): after a while
+/// without input, a 3-star High efficiency NEF is converted to a DNG in the
+/// cache; an unrated one isn't. A stand-in script plays the converter.
+#[cfg(unix)]
+#[test]
+fn likely_edits_convert_when_idle() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("DSC_0001.NEF"),
+        shoebox_fixtures::nikon_compression_stub(14, true),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("DSC_0001.NEF.xmp"),
+        shoebox_core::xmp::edit(
+            None,
+            &[(
+                shoebox_core::xmp::Prop::Rating,
+                Some(shoebox_core::xmp::Value::Text("3".into())),
+            )],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("DSC_0002.NEF"),
+        shoebox_fixtures::nikon_compression_stub(13, true),
+    )
+    .unwrap();
+    let dng = t.path().join("made.dng");
+    std::fs::write(
+        &dng,
+        shoebox_fixtures::Dng::new(32, 24).write(|x, y| 2000 + (x * y) as u16),
+    )
+    .unwrap();
+    let log = t.path().join("runs.log");
+    let script = t.path().join("fake-converter.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\necho \"$5\" >> '{}'\nout=\"$4\"; nef=\"$5\"; stem=$(basename \"$nef\"); \
+             stem=${{stem%.*}}\ncp '{}' \"$out/$stem.dng\"\n",
+            log.display(),
+            dng.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let mut s = Settings::load(&p.settings).unwrap();
+    s.dng_converter = Some(script);
+    s.preconvert = true;
+    s.save(&p.settings).unwrap();
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    h.state_mut().set_idle_after(Duration::from_millis(300));
+    settle(&mut h, Duration::from_secs(60));
+    let cached = || {
+        std::fs::read_dir(t.path().join("cache/dng"))
+            .map(|d| {
+                d.filter_map(Result::ok)
+                    .filter(|e| e.path().extension().is_some_and(|x| x == "dng"))
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+    wait_for(
+        &mut h,
+        Duration::from_secs(20),
+        "converted when idle",
+        |_| cached() == 1,
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    let runs = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(runs.lines().count(), 1, "{runs}");
+    assert!(runs.contains("DSC_0001.NEF"), "{runs}");
+}
+
 /// Export: ⇧⌘E, the first preset (JPEG, full size), into a folder outside
 /// the library; the Info panel lists it. A folder inside the library is
 /// refused.

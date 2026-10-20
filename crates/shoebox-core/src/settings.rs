@@ -68,6 +68,10 @@ pub struct Settings {
     /// The DNG cache's limit in GB (0: the default).
     #[serde(default)]
     pub dng_cache_gb: u32,
+    /// Convert likely edits (picks, 3 stars and up) to DNGs while Shoebox
+    /// is idle.
+    #[serde(default)]
+    pub preconvert: bool,
 }
 
 /// Default for [`Settings::dng_cache_gb`].

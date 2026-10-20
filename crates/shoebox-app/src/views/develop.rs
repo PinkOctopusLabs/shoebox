@@ -362,6 +362,16 @@ fn follow(app: &mut ShoeboxApp) {
             root,
             rel: p.rel.clone(),
         });
+        // The photos either side, converted while this one is edited.
+        let near: Vec<PathBuf> = app
+            .current_pos()
+            .into_iter()
+            .flat_map(|pos| [pos + 1, pos.wrapping_sub(1)])
+            .filter_map(|n| app.shown.get(n).copied())
+            .filter(|&j| app.needs_dng(j))
+            .map(|j| app.catalog.photos[j].path.clone())
+            .collect();
+        app.developer.convert_ahead(near);
     }
     let st = &mut app.develop;
     let Some(doc) = &st.doc else { return };

@@ -1326,3 +1326,23 @@ leave every such file out as "already in the library", because each matched
 itself. Now a source file in a reference root doesn't count as its own match.
 A copy elsewhere in the library still does, and so does a card's photo that a
 reference folder already has.
+
+## Converting ahead (2026-10-20)
+
+EDITING-SPEC's "hiding the wait" for High efficiency NEFs:
+
+- **Neighbours.** Opening a photo in Develop queues the photos either side
+  of it (in the order shown) for conversion. They run on a thread of their
+  own, one at a time, so the converter's second slot stays free for the
+  photo being opened.
+- **Idle pre-convert.** This is a setting in Settings → Raw, off by default.
+  "When the Mac is idle" is taken to mean a minute with no input to Shoebox;
+  watching system-wide idle would need an IOKit FFI wrapper for little
+  gain. The list is picks and photos rated 3★ or more, outside reference
+  folders, newest first. It is capped at half the DNG cache (about 30 MB
+  per DNG) so it can't evict everything else. Any input stops it once the
+  file being converted finishes.
+- **One cache.** The develop, export and convert-ahead threads now share one
+  `DngCache`, so "at most two conversions at once" holds across all of them.
+  Before this, the export thread made its own cache and could run two more.
+  The cache limit became settable in place for this.

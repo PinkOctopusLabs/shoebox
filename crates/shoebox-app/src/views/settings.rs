@@ -513,6 +513,16 @@ fn raw(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &mut Settings) {
     );
     ui.add_space(8.0);
     ui.label(egui::RichText::new("DNG cache").strong());
+    ui.checkbox(
+        &mut s.preconvert,
+        "Convert likely edits while Shoebox is idle",
+    );
+    note(
+        ui,
+        "After a minute without use, picks and photos rated 3 stars or more are converted, \
+         newest first, up to half the cache, so they open in Develop at once. The photos \
+         either side of the one in Develop are always converted ahead.",
+    );
     let mut gb = match s.dng_cache_gb {
         0 => DEFAULT_DNG_CACHE_GB,
         g => g,

@@ -70,6 +70,9 @@ enum Message {
     SavePresets(Vec<Preset>),
     /// Render part of a photo at full resolution (zoomed in).
     Region(Box<RegionJob>),
+    /// High efficiency NEFs to convert in the background (replaces the last
+    /// list).
+    ConvertAhead(Vec<PathBuf>),
 }
 
 /// A part of a photo to render at full resolution: `region` is
@@ -253,6 +256,14 @@ impl Develop {
         let _ = self.requests.send(Message::ClearCache);
     }
 
+    /// Convert these NEFs' DNGs in the background, in order, one at a time
+    /// (the converter's other slot stays free for the photo being opened).
+    /// Replaces the last list; one converting carries on. Files that don't
+    /// need a DNG, or have one, are passed over.
+    pub fn convert_ahead(&self, nefs: Vec<PathBuf>) {
+        let _ = self.requests.send(Message::ConvertAhead(nefs));
+    }
+
     /// Queue an edit's preview (after any photo being opened).
     pub fn preview(&self, p: PreviewJob) {
         let _ = self.requests.send(Message::Preview(Box::new(p)));
@@ -279,19 +290,20 @@ fn worker(
         let _ = events.send(e);
         repaint();
     };
-    let mut dngs = DngCache::new(cache_dir, shoebox_develop::dng::DEFAULT_LIMIT);
+    // One cache for every thread, so at most two conversions run at once.
+    let dngs = Arc::new(DngCache::new(
+        cache_dir,
+        shoebox_develop::dng::DEFAULT_LIMIT,
+    ));
     let mut converter: Option<PathBuf> = None;
-    let mut limit = shoebox_develop::dng::DEFAULT_LIMIT;
     // Exports run on a thread of their own, so Develop never waits on one.
-    let (exporter, jobs) = crossbeam_channel::unbounded::<(ExportJob, Option<PathBuf>, u64)>();
+    let (exporter, jobs) = crossbeam_channel::unbounded::<(ExportJob, Option<PathBuf>)>();
     {
-        let (cache_dir, events, repaint) =
-            (cache_dir.to_path_buf(), events.clone(), repaint.clone());
+        let (dngs, events, repaint) = (dngs.clone(), events.clone(), repaint.clone());
         let spawned = std::thread::Builder::new()
             .name("export".into())
             .spawn(move || {
-                while let Ok((job, conv, limit)) = jobs.recv() {
-                    let dngs = DngCache::new(&cache_dir, limit);
+                while let Ok((job, conv)) = jobs.recv() {
                     run_export(&job, conv.as_deref(), &dngs, &|e| {
                         let _ = events.send(e);
                         repaint();
@@ -300,6 +312,17 @@ fn worker(
             });
         if let Err(e) = spawned {
             tracing::error!("could not start the export thread: {e}");
+        }
+    }
+    // Conversions ahead of need, on another.
+    let (ahead, ahead_rx) = crossbeam_channel::unbounded::<(Option<PathBuf>, Vec<PathBuf>)>();
+    {
+        let dngs = dngs.clone();
+        let spawned = std::thread::Builder::new()
+            .name("convert-ahead".into())
+            .spawn(move || convert_ahead(&dngs, &ahead_rx));
+        if let Err(e) = spawned {
+            tracing::error!("could not start the convert-ahead thread: {e}");
         }
     }
     let previews = cache_dir.join("edited");
@@ -328,19 +351,21 @@ fn worker(
                     queue.retain(|q| q.id != p.id);
                     queue.push_back(*p);
                 }
-                Message::Configure(path, new_limit) => {
+                Message::Configure(path, limit) => {
                     converter = path;
-                    limit = new_limit;
-                    dngs = DngCache::new(cache_dir, limit);
+                    dngs.set_limit(limit);
                     if let Err(e) = dngs.evict(None) {
                         tracing::warn!("DNG cache: {e}");
                     }
                 }
                 Message::Check => emit(Event::Status(status(converter.as_deref(), &dngs))),
                 Message::Export(job) => {
-                    if exporter.send((*job, converter.clone(), limit)).is_err() {
+                    if exporter.send((*job, converter.clone())).is_err() {
                         tracing::warn!("the export thread has stopped");
                     }
+                }
+                Message::ConvertAhead(list) => {
+                    let _ = ahead.send((converter.clone(), list));
                 }
                 Message::LoadPresets => emit(Event::Presets(load_presets(presets_file))),
                 Message::SavePresets(list) => {
@@ -427,8 +452,40 @@ fn worker(
     }
 }
 
-/// Render an edit's preview JPEG unless it exists. False when it can't be
-/// made yet (a High efficiency NEF without the converter).
+/// The convert-ahead thread: the newest list, one file at a time.
+fn convert_ahead(dngs: &DngCache, lists: &Receiver<(Option<PathBuf>, Vec<PathBuf>)>) {
+    let mut list = std::collections::VecDeque::new();
+    let mut converter = None;
+    loop {
+        if list.is_empty() {
+            match lists.recv() {
+                Ok((c, l)) => (converter, list) = (c, l.into()),
+                Err(_) => return,
+            }
+        }
+        for (c, l) in lists.try_iter() {
+            (converter, list) = (c, l.into());
+        }
+        let Some(nef) = list.pop_front() else {
+            continue;
+        };
+        let Some(conv) = Converter::find(converter.as_deref()) else {
+            list.clear();
+            continue;
+        };
+        let Ok(bytes) = std::fs::read(&nef) else {
+            continue;
+        };
+        if !shoebox_develop::dng::needs_dng(&bytes) || dngs.has(&DngCache::key(&bytes)) {
+            continue;
+        }
+        if let Err(e) = dngs.get_or_convert(&conv, &nef, &bytes) {
+            tracing::warn!("converting {} ahead: {e}", nef.display());
+        }
+    }
+}
+
+/// The converter and the cache, for Settings → Raw.
 fn status(converter: Option<&std::path::Path>, dngs: &DngCache) -> RawStatus {
     RawStatus {
         converter: Converter::find(converter).map(|c| (c.program().to_path_buf(), c.version())),
@@ -436,6 +493,8 @@ fn status(converter: Option<&std::path::Path>, dngs: &DngCache) -> RawStatus {
     }
 }
 
+/// Render an edit's preview JPEG unless it exists. False when it can't be
+/// made yet (a High efficiency NEF without the converter).
 fn preview(
     p: &PreviewJob,
     dir: &std::path::Path,

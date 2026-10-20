@@ -3,6 +3,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use shoebox_core::catalog::{Catalog, Photo};
@@ -456,6 +457,12 @@ pub struct ShoeboxApp {
     pub(crate) unattached: Vec<PathBuf>,
     /// What the develop thread was last told (converter, cache limit).
     raw_config: Option<(Option<PathBuf>, u64)>,
+    /// The last keyboard or mouse input, and whether likely edits are
+    /// being converted since (Settings → Raw: idle pre-convert).
+    last_input: Instant,
+    converting_idle: bool,
+    /// How long without input counts as idle (tests shorten it).
+    idle_after: Duration,
     pub(crate) compare: CompareState,
     /// Photos in Survey, in order.
     pub(crate) survey: Vec<PhotoId>,
@@ -590,6 +597,9 @@ impl ShoeboxApp {
             raw_status: None,
             unattached: Vec::new(),
             raw_config: None,
+            last_input: Instant::now(),
+            converting_idle: false,
+            idle_after: Duration::from_secs(60),
             events: Vec::new(),
             event_members: HashMap::new(),
             event_spans: HashMap::new(),
@@ -1312,6 +1322,74 @@ impl ShoeboxApp {
         self.settings = s.clone();
         self.apply_settings();
         self.command(LibraryCommand::SaveSettings(Box::new(s)));
+    }
+
+    /// A High efficiency NEF: Develop needs a DNG of it.
+    pub(crate) fn needs_dng(&self, idx: usize) -> bool {
+        let p = &self.catalog.photos[idx];
+        p.format == shoebox_decode::Format::Nef
+            && p.meta
+                .exif
+                .nef_compression
+                .is_some_and(|c| shoebox_decode::nef::NefCompression::from_tag(c).needs_dng())
+    }
+
+    /// After a while without input, convert likely edits (when the setting
+    /// is on); input stops it after the file being converted.
+    fn tick_idle(&mut self, ctx: &egui::Context) {
+        let active = ctx.input(|i| !i.events.is_empty() || i.pointer.delta() != egui::Vec2::ZERO);
+        if active {
+            self.last_input = Instant::now();
+            if std::mem::take(&mut self.converting_idle) {
+                self.developer.convert_ahead(Vec::new());
+            }
+            return;
+        }
+        if !self.settings.preconvert || self.converting_idle {
+            return;
+        }
+        let wait = self.idle_after.saturating_sub(self.last_input.elapsed());
+        if !wait.is_zero() {
+            ctx.request_repaint_after(wait);
+            return;
+        }
+        self.converting_idle = true;
+        let list = self.likely_edits();
+        tracing::info!("idle: converting up to {} likely edits", list.len());
+        self.developer.convert_ahead(list);
+    }
+
+    /// High efficiency NEFs likely to be edited: picks and 3 stars and up,
+    /// outside reference folders, newest first, as many as fill half the
+    /// DNG cache (about 30 MB each).
+    fn likely_edits(&self) -> Vec<PathBuf> {
+        let limit = self
+            .raw_config
+            .as_ref()
+            .map_or(shoebox_develop::dng::DEFAULT_LIMIT, |r| r.1);
+        let room = (limit / 2 / (30 << 20)).max(1) as usize;
+        let mut likely: Vec<usize> = (0..self.catalog.photos.len())
+            .filter(|&i| {
+                let m = &self.catalog.photos[i].marks;
+                (m.pick == Some(shoebox_core::marks::Pick::Pick) || m.rating >= 3)
+                    && !self.catalog.is_reference(i)
+                    && self.needs_dng(i)
+            })
+            .collect();
+        likely.sort_by(|&a, &b| {
+            let t = |i: usize| self.catalog.photos[i].meta.exif.capture_time.clone();
+            t(b).cmp(&t(a))
+        });
+        likely
+            .into_iter()
+            .take(room)
+            .map(|i| self.catalog.photos[i].path.clone())
+            .collect()
+    }
+
+    /// Count input-free time as idle after this long (tests).
+    pub fn set_idle_after(&mut self, d: Duration) {
+        self.idle_after = d;
     }
 
     /// Apply the settings the UI uses directly.
@@ -3779,6 +3857,7 @@ impl eframe::App for ShoeboxApp {
         self.tick_people();
         self.tick_picker(&ctx);
         self.tick_quit(&ctx);
+        self.tick_idle(&ctx);
         crate::updater::tick(&ctx, crate::jobs::working());
         self.handle_keys(&ctx);
         views::develop::poll(self);
