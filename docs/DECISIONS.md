@@ -980,3 +980,29 @@ hashes, embeddings, faces).
   public and can't carry a real NEF, so instead each DNG is decoded by
   rawler before it's kept, and a failed conversion is reported as such.
   Conversions run two at a time; a file asked for twice converts once.
+
+## Develop, Phase 1: the edit document (2026-10-20)
+
+- `shoebox-develop::edit`, as EDITING-SPEC's Edit document, with these
+  choices:
+  - `source.blake3` instead of `source.xxh3`: Shoebox already hashes files
+    with BLAKE3 (duplicates, imports), so one hash serves both.
+  - Settings are typed structs whose defaults live in code; on save they're
+    serialised and everything equal to the default is pruned, so an
+    untouched photo stores `{}`. Modules this build doesn't know are kept
+    verbatim (`Modules::other`).
+  - History: each step is a JSON Patch from the previous (pruned) settings.
+    Undo, redo and jump replay patches from the defaults (cheap: a few
+    dozen small patches). `history_at` records an undone position; a new
+    change drops the undone steps and any snapshot past them. A slider drag
+    is one step (`amend`), and a drag back to the start removes it.
+    History that doesn't replay to the stored settings (a hand-edited file)
+    is dropped and the settings win.
+  - Values are `f64` so files read `0.7`, not `0.699999988`.
+  - `render_hash`: BLAKE3 of the process version and pruned settings, not
+    history or names; it keys rendered previews and stale exports.
+  - Phase 1 modules: `raw` (demosaic RCD, highlights inpaint-opposed),
+    `white_balance` (as shot, presets, custom temp/tint), `input_colour`
+    (matrix), `exposure`, `display_transform` (contrast, white and black
+    EV offsets, preserve hue), and `geometry` (rotate, crop as fractions of
+    the upright rotated frame, aspect).

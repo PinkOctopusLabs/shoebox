@@ -2,8 +2,11 @@
 //!
 //! - [`dng`]: High efficiency NEFs, which no open decoder reads yet, become
 //!   DNGs through Adobe's DNG Converter, cached by content.
+//! - [`edit`]: the edit document: settings that differ from the defaults,
+//!   with undoable history.
 
 pub mod dng;
+pub mod edit;
 
 use std::path::PathBuf;
 
