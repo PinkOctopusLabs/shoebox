@@ -1443,3 +1443,32 @@ files from then on, so they show up in the catalog.
   next chunk, not a second Whites/Blacks pair.
 - Module sections now open and close (the arrow, or a click on the title).
   A point on the curve is removed by double-clicking or right-clicking it.
+
+## Phase 2, second chunk: dehaze, highlights and shadows, clarity (2026-10-20)
+
+- **A fast guided filter instead of extra GPU passes.** The coefficients
+  `(a, b)` come from a small copy of the source (512 px long edge, made
+  once and cached on the source). The live pass samples them (bilinear) at
+  each pixel's source position and evaluates `a·I + b` with the pixel's own
+  guide, so edges stay sharp at full size (He and Sun, 2015). Working in
+  source space means crop, rotation, the proxy, 100% regions and export
+  all use the same maps. The GPU needs one storage buffer, re-uploaded only
+  when the maps change.
+- **The maps depend on the colour matrix and the dehaze amount**, not on
+  the slider amounts. Dragging highlights, shadows or clarity reuses them.
+  Dragging exposure or white balance recomputes them: 9 ms with all three
+  on (benchmark `local maps`), after replacing the airlight sort with a
+  selection and making the box filter's vertical pass cache-friendly. A
+  768 px copy took 35 ms.
+- **Highlights and shadows:** the base layer is log luminance, guided by
+  itself (radius 2.5% of the long edge, ε 0.25 stops²). Each slider is up
+  to ±1.5 stops, weighted by the base's tone. Detail keeps its contrast and
+  there's no halo (both tested).
+- **Clarity:** the same at 6% (ε 1). The detail above the base is scaled
+  in the midtones.
+- **Dehaze:** the dark channel prior (airlight from the haziest 0.1%,
+  ω 0.95, t ≥ 0.1). The transmission is refined by a guided filter on
+  luminance. A negative amount mixes towards the airlight.
+- Texture, sharpening and the simpler denoiser need fine neighbourhoods at
+  the source's own resolution. They come next, as neighbour taps in the
+  live pass.

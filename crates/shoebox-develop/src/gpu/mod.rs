@@ -7,9 +7,10 @@
 //! images; they skip where no GPU adapter is available (Linux CI).
 //!
 //! A [`Frame`] is cheap to build and the pass is one dispatch, so a slider
-//! re-renders the whole live pipe. Stages that cost more (dehaze, local
-//! tone, from Phase 2) get their own passes and cached textures, so a
-//! slider only re-runs from the first stage it changes.
+//! re-renders the whole live pipe. Modules that need a neighbourhood
+//! (dehaze, highlights and shadows, clarity) come as small coefficient
+//! maps worked out on the CPU (`cpu::maps`, a fast guided filter) and
+//! evaluated here per pixel; the maps are uploaded only when they change.
 
 use crate::cpu::{DISPLAY_GREY, Frame, MID_GREY, Rgb};
 
@@ -46,6 +47,8 @@ pub struct Pipe {
     output: Output,
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
+    /// The last local maps uploaded, and their buffer.
+    maps: std::sync::Mutex<Option<(std::sync::Arc<crate::cpu::maps::Maps>, wgpu::Buffer)>>,
 }
 
 /// The demosaiced image on the GPU.
@@ -119,6 +122,16 @@ impl Pipe {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -138,6 +151,7 @@ impl Pipe {
             output,
             layout,
             pipeline,
+            maps: Default::default(),
         }
     }
 
@@ -247,10 +261,15 @@ impl Pipe {
                 usage: wgpu::BufferUsages::STORAGE,
             },
         );
+        let maps = self.maps_buffer(device, frame);
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("develop"),
             layout: &self.layout,
             entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: maps.as_entire_binding(),
+                },
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: tone.as_entire_binding(),
@@ -280,6 +299,38 @@ impl Pipe {
             (frame.height as u32).div_ceil(WORKGROUP),
             1,
         );
+    }
+
+    /// The frame's local maps on the GPU: kept while they're the same maps
+    /// (dragging a slider that doesn't change them uploads nothing).
+    fn maps_buffer(&self, device: &wgpu::Device, frame: &Frame) -> wgpu::Buffer {
+        let Some(maps) = &frame.local.maps else {
+            return wgpu::util::DeviceExt::create_buffer_init(
+                device,
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("local maps (none)"),
+                    contents: &[0; 16],
+                    usage: wgpu::BufferUsages::STORAGE,
+                },
+            );
+        };
+        let mut kept = self.maps.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((m, b)) = &*kept
+            && std::sync::Arc::ptr_eq(m, maps)
+        {
+            return b.clone();
+        }
+        let bytes: Vec<u8> = maps.data.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let b = wgpu::util::DeviceExt::create_buffer_init(
+            device,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("local maps"),
+                contents: &bytes,
+                usage: wgpu::BufferUsages::STORAGE,
+            },
+        );
+        *kept = Some((maps.clone(), b.clone()));
+        b
     }
 
     /// Render `frame` and read it back (an [`Output::Rgba32Float`] pipe):
@@ -529,7 +580,7 @@ impl Histogram {
     }
 }
 
-/// The uniform block (`Params` in the shader), as 34 vec4s.
+/// The uniform block (`Params` in the shader), as 38 vec4s.
 fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
     let row = |r: [f32; 3]| [r[0], r[1], r[2], 0.0];
     let d = &f.display;
@@ -583,6 +634,15 @@ fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
         v.extend(band);
     }
     v.extend([flag(d.tone.is_some()), 0.0, 0.0, 0.0]);
+    let lc = &f.local;
+    v.extend([lc.shadows, lc.highlights, lc.clarity, lc.dehaze]);
+    let (mw, mh, air) = lc.maps.as_ref().map_or((1.0, 1.0, [1.0; 3]), |m| {
+        (m.width as f32, m.height as f32, m.airlight)
+    });
+    v.extend([flag(lc.maps.is_some()), mw, mh, 0.0]);
+    v.extend([lc.scale[0], lc.scale[1], 0.0, 0.0]);
+    let air_y = lc.luma[0] * air[0] + lc.luma[1] * air[1] + lc.luma[2] * air[2];
+    v.extend([air[0], air[1], air[2], air_y]);
     v
 }
 

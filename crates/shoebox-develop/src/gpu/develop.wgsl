@@ -1,6 +1,7 @@
 // The live pipe for one output pixel (see `cpu::apply` and
 // `cpu::display_pixel`, which this follows operation for operation):
-// geometry map → bilinear sample → colour matrix → look (colour, black and
+// geometry map → bilinear sample → colour matrix → local (dehaze,
+// highlights and shadows, clarity: `cpu::maps`) → look (colour, black and
 // white: `cpu::look`) → display transform → tone curve → output space and
 // sRGB transfer curve.
 //
@@ -38,6 +39,10 @@ struct Params {
     lum: array<vec4<f32>, 2>,
     mix: array<vec4<f32>, 2>,
     tone: vec4<f32>,      // x: tone curve on (0/1)
+    local: vec4<f32>,     // shadows, highlights, clarity, dehaze (−1..1)
+    maps: vec4<f32>,      // maps on (0/1), map width, map height
+    scale: vec4<f32>,     // source → map pixels (x, y)
+    air: vec4<f32>,       // dehaze airlight (rgb), its luminance
 };
 
 @group(0) @binding(0) var src: texture_2d<f32>;
@@ -46,6 +51,10 @@ struct Params {
 // The tone curve: red, green and blue tables of CURVE_SIZE entries.
 @group(0) @binding(3) var<storage, read> tone: array<f32>;
 
+// The local maps (see `cpu::maps`): STRIDE floats per map pixel.
+@group(0) @binding(4) var<storage, read> maps: array<f32>;
+
+const STRIDE: u32 = 6u;
 const CURVE_SIZE: u32 = 1024u;
 const CENTRES = array<f32, 8>(29.0, 58.0, 110.0, 142.0, 195.0, 264.0, 295.0, 328.0);
 
@@ -202,6 +211,78 @@ fn look(px: vec3<f32>) -> vec3<f32> {
     return out;
 }
 
+fn map_at(x: u32, y: u32, k: u32) -> f32 {
+    return maps[(y * u32(p.maps.y) + x) * STRIDE + k];
+}
+
+struct Coeffs { hs: vec2<f32>, cl: vec2<f32>, dz: vec2<f32> };
+
+// The maps at a source position (bilinear, clamped: `cpu::maps::sample`).
+fn coeffs(sx: f32, sy: f32) -> Coeffs {
+    let w = p.maps.y;
+    let h = p.maps.z;
+    let x = clamp((sx + 0.5) * p.scale.x - 0.5, 0.0, w - 1.0);
+    let y = clamp((sy + 0.5) * p.scale.y - 0.5, 0.0, h - 1.0);
+    let x0 = u32(floor(x));
+    let y0 = u32(floor(y));
+    let x1 = min(x0 + 1u, u32(w) - 1u);
+    let y1 = min(y0 + 1u, u32(h) - 1u);
+    let fx = x - f32(x0);
+    let fy = y - f32(y0);
+    var v: array<f32, 6>;
+    for (var k = 0u; k < STRIDE; k++) {
+        let a = map_at(x0, y0, k);
+        let b = map_at(x1, y0, k);
+        let c = map_at(x0, y1, k);
+        let d = map_at(x1, y1, k);
+        let top = a + (b - a) * fx;
+        let bot = c + (d - c) * fx;
+        v[k] = top + (bot - top) * fy;
+    }
+    return Coeffs(vec2<f32>(v[0], v[1]), vec2<f32>(v[2], v[3]), vec2<f32>(v[4], v[5]));
+}
+
+fn stops(y: f32) -> f32 {
+    return log2(max(y, 1e-6) / p.misc.y);
+}
+
+fn dehaze(px: vec3<f32>, t0: f32) -> vec3<f32> {
+    let amount = p.local.w;
+    if (amount > 0.0) {
+        let t = clamp(t0, 0.1, 1.0);
+        let j = (px - p.air.xyz) / t + p.air.xyz;
+        return max(px + amount * (j - px), vec3<f32>(0.0));
+    }
+    return px + (-amount) * 0.5 * (p.air.xyz - px);
+}
+
+// Dehaze, highlights and shadows, clarity (see `cpu::maps::local_pixel`).
+fn local_px(px0: vec3<f32>, sx: f32, sy: f32) -> vec3<f32> {
+    let m = coeffs(sx, sy);
+    var px = px0;
+    if (p.local.w != 0.0) {
+        let g = clamp(dot(p.luma.xyz, px) / max(p.air.w, 1e-6), 0.0, 2.0);
+        px = dehaze(px, m.dz.x * g + m.dz.y);
+    }
+    let s = stops(dot(p.luma.xyz, px));
+    var gain = 0.0;
+    if (p.local.x != 0.0 || p.local.y != 0.0) {
+        let base = m.hs.x * s + m.hs.y;
+        gain += p.local.x * 1.5 * (1.0 - smooth01(-3.0, 0.0, base));
+        gain += p.local.y * 1.5 * smooth01(-0.5, 2.5, base);
+    }
+    if (p.local.z != 0.0) {
+        let base = m.cl.x * s + m.cl.y;
+        let detail = clamp(s - base, -3.0, 3.0);
+        let mid = 1.0 - smooth01(2.0, 4.0, abs(base + 0.5));
+        gain += p.local.z * 0.7 * detail * mid;
+    }
+    if (gain == 0.0) {
+        return px;
+    }
+    return px * exp2(gain);
+}
+
 fn tone_at(ch: u32, v: f32) -> f32 {
     let x = clamp(v, 0.0, 1.0) * f32(CURVE_SIZE - 1u);
     let i = min(u32(floor(x)), CURVE_SIZE - 2u);
@@ -257,6 +338,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let sx = p.map0.x * x + p.map0.y * y + p.map0.z;
     let sy = p.map1.x * x + p.map1.y * y + p.map1.z;
     var px = mul3(p.colour0, p.colour1, p.colour2, bilinear(sx, sy));
+    if (p.maps.x > 0.5) {
+        px = local_px(px, sx, sy);
+    }
     if (p.look.x > 0.5) {
         px = look(px);
     }

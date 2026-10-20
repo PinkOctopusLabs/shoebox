@@ -535,10 +535,11 @@ fn preview(
         target: p.target,
     };
     let src = if ready.src.rgb.width.max(ready.src.rgb.height) > PREVIEW as usize {
-        Arc::new(Demosaiced {
-            rgb: cpu::downscale(&ready.src.rgb, PREVIEW as usize),
-            ..(*ready.src).clone()
-        })
+        Arc::new(Demosaiced::new(
+            cpu::downscale(&ready.src.rgb, PREVIEW as usize),
+            ready.src.as_shot,
+            ready.src.referred,
+        ))
     } else {
         ready.src.clone()
     };

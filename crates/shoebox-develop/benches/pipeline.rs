@@ -54,6 +54,19 @@ fn pipeline(c: &mut Criterion) {
             cpu::apply(&proxy.rgb, &f, true)
         })
     });
+    let mut local = s.clone();
+    local.modules.highlights_shadows.shadows = 50.0;
+    local.modules.clarity.amount = 30.0;
+    local.modules.dehaze.amount = 20.0;
+    let mut ev = 0.0;
+    g.bench_function("local maps (frame, cache miss)", |b| {
+        b.iter(|| {
+            // A new exposure each time: the maps are worked out again.
+            ev += 0.001;
+            local.modules.exposure.ev = ev;
+            cpu::frame(&raw, &proxy, black_box(&local), &o)
+        })
+    });
     let full = cpu::render(&raw, &s, &o);
     g.bench_function("export resize to 2048 (Lanczos)", |b| {
         b.iter(|| shoebox_develop::export::resize(black_box(&full), 2048, 1365))

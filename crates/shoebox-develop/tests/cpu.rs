@@ -426,11 +426,7 @@ fn the_eyedropper_makes_its_patch_neutral() {
     let raw = grey_card(0.2);
     let tinted = [0.30f64, 0.25, 0.16]; // a warm patch
     for src in [
-        cpu::Demosaiced {
-            rgb: Rgb::new(4, 4),
-            as_shot: [2.0, 1.0, 1.0 / 0.7],
-            referred: cpu::Referred::Scene,
-        },
+        cpu::Demosaiced::new(Rgb::new(4, 4), [2.0, 1.0, 1.0 / 0.7], cpu::Referred::Scene),
         cpu::from_display(4, 4, &[128; 48], Target::Srgb),
     ] {
         let (temp, tint) = shoebox_develop::wb::neutral_at(&raw, &src, tinted);
@@ -458,11 +454,7 @@ fn the_eyedropper_makes_its_patch_neutral() {
 #[test]
 fn a_region_is_that_part_of_the_render() {
     let raw = grey_card(0.3);
-    let src = cpu::Demosaiced {
-        rgb: truth(80, 60),
-        as_shot: [1.0; 3],
-        referred: cpu::Referred::Scene,
-    };
+    let src = cpu::Demosaiced::new(truth(80, 60), [1.0; 3], cpu::Referred::Scene);
     let mut s = Settings::default();
     s.geometry.rotate = 3.0;
     s.geometry.crop = [0.1, 0.05, 0.9, 0.95];

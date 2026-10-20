@@ -78,11 +78,11 @@ fn gpu_matches_the_cpu_reference() {
         return;
     };
     let raw = zf();
-    let src = Demosaiced {
-        rgb: synthetic(160, 120),
-        as_shot: [1.1425778, 1.0, 1.7753916],
-        referred: shoebox_develop::cpu::Referred::Scene,
-    };
+    let src = Demosaiced::new(
+        synthetic(160, 120),
+        [1.1425778, 1.0, 1.7753916],
+        shoebox_develop::cpu::Referred::Scene,
+    );
     let pipe = Pipe::new(&device, Output::Rgba32Float).unwrap();
     let gsrc = pipe.upload(&device, &queue, &src.rgb);
 
@@ -136,6 +136,17 @@ fn gpu_matches_the_cpu_reference() {
     cases.push(("tone curve", s.clone(), o));
     s.modules.display_transform.preserve_hue = false;
     cases.push(("tone curve, per channel", s, o));
+    let mut s = base.clone();
+    s.modules.highlights_shadows.shadows = 70.0;
+    s.modules.highlights_shadows.highlights = -60.0;
+    s.modules.clarity.amount = 50.0;
+    cases.push(("highlights, shadows, clarity", s.clone(), o));
+    s.modules.dehaze.amount = 60.0;
+    s.geometry.rotate = 3.0;
+    cases.push(("with dehaze, rotated", s.clone(), o));
+    s.modules.dehaze.amount = -40.0;
+    s.geometry.rotate = 0.0;
+    cases.push(("adding haze", s, o));
     cases.push((
         "display p3, orientation 3",
         base.clone(),
@@ -181,11 +192,11 @@ fn a_proxy_frame_renders_quickly() {
     // A 2560×1707 proxy (a 24 MP frame's), rendered repeatedly: the slider
     // path. Warm up once, then time.
     let raw = zf();
-    let src = Demosaiced {
-        rgb: synthetic(2560, 1707),
-        as_shot: [1.1425778, 1.0, 1.7753916],
-        referred: shoebox_develop::cpu::Referred::Scene,
-    };
+    let src = Demosaiced::new(
+        synthetic(2560, 1707),
+        [1.1425778, 1.0, 1.7753916],
+        shoebox_develop::cpu::Referred::Scene,
+    );
     let pipe = Pipe::new(&device, Output::Rgba16Float).unwrap();
     let gsrc = pipe.upload(&device, &queue, &src.rgb);
     let f = cpu::frame(&raw, &src, &Settings::default(), &Options::default());
@@ -220,11 +231,11 @@ fn histogram_and_clipping_match_the_cpu() {
         return;
     };
     let raw = zf();
-    let src = Demosaiced {
-        rgb: synthetic(200, 150),
-        as_shot: [1.1425778, 1.0, 1.7753916],
-        referred: shoebox_develop::cpu::Referred::Scene,
-    };
+    let src = Demosaiced::new(
+        synthetic(200, 150),
+        [1.1425778, 1.0, 1.7753916],
+        shoebox_develop::cpu::Referred::Scene,
+    );
     let pipe = Pipe::new(&device, Output::Rgba32Float).unwrap();
     let gsrc = pipe.upload(&device, &queue, &src.rgb);
     let mut f = cpu::frame(&raw, &src, &Settings::default(), &Options::default());

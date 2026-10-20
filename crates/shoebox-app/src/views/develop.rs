@@ -1495,9 +1495,13 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
 
                 // Tone (the display transform).
                 let t = &s.modules.display_transform;
-                if module(ui, "Tone", *t != defaults.modules.display_transform) {
+                let hs = &s.modules.highlights_shadows;
+                let toned = *t != defaults.modules.display_transform
+                    || *hs != defaults.modules.highlights_shadows;
+                if module(ui, "Tone", toned) {
                     edit(app, "tone", "Reset tone".into(), false, |s| {
                         s.modules.display_transform = Default::default();
+                        s.modules.highlights_shadows = Default::default();
                     });
                 }
                 egui::Grid::new("tone-grid").num_columns(2).show(ui, |ui| {
@@ -1505,6 +1509,19 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                     {
                         edit(app, "contrast", format!("Contrast {v:+.0}"), d, |s| {
                             s.modules.display_transform.contrast = v;
+                        });
+                    }
+                    if let Some((v, d)) =
+                        slider(ui, "Highlights", hs.highlights, -100.0..=100.0, 0.0, 0)
+                    {
+                        edit(app, "highlights", format!("Highlights {v:+.0}"), d, |s| {
+                            s.modules.highlights_shadows.highlights = v;
+                        });
+                    }
+                    if let Some((v, d)) = slider(ui, "Shadows", hs.shadows, -100.0..=100.0, 0.0, 0)
+                    {
+                        edit(app, "shadows", format!("Shadows {v:+.0}"), d, |s| {
+                            s.modules.highlights_shadows.shadows = v;
                         });
                     }
                     if let Some((v, d)) = slider(ui, "Whites", t.white_ev, -3.0..=3.0, 0.0, 2) {

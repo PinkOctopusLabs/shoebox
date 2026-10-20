@@ -2,7 +2,9 @@
 //! calibration (`shoebox_develop::cpu::look`), each a collapsible section.
 
 use eframe::egui::{self, Color32, RichText, Sense, pos2, vec2};
-use shoebox_develop::edit::{BlackAndWhite, Calibration, Colour, HUES, Settings, ToneCurve};
+use shoebox_develop::edit::{
+    BlackAndWhite, Calibration, Clarity, Colour, Dehaze, HUES, Settings, ToneCurve,
+};
 
 use super::develop::{edit, slider};
 use crate::app::ShoeboxApp;
@@ -47,12 +49,41 @@ const SAT_KEYS: [&str; 8] = ["s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7"];
 const LUM_KEYS: [&str; 8] = ["l0", "l1", "l2", "l3", "l4", "l5", "l6", "l7"];
 const MIX_KEYS: [&str; 8] = ["m0", "m1", "m2", "m3", "m4", "m5", "m6", "m7"];
 
-/// The look modules, after exposure.
+/// The look modules, after tone.
 pub fn modules(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &Settings) {
+    presence(app, ui, s);
     tone_curve(app, ui, &s.modules.tone_curve);
     colour(app, ui, &s.modules.colour);
     black_and_white(app, ui, &s.modules.black_and_white);
     calibration(app, ui, &s.modules.calibration);
+}
+
+/// Clarity and dehaze.
+fn presence(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &Settings) {
+    let (c, d) = (&s.modules.clarity, &s.modules.dehaze);
+    let changed = *c != Clarity::default() || *d != Dehaze::default();
+    let reset = section(ui, "Presence", changed, true, |ui| {
+        egui::Grid::new("presence-grid")
+            .num_columns(2)
+            .show(ui, |ui| {
+                if let Some((v, dr)) = slider(ui, "Clarity", c.amount, -100.0..=100.0, 0.0, 0) {
+                    edit(app, "clarity", format!("Clarity {v:+.0}"), dr, |s| {
+                        s.modules.clarity.amount = v;
+                    });
+                }
+                if let Some((v, dr)) = slider(ui, "Dehaze", d.amount, -100.0..=100.0, 0.0, 0) {
+                    edit(app, "dehaze", format!("Dehaze {v:+.0}"), dr, |s| {
+                        s.modules.dehaze.amount = v;
+                    });
+                }
+            });
+    });
+    if reset {
+        edit(app, "presence", "Reset presence".into(), false, |s| {
+            s.modules.clarity = Clarity::default();
+            s.modules.dehaze = Dehaze::default();
+        });
+    }
 }
 
 fn tone_curve(app: &mut ShoeboxApp, ui: &mut egui::Ui, t: &ToneCurve) {

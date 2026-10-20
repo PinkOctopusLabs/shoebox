@@ -155,7 +155,7 @@ fn modules_from_a_newer_build_are_kept() {
         "source": { "path": "a.NEF", "blake3": "00" },
         "modules": {
             "exposure": { "ev": 0.5 },
-            "dehaze": { "amount": 20 }
+            "lens_blur": { "focus": 20 }
         },
         "geometry": { "rotate": 1.5 }
     })
@@ -166,7 +166,7 @@ fn modules_from_a_newer_build_are_kept() {
     assert_eq!(d.settings().geometry.crop, [0.0, 0.0, 1.0, 1.0]);
     d.change("More", |s| s.modules.exposure.ev = 1.0);
     let v = parsed(&d.to_json());
-    assert_eq!(v["modules"]["dehaze"], json!({ "amount": 20 }));
+    assert_eq!(v["modules"]["lens_blur"], json!({ "focus": 20 }));
     assert_eq!(v["copy"]["id"], "main");
 }
 

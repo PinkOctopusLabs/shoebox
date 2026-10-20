@@ -3,7 +3,9 @@
 //! A High efficiency NEF goes through Adobe DNG Converter first (cached in
 //! `<out dir>/cache`). Writes `<name>.png` (sRGB) and prints stage timings.
 //! `SHOEBOX_LONG_EDGE` renders a proxy; `SHOEBOX_EV`, `SHOEBOX_CONTRAST`,
-//! `SHOEBOX_WHITE_EV` and `SHOEBOX_BLACK_EV` set those sliders; with
+//! `SHOEBOX_WHITE_EV` and `SHOEBOX_BLACK_EV` set those sliders;
+//! `SHOEBOX_EDIT` takes any settings as JSON (as an edit document stores
+//! them, e.g. `{"modules":{"clarity":{"amount":40}}}`) before those; with
 //! `SHOEBOX_GPU=1` the live pipe also runs on the GPU and the largest
 //! difference from the CPU render is printed.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -40,7 +42,10 @@ fn main() {
         let t_conv = t.elapsed();
         let raw = shoebox_decode::raw::decode_path(&source).unwrap();
         let t_dec = t.elapsed();
-        let mut s = Settings::default();
+        let mut s = std::env::var("SHOEBOX_EDIT").map_or_else(
+            |_| Settings::default(),
+            |j| Settings::from_value(&serde_json::from_str(&j).unwrap()).unwrap(),
+        );
         let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f64>().ok());
         if let Some(v) = env("SHOEBOX_EV") {
             s.modules.exposure.ev = v;

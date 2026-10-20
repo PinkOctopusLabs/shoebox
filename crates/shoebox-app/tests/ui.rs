@@ -3466,6 +3466,7 @@ fn develop_look_modules() {
     h.run_steps(3);
     assert!(h.query_by_label("Vibrance").is_some());
     assert!(h.query_by_label("Black & white").is_some());
+    assert!(h.query_by_label("Clarity").is_some() && h.query_by_label("Dehaze").is_some());
     // The curve sits under its channel buttons.
     let rgb = h.get_by_label("RGB").rect();
     let curve = egui::Rect::from_min_size(

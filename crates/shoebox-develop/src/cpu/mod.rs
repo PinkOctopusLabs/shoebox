@@ -22,6 +22,7 @@
 #![allow(clippy::needless_range_loop)]
 
 pub mod look;
+pub mod maps;
 pub mod raw;
 
 use rayon::prelude::*;
@@ -128,6 +129,20 @@ pub struct Demosaiced {
     pub rgb: Rgb,
     pub as_shot: [f32; 3],
     pub referred: Referred,
+    /// Its small copy and last local-adjustment maps (see [`maps`]),
+    /// shared by clones.
+    pub cache: maps::Cache,
+}
+
+impl Demosaiced {
+    pub fn new(rgb: Rgb, as_shot: [f32; 3], referred: Referred) -> Self {
+        Self {
+            rgb,
+            as_shot,
+            referred,
+            cache: Default::default(),
+        }
+    }
 }
 
 /// A finished image (8-bit, `space`'s primaries and the sRGB transfer
@@ -165,11 +180,7 @@ fn display_source<T: Copy + Into<usize> + Sync>(
             let lin = [lut[p[0].into()], lut[p[1].into()], lut[p[2].into()]];
             o.copy_from_slice(&mul3(&to_2020, lin));
         });
-    Demosaiced {
-        rgb,
-        as_shot: [1.0; 3],
-        referred: Referred::Display,
-    }
+    Demosaiced::new(rgb, [1.0; 3], Referred::Display)
 }
 
 /// The inverse of [`srgb_oetf`].
@@ -215,11 +226,7 @@ pub fn demosaic(raw: &RawImage, r: &Raw, long_edge: Option<u32>) -> Demosaiced {
         Some(l) => downscale(&rgb, l as usize),
         None => rgb,
     };
-    Demosaiced {
-        rgb,
-        as_shot: mult,
-        referred: Referred::Scene,
-    }
+    Demosaiced::new(rgb, mult, Referred::Scene)
 }
 
 /// Box-filter downscale by a whole factor so the long edge fits `long_edge`.
@@ -271,6 +278,8 @@ pub struct Frame {
     /// Source (camera RGB balanced at as shot) → linear Rec.2020, with the
     /// white balance change, exposure and calibration folded in.
     pub colour: [[f32; 3]; 3],
+    /// Dehaze, highlights and shadows, clarity (see [`maps`]).
+    pub local: maps::Local,
     /// Colour and black and white, per pixel (see [`look`]).
     pub look: look::Look,
     pub display: Display,
@@ -481,6 +490,7 @@ pub fn frame(raw: &RawImage, src: &Demosaiced, s: &Settings, o: &Options) -> Fra
         width,
         height,
         map: map.map(|r| r.map(|v| v as f32)),
+        local: maps::local(src, &colour, s),
         colour,
         look: look::Look::new(
             &s.modules.colour,
@@ -583,7 +593,8 @@ pub fn apply(src: &Rgb, f: &Frame, display: bool) -> Rgb {
                 let (xf, yf) = (x as f32, y as f32);
                 let sx = f.map[0][0] * xf + f.map[0][1] * yf + f.map[0][2];
                 let sy = f.map[1][0] * xf + f.map[1][1] * yf + f.map[1][2];
-                let lin = look::look_pixel(&f.look, mul3(&f.colour, sample(src, sx, sy)));
+                let lin = mul3(&f.colour, sample(src, sx, sy));
+                let lin = look::look_pixel(&f.look, maps::local_pixel(&f.local, lin, sx, sy));
                 let px = if display {
                     let d = display_pixel(&f.display, lin);
                     if f.warnings { warn(d) } else { d }
@@ -627,6 +638,7 @@ fn resample(img: &Rgb, map: [[f64; 3]; 2], w: usize, h: usize) -> Rgb {
         height: h,
         map: map.map(|r| r.map(|v| v as f32)),
         colour: f32m(&colour::IDENTITY),
+        local: maps::Local::none(),
         look: look::Look::new(
             &Default::default(),
             &Default::default(),

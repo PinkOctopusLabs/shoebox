@@ -205,6 +205,30 @@ impl Default for DisplayTransform {
     }
 }
 
+/// Highlights and shadows (module 7): −100 to +100, applied through an
+/// edge-aware base layer so detail keeps its contrast.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HighlightsShadows {
+    pub highlights: f64,
+    pub shadows: f64,
+}
+
+/// Clarity (module 8): midtone local contrast at a coarse scale, −100 to
+/// +100.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Clarity {
+    pub amount: f64,
+}
+
+/// Dehaze (module 5): −100 (add haze) to +100.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Dehaze {
+    pub amount: f64,
+}
+
 /// The eight hue bands of HSL and the black-and-white mix, in order.
 pub const HUES: [&str; 8] = [
     "Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple", "Magenta",
@@ -298,6 +322,9 @@ pub struct Modules {
     pub white_balance: WhiteBalance,
     pub input_colour: InputColour,
     pub exposure: Exposure,
+    pub dehaze: Dehaze,
+    pub highlights_shadows: HighlightsShadows,
+    pub clarity: Clarity,
     pub calibration: Calibration,
     pub colour: Colour,
     pub black_and_white: BlackAndWhite,
