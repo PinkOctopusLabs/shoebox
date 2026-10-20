@@ -1413,3 +1413,33 @@ files from then on, so they show up in the catalog.
   on its own, with the camera's JPEG as the only outside reference, plus
   measurements (ColorChecker, golden images). Other editors are still named,
   but only as sources of features to build.
+
+## Phase 2, first chunk: colour and tone curve (2026-10-20)
+
+- **Order.** These per-pixel modules come first because they fit the single
+  GPU pass as it is: calibration, colour (vibrance, saturation, HSL), black
+  and white, tone curve. Neighbourhood modules (highlights and shadows,
+  clarity, dehaze, sharpening, denoise) come next, together with the
+  multi-pass pipe they need.
+- **Where they run.** Calibration is a 3×3 matrix on the working primaries.
+  It's folded into the frame's colour matrix, so it costs nothing per pixel,
+  and white stays white. Colour and black and white run per pixel in Oklab,
+  reached from linear Rec.2020 through a composed LMS matrix, before the
+  display transform. Scene-linear values above 1 are fine, because Oklab's
+  cube root is homogeneous. HSL luminance scales linear light, ±1 stop at
+  ±100, so it keeps hue. All the colour sliders fade out on greys, by chroma
+  relative to lightness.
+- **The tone curve deviates from the spec.** EDITING-SPEC places it before
+  the display transform, as "a monotone cubic in log space". It runs instead
+  on the display transform's own display values (2.2-encoded, before the
+  output space). A curve the user draws then matches what the screen and
+  histogram show, and doesn't fight the sigmoid. It's still independent of
+  the export space, because it runs before the output matrix. Point curves
+  are monotone cubics (Fritsch–Carlson); the parametric regions are smooth
+  humps. Both are baked into a 1024-entry table per channel, kept
+  non-decreasing.
+- **Whites and Blacks.** These stay the display transform's white and black
+  points (Phase 1). Module 7 adds Highlights and Shadows (guided filter)
+  next chunk, not a second Whites/Blacks pair.
+- Module sections now open and close (the arrow, or a click on the title).
+  A point on the curve is removed by double-clicking or right-clicking it.

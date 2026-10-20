@@ -109,6 +109,16 @@ impl Pipe {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -224,10 +234,27 @@ impl Pipe {
                 usage: wgpu::BufferUsages::UNIFORM,
             },
         );
+        // The tone curve's tables (a placeholder when it's off).
+        let tone: Vec<u8> = match &frame.display.tone {
+            Some(t) => t.iter().flat_map(|v| v.to_le_bytes()).collect(),
+            None => vec![0; 16],
+        };
+        let tone = wgpu::util::DeviceExt::create_buffer_init(
+            device,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("tone curve"),
+                contents: &tone,
+                usage: wgpu::BufferUsages::STORAGE,
+            },
+        );
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("develop"),
             layout: &self.layout,
             entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: tone.as_entire_binding(),
+                },
                 wgpu::BindGroupEntry {
                     binding: 0,
                     resource: wgpu::BindingResource::TextureView(&src.view),
@@ -502,7 +529,7 @@ impl Histogram {
     }
 }
 
-/// The uniform block (`Params` in the shader), as 17 vec4s.
+/// The uniform block (`Params` in the shader), as 34 vec4s.
 fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
     let row = |r: [f32; 3]| [r[0], r[1], r[2], 0.0];
     let d = &f.display;
@@ -543,6 +570,19 @@ fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
         src.width as f32,
         src.height as f32,
     ]);
+    let l = &f.look;
+    for m in [l.to_lms, l.from_lms] {
+        for r in m {
+            v.extend(row(r));
+        }
+    }
+    let flag = |b: bool| if b { 1.0 } else { 0.0 };
+    v.extend([flag(l.active), l.shadows_tint, l.vibrance, l.saturation]);
+    v.extend([l.luma[0], l.luma[1], l.luma[2], flag(l.mono)]);
+    for band in [l.hue, l.sat, l.lum, l.mix] {
+        v.extend(band);
+    }
+    v.extend([flag(d.tone.is_some()), 0.0, 0.0, 0.0]);
     v
 }
 

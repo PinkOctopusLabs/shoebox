@@ -21,6 +21,7 @@
 // Channel and matrix loops read clearer indexed (c, r) than zipped.
 #![allow(clippy::needless_range_loop)]
 
+pub mod look;
 pub mod raw;
 
 use rayon::prelude::*;
@@ -259,7 +260,7 @@ fn f32m(m: &M3) -> [[f32; 3]; 3] {
 
 /// Everything the live pipe needs for one render, worked out once from the
 /// settings: the same numbers drive the CPU reference and the shader.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Frame {
     /// Output size.
     pub width: usize,
@@ -268,15 +269,17 @@ pub struct Frame {
     /// indices: `sx = map[0]·(x, y, 1)`, `sy = map[1]·(x, y, 1)`.
     pub map: [[f32; 3]; 2],
     /// Source (camera RGB balanced at as shot) → linear Rec.2020, with the
-    /// white balance change and exposure folded in.
+    /// white balance change, exposure and calibration folded in.
     pub colour: [[f32; 3]; 3],
+    /// Colour and black and white, per pixel (see [`look`]).
+    pub look: look::Look,
     pub display: Display,
     /// Show clipping: blown highlights red, crushed shadows blue (J).
     pub warnings: bool,
 }
 
 /// The display transform's numbers.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Display {
     pub curve: Curve,
     pub inset: [[f32; 3]; 3],
@@ -288,6 +291,9 @@ pub struct Display {
     /// A finished image's tone instead of the scene curve: black and white
     /// points and contrast on 2.2-encoded values (identity at defaults).
     pub referred: Option<Levels>,
+    /// The tone curve's tables (red, green, blue; see
+    /// [`look::curve_table`]), applied to the display values; None: none.
+    pub tone: Option<std::sync::Arc<[f32]>>,
 }
 
 /// Tone for a display-referred image: `x' = (x − black) / (white − black)`,
@@ -330,6 +336,7 @@ impl Display {
             to_target: f32m(&target.from_rec2020()),
             preserve_hue: d.preserve_hue,
             referred: None,
+            tone: None,
             target,
         }
     }
@@ -462,7 +469,12 @@ pub fn frame(raw: &RawImage, src: &Demosaiced, s: &Settings, o: &Options) -> Fra
         ),
     };
     let gain = 2f64.powf(ev);
+    let m = colour::mul(&look::calibration_matrix(&s.modules.calibration), &m);
     let colour = f32m(&m.map(|r| r.map(|v| v * gain)));
+    let display = Display {
+        tone: look::curve_table(&s.modules.tone_curve),
+        ..display
+    };
     let (map, width, height) =
         geometry_map(src.rgb.width, src.rgb.height, o.orientation, &s.geometry);
     Frame {
@@ -470,6 +482,11 @@ pub fn frame(raw: &RawImage, src: &Demosaiced, s: &Settings, o: &Options) -> Fra
         height,
         map: map.map(|r| r.map(|v| v as f32)),
         colour,
+        look: look::Look::new(
+            &s.modules.colour,
+            &s.modules.calibration,
+            &s.modules.black_and_white,
+        ),
         display,
         warnings: false,
     }
@@ -509,7 +526,7 @@ impl Frame {
     pub fn region(&self, r: [usize; 4]) -> Frame {
         let x = r[0].min(self.width.saturating_sub(1));
         let y = r[1].min(self.height.saturating_sub(1));
-        let mut f = *self;
+        let mut f = self.clone();
         f.width = r[2].min(self.width - x).max(1);
         f.height = r[3].min(self.height - y).max(1);
         for row in 0..2 {
@@ -566,7 +583,7 @@ pub fn apply(src: &Rgb, f: &Frame, display: bool) -> Rgb {
                 let (xf, yf) = (x as f32, y as f32);
                 let sx = f.map[0][0] * xf + f.map[0][1] * yf + f.map[0][2];
                 let sy = f.map[1][0] * xf + f.map[1][1] * yf + f.map[1][2];
-                let lin = mul3(&f.colour, sample(src, sx, sy));
+                let lin = look::look_pixel(&f.look, mul3(&f.colour, sample(src, sx, sy)));
                 let px = if display {
                     let d = display_pixel(&f.display, lin);
                     if f.warnings { warn(d) } else { d }
@@ -610,6 +627,11 @@ fn resample(img: &Rgb, map: [[f64; 3]; 2], w: usize, h: usize) -> Rgb {
         height: h,
         map: map.map(|r| r.map(|v| v as f32)),
         colour: f32m(&colour::IDENTITY),
+        look: look::Look::new(
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        ),
         display: Display::new(&DisplayTransform::default(), Target::Srgb),
         warnings: false,
     };
@@ -759,6 +781,13 @@ pub fn display_pixel(d: &Display, p: [f32; 3]) -> [f32; 3] {
         [0, 1, 2].map(|i| scaled[i] + (per[i] - scaled[i]) * t)
     } else {
         v.map(|c| curve.apply(c).powf(2.2))
+    };
+    // The tone curve, on 2.2-encoded display values.
+    let shaped = match &d.tone {
+        Some(t) => {
+            [0, 1, 2].map(|c| look::curve_at(t, c, shaped[c].max(0.0).powf(1.0 / 2.2)).powf(2.2))
+        }
+        None => shaped,
     };
     let lin = mul3(&d.to_target, mul3(&d.outset, shaped));
     lin.map(|c| d.target.encode(c.clamp(0.0, 1.0)))

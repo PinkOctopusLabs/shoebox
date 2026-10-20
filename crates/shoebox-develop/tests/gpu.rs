@@ -115,6 +115,27 @@ fn gpu_matches_the_cpu_reference() {
             ..o
         },
     ));
+    let mut s = base.clone();
+    s.modules.colour.vibrance = 40.0;
+    s.modules.colour.saturation = -20.0;
+    s.modules.colour.hue = [30.0, -20.0, 10.0, 50.0, -40.0, 60.0, -10.0, 25.0];
+    s.modules.colour.hsl_saturation = [50.0, 20.0, -30.0, 10.0, 0.0, -60.0, 40.0, 80.0];
+    s.modules.colour.luminance = [-50.0, 30.0, 0.0, 20.0, -10.0, 60.0, -30.0, 10.0];
+    s.modules.calibration.shadows_tint = 40.0;
+    s.modules.calibration.red_hue = 30.0;
+    s.modules.calibration.blue_saturation = -50.0;
+    cases.push(("colour and calibration", s, o));
+    let mut s = base.clone();
+    s.modules.black_and_white.enabled = true;
+    s.modules.black_and_white.mix = [40.0, 20.0, -30.0, 10.0, 0.0, -60.0, 40.0, 80.0];
+    cases.push(("black and white", s, o));
+    let mut s = base.clone();
+    s.modules.tone_curve.regions = [30.0, -20.0, 15.0, -40.0];
+    s.modules.tone_curve.rgb = vec![[0.3, 0.25], [0.7, 0.8]];
+    s.modules.tone_curve.blue = vec![[0.5, 0.55]];
+    cases.push(("tone curve", s.clone(), o));
+    s.modules.display_transform.preserve_hue = false;
+    cases.push(("tone curve, per channel", s, o));
     cases.push((
         "display p3, orientation 3",
         base.clone(),

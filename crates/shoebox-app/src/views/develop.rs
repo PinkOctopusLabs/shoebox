@@ -98,6 +98,10 @@ pub struct State {
     pub histogram: Option<Box<[[u32; 256]; 4]>>,
     /// The snapshot being renamed, and its name so far.
     renaming: Option<(usize, String)>,
+    /// The tone curve channel shown (0 RGB, 1–3 red, green, blue), and
+    /// the point being dragged.
+    pub(super) curve_channel: usize,
+    pub(super) curve_drag: Option<usize>,
     gpu: Option<GpuShared>,
     edited: Option<Shown>,
     original: Option<Shown>,
@@ -1182,7 +1186,7 @@ fn tick_saving(app: &mut ShoeboxApp, ctx: &egui::Context) {
 
 /// Change the edit as one step (or, while `key`'s slider is dragged, fold
 /// into the step the drag began).
-fn edit(
+pub(super) fn edit(
     app: &mut ShoeboxApp,
     key: &'static str,
     label: String,
@@ -1228,7 +1232,7 @@ pub fn undo(app: &mut ShoeboxApp, redo: bool) {
 
 /// A slider row; double-click resets it. Returns the new value when moved,
 /// and whether it's being dragged.
-fn slider(
+pub(super) fn slider(
     ui: &mut egui::Ui,
     name: &str,
     value: f64,
@@ -1527,6 +1531,8 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                     );
                 }
                 ui.separator();
+
+                super::look::modules(app, ui, &s);
 
                 // Geometry: crop, and rotation (with the largest crop that
                 // stays inside).

@@ -1,7 +1,8 @@
 // The live pipe for one output pixel (see `cpu::apply` and
 // `cpu::display_pixel`, which this follows operation for operation):
-// geometry map → bilinear sample → colour matrix → display transform →
-// output space and sRGB transfer curve.
+// geometry map → bilinear sample → colour matrix → look (colour, black and
+// white: `cpu::look`) → display transform → tone curve → output space and
+// sRGB transfer curve.
 //
 // OUT_FORMAT is replaced with the output texture's format when the
 // pipeline is built (rgba32float for read-back, rgba16float for display).
@@ -24,11 +25,29 @@ struct Params {
     curve: vec4<f32>,     // up scale, up hardness, toe a, toe floor; display-referred: black, white, contrast
     misc: vec4<f32>,      // display grey, mid grey, preserve hue (0/1), display (0/1)
     size: vec4<f32>,      // out width, out height, src width, src height
+    lms0: vec4<f32>,      // linear Rec.2020 → Oklab's LMS
+    lms1: vec4<f32>,
+    lms2: vec4<f32>,
+    inv0: vec4<f32>,      // and back
+    inv1: vec4<f32>,
+    inv2: vec4<f32>,
+    look: vec4<f32>,      // active (0/1), shadows tint, vibrance, saturation
+    luma: vec4<f32>,      // Rec.2020 luminance weights; w: black and white (0/1)
+    hue: array<vec4<f32>, 2>,  // per band, degrees
+    sat: array<vec4<f32>, 2>,
+    lum: array<vec4<f32>, 2>,
+    mix: array<vec4<f32>, 2>,
+    tone: vec4<f32>,      // x: tone curve on (0/1)
 };
 
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var dst: texture_storage_2d<OUT_FORMAT, write>;
 @group(0) @binding(2) var<uniform> p: Params;
+// The tone curve: red, green and blue tables of CURVE_SIZE entries.
+@group(0) @binding(3) var<storage, read> tone: array<f32>;
+
+const CURVE_SIZE: u32 = 1024u;
+const CENTRES = array<f32, 8>(29.0, 58.0, 110.0, 142.0, 195.0, 264.0, 295.0, 328.0);
 
 fn mul3(r0: vec4<f32>, r1: vec4<f32>, r2: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(dot(r0.xyz, v), dot(r1.xyz, v), dot(r2.xyz, v));
@@ -92,6 +111,110 @@ fn levels(v: f32) -> f32 {
     return pow(y, 2.2);
 }
 
+fn cbrt(v: f32) -> f32 {
+    return sign(v) * pow(abs(v), 1.0 / 3.0);
+}
+
+fn smooth01(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = clamp((x - e0) / (e1 - e0), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+fn at8(v: array<vec4<f32>, 2>, i: u32) -> f32 {
+    return v[i / 4u][i % 4u];
+}
+
+// The bands either side of hue h and how far between (see `cpu::look::bands`).
+struct Bands { i: u32, j: u32, t: f32 };
+
+fn bands(h: f32) -> Bands {
+    var i = 7u;
+    for (var k = 0u; k < 8u; k++) {
+        if (h >= CENTRES[k]) {
+            i = k;
+        }
+    }
+    let j = (i + 1u) % 8u;
+    let a = CENTRES[i];
+    var b = CENTRES[j];
+    var x = h;
+    if (b <= a) {
+        b += 360.0;
+    }
+    if (x < a) {
+        x += 360.0;
+    }
+    return Bands(i, j, smooth01(0.0, 1.0, (x - a) / (b - a)));
+}
+
+fn band(v: array<vec4<f32>, 2>, at: Bands) -> f32 {
+    let a = at8(v, at.i);
+    return a + (at8(v, at.j) - a) * at.t;
+}
+
+fn rem360(h: f32) -> f32 {
+    return h - 360.0 * floor(h / 360.0);
+}
+
+// The colour stage (see `cpu::look::look_pixel`).
+fn look(px: vec3<f32>) -> vec3<f32> {
+    let lms = mul3(p.lms0, p.lms1, p.lms2, px);
+    let l3 = vec3<f32>(cbrt(lms.x), cbrt(lms.y), cbrt(lms.z));
+    let lum0 = 0.21045426 * l3.x + 0.7936178 * l3.y - 0.004072047 * l3.z;
+    var a = 1.9779985 * l3.x - 2.4285922 * l3.y + 0.4505937 * l3.z;
+    let b = 0.025904037 * l3.x + 0.78277177 * l3.y - 0.80867577 * l3.z;
+    let shade = clamp(1.0 - lum0 / 0.6, 0.0, 1.0);
+    a += p.look.y * 0.04 * shade * shade * max(lum0, 0.0);
+    var c = length(vec2<f32>(a, b));
+    var h = rem360(degrees(atan2(b, a)));
+    let at = bands(h);
+    let rel = c / max(lum0, 1e-4);
+    let coloured = smooth01(0.0, 0.08, rel);
+    h += band(p.hue, at) * coloured;
+    c *= max(1.0 + band(p.sat, at) * coloured, 0.0);
+    let k = cbrt(exp2(band(p.lum, at) * coloured));
+    let lum = lum0 * k;
+    c *= k;
+    var skin = 0.0;
+    if (at.i == 1u) {
+        skin = 1.0 - at.t;
+    } else if (at.j == 1u) {
+        skin = at.t;
+    }
+    let muted = 1.0 - smooth01(0.0, 0.3, rel);
+    c *= max(1.0 + p.look.z * muted * (1.0 - 0.6 * skin), 0.0);
+    c *= max(1.0 + p.look.w, 0.0);
+    let hr = radians(h);
+    let la = c * cos(hr);
+    let lb = c * sin(hr);
+    let m3 = vec3<f32>(
+        lum + 0.39633778 * la + 0.21580376 * lb,
+        lum - 0.105561346 * la - 0.06385417 * lb,
+        lum - 0.08948418 * la - 1.2914855 * lb,
+    );
+    var out = mul3(p.inv0, p.inv1, p.inv2, m3 * m3 * m3);
+    if (p.luma.w > 0.5) {
+        let y = dot(p.luma.xyz, out);
+        let r = c / max(lum, 1e-4);
+        let mixv = band(p.mix, bands(rem360(h)));
+        out = vec3<f32>(y * exp2(mixv * 1.5 * smooth01(0.0, 0.15, r)));
+    }
+    return out;
+}
+
+fn tone_at(ch: u32, v: f32) -> f32 {
+    let x = clamp(v, 0.0, 1.0) * f32(CURVE_SIZE - 1u);
+    let i = min(u32(floor(x)), CURVE_SIZE - 2u);
+    let t = x - f32(i);
+    let base = ch * CURVE_SIZE;
+    return tone[base + i] + (tone[base + i + 1u] - tone[base + i]) * t;
+}
+
+fn tone_curve(v: vec3<f32>) -> vec3<f32> {
+    let e = pow(max(v, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
+    return pow(vec3<f32>(tone_at(0u, e.x), tone_at(1u, e.y), tone_at(2u, e.z)), vec3<f32>(2.2));
+}
+
 fn display(px: vec3<f32>) -> vec3<f32> {
     let v = mul3(p.inset0, p.inset1, p.inset2, px);
     var shaped: vec3<f32>;
@@ -116,6 +239,9 @@ fn display(px: vec3<f32>) -> vec3<f32> {
     } else {
         shaped = vec3<f32>(lin(curve(v.x)), lin(curve(v.y)), lin(curve(v.z)));
     }
+    if (p.tone.x > 0.5) {
+        shaped = tone_curve(shaped);
+    }
     let o = mul3(p.target0, p.target1, p.target2, mul3(p.outset0, p.outset1, p.outset2, shaped));
     let c = clamp(o, vec3<f32>(0.0), vec3<f32>(1.0));
     return vec3<f32>(oetf(c.x), oetf(c.y), oetf(c.z));
@@ -131,6 +257,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let sx = p.map0.x * x + p.map0.y * y + p.map0.z;
     let sy = p.map1.x * x + p.map1.y * y + p.map1.z;
     var px = mul3(p.colour0, p.colour1, p.colour2, bilinear(sx, sy));
+    if (p.look.x > 0.5) {
+        px = look(px);
+    }
     if (p.misc.w > 0.5) {
         px = display(px);
         if (p.map0.w > 0.5) {

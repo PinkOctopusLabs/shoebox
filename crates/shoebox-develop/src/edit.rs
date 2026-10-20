@@ -205,6 +205,91 @@ impl Default for DisplayTransform {
     }
 }
 
+/// The eight hue bands of HSL and the black-and-white mix, in order.
+pub const HUES: [&str; 8] = [
+    "Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple", "Magenta",
+];
+
+/// Calibration: the working space's primaries nudged (hue and saturation
+/// of red, green and blue) and a green–magenta tint in the shadows. All
+/// −100 to +100.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Calibration {
+    pub shadows_tint: f64,
+    pub red_hue: f64,
+    pub red_saturation: f64,
+    pub green_hue: f64,
+    pub green_saturation: f64,
+    pub blue_hue: f64,
+    pub blue_saturation: f64,
+}
+
+/// Vibrance, saturation, and hue, saturation and luminance per hue band
+/// ([`HUES`]). All −100 to +100.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Colour {
+    pub vibrance: f64,
+    pub saturation: f64,
+    pub hue: [f64; 8],
+    pub hsl_saturation: [f64; 8],
+    pub luminance: [f64; 8],
+}
+
+/// A monochrome treatment: how bright each hue band ([`HUES`]) turns out,
+/// −100 to +100.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BlackAndWhite {
+    pub enabled: bool,
+    pub mix: [f64; 8],
+}
+
+/// The tone curve: a parametric curve (four regions between three
+/// splits), then point curves for all channels and for red, green and
+/// blue. On display values (0–1), as the photo is shown.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToneCurve {
+    /// Shadows, darks, lights, highlights: −100 to +100.
+    pub regions: [f64; 4],
+    /// Where the regions meet, 0–1, increasing.
+    pub splits: [f64; 3],
+    /// Points `[x, y]` (0–1) besides the ends (0, 0) and (1, 1).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rgb: Vec<[f64; 2]>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub red: Vec<[f64; 2]>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub green: Vec<[f64; 2]>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blue: Vec<[f64; 2]>,
+}
+
+impl Default for ToneCurve {
+    fn default() -> Self {
+        Self {
+            regions: [0.0; 4],
+            splits: [0.25, 0.5, 0.75],
+            rgb: Vec::new(),
+            red: Vec::new(),
+            green: Vec::new(),
+            blue: Vec::new(),
+        }
+    }
+}
+
+impl ToneCurve {
+    pub fn is_identity(&self) -> bool {
+        self.regions.iter().all(|&r| r == 0.0)
+            && self.rgb.is_empty()
+            && self.red.is_empty()
+            && self.green.is_empty()
+            && self.blue.is_empty()
+    }
+}
+
 /// The global modules. Phase 1 has these; unknown ones are carried along.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -213,6 +298,10 @@ pub struct Modules {
     pub white_balance: WhiteBalance,
     pub input_colour: InputColour,
     pub exposure: Exposure,
+    pub calibration: Calibration,
+    pub colour: Colour,
+    pub black_and_white: BlackAndWhite,
+    pub tone_curve: ToneCurve,
     pub display_transform: DisplayTransform,
     /// Modules from a newer build, kept untouched.
     #[serde(flatten)]

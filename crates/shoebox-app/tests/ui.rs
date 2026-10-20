@@ -3438,6 +3438,99 @@ fn develop_a_jpeg() {
     assert!(!h.state().loupe_drawn().unwrap().0);
 }
 
+/// Develop's look modules: dragging on the tone curve adds a point (one
+/// history step however long the drag), double-clicking it removes it;
+/// HSL and black and white sliders are there and change the document.
+#[test]
+fn develop_look_modules() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(&root).unwrap();
+    let img = shoebox_fixtures::scene(4, 800, 600);
+    std::fs::write(
+        root.join("look.jpg"),
+        shoebox_fixtures::jpeg(&img, 92).unwrap(),
+    )
+    .unwrap();
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    // Tall enough that the panel doesn't scroll (kittest's positions don't
+    // follow a scroll).
+    let mut h = harness(p, egui::vec2(1400.0, 1500.0));
+    settle(&mut h, Duration::from_secs(60));
+    h.get_by_label("look.jpg").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(30), "develop", |a| {
+        a.develop_ready()
+    });
+    h.run_steps(3);
+    assert!(h.query_by_label("Vibrance").is_some());
+    assert!(h.query_by_label("Black & white").is_some());
+    // The curve sits under its channel buttons.
+    let rgb = h.get_by_label("RGB").rect();
+    let curve = egui::Rect::from_min_size(
+        egui::pos2(rgb.min.x, rgb.max.y + 6.0),
+        egui::vec2(200.0, 200.0),
+    );
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let start = curve.min + egui::vec2(100.0, 100.0);
+    h.event(egui::Event::PointerMoved(start));
+    h.event(button(start, true));
+    h.run_steps(1);
+    for k in 1..=5 {
+        h.event(egui::Event::PointerMoved(
+            start + egui::vec2(0.0, -6.0 * k as f32),
+        ));
+        h.run_steps(1);
+    }
+    let end = start + egui::vec2(0.0, -30.0);
+    h.event(button(end, false));
+    h.run_steps(3);
+    let doc = h.state().develop_doc().unwrap();
+    let pts = doc.settings().modules.tone_curve.rgb.clone();
+    assert_eq!(pts.len(), 1, "{pts:?}");
+    assert!(pts[0][1] > pts[0][0] + 0.05, "dragged up: {pts:?}");
+    let steps = doc.history().len();
+    assert_eq!(doc.history().last().unwrap().label, "Curve RGB");
+    snapshot(&mut h, "develop-look");
+    // Right-click the point: gone, as one more step.
+    let right = |pressed| egui::Event::PointerButton {
+        pos: end,
+        button: egui::PointerButton::Secondary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.event(egui::Event::PointerMoved(end));
+    h.run_steps(1);
+    h.event(right(true));
+    h.run_steps(1);
+    h.event(right(false));
+    h.run_steps(3);
+    let doc = h.state().develop_doc().unwrap();
+    assert!(doc.settings().modules.tone_curve.rgb.is_empty());
+    assert_eq!(doc.history().len(), steps + 1);
+    // Black and white on (its section starts closed; clicking the title
+    // opens it).
+    h.get_by_label("Black & white").click();
+    h.run_steps(2);
+    h.get_by_label("Black and white").click();
+    h.run_steps(3);
+    assert!(
+        h.state()
+            .develop_doc()
+            .unwrap()
+            .settings()
+            .modules
+            .black_and_white
+            .enabled
+    );
+}
+
 /// A photo in a reference folder opens in Develop read-only, with an offer
 /// to import its folder: that plans an import of it (nothing copied yet).
 #[test]
