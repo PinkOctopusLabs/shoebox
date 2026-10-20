@@ -1224,12 +1224,32 @@ fn slider(
 ) -> Option<(f64, bool)> {
     let mut v = value;
     ui.label(name);
-    let r = ui.add(egui::Slider::new(&mut v, range).fixed_decimals(decimals));
+    let width = ui.spacing().slider_width;
+    let r = ui.add(egui::Slider::new(&mut v, range.clone()).fixed_decimals(decimals));
     ui.end_row();
     if r.double_clicked() {
         return Some((default, false));
     }
-    (r.changed() && v != value).then_some((v, r.dragged()))
+    // Shift-drag: a tenth of the speed, from where the value was.
+    if r.dragged() && ui.input(|i| i.modifiers.shift_only()) {
+        v = fine(value, r.drag_delta().x, range, width, decimals);
+    }
+    ((r.changed() || r.dragged()) && v != value).then_some((v, r.dragged()))
+}
+
+/// `value` moved by a drag of `dx` points at a tenth of the slider's speed,
+/// kept in range, to one more decimal than shown.
+fn fine(
+    value: f64,
+    dx: f32,
+    range: std::ops::RangeInclusive<f64>,
+    width: f32,
+    decimals: usize,
+) -> f64 {
+    let span = range.end() - range.start();
+    let v = value + f64::from(dx) * span / f64::from(width.max(1.0)) / 10.0;
+    let q = 10f64.powi(decimals as i32 + 1);
+    ((v * q).round() / q).clamp(*range.start(), *range.end())
 }
 
 fn module(ui: &mut egui::Ui, title: &str, reset: bool) -> bool {
@@ -1726,6 +1746,16 @@ fn snapshots(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
 mod tests {
     use super::exif_summary;
     use shoebox_core::exif::ExifInfo;
+
+    #[test]
+    fn shift_drag_is_a_tenth_as_fast() {
+        // A 200-point slider over -5..5: 20 points is 1 EV, shifted 0.1.
+        assert_eq!(super::fine(0.5, 20.0, -5.0..=5.0, 200.0, 2), 0.6);
+        assert_eq!(super::fine(0.5, -20.0, -5.0..=5.0, 200.0, 2), 0.4);
+        assert_eq!(super::fine(4.95, 40.0, -5.0..=5.0, 200.0, 2), 5.0);
+        // Kelvin shown whole moves in tenths.
+        assert_eq!(super::fine(5000.0, 1.0, 2000.0..=12000.0, 200.0, 0), 5005.0);
+    }
 
     #[test]
     fn camera_settings_line() {
