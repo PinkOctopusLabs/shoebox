@@ -87,6 +87,8 @@ files you put in the gitignored `tests/fixtures/real/`.
   (Develop view, raw decoding, export), in phases.
 - [`docs/DECISIONS.md`](docs/DECISIONS.md): where and why the code differs
   from the spec, with measurements.
+- [`docs/MANUAL-CHECKS.md`](docs/MANUAL-CHECKS.md): checks that need new
+  photos or a person's eye, kept until they're done.
 - [`CLAUDE.md`](CLAUDE.md): working notes for AI-assisted development.
 
 ## Licence
