@@ -223,6 +223,10 @@ pub struct Modules {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Geometry {
+    /// Quarter turns clockwise (0–3), after the file's own orientation.
+    pub quarter: u8,
+    /// Mirrored left to right (after the quarter turns).
+    pub flip: bool,
     /// Degrees, clockwise positive, about the image centre.
     pub rotate: f64,
     /// The kept area after rotation, as fractions of the frame:
@@ -235,10 +239,47 @@ pub struct Geometry {
 impl Default for Geometry {
     fn default() -> Self {
         Self {
+            quarter: 0,
+            flip: false,
             rotate: 0.0,
             crop: [0.0, 0.0, 1.0, 1.0],
             aspect: "free".into(),
         }
+    }
+}
+
+impl Geometry {
+    /// A quarter turn clockwise (or anticlockwise), the crop turning with
+    /// the frame.
+    pub fn turn(&mut self, clockwise: bool) {
+        let [l, t, r, b] = self.crop;
+        if clockwise {
+            self.quarter = (self.quarter + 1) % 4;
+            self.crop = [1.0 - b, l, 1.0 - t, r];
+        } else {
+            self.quarter = (self.quarter + 3) % 4;
+            self.crop = [t, 1.0 - r, b, 1.0 - l];
+        }
+        if self.flip {
+            // A turn after a mirror is the other way round.
+            self.quarter = (self.quarter + 2) % 4;
+        }
+        self.aspect = flip_aspect(&self.aspect);
+    }
+
+    /// Mirror left to right, the crop mirroring with it.
+    pub fn mirror(&mut self) {
+        let [l, t, r, b] = self.crop;
+        self.flip = !self.flip;
+        self.crop = [1.0 - r, t, 1.0 - l, b];
+    }
+}
+
+/// "3:2" ↔ "2:3" (an aspect turned a quarter).
+fn flip_aspect(a: &str) -> String {
+    match a.split_once(':') {
+        Some((w, h)) => format!("{h}:{w}"),
+        None => a.to_owned(),
     }
 }
 

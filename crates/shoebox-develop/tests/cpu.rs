@@ -315,7 +315,7 @@ fn a_finished_image_is_unchanged_by_default() {
 fn relative_white_balance() {
     use shoebox_develop::edit::{WbMode, WhiteBalance};
     let (t, n, m) = shoebox_develop::wb::relative(&WhiteBalance::default());
-    assert_eq!((t, n), (6500.0, 0.0));
+    assert!((t - 6504.0).abs() < 40.0 && n.abs() < 15.0, "{t} {n}");
     assert_eq!(m, shoebox_develop::colour::IDENTITY);
     // Saying the light was tungsten makes a neutral bluer.
     let (_, _, m) = shoebox_develop::wb::relative(&WhiteBalance {
@@ -347,6 +347,108 @@ fn a_grey_card_is_neutral_in_every_export_space() {
         assert!(
             (p[0] - p[1]).abs() < 1.5 / 255.0 && (p[2] - p[1]).abs() < 1.5 / 255.0,
             "{target:?}: {p:?}"
+        );
+    }
+}
+
+#[test]
+fn quarter_turns_and_mirror_compose_with_the_files_orientation() {
+    use shoebox_develop::cpu::compose_orientation;
+    // A quarter turn of an upright file is EXIF 6; two are 3; a mirror 2.
+    assert_eq!(compose_orientation(1, 1, false), 6);
+    assert_eq!(compose_orientation(1, 2, false), 3);
+    assert_eq!(compose_orientation(1, 3, false), 8);
+    assert_eq!(compose_orientation(1, 0, true), 2);
+    // A portrait file (6) turned back anticlockwise is upright.
+    assert_eq!(compose_orientation(6, 3, false), 1);
+    for o in 1..=8 {
+        assert_eq!(compose_orientation(o, 4, false), o);
+        assert_eq!(
+            compose_orientation(compose_orientation(o, 0, true), 0, true),
+            o
+        );
+    }
+}
+
+#[test]
+fn a_turned_crop_shows_the_same_pixels_turned() {
+    let t = truth(60, 40);
+    let mut g = Geometry {
+        crop: [0.1, 0.2, 0.6, 0.9],
+        ..Default::default()
+    };
+    let before = rotate_crop(&t, &g);
+    for clockwise in [true, false] {
+        let mut turned = g.clone();
+        turned.turn(clockwise);
+        let after = rotate_crop(&t, &turned);
+        let want = orient(&before, if clockwise { 6 } else { 8 });
+        assert_eq!((after.width, after.height), (want.width, want.height));
+        assert!(
+            after
+                .data
+                .iter()
+                .zip(&want.data)
+                .all(|(a, b)| (a - b).abs() < 1e-5)
+        );
+    }
+    // Mirrored, and four turns (with or without a mirror) come back.
+    let mut m = g.clone();
+    m.mirror();
+    assert!(
+        rotate_crop(&t, &m)
+            .data
+            .iter()
+            .zip(&orient(&before, 2).data)
+            .all(|(a, b)| (a - b).abs() < 1e-5)
+    );
+    m.turn(true);
+    let want = orient(&orient(&before, 2), 6);
+    let got = rotate_crop(&t, &m);
+    assert!(
+        got.data
+            .iter()
+            .zip(&want.data)
+            .all(|(a, b)| (a - b).abs() < 1e-5),
+        "turn after mirror"
+    );
+    for _ in 0..4 {
+        g.turn(true);
+    }
+    assert_eq!(rotate_crop(&t, &g), before);
+}
+
+/// The eyedropper: a patch that should be grey comes out grey, for a raw
+/// and for a finished image.
+#[test]
+fn the_eyedropper_makes_its_patch_neutral() {
+    use shoebox_develop::edit::{WbMode, WhiteBalance};
+    let raw = grey_card(0.2);
+    let tinted = [0.30f64, 0.25, 0.16]; // a warm patch
+    for src in [
+        cpu::Demosaiced {
+            rgb: Rgb::new(4, 4),
+            as_shot: [2.0, 1.0, 1.0 / 0.7],
+            referred: cpu::Referred::Scene,
+        },
+        cpu::from_display(4, 4, &[128; 48], Target::Srgb),
+    ] {
+        let (temp, tint) = shoebox_develop::wb::neutral_at(&raw, &src, tinted);
+        let mut s = Settings::default();
+        s.modules.white_balance = WhiteBalance {
+            mode: WbMode::Custom,
+            temp: Some(temp),
+            tint: Some(tint),
+        };
+        let f = cpu::frame(&raw, &src, &s, &Options::default());
+        let m = f.colour;
+        let p: Vec<f32> = (0..3)
+            .map(|r| (0..3).map(|k| m[r][k] * tinted[k] as f32).sum())
+            .collect();
+        assert!(
+            (p[0] / p[1] - 1.0).abs() < 0.01 && (p[2] / p[1] - 1.0).abs() < 0.01,
+            "{:?}: {p:?}",
+            src.referred
         );
     }
 }

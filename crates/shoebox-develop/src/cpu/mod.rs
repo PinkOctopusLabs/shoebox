@@ -331,6 +331,43 @@ impl Display {
     }
 }
 
+/// The 2×2 matrix taking a stored image's (centred, y-down) coordinates to
+/// the upright image's, for each EXIF orientation 1–8.
+fn orientation_matrix(o: u16) -> [[i8; 2]; 2] {
+    match o {
+        2 => [[-1, 0], [0, 1]],
+        3 => [[-1, 0], [0, -1]],
+        4 => [[1, 0], [0, -1]],
+        5 => [[0, 1], [1, 0]],
+        6 => [[0, -1], [1, 0]],
+        7 => [[0, -1], [-1, 0]],
+        8 => [[0, 1], [-1, 0]],
+        _ => [[1, 0], [0, 1]],
+    }
+}
+
+/// The file's orientation followed by the edit's quarter turns (clockwise)
+/// and mirror, as one EXIF orientation code.
+pub fn compose_orientation(exif: u16, quarter: u8, flip: bool) -> u16 {
+    let mul = |a: [[i8; 2]; 2], b: [[i8; 2]; 2]| {
+        let mut m = [[0i8; 2]; 2];
+        for i in 0..2 {
+            for j in 0..2 {
+                m[i][j] = a[i][0] * b[0][j] + a[i][1] * b[1][j];
+            }
+        }
+        m
+    };
+    let mut m = orientation_matrix(exif);
+    for _ in 0..quarter % 4 {
+        m = mul(orientation_matrix(6), m);
+    }
+    if flip {
+        m = mul(orientation_matrix(2), m);
+    }
+    (1..=8).find(|&o| orientation_matrix(o) == m).unwrap_or(1)
+}
+
 /// The upright size of a `w`×`h` source with this EXIF orientation.
 pub fn upright(w: usize, h: usize, orientation: u16) -> (usize, usize) {
     if matches!(orientation, 5..=8) {
@@ -349,6 +386,7 @@ pub fn geometry_map(
     orientation: u16,
     g: &Geometry,
 ) -> ([[f64; 3]; 2], usize, usize) {
+    let orientation = compose_orientation(orientation, g.quarter, g.flip);
     let (uw, uh) = upright(src_w, src_h, orientation);
     let (uwf, uhf) = (uw as f64, uh as f64);
     let [l, t, r, b] = g.crop.map(|v| v.clamp(0.0, 1.0));

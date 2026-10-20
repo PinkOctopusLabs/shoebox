@@ -79,6 +79,8 @@ pub struct State {
     pub photo_rect: Option<Rect>,
     /// Show clipped highlights and shadows (J).
     pub warnings: bool,
+    /// Picking a neutral for white balance (W): the next click on the photo.
+    pub picking: bool,
     /// Drawing a crop (R): the whole frame shows, the crop over it.
     pub crop: Option<super::crop::CropEdit>,
     /// The render's histogram (R, G, B, luma).
@@ -585,6 +587,22 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
     let target = Rect::from_center_size(area.center(), egui::vec2(size[0], size[1]) * fit);
     let full = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
     app.develop.photo_rect = Some(target);
+    if app.develop.picking && app.develop.crop.is_none() && edited.is_some() {
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+        }
+        if resp.clicked()
+            && let Some(p) = resp.interact_pointer_pos()
+            && target.contains(p)
+        {
+            let at = egui::pos2(
+                (p.x - target.left()) / target.width() * size[0],
+                (p.y - target.top()) / target.height() * size[1],
+            );
+            app.develop.picking = false;
+            pick_neutral(app, at);
+        }
+    }
     match (compare, tex, original) {
         (Compare::Original, Some(_), Some((o, _))) => {
             painter.image(o, target, full, Color32::WHITE);
@@ -782,6 +800,73 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
     if let Some(pos) = app.current_pos() {
         super::photo_menu(app, &resp, pos);
     }
+}
+
+/// A quarter turn (⌘] clockwise, ⌘[ anticlockwise).
+pub fn turn(app: &mut ShoeboxApp, clockwise: bool) {
+    let label = if clockwise {
+        "Rotate right"
+    } else {
+        "Rotate left"
+    };
+    edit(app, "turn", label.into(), false, |s| {
+        s.geometry.turn(clockwise)
+    });
+    if let (Some(c), Some(doc)) = (&mut app.develop.crop, &app.develop.doc) {
+        let g = &doc.settings().geometry;
+        *c = super::crop::CropEdit::new(g.crop, &g.aspect);
+    }
+}
+
+/// The eyedropper: the white balance that makes the source neutral around
+/// `at`, a point in the render (output pixels).
+fn pick_neutral(app: &mut ShoeboxApp, at: egui::Pos2) {
+    let o = options(app);
+    let st = &app.develop;
+    let (Some(ready), Some(doc)) = (&st.ready, &st.doc) else {
+        return;
+    };
+    let f = cpu::frame(&ready.meta, &ready.src, doc.settings(), &o);
+    let sx = f.map[0][0] * at.x + f.map[0][1] * at.y + f.map[0][2];
+    let sy = f.map[1][0] * at.x + f.map[1][1] * at.y + f.map[1][2];
+    let img = &ready.src.rgb;
+    let (cx, cy) = (sx.round() as i64, sy.round() as i64);
+    let mut sum = [0.0f64; 3];
+    let mut n = 0.0;
+    for y in cy - 2..=cy + 2 {
+        for x in cx - 2..=cx + 2 {
+            if x >= 0 && y >= 0 && (x as usize) < img.width && (y as usize) < img.height {
+                let p = img.px(x as usize, y as usize);
+                for c in 0..3 {
+                    sum[c] += f64::from(p[c]);
+                }
+                n += 1.0;
+            }
+        }
+    }
+    if n == 0.0 {
+        return;
+    }
+    let patch = sum.map(|v| v / n);
+    let (temp, tint) = shoebox_develop::wb::neutral_at(&ready.meta, &ready.src, patch);
+    // Within the sliders' ranges, so the result can be adjusted from there.
+    let (temp, tint) = (
+        temp.round().clamp(2000.0, 12000.0),
+        tint.round().clamp(-150.0, 150.0),
+    );
+    edit(
+        app,
+        "wb",
+        format!("White balance picked ({temp:.0} K, {tint:+.0})"),
+        false,
+        |s| {
+            s.modules.white_balance = WhiteBalance {
+                mode: WbMode::Custom,
+                temp: Some(temp),
+                tint: Some(tint),
+            };
+        },
+    );
 }
 
 /// Start drawing a crop (R), from the edit's crop.
@@ -1025,6 +1110,14 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                             }
                         }
                     });
+                let mut picking = app.develop.picking;
+                if ui
+                    .toggle_value(&mut picking, "Pick neutral")
+                    .on_hover_text("Click something that should be grey or white (W)")
+                    .changed()
+                {
+                    app.develop.picking = picking;
+                }
                 egui::Grid::new("wb-grid").num_columns(2).show(ui, |ui| {
                     if let Some((t, d)) =
                         slider(ui, "Temperature", temp.round(), 2000.0..=12000.0, temp, 0)
@@ -1115,6 +1208,29 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                         s.geometry = Default::default()
                     });
                 }
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Rotate left")
+                        .on_hover_text("A quarter turn anticlockwise (⌘[)")
+                        .clicked()
+                    {
+                        turn(app, false);
+                    }
+                    if ui
+                        .button("Rotate right")
+                        .on_hover_text("A quarter turn clockwise (⌘])")
+                        .clicked()
+                    {
+                        turn(app, true);
+                    }
+                    if ui
+                        .button("Flip")
+                        .on_hover_text("Mirror left to right")
+                        .clicked()
+                    {
+                        edit(app, "flip", "Flip".into(), false, |s| s.geometry.mirror());
+                    }
+                });
                 egui::Grid::new("geo-grid").num_columns(2).show(ui, |ui| {
                     if let Some((v, d)) = slider(ui, "Angle", g.rotate, -45.0..=45.0, 0.0, 1) {
                         let (w, h) = cpu::upright(src_size.0, src_size.1, orientation);

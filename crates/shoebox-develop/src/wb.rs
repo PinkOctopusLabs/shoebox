@@ -104,24 +104,48 @@ impl Camera {
 }
 
 /// White balance for a finished image (JPEG and the like), relative to
-/// how it was shot: as shot is no change (shown as 6500 K, tint 0); another
-/// white is adapted (Bradford) to D65, so "Tungsten" neutralises a warm
-/// light. Returns the temperature, tint and the Rec.2020 matrix.
+/// how it was shot: as shot is no change (shown as D65's temperature and
+/// tint); another white is adapted (Bradford) to D65, so "Tungsten"
+/// neutralises a warm light. Returns the temperature, tint and the
+/// Rec.2020 matrix.
 pub fn relative(wb: &WhiteBalance) -> (f64, f64, M3) {
     let (t, tint) = match wb.mode {
-        WbMode::AsShot => return (6500.0, 0.0, colour::IDENTITY),
-        WbMode::Custom => (wb.temp.unwrap_or(6500.0), wb.tint.unwrap_or(0.0)),
-        mode => preset(mode).unwrap_or((6500.0, 0.0)),
+        WbMode::AsShot => {
+            let (t, n) = colour::xy_to_temp_tint(colour::D65);
+            return (t, n, colour::IDENTITY);
+        }
+        WbMode::Custom => (wb.temp.unwrap_or(6504.0), wb.tint.unwrap_or(0.0)),
+        mode => preset(mode).unwrap_or((6504.0, 0.0)),
     };
     let xy = colour::temp_tint_to_xy(t, tint);
     let m = colour::mul(
         &colour::xyz_to_rgb(&colour::REC2020, colour::D65),
         &colour::mul(
-            &colour::bradford(xy, colour::temp_tint_to_xy(6500.0, 0.0)),
+            &colour::bradford(xy, colour::D65),
             &colour::rgb_to_xyz(&colour::REC2020, colour::D65),
         ),
     );
     (t, tint, m)
+}
+
+/// The white balance that makes `patch` neutral (the eyedropper): the
+/// temperature and tint of a custom white balance. `patch` is the source's
+/// mean around the point clicked: for a raw, camera RGB balanced at
+/// `as_shot`; for a finished image, linear Rec.2020.
+pub fn neutral_at(raw: &RawImage, src: &crate::cpu::Demosaiced, patch: [f64; 3]) -> (f64, f64) {
+    let xy = match src.referred {
+        crate::cpu::Referred::Scene => {
+            // Undo the as-shot balance: the patch's raw camera RGB is the
+            // white's neutral.
+            let n = [0, 1, 2].map(|c| patch[c].max(1e-9) / f64::from(src.as_shot[c]));
+            Camera::new(&raw.matrices).xy_of(n)
+        }
+        crate::cpu::Referred::Display => colour::xyz_to_xy(colour::mulv(
+            &colour::rgb_to_xyz(&colour::REC2020, colour::D65),
+            patch.map(|v| v.max(1e-9)),
+        )),
+    };
+    colour::xy_to_temp_tint(xy)
 }
 
 /// White balance worked out for one photo.

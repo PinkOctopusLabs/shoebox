@@ -1252,3 +1252,21 @@ hashes, embeddings, faces).
   question comes up; the catalog keeps one record per file. Output
   sharpening and the PNG, AVIF and JPEG XL formats are later phases'
   items.
+
+## Develop: rotate and flip, the white balance eyedropper (2026-10-20)
+
+- Geometry gains `quarter` (turns clockwise) and `flip`. EXIF orientations
+  and the edit's turns and mirror form one group of eight, so they compose
+  into a single orientation code (`compose_orientation`) inside the
+  geometry map: no extra resample, the GPU unchanged. A turn turns the
+  crop rectangle and swaps a `w:h` aspect with it; a turn after a mirror
+  goes the right way on screen. Rotate left / right (⌘[ / ⌘]) and Flip
+  under Crop & rotate.
+- Eyedropper (W, or Pick neutral): a 5×5 patch of the source under the
+  click, mapped back through the render's own geometry; for a raw, its
+  as-shot balance undone gives the camera neutral (through the matrices,
+  to temperature and tint); for a finished image, its chromaticity.
+  Applied as a custom white balance, clamped to the sliders' ranges.
+  Relative white balance for finished images now adapts to D65 itself
+  (not a Planckian 6500 K, which isn't quite D65), so a picked grey comes
+  out grey.

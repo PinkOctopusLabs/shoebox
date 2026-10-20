@@ -3477,6 +3477,14 @@ impl ShoeboxApp {
             }
             return;
         }
+        if m.command && self.view == View::Develop {
+            if pressed(egui::Key::CloseBracket) {
+                views::develop::turn(self, true);
+            }
+            if pressed(egui::Key::OpenBracket) {
+                views::develop::turn(self, false);
+            }
+        }
         if m.command {
             if pressed(egui::Key::Z) {
                 if self.view == View::Develop {
@@ -3595,6 +3603,9 @@ impl ShoeboxApp {
             }
             if pressed(egui::Key::J) {
                 self.develop.warnings = !self.develop.warnings;
+            }
+            if pressed(egui::Key::W) {
+                self.develop.picking = !self.develop.picking;
             }
             if pressed(egui::Key::R) {
                 if self.develop.crop.is_some() {

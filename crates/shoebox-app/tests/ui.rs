@@ -3310,6 +3310,56 @@ fn develop_a_jpeg() {
         "no raw module for a JPEG"
     );
     snapshot(&mut h, "develop-jpeg");
+
+    // W, then a click: the white balance that makes that spot neutral.
+    h.key_press(egui::Key::W);
+    h.run_steps(2);
+    let photo = h.state().develop_photo_rect().unwrap();
+    h.event(egui::Event::PointerMoved(photo.center()));
+    h.run_steps(1);
+    h.get_by_label("Pick neutral"); // still there
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.event(button(photo.center(), true));
+    h.event(button(photo.center(), false));
+    h.run_steps(3);
+    let doc = h.state().develop_doc().unwrap();
+    assert_eq!(
+        doc.settings().modules.white_balance.mode,
+        shoebox_develop::edit::WbMode::Custom
+    );
+    assert!(
+        doc.history()
+            .last()
+            .unwrap()
+            .label
+            .starts_with("White balance picked")
+    );
+
+    // ⌘] turns it a quarter clockwise (portrait now); ⌘[ back.
+    let wide = h.state().develop_photo_rect().unwrap();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::CloseBracket);
+    h.run_steps(4);
+    assert_eq!(
+        h.state().develop_doc().unwrap().settings().geometry.quarter,
+        1
+    );
+    let tall = h.state().develop_photo_rect().unwrap();
+    assert!(
+        wide.aspect_ratio() > 1.0 && tall.aspect_ratio() < 1.0,
+        "{wide:?} {tall:?}"
+    );
+    snapshot(&mut h, "develop-jpeg-turned");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::OpenBracket);
+    h.run_steps(4);
+    assert_eq!(
+        h.state().develop_doc().unwrap().settings().geometry.quarter,
+        0
+    );
 }
 
 /// Settings → Raw: the converter's status, the High efficiency count, and
