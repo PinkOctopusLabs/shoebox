@@ -1113,3 +1113,35 @@ hashes, embeddings, faces).
   instead of wgpu's default panic.
 - RCD is still on the CPU; the spec's GPU RCD waits until the open-time
   target needs it.
+
+## Develop, Phase 1: the Develop view (2026-10-20)
+
+- `View::Develop` (D; G or Escape back; arrows and the filmstrip step).
+  Right panel: white balance (as shot, presets, custom temperature and
+  tint), exposure, tone (contrast, whites, blacks, preserve hue), rotate
+  (setting the largest crop for the angle), raw (highlights, demosaic).
+  Each module has Reset; double-click resets a slider. Left panel: the
+  edit's history (click to jump). ⌘Z/⌘⇧Z walk that history in Develop,
+  not the library's. `\` shows before/after. A slider drag is one step.
+- The develop thread (`develop.rs`) prepares a photo off the UI thread:
+  High efficiency NEFs through Adobe DNG Converter (cached), decode,
+  demosaic to a 2560 px proxy; the newest request wins and the last four
+  are kept. The embedded preview shows meanwhile, with "Preparing raw…" or
+  "Converting to DNG…"; without the converter, the spec's message and a
+  Download Adobe DNG Converter button.
+- The live pipe renders on eframe's own wgpu device into an
+  `rgba16float` texture registered with egui-wgpu (egui 0.37 treats
+  texture values as gamma-encoded, which is what the shader writes), so
+  nothing goes through the CPU; without a GPU the same pipe runs on the CPU
+  into an egui texture. Output is Display P3 on macOS (the window's layer
+  is already tagged P3), sRGB elsewhere.
+- Edits: loaded from the catalog or `.shoebox/edits` through the library
+  worker; a change is handed to the catalog 0.3 s after sliders are
+  released, and written to its file after 2 s idle, on leaving the photo
+  or Develop, and at the next launch if the app quit first. The worker
+  fills in the source's BLAKE3 and size on first save.
+- Reference-root photos open read-only. Only NEFs for now (JPEG and TIFF
+  editing to come).
+- Still to come in Phase 1: the histogram and clipping warnings, a crop
+  tool drawn on the image (crop is set by rotation only so far), JPEG/TIFF
+  export, edited previews in the other views, and Settings → Raw.

@@ -39,6 +39,8 @@ pub enum View {
     History,
     /// Photos with a GPS position on a map.
     Map,
+    /// Editing a raw photo (D).
+    Develop,
 }
 
 impl View {
@@ -52,12 +54,18 @@ impl View {
     ];
 
     pub fn has_filmstrip(self) -> bool {
-        matches!(self, View::Loupe | View::Compare | View::Survey)
+        matches!(
+            self,
+            View::Loupe | View::Compare | View::Survey | View::Develop
+        )
     }
 
     /// Views of the filtered photos, which get the filter bar.
     pub fn has_filters(self) -> bool {
-        !matches!(self, View::Duplicates | View::Import | View::History)
+        !matches!(
+            self,
+            View::Duplicates | View::Import | View::History | View::Develop
+        )
     }
 }
 
@@ -251,6 +259,8 @@ pub struct AppPaths {
     pub faces: crate::people::FaceSource,
     /// Names given to people.
     pub people: PathBuf,
+    /// Develop's caches (DNGs of High efficiency NEFs, under `dng/`).
+    pub raw_cache: PathBuf,
 }
 
 impl AppPaths {
@@ -286,6 +296,7 @@ impl AppPaths {
                 staging: cache.join("model-download"),
             },
             people: shoebox_core::paths::people_file(&data),
+            raw_cache: cache.clone(),
         })
     }
 }
@@ -419,7 +430,11 @@ pub struct ShoeboxApp {
     /// Tags the window Display P3 on macOS (None in tests / elsewhere).
     display: Option<crate::display::DisplayTagger>,
     /// Colour space images are rendered in for this display.
-    target: shoebox_decode::Target,
+    pub(crate) target: shoebox_decode::Target,
+    /// Develop: the photo being edited.
+    pub(crate) develop: views::develop::State,
+    /// The develop thread (prepares raw photos).
+    pub(crate) developer: crate::develop::Develop,
     pub(crate) compare: CompareState,
     /// Photos in Survey, in order.
     pub(crate) survey: Vec<PhotoId>,
@@ -497,6 +512,8 @@ impl ShoeboxApp {
             crate::semantic::Semantic::new(paths.model, paths.embeddings_db, move || {
                 c3.request_repaint()
             });
+        let c5 = ctx.clone();
+        let developer = crate::develop::Develop::new(paths.raw_cache, move || c5.request_repaint());
         Self {
             loader,
             library,
@@ -539,6 +556,8 @@ impl ShoeboxApp {
             scroll_to_current: false,
             display,
             target,
+            develop: Default::default(),
+            developer,
             events: Vec::new(),
             event_members: HashMap::new(),
             event_spans: HashMap::new(),
@@ -769,6 +788,16 @@ impl ShoeboxApp {
         self.view
     }
 
+    /// Develop's edit of the current photo, once loaded (tests).
+    pub fn develop_doc(&self) -> Option<&shoebox_develop::edit::EditDoc> {
+        self.develop.doc.as_ref()
+    }
+
+    /// Develop is showing the photo rendered from its raw data (tests).
+    pub fn develop_ready(&self) -> bool {
+        self.develop.ready.is_some() && self.develop.rendered()
+    }
+
     /// The left panel's photo count for a folder of this name (tests).
     pub fn folder_count(&self, name: &str) -> usize {
         fn find(n: &FolderNode, name: &str) -> Option<usize> {
@@ -839,8 +868,16 @@ impl ShoeboxApp {
         if !matches!(v, View::Compare | View::Survey | View::Duplicates) {
             self.dupes.open = None;
         }
-        if v == View::Loupe && self.view != View::Loupe {
+        if matches!(v, View::Loupe | View::Develop)
+            && !matches!(self.view, View::Loupe | View::Develop)
+        {
             self.back_view = self.view;
+        }
+        if v == View::Develop && self.current.is_none() {
+            self.current = self.shown.first().map(|&i| self.ids[i]);
+        }
+        if self.view == View::Develop && v != View::Develop {
+            views::develop::leave(self);
         }
         self.view = v;
         self.loupe = LoupeState::default();
@@ -856,6 +893,9 @@ impl ShoeboxApp {
     fn apply_events(&mut self, ctx: &egui::Context) {
         while let Ok(ev) = self.library.events.try_recv() {
             match ev {
+                LibraryEvent::EditLoaded { root, rel, json } => {
+                    views::develop::edit_loaded(self, root, rel, json);
+                }
                 LibraryEvent::Catalog {
                     published,
                     settings,
@@ -3266,7 +3306,10 @@ impl ShoeboxApp {
         }
         if m.command {
             if pressed(egui::Key::Z) {
-                if m.shift {
+                if self.view == View::Develop {
+                    // Develop's ⌘Z walks the edit's own history.
+                    views::develop::undo(self, m.shift);
+                } else if m.shift {
                     self.redo();
                 } else {
                     self.undo();
@@ -3353,8 +3396,19 @@ impl ShoeboxApp {
             // an open menu takes the first Escape.
             self.set_view(self.back_view);
         }
-        if pressed(egui::Key::Enter) && self.current.is_some() {
+        if pressed(egui::Key::Enter) && self.current.is_some() && self.view != View::Develop {
             self.set_view(View::Loupe);
+        }
+        if pressed(egui::Key::D) && self.view != View::Develop {
+            self.set_view(View::Develop);
+        }
+        if self.view == View::Develop {
+            if pressed(egui::Key::Backslash) {
+                self.develop.before = !self.develop.before;
+            }
+            if pressed(egui::Key::Escape) && !self.fullscreen && !ctx.any_popup_open() {
+                self.set_view(self.back_view);
+            }
         }
         if pressed(egui::Key::Escape) && self.dupes.open.is_some() {
             self.close_group();
@@ -3443,7 +3497,7 @@ impl ShoeboxApp {
 }
 
 impl eframe::App for ShoeboxApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         if let Some(d) = &self.display {
             d.ensure();
@@ -3459,6 +3513,9 @@ impl eframe::App for ShoeboxApp {
         self.tick_quit(&ctx);
         crate::updater::tick(&ctx, crate::jobs::working());
         self.handle_keys(&ctx);
+        if self.view == View::Develop {
+            views::develop::tick(self);
+        }
         self.wanted.clear();
         self.ppl.hovered = None; // set again by the info panel while pointed at
         self.fold_stacks_left();
@@ -3482,13 +3539,25 @@ impl eframe::App for ShoeboxApp {
         egui::Panel::left("library")
             .resizable(true)
             .default_size(260.0)
-            .show_collapsible(ui, &mut left, |ui| panels::library(self, ui));
+            .show_collapsible(ui, &mut left, |ui| {
+                if self.view == View::Develop {
+                    views::develop::history(self, ui);
+                } else {
+                    panels::library(self, ui);
+                }
+            });
         self.left_open = left;
         let mut right = self.right_open;
         egui::Panel::right("info")
             .resizable(true)
             .default_size(280.0)
-            .show_collapsible(ui, &mut right, |ui| panels::info(self, ui));
+            .show_collapsible(ui, &mut right, |ui| {
+                if self.view == View::Develop {
+                    views::develop::controls(self, ui);
+                } else {
+                    panels::info(self, ui);
+                }
+            });
         self.right_open = right;
         // Over and under the photos only (added after the side panels):
         // the filters narrow what's in the middle.
@@ -3524,6 +3593,7 @@ impl eframe::App for ShoeboxApp {
                 View::History => views::files::history(self, ui),
                 View::Timeline => views::timeline::show(self, ui),
                 View::Map => views::map::show(self, ui),
+                View::Develop => views::develop::show(self, ui, frame.wgpu_render_state()),
             }
         });
         views::duplicates::apply_dialog(self, &ctx);

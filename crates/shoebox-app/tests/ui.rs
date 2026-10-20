@@ -44,6 +44,7 @@ fn paths(tmp: &Path, roots: &[PathBuf]) -> AppPaths {
             staging: tmp.join("cache/model-download"),
         },
         people: tmp.join("data/people.json"),
+        raw_cache: tmp.join("cache"),
     }
 }
 
@@ -3088,4 +3089,95 @@ fn live_photos_and_movies() {
         "the full-size poster loads too"
     );
     snapshot(&mut h, "movies-2-loupe");
+}
+
+/// Develop: a raw photo (a synthetic DNG, which rawler reads whatever its
+/// name) opens with D, renders from its raw data, takes a slider drag as
+/// one history step, keeps the edit in `.shoebox/edits`, and undoes with ⌘Z.
+#[test]
+fn develop_a_raw_photo() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    let dng = shoebox_fixtures::Dng::new(600, 400);
+    let bytes = dng.write(|x, y| 1500 + ((x * 7 + y * 13) % 600) as u16 * 15);
+    std::fs::create_dir_all(root.join("2026")).unwrap();
+    std::fs::write(root.join("2026/DSC_0001.NEF"), &bytes).unwrap();
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+    h.get_by_label("DSC_0001.NEF").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    h.run_steps(2);
+    assert_eq!(h.state().view_name(), View::Develop);
+    wait_for(&mut h, Duration::from_secs(30), "develop", |a| {
+        a.develop_ready()
+    });
+    snapshot(&mut h, "develop");
+
+    // Drag Exposure (the third slider: temperature, tint, exposure).
+    let r = h
+        .get_all_by_role(egui::accesskit::Role::Slider)
+        .map(|n| n.rect())
+        .nth(2)
+        .unwrap();
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.event(egui::Event::PointerMoved(r.center()));
+    h.event(button(r.center(), true));
+    h.run_steps(1);
+    for dx in [10.0, 20.0, 30.0] {
+        h.event(egui::Event::PointerMoved(r.center() + egui::vec2(dx, 0.0)));
+        h.run_steps(1);
+    }
+    h.event(button(r.center() + egui::vec2(30.0, 0.0), false));
+    h.run_steps(3);
+    let doc = h.state().develop_doc().unwrap();
+    let ev = doc.settings().modules.exposure.ev;
+    assert!(ev > 0.1, "{ev}");
+    assert_eq!(doc.history().len(), 1, "one drag, one step");
+    snapshot(&mut h, "develop-brighter");
+
+    // Kept, then written to the library's .shoebox/edits after a pause.
+    let file = root.join(".shoebox/edits/2026/DSC_0001.NEF.json");
+    wait_for(&mut h, Duration::from_secs(15), "edit file", |_| {
+        file.is_file()
+    });
+    let saved = shoebox_develop::edit::EditDoc::from_json(&std::fs::read_to_string(&file).unwrap())
+        .unwrap();
+    assert_eq!(saved.settings().modules.exposure.ev, ev);
+    assert_eq!(saved.source.size, Some(bytes.len() as u64));
+    assert!(!saved.source.blake3.is_empty());
+
+    // ⌘Z undoes the edit (not a library action); Escape goes back.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(2);
+    assert_eq!(
+        h.state()
+            .develop_doc()
+            .unwrap()
+            .settings()
+            .modules
+            .exposure
+            .ev,
+        0.0
+    );
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert_eq!(h.state().view_name(), View::Grid);
+    // Leaving wrote the undo too; the photo itself was never touched.
+    wait_for(&mut h, Duration::from_secs(15), "saved undo", |_| {
+        std::fs::read_to_string(&file)
+            .ok()
+            .and_then(|s| shoebox_develop::edit::EditDoc::from_json(&s).ok())
+            .is_some_and(|d| d.settings().modules.exposure.ev == 0.0)
+    });
+    assert_eq!(
+        std::fs::read(root.join("2026/DSC_0001.NEF")).unwrap(),
+        bytes
+    );
 }

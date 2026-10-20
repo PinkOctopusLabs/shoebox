@@ -1,6 +1,7 @@
 //! The Shoebox egui application (a thin layer over `shoebox-core`).
 
 pub mod app;
+pub mod develop;
 mod display;
 pub mod icons;
 pub mod jobs;

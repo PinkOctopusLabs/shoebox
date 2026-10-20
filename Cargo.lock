@@ -5964,6 +5964,7 @@ dependencies = [
  "rfd",
  "shoebox-core",
  "shoebox-decode",
+ "shoebox-develop",
  "shoebox-fixtures",
  "shoebox-ml",
  "tempfile",

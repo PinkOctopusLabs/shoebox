@@ -88,6 +88,7 @@ Six views share one selection, so switching view never loses your place.
 | Compare | C | Two images side by side with synced zoom and pan. One is the "select", the other the "candidate"; arrows step the candidate. Used by duplicate review. |
 | Survey | N | 2–9 selected images tiled to fit, for picking the best of a burst. Remove a tile with its X; flag or rate in place. |
 | Timeline | T | Stacks grouped by month and day, with a heat strip of shooting days; click a day to jump to it in Grid. Can follow after v1. |
+| Develop | D | Edit a raw photo (see `docs/EDITING-SPEC.md`): rendered live from its raw data, modules on the right, the edit's history on the left. G or Escape goes back. |
 
 F toggles fullscreen on a black background in any view.
 
@@ -292,7 +293,9 @@ Shortcuts follow Lightroom wherever one exists, so existing muscle memory carrie
 | Cmd+A / Cmd+D | Select all / deselect |
 | Cmd+R | Reveal in Finder |
 | Cmd+Backspace | Move selection to `_rejected/` |
-| Cmd+Z / Cmd+Shift+Z | Undo / redo the last batch |
+| Cmd+Z / Cmd+Shift+Z | Undo / redo the last batch (in Develop: the edit's own history) |
+| D | Develop the current photo |
+| \\ | In Develop: before / after |
 
 ## Milestones
 

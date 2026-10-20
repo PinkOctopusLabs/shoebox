@@ -34,6 +34,7 @@ jiff = "0.2.38"
 walkers = "0.63.0"
 shoebox-ml.workspace = true
 rayon = "1.12.0"
+shoebox-develop.workspace = true
 
 [dev-dependencies]
 egui_kittest = { version = "0.37.0", features = ["eframe", "snapshot", "wgpu"] }

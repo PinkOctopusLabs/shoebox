@@ -329,6 +329,21 @@ pub enum LibraryCommand {
     /// Download cloud-only files (by reading them; nothing is written) and
     /// read them as photos.
     Download(Vec<PathBuf>),
+    /// A photo's edit (Develop): the catalog's working copy, or its
+    /// `.shoebox/edits` file when that's newer. Answered by `EditLoaded`.
+    LoadEdit {
+        root: PathBuf,
+        rel: String,
+    },
+    /// Keep a changed edit in the catalog; `SaveEdits` writes it to its
+    /// file. The document's source hash and size are filled in if missing.
+    PutEdit {
+        root: PathBuf,
+        rel: String,
+        json: String,
+    },
+    /// Write every edit changed since its last save to its `.shoebox` file.
+    SaveEdits,
 }
 
 /// A move, reject, rename or trash of stacks, by the paths of their files.
@@ -550,6 +565,12 @@ pub enum LibraryEvent {
         undo_at: Option<i64>,
         redo_at: Option<i64>,
         fresh: bool,
+    },
+    /// A photo's edit, if it has one (answer to `LoadEdit`).
+    EditLoaded {
+        root: PathBuf,
+        rel: String,
+        json: Option<String>,
     },
     Error(String),
 }
@@ -830,6 +851,10 @@ fn library_worker(
         let _working = Working::start();
         let (settings_changed, rescan) = match cmd {
             LibraryCommand::Open => {
+                // Edits kept but not yet written (the app quit first).
+                if let Err(e) = shoebox_core::edits::save_pending(&cache, &fileops) {
+                    tracing::warn!("saving edits left from last time: {e}");
+                }
                 if let Ok(c) = Catalog::from_cache(&cache, settings.scan_roots()) {
                     catalog = c;
                     index = catalog
@@ -1327,6 +1352,45 @@ fn library_worker(
                 }
                 (false, false)
             }
+            LibraryCommand::LoadEdit { root, rel } => {
+                let json = shoebox_core::edits::load(
+                    &cache,
+                    &root,
+                    &rel,
+                    shoebox_core::edits::MAIN,
+                    render_hash,
+                )
+                .unwrap_or_else(|e| {
+                    tracing::warn!("loading the edit of {rel}: {e}");
+                    None
+                });
+                emit(LibraryEvent::EditLoaded { root, rel, json });
+                (false, false)
+            }
+            LibraryCommand::PutEdit { root, rel, json } => {
+                match complete_source(&root, &rel, &json) {
+                    Ok((json, hash)) => {
+                        if let Err(e) = shoebox_core::edits::put(
+                            &cache,
+                            &root,
+                            &rel,
+                            shoebox_core::edits::MAIN,
+                            &json,
+                            &hash,
+                        ) {
+                            emit(LibraryEvent::Error(format!("keeping the edit: {e}")));
+                        }
+                    }
+                    Err(e) => emit(LibraryEvent::Error(e)),
+                }
+                (false, false)
+            }
+            LibraryCommand::SaveEdits => {
+                if let Err(e) = shoebox_core::edits::save_pending(&cache, &fileops) {
+                    emit(LibraryEvent::Error(format!("saving edits: {e}")));
+                }
+                (false, false)
+            }
             LibraryCommand::MarkSeen(paths) => {
                 let idx: Vec<usize> = paths.iter().filter_map(|p| index.get(p).copied()).collect();
                 if let Err(e) = catalog.mark_seen(&idx, &mut cache) {
@@ -1433,6 +1497,28 @@ fn undo_batch(
 }
 
 /// Stacks of these files.
+/// An edit document's render hash (for the catalog row); empty if it
+/// doesn't parse.
+fn render_hash(json: &str) -> String {
+    shoebox_develop::edit::EditDoc::from_json(json)
+        .map_or_else(|_| String::new(), |d| d.render_hash())
+}
+
+/// Fill in an edit's source (BLAKE3, size, and path as it is now) from the
+/// photo, and return it with its render hash.
+fn complete_source(root: &Path, rel: &str, json: &str) -> Result<(String, String), String> {
+    let mut doc = shoebox_develop::edit::EditDoc::from_json(json).map_err(|e| e.to_string())?;
+    doc.source.path = rel.to_owned();
+    if doc.source.blake3.is_empty() {
+        let path = root.join(rel);
+        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        doc.source.blake3 = shoebox_develop::dng::DngCache::key(&bytes);
+        doc.source.size = Some(bytes.len() as u64);
+    }
+    let hash = doc.render_hash();
+    Ok((doc.to_json(), hash))
+}
+
 fn stacks_of(catalog: &Catalog, photos: &[PathBuf]) -> Vec<usize> {
     let mut v: Vec<usize> = photos
         .iter()
