@@ -1400,3 +1400,16 @@ to the Trash, and the cache copies are removed afterwards. Inside the
 library a clash never asks: the export just takes the next free `-1`, `-2`
 name. Reference folders are refused. Exported files are ordinary library
 files from then on, so they show up in the catalog.
+
+## Phase 1 gate deferred; no other editors in testing (2026-10-20)
+
+- The Phase 1 gate (30 NEFs clean, ColorChecker ΔE2000 ≤ 3) needs new
+  photos, a ColorChecker shot among them, so it's deferred until those are
+  taken. Phase 2 starts now. The gate still has to pass before a release
+  calls Phase 1 done. The 0.3.0 release isn't held for it.
+- Testing never depends on licensed editors (PhotoLab, DeepPRIME, PureRAW,
+  Lightroom): none is available. EDITING-SPEC's definition of done, the
+  AI-denoise quality gate, the Phase 3 gate and the risks now judge Shoebox
+  on its own, with the camera's JPEG as the only outside reference, plus
+  measurements (ColorChecker, golden images). Other editors are still named,
+  but only as sources of features to build.

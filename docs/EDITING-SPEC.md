@@ -13,7 +13,7 @@ Shoebox gains a Develop view that turns Nikon NEF files into finished images goo
 **Goals**
 
 - Non-destructive editing of NEF, TIFF and JPG from the existing dated archive; originals are never written to.
-- An Auto rendering on first open that is as good as PhotoLab's default preset with no manual edits.
+- An Auto rendering on first open that looks finished with no manual edits.
 - Real-time slider feedback on a MacBook Pro M2 Max (32 GB) for global adjustments.
 - Feature parity with PhotoLab: RAW colour, exposure and tone, white balance, AI denoise (DeepPRIME equivalent), lens corrections, dehaze (ClearView equivalent), local tone mapping (Smart Lighting equivalent), perspective (ViewPoint equivalent), local adjustments, crop and export. FilmPack-style looks, U Point-style control points and ViewPoint's volume fix follow as Phase 4 options.
 - Presets and preset packs, including film-look LUTs and imported Lightroom presets.
@@ -30,7 +30,9 @@ Shoebox gains a Develop view that turns Nikon NEF files into finished images goo
 - Reading DxO `.dop` files, or round-tripping edits with Lightroom. Importing Lightroom *presets* is in scope. Ratings, labels and keywords still go through standard XMP.
 - Cameras other than the Nikon Z f and any older Nikon bodies in the archive. The decoder supports others, but they are not tested targets.
 
-**Definition of done:** pick 30 representative NEFs (low light, high ISO, backlit, landscape with sky, portrait, architecture) and review them side by side at 100% and at fit-to-screen, in two passes. Pass 1 compares Shoebox's Auto rendering with PhotoLab's default preset, with no manual edits on either side. Pass 2 compares each photo edited normally in both. Shoebox must be acceptable or better on at least 27 of 30 in each pass.
+**Definition of done:** pick 30 representative NEFs (low light, high ISO, backlit, landscape with sky, portrait, architecture) and review them at 100% and at fit-to-screen, in two passes. Pass 1 judges Shoebox's Auto rendering with no manual edits; Pass 2 judges each photo edited normally. The camera's own JPEG of each frame is the only outside reference. Shoebox must be acceptable on at least 27 of 30 in each pass.
+
+**Testing never depends on other editors.** No review, gate or benchmark needs DxO PhotoLab, DeepPRIME, PureRAW, Lightroom or any other licensed tool. Photos are judged on their own merits, against the camera JPEG, and by measurement (ColorChecker ΔE, golden images). Other editors appear in this spec only to name features to build.
 
 ## Reference implementation: LightCraft
 
@@ -104,7 +106,7 @@ The author's folder has two Bayer checkpoints worth testing:
 - `DenoiserTrainingBayerToProfiledRGB_4ch_2024-02-21-bayer_ms-ssim_mgout_notrans_valeither_-4` works at the packed half resolution and doubles it with PixelShuffle. darktable ships this one, describing it as "about 4× faster, marginally lower quality". A 512×512 packed tile is about 48.5 G multiply-adds; ONNX Runtime ran one in 0.51 s on two slow cloud CPU threads, so a 24 MP Z f frame (about 35 tiles) should take a few seconds on the M2 Max.
 - `DenoiserTrainingBayerToProfiledRGB_4ch_2024-03-11-bayer_ms-ssim_mgout_preupsample_notrans_valeither_-2` first upsamples the packed input to full resolution (bilinear), so it costs about 4× as much and keeps more detail.
 
-Convert both and run both through the quality gate in Noise reduction (the 10 highest-ISO Z f frames against DeepPRIME XD). Keep the better one if it fits the 30 s target; offer the other as a faster or finer option if it's worth it. The linear (3-channel) RawNIND model isn't needed: every Z f file is Bayer.
+Convert both and run both through the quality gate in Noise reduction (the 10 highest-ISO Z f frames, reviewed at 100%). Keep the better one if it fits the 30 s target; offer the other as a faster or finer option if it's worth it. The linear (3-channel) RawNIND model isn't needed: every Z f file is Bayer.
 
 **RawNIND: converting and hosting the weights**
 
@@ -330,7 +332,7 @@ Auto is an ordinary partial preset applied when a photo is first opened, so ever
 | Display transform | Default sigmoid |
 
 - Auto's values are computed from image statistics once and stored as plain numbers in the edit document, so an improved Auto never changes an old edit. Re-running Auto on a photo is an explicit action.
-- The camera JPEG makes a cheap check during development: Auto should rarely be further from it in brightness than PhotoLab's default is.
+- The camera JPEG makes a cheap check during development: Auto should rarely be far from it in brightness.
 - **Learning your taste (Phase 4 option).** Once a few hundred photos have been edited in Shoebox, each edit is a training example. Train a small model from image statistics to the slider values you chose, so Auto starts from what you would have done, and stays editable.
 
 **Presets**
@@ -367,7 +369,7 @@ Two tiers. A fast classic denoiser runs live in the pipe. An AI raw denoiser, bu
 - **Local strength.** A mask can raise or lower the blend per region, matching PhotoLab 9's local DeepPRIME control. The cost is one extra multiply.
 - **Batch.** "Denoise selection" queues jobs; one runs at a time, on Metal or the CPU, whichever the Task 0.3 benchmark picked.
 
-**Quality gate:** on the 10 highest-ISO images in the test set, compare against DeepPRIME XD exports at 100%. If RawNIND falls clearly short, the alternatives are a stronger model (NAFNet- or Restormer-class, trained on RawNIND) or running DxO PureRAW only on those files as a pre-step.
+**Quality gate:** on the 10 highest-ISO images in the test set, review at 100%: noise clearly lower than the camera JPEG and the classic tier, with fine detail (hair, foliage, text) kept and no smearing, blotches or invented texture. If RawNIND falls clearly short, the alternative is a stronger model (NAFNet- or Restormer-class, trained on RawNIND).
 
 ## Optics and geometry
 
@@ -504,7 +506,7 @@ Exports are always manual: nothing is exported unless you ask, and an export nev
 
 ## Performance, testing and roadmap
 
-Build in four phases. Shoebox is a usable everyday editor after Phase 2 and can replace PhotoLab after Phase 3, each phase ending at a gate that has to pass before the next starts.
+Build in four phases. Shoebox is a usable everyday editor after Phase 2 and can replace PhotoLab after Phase 3, each phase ending at a gate. A gate that needs new photos (the 30-NEF review, the ColorChecker) can be deferred while the next phase starts; it still has to pass before a release claims that phase is done.
 
 **Performance targets (M2 Max, 32 GB)**
 
@@ -533,7 +535,7 @@ flowchart LR
   P0["Before Phase 1<br/>Task 0.1 GPL relicense<br/>Task 0.2 layout<br/>Task 0.3 ML plan"] --> P1
   P1["Phase 1 · Foundations · ≈4–6 weeks<br/>rawler decode, RCD<br/>Matrix colour, WB<br/>Exposure, crop, rotate/flip<br/>Display transform<br/>Edit docs in .shoebox<br/>JPEG and TIFF export"] --> G1{"Gate: 30 NEFs clean<br/>ColorChecker ΔE ≤ 3"}
   G1 --> P2["Phase 2 · Everyday editor · ≈6–8 weeks<br/>Tone, curve, HSL<br/>Dehaze, clarity<br/>Classic denoise<br/>Lens corrections<br/>Auto, presets, copy/paste<br/>Virtual copies<br/>B&W, defringe, calibration<br/>Transform sliders, soft proof"] --> G2{"Gate: daily driver<br/>for low-ISO shots"}
-  G2 --> P3["Phase 3 · Replace PhotoLab · ≈8–12 weeks<br/>AI raw denoise<br/>Auto-upright<br/>Local adjustments<br/>AI masks: SAM, Vision<br/>Smart-light tone<br/>Spot heal, red-eye<br/>Point Color, reference view"] --> G3{"Gate: 27 of 30 pass<br/>side-by-side review"}
+  G2 --> P3["Phase 3 · Replace PhotoLab · ≈8–12 weeks<br/>AI raw denoise<br/>Auto-upright<br/>Local adjustments<br/>AI masks: SAM, Vision<br/>Smart-light tone<br/>Spot heal, red-eye<br/>Point Color, reference view"] --> G3{"Gate: 27 of 30 pass<br/>the 30-NEF review"}
   G3 --> P4["Phase 4 · Polish · ongoing<br/>Custom DCP profiles<br/>AI sky masks<br/>Object removal<br/>AVIF and JPEG XL<br/>Photo merges, Lens Blur"]
 ```
 
@@ -545,8 +547,8 @@ Nothing from Phase 4 starts before the Phase 3 gate passes; that gate is the def
 | --- | --- | --- |
 | No released open-source decoder for HE/HE\* NEFs yet | Some files unreadable | Set the Z f's RAW recording to Lossless compression; convert existing HE files on demand with Adobe DNG Converter |
 | GPL code and models (RCD/AMaZE ports, RawNIND weights) | Shoebox must be GPL-licensed, since the repo is public | Accepted: relicense to GPL-3.0-or-later (Task 0.1) before any GPL code or model enters the repo |
-| Matrix-only colour looks flatter than DxO | Fails side-by-side review | Build a custom DCP with dcamprof in Phase 2, not Phase 4, if the review flags it |
-| AI denoise below DeepPRIME XD3 quality | High-ISO shots fail the gate | Try a stronger architecture trained on RawNIND; or keep PureRAW as a pre-step for those files only |
+| Matrix-only colour looks flat | Fails the 30-NEF review | Build a custom DCP with dcamprof in Phase 2, not Phase 4, if the review flags it |
+| AI denoise not good enough | High-ISO shots fail the gate | Try a stronger architecture trained on RawNIND |
 | Lensfun lacks your newest NIKKOR Z lenses | Uncorrected distortion and vignetting | Use the Z f's embedded distortion data first; calibrate missing vignetting yourself |
 | wgpu offers no CAMetalLayer colour-space control | Wrong colours on the P3 screen | Set it through `objc2-quartz-core` on the raw layer; test with a P3 test chart |
 | Scope creep | Never finishes | Hold to the phase gates; nothing from Phase 4 before the Phase 3 gate |
@@ -556,7 +558,7 @@ Nothing from Phase 4 starts before the Phase 3 gate passes; that gate is the def
 - How many existing NEFs are High efficiency, and are any High efficiency★? With on-demand conversion the count no longer sizes a bulk job, but HE\* files will wait longest for a native decoder.
 - Does the Z f embed vignetting data as well as distortion? Check a few NEFs with exiftool.
 - Which Picture Control is the Z f set to? Camera match is fitted per Picture Control.
-- PhotoLab is no longer in use. If it isn't available for the definition-of-done review, Pass 1 compares Auto against the Z f's camera JPEG instead.
+- PhotoLab is no longer in use, and no licensed editor is used for testing (see Definition of done).
 - Should Shoebox move NX Studio's `NKSC_PARAM/*.nksc` (and DxO `.dop`) sidecars with their photos on rename and organise? Today it doesn't, so a rename orphans NX Studio's edits.
 
 **Sources**
