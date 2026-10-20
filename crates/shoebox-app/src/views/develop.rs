@@ -400,6 +400,7 @@ fn follow(app: &mut ShoeboxApp) {
             path: p.path.clone(),
             format: p.format,
             raw,
+            lens: crate::develop::shot(p),
         });
     }
 }
@@ -1156,6 +1157,7 @@ fn zoomed_region(
         path: photo.path.clone(),
         format: photo.format,
         raw: settings.modules.raw.clone(),
+        lens: crate::develop::shot(photo),
     };
     app.developer.region(crate::develop::RegionJob {
         request,

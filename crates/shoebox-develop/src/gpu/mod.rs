@@ -132,6 +132,16 @@ impl Pipe {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -262,10 +272,26 @@ impl Pipe {
             },
         );
         let maps = self.maps_buffer(device, frame);
+        let grid: Vec<u8> = match &frame.lens {
+            Some(g) => g.data.iter().flat_map(|v| v.to_le_bytes()).collect(),
+            None => vec![0; 28],
+        };
+        let grid = wgpu::util::DeviceExt::create_buffer_init(
+            device,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("lens grid"),
+                contents: &grid,
+                usage: wgpu::BufferUsages::STORAGE,
+            },
+        );
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("develop"),
             layout: &self.layout,
             entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: grid.as_entire_binding(),
+                },
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: maps.as_entire_binding(),
@@ -580,7 +606,7 @@ impl Histogram {
     }
 }
 
-/// The uniform block (`Params` in the shader), as 38 vec4s.
+/// The uniform block (`Params` in the shader), as 39 vec4s.
 fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
     let row = |r: [f32; 3]| [r[0], r[1], r[2], 0.0];
     let d = &f.display;
@@ -643,6 +669,10 @@ fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
     v.extend([lc.scale[0], lc.scale[1], 0.0, 0.0]);
     let air_y = lc.luma[0] * air[0] + lc.luma[1] * air[1] + lc.luma[2] * air[2];
     v.extend([air[0], air[1], air[2], air_y]);
+    match &f.lens {
+        Some(g) => v.extend([1.0, g.cols as f32, g.rows as f32, flag(g.chromatic)]),
+        None => v.extend([0.0, 2.0, 2.0, 0.0]),
+    }
     v
 }
 

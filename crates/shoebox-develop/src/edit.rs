@@ -205,6 +205,34 @@ impl Default for DisplayTransform {
     }
 }
 
+/// Lens corrections (module 1): distortion and vignetting from the camera's
+/// own data or Lensfun, chromatic aberration from Lensfun.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LensCorrection {
+    pub enabled: bool,
+    /// How much of the distortion and vignetting corrections, 0–200 (%).
+    pub distortion: f64,
+    pub vignetting: f64,
+    pub chromatic: bool,
+    /// A Lensfun lens chosen by hand (its model name); None: matched from
+    /// the photo's EXIF.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lens: Option<String>,
+}
+
+impl Default for LensCorrection {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            distortion: 100.0,
+            vignetting: 100.0,
+            chromatic: true,
+            lens: None,
+        }
+    }
+}
+
 /// Highlights and shadows (module 7): −100 to +100, applied through an
 /// edge-aware base layer so detail keeps its contrast.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -366,6 +394,7 @@ pub struct Modules {
     pub white_balance: WhiteBalance,
     pub input_colour: InputColour,
     pub exposure: Exposure,
+    pub lens: LensCorrection,
     pub noise_reduction: NoiseReduction,
     pub sharpening: Sharpening,
     pub dehaze: Dehaze,

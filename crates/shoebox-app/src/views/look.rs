@@ -3,8 +3,8 @@
 
 use eframe::egui::{self, Color32, RichText, Sense, pos2, vec2};
 use shoebox_develop::edit::{
-    BlackAndWhite, Calibration, Clarity, Colour, Dehaze, HUES, NoiseReduction, Settings,
-    Sharpening, ToneCurve,
+    BlackAndWhite, Calibration, Clarity, Colour, Dehaze, HUES, LensCorrection, NoiseReduction,
+    Settings, Sharpening, ToneCurve,
 };
 
 use super::develop::{edit, slider};
@@ -56,6 +56,7 @@ pub fn modules(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &Settings) {
     tone_curve(app, ui, &s.modules.tone_curve);
     colour(app, ui, &s.modules.colour);
     detail(app, ui, s);
+    lens(app, ui, &s.modules.lens);
     black_and_white(app, ui, &s.modules.black_and_white);
     calibration(app, ui, &s.modules.calibration);
 }
@@ -178,6 +179,117 @@ fn detail(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &Settings) {
         edit(app, "detail", "Reset detail".into(), false, |s| {
             s.modules.sharpening = Sharpening::default();
             s.modules.noise_reduction = NoiseReduction::default();
+        });
+    }
+}
+
+/// Distortion, vignetting and chromatic aberration, from the camera's own
+/// data and Lensfun.
+fn lens(app: &mut ShoeboxApp, ui: &mut egui::Ui, lc: &LensCorrection) {
+    let shot = app.develop.ready.as_ref().and_then(|r| r.src.lens.clone());
+    // The frame's size as the pipe sees it (a raw's full size).
+    let size = app.develop.ready.as_ref().map(|r| {
+        if r.meta.width > 0 {
+            (r.meta.width, r.meta.height)
+        } else {
+            (r.src.rgb.width, r.src.rgb.height)
+        }
+    });
+    let reset = section(
+        ui,
+        "Lens corrections",
+        *lc != LensCorrection::default(),
+        false,
+        |ui| {
+            let Some(shot) = shot else {
+                ui.weak("The photo doesn't say which camera and lens took it.");
+                return;
+            };
+            let mut on = lc.enabled;
+            if ui.checkbox(&mut on, "Correct the lens").changed() {
+                let label = if on {
+                    "Lens corrections on"
+                } else {
+                    "Lens corrections off"
+                };
+                edit(app, "lens", label.into(), false, |s| {
+                    s.modules.lens.enabled = on
+                });
+            }
+            if !lc.enabled {
+                return;
+            }
+            let found = size.and_then(|(w, h)| shoebox_develop::lens::grid(&shot, lc, w, h));
+            match &found {
+                Some(g) => ui.weak(format!("Using: {}", g.source)),
+                None => ui.weak(format!(
+                    "No correction known for {}",
+                    if shot.lens.is_empty() {
+                        "this lens"
+                    } else {
+                        &shot.lens
+                    }
+                )),
+            };
+            egui::Grid::new("lens-grid").num_columns(2).show(ui, |ui| {
+                if let Some((v, d)) = slider(ui, "Distortion", lc.distortion, 0.0..=200.0, 100.0, 0)
+                {
+                    edit(app, "lens-d", format!("Distortion {v:.0}%"), d, |s| {
+                        s.modules.lens.distortion = v;
+                    });
+                }
+                if let Some((v, d)) = slider(ui, "Vignetting", lc.vignetting, 0.0..=200.0, 100.0, 0)
+                {
+                    edit(app, "lens-v", format!("Vignetting {v:.0}%"), d, |s| {
+                        s.modules.lens.vignetting = v;
+                    });
+                }
+            });
+            let mut ca = lc.chromatic;
+            if ui
+                .checkbox(&mut ca, "Remove chromatic aberration")
+                .changed()
+            {
+                edit(
+                    app,
+                    "lens-ca",
+                    format!("Chromatic aberration {}", if ca { "on" } else { "off" }),
+                    false,
+                    |s| {
+                        s.modules.lens.chromatic = ca;
+                    },
+                );
+            }
+            let chosen = lc.lens.clone();
+            let mut pick = None;
+            ui.horizontal(|ui| {
+                ui.label("Lens");
+                egui::ComboBox::from_id_salt("lens-profile")
+                    .selected_text(chosen.as_deref().unwrap_or("Automatic"))
+                    .width(ui.available_width() - 8.0)
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(chosen.is_none(), "Automatic").clicked() {
+                            pick = Some(None);
+                        }
+                        for name in shoebox_develop::lens::lenses_for(&shot) {
+                            let on = chosen.as_deref() == Some(name.as_str());
+                            if ui.selectable_label(on, &name).clicked() {
+                                pick = Some(Some(name));
+                            }
+                        }
+                    });
+            });
+            if let Some(choice) = pick {
+                let label = format!("Lens {}", choice.as_deref().unwrap_or("automatic"));
+                edit(app, "lens-pick", label, false, |s| {
+                    s.modules.lens.lens = choice
+                });
+            }
+        },
+    );
+    if reset {
+        edit(app, "lens", "Reset lens corrections".into(), false, |s| {
+            s.modules.lens = LensCorrection::default();
         });
     }
 }

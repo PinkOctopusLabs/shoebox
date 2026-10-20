@@ -28,6 +28,24 @@ pub struct Request {
     pub path: PathBuf,
     pub format: shoebox_decode::Format,
     pub raw: Raw,
+    /// How it was taken (lens corrections), from the catalog's EXIF.
+    pub lens: Option<Arc<Shot>>,
+}
+
+use shoebox_develop::lens::Shot;
+
+/// What a photo's EXIF says about its lens (None without a camera and
+/// lens). A NEF's own lens data is added as the file is read.
+pub fn shot(photo: &shoebox_core::catalog::Photo) -> Option<Arc<Shot>> {
+    let x = &photo.meta.exif;
+    Some(Arc::new(Shot {
+        make: x.make.clone()?,
+        model: x.model.clone()?,
+        lens: x.lens.clone().unwrap_or_default(),
+        focal: x.focal.unwrap_or(0.0) as f32,
+        aperture: x.fnumber.unwrap_or(0.0) as f32,
+        camera_data: Default::default(),
+    }))
 }
 
 /// A photo ready to edit.
@@ -49,6 +67,7 @@ pub struct Ready {
 pub struct PreviewJob {
     pub id: PhotoId,
     pub path: PathBuf,
+    pub lens: Option<Arc<Shot>>,
     pub format: shoebox_decode::Format,
     pub orientation: u16,
     pub settings: shoebox_develop::edit::Settings,
@@ -124,6 +143,8 @@ pub struct ExportItem {
     pub date: Option<String>,
     /// The photo's XMP sidecar, for keywords, rating and title.
     pub sidecar: Option<PathBuf>,
+    /// How it was taken (lens corrections).
+    pub lens: Option<Arc<Shot>>,
 }
 
 /// A file an export wrote.
@@ -333,6 +354,13 @@ fn worker(
         }
     }
     let previews = cache_dir.join("edited");
+    // Load Lensfun's database now, so turning lens corrections on doesn't
+    // wait for it.
+    let _ = std::thread::Builder::new()
+        .name("lensfun".into())
+        .spawn(|| {
+            shoebox_develop::lens::lensfun();
+        });
     let mut kept: Vec<Ready> = Vec::new();
     let mut open: Option<Request> = None;
     let mut queue: std::collections::VecDeque<PreviewJob> = Default::default();
@@ -522,6 +550,7 @@ fn preview(
                 path: p.path.clone(),
                 format: p.format,
                 raw,
+                lens: p.lens.clone(),
             };
             match prepare(&r, Some(PROXY), converter, dngs, &|_| {})? {
                 Some(k) => k,
@@ -537,7 +566,11 @@ fn preview(
     let src = if ready.src.rgb.width.max(ready.src.rgb.height) > PREVIEW as usize {
         let small = cpu::downscale(&ready.src.rgb, PREVIEW as usize);
         let scale = ready.src.scale * small.width as f32 / ready.src.rgb.width as f32;
-        Arc::new(Demosaiced::new(small, ready.src.as_shot, ready.src.referred).with_scale(scale))
+        Arc::new(
+            Demosaiced::new(small, ready.src.as_shot, ready.src.referred)
+                .with_scale(scale)
+                .with_lens(ready.src.lens.clone()),
+        )
     } else {
         ready.src.clone()
     };
@@ -581,9 +614,16 @@ fn prepare(
     } else {
         r.path.clone()
     };
+    // The camera's own lens data, from the NEF itself.
+    let lens = r.lens.as_ref().map(|shot| {
+        Arc::new(Shot {
+            camera_data: shoebox_decode::nef::lens_data(&bytes),
+            ..(**shot).clone()
+        })
+    });
     drop(bytes);
     let mut raw = shoebox_decode::raw::decode_path(&source).map_err(|e| e.to_string())?;
-    let src = cpu::demosaic(&raw, &r.raw, long_edge);
+    let src = cpu::demosaic(&raw, &r.raw, long_edge).with_lens(lens);
     raw.data = Vec::new();
     Ok(Some(Ready {
         id: r.id,
@@ -597,6 +637,13 @@ fn prepare(
 /// A finished image: decoded (colour-managed to Display P3, the widest the
 /// decoder offers) at the proxy size, as a display-referred source.
 fn finished(r: &Request, long_edge: Option<u32>) -> Result<Ready, String> {
+    finished_image(r, long_edge).map(|mut ready| {
+        ready.src = Arc::new((*ready.src).clone().with_lens(r.lens.clone()));
+        ready
+    })
+}
+
+fn finished_image(r: &Request, long_edge: Option<u32>) -> Result<Ready, String> {
     use shoebox_decode::{Format, Target};
     let data = std::fs::read(&r.path).map_err(|e| format!("{}: {e}", r.path.display()))?;
     // 16-bit TIFFs and PNGs keep their precision.
@@ -877,6 +924,7 @@ fn export_item(
         path: item.path.clone(),
         format: item.format,
         raw: item.settings.modules.raw.clone(),
+        lens: item.lens.clone(),
     };
     let failed = match prepare(&r, None, converter, dngs, &|_| {}) {
         Ok(Some(ready)) => {
@@ -1130,6 +1178,7 @@ mod tests {
                 edit_key: None,
                 date: None,
                 sidecar: None,
+                lens: None,
             });
         }
         let out = t.path().join("out");
@@ -1257,6 +1306,7 @@ mod tests {
             edit_key: None,
             date: None,
             sidecar: None,
+            lens: None,
         };
         let preset = Preset {
             metadata: shoebox_develop::export::Metadata::AllButLocation,

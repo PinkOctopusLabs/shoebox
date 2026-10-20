@@ -1,6 +1,7 @@
 // The live pipe for one output pixel (see `cpu::apply` and
 // `cpu::display_pixel`, which this follows operation for operation):
-// geometry map → bilinear sample → colour matrix → local (dehaze,
+// geometry map → lens grid (each channel from where the lens put it, times
+// the vignetting gain: `cpu::lens_sample`) → bilinear sample → colour matrix → local (dehaze,
 // highlights and shadows, clarity: `cpu::maps`) → look (colour, black and
 // white: `cpu::look`) → display transform → tone curve → output space and
 // sRGB transfer curve.
@@ -43,6 +44,7 @@ struct Params {
     maps: vec4<f32>,      // maps on (0/1), map width, map height
     scale: vec4<f32>,     // source → map pixels (x, y)
     air: vec4<f32>,       // dehaze airlight (rgb), its luminance
+    lens: vec4<f32>,      // grid on (0/1), columns, rows, chromatic (0/1)
 };
 
 @group(0) @binding(0) var src: texture_2d<f32>;
@@ -55,6 +57,10 @@ struct Params {
 @group(0) @binding(4) var<storage, read> maps: array<f32>;
 
 const STRIDE: u32 = 6u;
+
+// The lens grid (see `lens::Grid`): GRID floats per node.
+@group(0) @binding(5) var<storage, read> grid: array<f32>;
+const GRID: u32 = 7u;
 const CURVE_SIZE: u32 = 1024u;
 const CENTRES = array<f32, 8>(29.0, 58.0, 110.0, 142.0, 195.0, 264.0, 295.0, 328.0);
 
@@ -283,6 +289,49 @@ fn local_px(px0: vec3<f32>, sx: f32, sy: f32) -> vec3<f32> {
     return px * exp2(gain);
 }
 
+fn grid_at(x: u32, y: u32, k: u32) -> f32 {
+    return grid[(y * u32(p.lens.y) + x) * GRID + k];
+}
+
+struct Lensed { px: vec3<f32>, at: vec2<f32> };
+
+// The source through the lens grid (see `cpu::lens_sample`).
+fn lens_sample(sx: f32, sy: f32) -> Lensed {
+    let w = p.size.z;
+    let h = p.size.w;
+    let cols = p.lens.y;
+    let rows = p.lens.z;
+    let gx = clamp(sx / max(w - 1.0, 1.0) * (cols - 1.0), 0.0, cols - 1.0);
+    let gy = clamp(sy / max(h - 1.0, 1.0) * (rows - 1.0), 0.0, rows - 1.0);
+    let x0 = u32(floor(gx));
+    let y0 = u32(floor(gy));
+    let x1 = min(x0 + 1u, u32(cols) - 1u);
+    let y1 = min(y0 + 1u, u32(rows) - 1u);
+    let fx = gx - f32(x0);
+    let fy = gy - f32(y0);
+    var n: array<f32, 7>;
+    for (var k = 0u; k < GRID; k++) {
+        let a = grid_at(x0, y0, k);
+        let b = grid_at(x1, y0, k);
+        let c = grid_at(x0, y1, k);
+        let d = grid_at(x1, y1, k);
+        let top = a + (b - a) * fx;
+        let bot = c + (d - c) * fx;
+        n[k] = top + (bot - top) * fy;
+    }
+    let g = vec2<f32>(sx + n[2] * w, sy + n[3] * h);
+    var px: vec3<f32>;
+    if (p.lens.w > 0.5) {
+        let r = bilinear(sx + n[0] * w, sy + n[1] * h).x;
+        let mid = bilinear(g.x, g.y).y;
+        let b = bilinear(sx + n[4] * w, sy + n[5] * h).z;
+        px = vec3<f32>(r, mid, b);
+    } else {
+        px = bilinear(g.x, g.y);
+    }
+    return Lensed(px * n[6], g);
+}
+
 fn tone_at(ch: u32, v: f32) -> f32 {
     let x = clamp(v, 0.0, 1.0) * f32(CURVE_SIZE - 1u);
     let i = min(u32(floor(x)), CURVE_SIZE - 2u);
@@ -335,9 +384,18 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let x = f32(id.x);
     let y = f32(id.y);
-    let sx = p.map0.x * x + p.map0.y * y + p.map0.z;
-    let sy = p.map1.x * x + p.map1.y * y + p.map1.z;
-    var px = mul3(p.colour0, p.colour1, p.colour2, bilinear(sx, sy));
+    var sx = p.map0.x * x + p.map0.y * y + p.map0.z;
+    var sy = p.map1.x * x + p.map1.y * y + p.map1.z;
+    var raw: vec3<f32>;
+    if (p.lens.x > 0.5) {
+        let l = lens_sample(sx, sy);
+        raw = l.px;
+        sx = l.at.x;
+        sy = l.at.y;
+    } else {
+        raw = bilinear(sx, sy);
+    }
+    var px = mul3(p.colour0, p.colour1, p.colour2, raw);
     if (p.maps.x > 0.5) {
         px = local_px(px, sx, sy);
     }

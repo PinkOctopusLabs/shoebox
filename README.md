@@ -110,4 +110,7 @@ Raw editing ports two of [darktable](https://www.darktable.org)'s algorithms
 (GPL-3.0): Luis Sanz Rodríguez's RCD demosaicing and the "inpaint opposed"
 highlight reconstruction (each module names its source file and commit), and
 decodes raw files with [rawler](https://github.com/dnglab/dnglab)
-(LGPL-2.1).
+(LGPL-2.1). Lens corrections use the
+[lensfun](https://github.com/vdavid/lensfun-rs) crate (LGPL-3.0), a Rust
+port of [LensFun](https://github.com/lensfun/lensfun), and its bundled lens
+database (CC-BY-SA 3.0, by the LensFun contributors).

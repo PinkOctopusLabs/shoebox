@@ -3468,6 +3468,7 @@ fn develop_look_modules() {
     assert!(h.query_by_label("Black & white").is_some());
     assert!(h.query_by_label("Clarity").is_some() && h.query_by_label("Dehaze").is_some());
     assert!(h.query_by_label("Texture").is_some() && h.query_by_label("Detail").is_some());
+    assert!(h.query_by_label("Lens corrections").is_some());
     // The curve sits under its channel buttons.
     let rgb = h.get_by_label("RGB").rect();
     let curve = egui::Rect::from_min_size(

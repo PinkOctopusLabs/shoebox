@@ -133,6 +133,8 @@ pub struct Demosaiced {
     /// Source pixels per original pixel (a proxy's is below 1): detail
     /// radii are in the original's pixels.
     pub scale: f32,
+    /// How the photo was taken, for lens corrections (None: unknown).
+    pub lens: Option<std::sync::Arc<crate::lens::Shot>>,
     /// Its small copy, last local-adjustment maps (see [`maps`]), noise
     /// estimate and detail-stage result (see [`detail`]), shared by clones.
     pub cache: maps::Cache,
@@ -145,8 +147,14 @@ impl Demosaiced {
             as_shot,
             referred,
             scale: 1.0,
+            lens: None,
             cache: Default::default(),
         }
+    }
+
+    pub fn with_lens(mut self, lens: Option<std::sync::Arc<crate::lens::Shot>>) -> Self {
+        self.lens = lens;
+        self
     }
 
     pub fn with_scale(mut self, scale: f32) -> Self {
@@ -302,6 +310,9 @@ pub struct Frame {
     /// Source (camera RGB balanced at as shot) → linear Rec.2020, with the
     /// white balance change, exposure and calibration folded in.
     pub colour: [[f32; 3]; 3],
+    /// Lens corrections: where each channel comes from, and the
+    /// vignetting gain (see [`crate::lens`]).
+    pub lens: Option<std::sync::Arc<crate::lens::Grid>>,
     /// Dehaze, highlights and shadows, clarity (see [`maps`]).
     pub local: maps::Local,
     /// Colour and black and white, per pixel (see [`look`]).
@@ -508,12 +519,34 @@ pub fn frame(raw: &RawImage, src: &Demosaiced, s: &Settings, o: &Options) -> Fra
         tone: look::curve_table(&s.modules.tone_curve),
         ..display
     };
-    let (map, width, height) =
+    let (mut map, width, height) =
         geometry_map(src.rgb.width, src.rgb.height, o.orientation, &s.geometry);
+    // Lens corrections, on the frame's own aspect; their zoom keeps the
+    // corrected frame filled.
+    let lens = src.lens.as_ref().and_then(|shot| {
+        let (w, h) = match src.referred {
+            Referred::Scene if raw.width > 0 => (raw.width, raw.height),
+            _ => (src.rgb.width, src.rgb.height),
+        };
+        crate::lens::grid(shot, &s.modules.lens, w, h)
+    });
+    if let Some(g) = &lens {
+        let z = f64::from(g.zoom);
+        let c = [
+            (src.rgb.width as f64 - 1.0) / 2.0,
+            (src.rgb.height as f64 - 1.0) / 2.0,
+        ];
+        for (r, row) in map.iter_mut().enumerate() {
+            row[0] /= z;
+            row[1] /= z;
+            row[2] = c[r] + (row[2] - c[r]) / z;
+        }
+    }
     Frame {
         width,
         height,
         map: map.map(|r| r.map(|v| v as f32)),
+        lens,
         local: maps::local(src, &colour, s),
         colour,
         look: look::Look::new(
@@ -617,7 +650,8 @@ pub fn apply(src: &Rgb, f: &Frame, display: bool) -> Rgb {
                 let (xf, yf) = (x as f32, y as f32);
                 let sx = f.map[0][0] * xf + f.map[0][1] * yf + f.map[0][2];
                 let sy = f.map[1][0] * xf + f.map[1][1] * yf + f.map[1][2];
-                let lin = mul3(&f.colour, sample(src, sx, sy));
+                let (rgb, sx, sy) = lens_sample(src, f.lens.as_deref(), sx, sy);
+                let lin = mul3(&f.colour, rgb);
                 let lin = look::look_pixel(&f.look, maps::local_pixel(&f.local, lin, sx, sy));
                 let px = if display {
                     let d = display_pixel(&f.display, lin);
@@ -629,6 +663,39 @@ pub fn apply(src: &Rgb, f: &Frame, display: bool) -> Rgb {
             }
         });
     out
+}
+
+/// Sample the source at corrected position `(sx, sy)` through the lens
+/// grid: each channel from where the lens put it, times the vignetting
+/// gain. Returns the pixel and green's source position (where the local
+/// maps are read).
+pub fn lens_sample(
+    src: &Rgb,
+    grid: Option<&crate::lens::Grid>,
+    sx: f32,
+    sy: f32,
+) -> ([f32; 3], f32, f32) {
+    let Some(g) = grid else {
+        return (sample(src, sx, sy), sx, sy);
+    };
+    let (w, h) = (src.width as f32, src.height as f32);
+    let n = g.at(
+        sx / (w - 1.0).max(1.0) * (g.cols - 1) as f32,
+        sy / (h - 1.0).max(1.0) * (g.rows - 1) as f32,
+    );
+    let (gx, gy) = (sx + n[2] * w, sy + n[3] * h);
+    let mut p = if g.chromatic {
+        let r = sample(src, sx + n[0] * w, sy + n[1] * h)[0];
+        let mid = sample(src, gx, gy)[1];
+        let b = sample(src, sx + n[4] * w, sy + n[5] * h)[2];
+        [r, mid, b]
+    } else {
+        sample(src, gx, gy)
+    };
+    for v in &mut p {
+        *v *= n[6];
+    }
+    (p, gx, gy)
 }
 
 /// Render for display or export: display-encoded values 0–1 in `target`.
@@ -682,6 +749,7 @@ fn resample(img: &Rgb, map: [[f64; 3]; 2], w: usize, h: usize) -> Rgb {
         width: w,
         height: h,
         map: map.map(|r| r.map(|v| v as f32)),
+        lens: None,
         colour: f32m(&colour::IDENTITY),
         local: maps::Local::none(),
         look: look::Look::new(

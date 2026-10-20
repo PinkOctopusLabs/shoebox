@@ -125,3 +125,25 @@ fn real_high_efficiency_nef() {
         Err(shoebox_decode::DecodeError::Unsupported(_))
     ));
 }
+
+/// The Z f's own lens data (exiftool reads distortion 0.00935, −0.02086,
+/// 0.00998 and vignette 2.2917, −1.8133, 0.8411 for this file).
+#[test]
+fn real_nef_lens_data() {
+    let Ok(bytes) = std::fs::read(REAL_NEF) else {
+        eprintln!("skipping: no {REAL_NEF}");
+        return;
+    };
+    let d = nef::lens_data(&bytes);
+    let close =
+        |got: [f64; 3], want: [f64; 3]| got.iter().zip(want).all(|(g, w)| (g - w).abs() < 1e-4);
+    assert!(
+        close(d.distortion.unwrap(), [0.00935, -0.02086, 0.00998]),
+        "{d:?}"
+    );
+    assert!(
+        close(d.vignette.unwrap(), [2.29174, -1.81334, 0.84110]),
+        "{d:?}"
+    );
+    assert_eq!(nef::lens_data(b"not a tiff"), nef::LensData::default());
+}

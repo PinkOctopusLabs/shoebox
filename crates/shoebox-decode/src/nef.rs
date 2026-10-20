@@ -135,6 +135,63 @@ pub fn compression_in_maker_note(note: &[u8]) -> Option<NefCompression> {
         .map(NefCompression::from_tag)
 }
 
+/// Nikon's `NikonNEFInfo` (tag 0xC7D5, in the raw image's SubIFD): "Nikon\0", a version, then a
+/// TIFF whose tag 5 is DistortionInfo and tag 6 VignetteInfo.
+const NIKON_NEF_INFO: u16 = 0xC7D5;
+const NEF_INFO_DISTORTION: u16 = 0x0005;
+const NEF_INFO_VIGNETTE: u16 = 0x0006;
+
+/// The lens corrections a Nikon Z body records for its lens. Both are
+/// polynomials in r², r = 1 at the half-diagonal of the frame (the blocks
+/// store that radius, 21.6 mm):
+/// - `distortion` `[k1, k2, k3]`: a pixel at radius r of the corrected image
+///   comes from radius r·(1 + k1·r² + k2·r⁴ + k3·r⁶) of the raw.
+/// - `vignette` `[v1, v2, v3]`: the gain that corrects the falloff,
+///   1 + v1·r² + v2·r⁴ + v3·r⁶.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct LensData {
+    pub distortion: Option<[f64; 3]>,
+    pub vignette: Option<[f64; 3]>,
+}
+
+/// The NEF's [`LensData`] (empty for other files, or a lens that sends none).
+pub fn lens_data(data: &[u8]) -> LensData {
+    lens_data_in(data).unwrap_or_default()
+}
+
+fn lens_data_in(data: &[u8]) -> Option<LensData> {
+    let tiff = Tiff::parse(data).ok()?;
+    // In the raw image's SubIFD (any IFD that has it).
+    let ifds = tiff.all_ifds().ok()?;
+    let e = ifds.iter().find_map(|ifd| ifd.get(NIKON_NEF_INFO))?;
+    let block = tiff.raw(e).ok()?;
+    let inner = block.strip_prefix(b"Nikon\0")?.get(4..)?;
+    let info = Tiff::parse(inner).ok()?;
+    let ifd = info.ifd0().ok()?;
+    let big = inner.starts_with(b"MM");
+    let coefficients = |tag: u16, at: [usize; 3]| -> Option<[f64; 3]> {
+        let b = info.raw(ifd.get(tag)?).ok()?;
+        let i32_at = |o: usize| -> Option<i32> {
+            let v: [u8; 4] = b.get(o..o + 4)?.try_into().ok()?;
+            Some(if big {
+                i32::from_be_bytes(v)
+            } else {
+                i32::from_le_bytes(v)
+            })
+        };
+        let rational = |o: usize| -> Option<f64> {
+            let (n, d) = (i32_at(o)?, i32_at(o + 4)?);
+            (d != 0).then(|| f64::from(n) / f64::from(d))
+        };
+        let k = [rational(at[0])?, rational(at[1])?, rational(at[2])?];
+        (k.iter().any(|v| *v != 0.0) && k.iter().all(|v| v.abs() < 16.0)).then_some(k)
+    };
+    Some(LensData {
+        distortion: coefficients(NEF_INFO_DISTORTION, [0x14, 0x1C, 0x24]),
+        vignette: coefficients(NEF_INFO_VIGNETTE, [0x24, 0x34, 0x44]),
+    })
+}
+
 /// Orientation and declared dimensions from IFD0 of a TIFF-based file.
 pub fn ifd0_orientation(data: &[u8]) -> Result<Option<u16>, DecodeError> {
     let tiff = Tiff::parse(data)?;

@@ -1504,3 +1504,36 @@ files from then on, so they show up in the catalog.
   the stage can come later if drags feel slow.
 - Defaults are zero. Auto (later in Phase 2) will set noise reduction by
   ISO, as the spec says.
+
+## Lens corrections (2026-10-20)
+
+- **The NEF's own data.** It isn't in the MakerNote. It's in NikonNEFInfo
+  (tag 0xC7D5 in the raw image's SubIFD): tag 5 is DistortionInfo, tag 6
+  VignetteInfo. Both store their normalising radius (88474/4096 = 21.6 mm,
+  the half-diagonal of a full-frame sensor), so r = 1 at the frame's
+  half-diagonal.
+  - **Vignetting** is a correction gain 1 + v1·r² + v2·r⁴ + v3·r⁶. On the
+    test NEF (Z 40mm f/2 at f/4) it gives 2.32× at the corner, against
+    Lensfun's 2.38× for the same lens and aperture.
+  - **Distortion:** a corrected pixel at radius r comes from radius
+    r·(1 + k1·r² + k2·r⁴ + k3·r⁶) in the raw. Block-matching the raw against
+    the camera's own corrected JPEG (`examples/lens_probe.rs`) fits that
+    convention best (0.43 px RMS, against 0.90 px the other way round). The
+    40mm's distortion is too small for the match to prove it, though, so a
+    shot of straight lines with a more distorting lens should confirm it
+    (added to the deferred gate's checks).
+- **Order of sources.** As the spec says: the camera's data first for
+  distortion and vignetting, then Lensfun for chromatic aberration, and for
+  distortion and vignetting where the camera gives none. Lensfun's bundled
+  database has the Z f and 33 Z-mount lenses.
+- **A grid instead of ported formulas.** Lensfun's own scalar code computes
+  a 65-column grid of per-channel source offsets and gains, as fractions
+  of the frame, so one grid serves the proxy, 100% regions and export. The
+  live pass interpolates it (about 0.04 px of error at full size for strong
+  distortion). There are no models to port and keep in sync. Distortion
+  and vignetting have amounts (0–200%). A fill zoom (binary search over the
+  frame's edge points) keeps the corrected frame without blank corners and
+  is folded into the geometry map.
+- Lensfun's colour pass with `reverse` set simulates vignetting (unlike its
+  geometry passes), so the correction is its reciprocal.
+- Lens corrections are off by default for now. Auto will turn them on.

@@ -138,9 +138,13 @@ What's been copied is recorded per library root in `<root>/.shoebox/photos.json`
 - **Status** is `copied`, `in_library` (skipped: the same bytes were already there, with the path), or `left_out` (the person chose not to import it; it's offered again only with **Show left-out**).
 - **"Synced before" means a ledger entry**, not "a file exists". An asset whose copy was later moved to `_rejected/` or the Trash stays synced and isn't copied again. Settings › iCloud Photos has **Re-import missing**, which lists entries whose files are no longer anywhere in the library (found by BLAKE3, so moves don't count as missing) and copies them again on request.
 - **A changed Photos edit.** If the asset's `modificationDate` and its `.fullSizePhoto` changed since `photos_modified` (the person edited it again in Photos), the next run offers the new render as **updated in Photos** and imports it as another variant (`-photos-1`); the earlier one is never replaced. Edits Shoebox itself pushed are recognised by our adjustment format id and never come back as imports.
-- **Assets Shoebox created** in Photos (pushes of non-Photos photos) are recorded under `pushed` and skipped by later imports.
+- **No round trips.** Nothing Shoebox sends to Photos is ever imported back as a new photo:
+  - *A photo that came from Photos* goes back as an edit of the same asset, which is already in the ledger as synced, so it isn't copied again. Its edit changes the asset's `modificationDate`, which would normally offer the render as **updated in Photos**, but the edit carries our adjustment format id, so it's recognised as Shoebox's own and skipped.
+  - *A photo from elsewhere* becomes a new asset, recorded under `pushed` with its cloud id the moment PhotoKit returns it, and skipped by later imports.
+  - *Backstop for a lost ledger:* every file Shoebox renders for Photos carries a Shoebox marker in its XMP (`shoebox:PushedFrom` = the source photo's BLAKE3 and copy id). Photos keeps an asset's original bytes, so a later import, or **Rebuild sync record**, reads the marker and links the asset back to the Shoebox photo it came from instead of importing it.
+  - *Edited again in Photos* (on the phone, after a push): that's a genuine change made outside Shoebox, so it's offered as **updated in Photos** and imported as a `-photos` variant in the source photo's stack, never as a separate photo.
 - **Several roots.** The ledger is per root, and import checks the ledgers of *every* root, so an asset copied into one root isn't copied again into another.
-- **Lost ledger.** If `photos.json` is gone, the exact-hash check still prevents duplicate copies (Photos returns originals byte-for-byte), at the cost of downloading again. Settings offers **Rebuild sync record**: fetch, download and hash, match against the library, write the ledger, copy nothing.
+- **Lost ledger.** If `photos.json` is gone, the exact-hash check still prevents duplicate copies (Photos returns originals byte-for-byte), at the cost of downloading again. Settings offers **Rebuild sync record**: fetch, download and hash, match against the library (and Shoebox's push markers), write the ledger, copy nothing.
 - **Quick re-sync.** The change token lets a later run ask Photos for only the inserted and updated assets since last time, so "Sync again" on a 30k library takes seconds when little changed. Without a usable token (first run, token expired, other Mac) it falls back to the full fetch and diff, which is still metadata only.
 
 ## Push to Photos
@@ -157,7 +161,7 @@ Pushing is exporting with Photos as the destination: what goes to Photos is alwa
 | Already pushed before | Edited since | The same asset is updated with a new edit (for an asset Shoebox created, that's an edit on top of the first push, so its first push is the "original"). Never a second asset |
 | Already pushed before | Not changed since | Disabled: "up to date in Photos" |
 
-- **Rendering** uses the export pipeline and its presets. A built-in, non-deletable "Photos" preset is the default: JPEG, full size, quality 92, 4:4:4, Display P3, all metadata (capture date, GPS, keywords as XMP). Any JPEG, PNG or TIFF preset can be chosen instead, and the preset used is recorded with the push, as exports record theirs. It renders into the cache, never into the library. An edit of a Photos asset must be a JPEG (PhotoKit's rule for rendered edits), so those always use a JPEG preset.
+- **Rendering** uses the export pipeline and its presets. A built-in, non-deletable "Photos" preset is the default: JPEG, full size, quality 92, 4:4:4, Display P3, all metadata (capture date, GPS, keywords as XMP). Any JPEG, PNG or TIFF preset can be chosen instead, and the preset used is recorded with the push, as exports record theirs. It renders into the cache, never into the library, and the render carries the `shoebox:PushedFrom` marker (see No round trips). An edit of a Photos asset must be a JPEG (PhotoKit's rule for rendered edits), so those always use a JPEG preset.
 - **Option per push:** add to an album (default: none; the album is remembered).
 - **Dry-run table** (rule 6): photo → what it becomes in Photos (new asset / edit of *IMG_1234* / update of an earlier push), size, album. Confirm, then the system alert, then the writes.
 - **Stale pushes** work like stale exports: if a pushed photo's edit `render_hash` changes, the grid shows a small badge, and the Info panel's "In Photos" row says "edited since sent to Photos" with **Send again**. Nothing is pushed automatically.
@@ -232,7 +236,7 @@ Each phase is one reviewable chunk, finished with `cargo fmt`, `clippy -D warnin
 
 **Phase 5 — Push**
 - `photos::push` planning; the built-in Photos export preset; `PhotoSource::push` for new asset, edit, update and undo; dry-run table, ledger `pushed` entries, History batch; stale-push badge and Info panel row; the album option.
-- *Done when* in the test account each row of the "What gets sent" table works, a pushed edit shows on the asset in Photos with Revert to Original, a second push updates rather than duplicates, the next import ignores everything pushed, and undo reverses each kind.
+- *Done when* in the test account each row of the "What gets sent" table works, a pushed edit shows on the asset in Photos with Revert to Original, a second push updates rather than duplicates, the next import ignores everything pushed (also with `photos.json` deleted, through the marker), and undo reverses each kind.
 
 **Phase 6 — CLI, docs and first real run**
 - `shoebox photos status` and `import --dry-run`; SPEC.md and CLAUDE.md updates (non-goal wording, rules 9 and 10, layout, M7).

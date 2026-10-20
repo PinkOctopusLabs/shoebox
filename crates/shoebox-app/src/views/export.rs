@@ -103,6 +103,7 @@ fn send(app: &mut ShoeboxApp, ids: &[PhotoId], presets: Vec<Preset>) {
             edit_key: app.edited.get(&p.path).cloned(),
             date,
             sidecar: p.sidecar.clone(),
+            lens: crate::develop::shot(p),
         });
     }
     if items.is_empty() {

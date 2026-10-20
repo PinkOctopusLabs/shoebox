@@ -157,8 +157,34 @@ fn gpu_matches_the_cpu_reference() {
         },
     ));
 
+    // Lens corrections need the photo's shot: a second source with one.
+    let lensed = src
+        .clone()
+        .with_lens(Some(std::sync::Arc::new(shoebox_develop::lens::Shot {
+            make: "NIKON CORPORATION".into(),
+            model: "NIKON Z f".into(),
+            lens: "NIKKOR Z 40mm f/2".into(),
+            focal: 40.0,
+            aperture: 4.0,
+            camera_data: shoebox_decode::nef::LensData {
+                distortion: Some([-0.04, 0.01, 0.0]),
+                vignette: Some([0.6, -0.2, 0.05]),
+            },
+        })));
+    let mut s = base.clone();
+    s.modules.lens.enabled = true;
+    s.modules.highlights_shadows.shadows = 40.0;
+    cases.push(("lens corrections", s.clone(), o));
+    s.geometry.rotate = 2.0;
+    cases.push(("lens corrections, rotated", s, o));
+
     for (name, s, o) in &cases {
-        let f = cpu::frame(&raw, &src, s, o);
+        let src = if name.starts_with("lens") {
+            &lensed
+        } else {
+            &src
+        };
+        let f = cpu::frame(&raw, src, s, o);
         for display in [true, false] {
             let want = cpu::apply(&src.rgb, &f, display);
             let got = pipe.render(&device, &queue, &gsrc, &f, display).unwrap();

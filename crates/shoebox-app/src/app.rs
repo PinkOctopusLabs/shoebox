@@ -3285,6 +3285,7 @@ impl ShoeboxApp {
             self.developer.preview(crate::develop::PreviewJob {
                 id,
                 path: p.path.clone(),
+                lens: crate::develop::shot(p),
                 format: p.format,
                 orientation: p.meta.orientation(),
                 settings: doc.settings().clone(),

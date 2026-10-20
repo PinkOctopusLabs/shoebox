@@ -13,6 +13,7 @@ pub mod encode;
 pub mod export;
 pub mod golden;
 pub mod gpu;
+pub mod lens;
 pub mod wb;
 
 use std::path::PathBuf;

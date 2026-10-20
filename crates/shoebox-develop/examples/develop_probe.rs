@@ -4,7 +4,8 @@
 //! `<out dir>/cache`). Writes `<name>.png` (sRGB) and prints stage timings.
 //! `SHOEBOX_LONG_EDGE` renders a proxy; `SHOEBOX_EV`, `SHOEBOX_CONTRAST`,
 //! `SHOEBOX_WHITE_EV` and `SHOEBOX_BLACK_EV` set those sliders;
-//! `SHOEBOX_EDIT` takes any settings as JSON (as an edit document stores
+//! `SHOEBOX_LENS` (and `SHOEBOX_FOCAL`, `SHOEBOX_APERTURE`) names the lens
+//! for lens corrections; `SHOEBOX_EDIT` takes any settings as JSON (as an edit document stores
 //! them, e.g. `{"modules":{"clarity":{"amount":40}}}`) before those; with
 //! `SHOEBOX_GPU=1` the live pipe also runs on the GPU and the largest
 //! difference from the CPU render is printed.
@@ -65,7 +66,19 @@ fn main() {
             orientation,
             target: Target::Srgb,
         };
-        let src = cpu::demosaic(&raw, &s.modules.raw, o.long_edge);
+        // `SHOEBOX_LENS` names the lens (with `SHOEBOX_FOCAL` and
+        // `SHOEBOX_APERTURE`) for lens corrections, as a Nikon Z f.
+        let shot = std::env::var("SHOEBOX_LENS").ok().map(|lens| {
+            std::sync::Arc::new(shoebox_develop::lens::Shot {
+                make: "NIKON CORPORATION".into(),
+                model: "NIKON Z f".into(),
+                lens,
+                focal: env("SHOEBOX_FOCAL").unwrap_or(50.0) as f32,
+                aperture: env("SHOEBOX_APERTURE").unwrap_or(4.0) as f32,
+                camera_data: shoebox_decode::nef::lens_data(&bytes),
+            })
+        });
+        let src = cpu::demosaic(&raw, &s.modules.raw, o.long_edge).with_lens(shot);
         let frame = cpu::frame(&raw, &src, &s, &o);
         let img = cpu::apply_from(&src, &s, &frame, true);
         let t_all = t.elapsed();
