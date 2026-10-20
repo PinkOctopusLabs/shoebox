@@ -6055,6 +6055,7 @@ dependencies = [
  "shoebox-fixtures",
  "tempfile",
  "thiserror 2.0.21",
+ "tiff",
  "tracing",
  "wgpu",
 ]

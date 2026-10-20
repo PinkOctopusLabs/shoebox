@@ -325,3 +325,23 @@ fn relative_white_balance() {
     let grey = shoebox_develop::colour::mulv(&m, [0.5, 0.5, 0.5]);
     assert!(grey[2] > grey[0], "{grey:?}");
 }
+
+#[test]
+fn a_grey_card_is_neutral_in_every_export_space() {
+    let raw = grey_card(0.2);
+    for target in [Target::Srgb, Target::DisplayP3, Target::AdobeRgb, Target::ProPhoto] {
+        let p = cpu::render(
+            &raw,
+            &Settings::default(),
+            &Options {
+                target,
+                ..Default::default()
+            },
+        )
+        .px(32, 24);
+        assert!(
+            (p[0] - p[1]).abs() < 1.5 / 255.0 && (p[2] - p[1]).abs() < 1.5 / 255.0,
+            "{target:?}: {p:?}"
+        );
+    }
+}

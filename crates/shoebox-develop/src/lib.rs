@@ -10,6 +10,7 @@ pub mod cpu;
 pub mod dng;
 pub mod edit;
 pub mod encode;
+pub mod export;
 pub mod gpu;
 pub mod wb;
 

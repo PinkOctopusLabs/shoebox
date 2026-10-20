@@ -37,13 +37,53 @@ pub use raw::Rgb;
 pub enum Target {
     Srgb,
     DisplayP3,
+    /// Export only (the screen and the GPU pipe are sRGB or P3).
+    AdobeRgb,
+    /// Export only; D50 white.
+    ProPhoto,
 }
 
 impl Target {
-    fn primaries(self) -> &'static [colour::Xy; 3] {
+    pub fn primaries(self) -> &'static [colour::Xy; 3] {
         match self {
             Target::Srgb => &colour::SRGB,
             Target::DisplayP3 => &colour::DISPLAY_P3,
+            Target::AdobeRgb => &colour::ADOBE_RGB,
+            Target::ProPhoto => &colour::PRO_PHOTO,
+        }
+    }
+
+    pub fn white(self) -> colour::Xy {
+        match self {
+            Target::ProPhoto => colour::D50,
+            _ => colour::D65,
+        }
+    }
+
+    /// Linear Rec.2020 (D65) → this space's linear RGB (adapted to its
+    /// white).
+    pub fn from_rec2020(self) -> M3 {
+        colour::mul(
+            &colour::xyz_to_rgb(self.primaries(), self.white()),
+            &colour::mul(
+                &colour::bradford(colour::D65, self.white()),
+                &colour::rgb_to_xyz(&colour::REC2020, colour::D65),
+            ),
+        )
+    }
+
+    /// The space's transfer curve (linear → encoded).
+    pub fn encode(self, v: f32) -> f32 {
+        match self {
+            Target::Srgb | Target::DisplayP3 => srgb_oetf(v),
+            Target::AdobeRgb => v.max(0.0).powf(256.0 / 563.0),
+            Target::ProPhoto => {
+                if v < 1.0 / 512.0 {
+                    16.0 * v
+                } else {
+                    v.powf(1.0 / 1.8)
+                }
+            }
         }
     }
 }
@@ -228,6 +268,8 @@ pub struct Display {
     pub outset: [[f32; 3]; 3],
     pub to_target: [[f32; 3]; 3],
     pub preserve_hue: bool,
+    /// The output space (its transfer curve is applied last).
+    pub target: Target,
     /// A finished image's tone instead of the scene curve: black and white
     /// points and contrast on 2.2-encoded values (identity at defaults).
     pub referred: Option<Levels>,
@@ -270,12 +312,10 @@ impl Display {
             curve: Curve::new(d),
             inset: f32m(&toward_grey(INSET)),
             outset: f32m(&colour::inv(&toward_grey(OUTSET)).unwrap_or(colour::IDENTITY)),
-            to_target: f32m(&colour::mul(
-                &colour::xyz_to_rgb(target.primaries(), colour::D65),
-                &colour::rgb_to_xyz(&colour::REC2020, colour::D65),
-            )),
+            to_target: f32m(&target.from_rec2020()),
             preserve_hue: d.preserve_hue,
             referred: None,
+            target,
         }
     }
 
@@ -652,7 +692,7 @@ pub fn display_pixel(d: &Display, p: [f32; 3]) -> [f32; 3] {
         v.map(|c| curve.apply(c).powf(2.2))
     };
     let lin = mul3(&d.to_target, mul3(&d.outset, shaped));
-    lin.map(|c| srgb_oetf(c.clamp(0.0, 1.0)))
+    lin.map(|c| d.target.encode(c.clamp(0.0, 1.0)))
 }
 
 /// The sRGB transfer curve (Display P3 uses the same one).

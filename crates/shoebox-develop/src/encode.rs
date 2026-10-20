@@ -8,6 +8,8 @@ pub fn icc(target: Target) -> Result<Vec<u8>, String> {
     let p = match target {
         Target::Srgb => moxcms::ColorProfile::new_srgb(),
         Target::DisplayP3 => moxcms::ColorProfile::new_display_p3(),
+        Target::AdobeRgb => moxcms::ColorProfile::new_adobe_rgb(),
+        Target::ProPhoto => moxcms::ColorProfile::new_pro_photo_rgb(),
     };
     p.encode().map_err(|e| format!("ICC profile: {e}"))
 }
