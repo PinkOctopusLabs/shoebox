@@ -3508,6 +3508,11 @@ fn develop_look_modules() {
     wait_for(&mut h, Duration::from_secs(30), "develop", |a| {
         a.develop_ready()
     });
+    // The histogram's row comes in above the modules: wait for it, so the
+    // curve isn't moved down between finding it and clicking on it.
+    wait_for(&mut h, Duration::from_secs(30), "histogram", |a| {
+        a.develop_histogram().0.is_some()
+    });
     h.run_steps(3);
     assert!(h.query_by_label("Vibrance").is_some());
     assert!(h.query_by_label("Black & white").is_some());
@@ -3741,6 +3746,18 @@ fn virtual_copies() {
         a.edited_previews().1 >= 2
     });
     snapshot(&mut h, "copies-grid");
+    // Exported beside the original from the copy's tile: listed for the
+    // copy (not the master), and current.
+    let lib = h.state().copy_path("pier.jpg").unwrap();
+    let lib = lib.parent().unwrap().to_path_buf();
+    h.state_mut().edit_export_presets(|p| {
+        p.destination = shoebox_develop::export::Destination::Library;
+    });
+    h.state_mut().export_with(0);
+    let beside = lib.join("pier_Copy 1_JPEG · Full size.jpg");
+    wait_for(&mut h, Duration::from_secs(30), "exported", |a| {
+        beside.exists() && a.exports_stale() == [false]
+    });
     // The master's tile opens the master in Develop; the copy's, the copy.
     h.get_by_label("pier.jpg").click();
     h.run_steps(2);
@@ -3758,8 +3775,26 @@ fn virtual_copies() {
         a.develop_doc().is_some() && a.develop_copies().1 == "copy-1"
     });
     assert_eq!(quarter(&h), 2);
+    // The master was opened, not changed: the copy's export is current.
+    // Changing the copy's edit makes it stale; the master lists none.
+    turn(&mut h);
+    h.key_press(egui::Key::G);
+    wait_for(&mut h, Duration::from_secs(30), "stale", |a| {
+        a.current_copy().as_deref() == Some("copy-1") && a.exports_stale() == [true]
+    });
+    h.get_by_label("pier.jpg").click();
+    wait_for(&mut h, Duration::from_secs(10), "the master's", |a| {
+        a.current_copy().is_none() && a.exports_stale().is_empty()
+    });
+    h.get_by_label("pier.jpg (Copy 1)").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(10), "copy", |a| {
+        a.develop_doc().is_some() && a.develop_copies().1 == "copy-1"
+    });
 
     // Delete the copy (right-click): to the Trash, back to the master.
+    h.run_steps(5);
     h.get_by_label("Copy 1").click_secondary();
     h.run_steps(2);
     h.get_by_label("Delete").click();
@@ -3769,8 +3804,13 @@ fn virtual_copies() {
     assert!(t.path().join("trash/pier.jpg.copy-1.json").exists());
     assert_eq!(h.state().develop_copies().1, "main");
     assert_eq!(quarter(&h), 1);
-    // Its tile is gone; the master is current.
-    assert_eq!(h.state().shown_names(), ["pier.jpg"]);
+    // Its tile is gone (its export stays, in the stack); the master is
+    // current.
+    assert!(
+        !h.state()
+            .shown_names()
+            .contains(&"pier.jpg (Copy 1)".to_owned())
+    );
     assert_eq!(h.state().current_copy(), None);
 }
 
@@ -4114,9 +4154,11 @@ fn export_with_a_border_and_watermark() {
 }
 
 /// Export: ⇧⌘E, the first preset (JPEG, full size), into a folder outside
-/// the library; the Info panel lists it. Into a folder in the library, it
-/// lands as a new file (journaled, never replacing, no question asked) and
-/// ⌘Z takes it out again; the original is untouched.
+/// the library: not kept track of; exporting onto it again asks first.
+/// Beside the original, in the library: a new file in the photo's stack
+/// (journaled, no question asked), listed in the Info panel, stale once the
+/// edit changes; re-exporting puts the new file in its place and the old
+/// one in the Trash, and ⌘Z brings it back. The original is untouched.
 #[test]
 fn export_a_photo() {
     let t = tempfile::tempdir().unwrap();
@@ -4169,13 +4211,12 @@ fn export_a_photo() {
     )
     .unwrap();
     assert_eq!((decoded.width, decoded.height), (640, 480));
-    // Listed in the Info panel.
-    wait_for(&mut h, Duration::from_secs(10), "listed", |a| {
-        a.export_state().2 == Some(1)
-    });
+    // Outside the library: not kept track of.
+    h.run_steps(5);
+    assert_eq!(h.state().export_state().2, Some(0));
 
     // Exporting again lands on that file: asked first. Cancel writes
-    // nothing; "Save as a new file" keeps both.
+    // nothing; "Save as a new file" keeps both; "Replace" writes over it.
     let opt_shift_cmd = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT | egui::Modifiers::ALT;
     h.key_press_modifiers(opt_shift_cmd, egui::Key::E);
     wait_for(&mut h, Duration::from_secs(30), "asked", |a| {
@@ -4195,16 +4236,10 @@ fn export_a_photo() {
     wait_for(&mut h, Duration::from_secs(30), "kept both", |_| {
         walk(&out).len() == 2
     });
-
-    // Re-export from the Info panel: asked, and "Replace" overwrites that
-    // file in place (still two files; the record isn't doubled).
-    wait_for(&mut h, Duration::from_secs(10), "listed", |a| {
-        a.export_state().2 == Some(2)
-    });
     let first = f.clone();
     let before = std::fs::metadata(&first).unwrap().modified().unwrap();
     std::thread::sleep(Duration::from_millis(20));
-    h.get_all_by_label("Re-export").last().unwrap().click();
+    h.key_press_modifiers(opt_shift_cmd, egui::Key::E);
     wait_for(&mut h, Duration::from_secs(30), "asked", |a| {
         a.export_asking()
     });
@@ -4214,24 +4249,20 @@ fn export_a_photo() {
     });
     settle(&mut h, Duration::from_secs(30));
     assert_eq!(walk(&out).len(), 2, "{:?}", walk(&out));
-    wait_for(&mut h, Duration::from_secs(10), "listed once", |a| {
-        a.export_state().2 == Some(2)
-    });
 
-    // Into the library (given by a path through a symlink: the temp folder
-    // is /var, the root /private/var): a new file each time, then ⌘Z.
+    // Beside the original: a new file in the photo's stack, no question.
     let original = std::fs::read(root.join("beach.jpg")).unwrap();
-    let inside = root.join("exports");
-    h.state_mut().set_export_folder(&inside);
-    for n in 1..=2 {
-        h.key_press_modifiers(opt_shift_cmd, egui::Key::E);
-        wait_for(&mut h, Duration::from_secs(30), "exported inside", |_| {
-            walk(&inside).len() == n
-        });
-        assert!(!h.state().export_asking());
-    }
-    wait_for(&mut h, Duration::from_secs(30), "in the catalog", |a| {
-        a.photo_count() == 3
+    h.state_mut().edit_export_presets(|p| {
+        p.destination = shoebox_develop::export::Destination::Library;
+    });
+    h.key_press_modifiers(opt_shift_cmd, egui::Key::E);
+    let beside = root.join("beach_JPEG · Full size.jpg");
+    wait_for(&mut h, Duration::from_secs(30), "exported beside", |_| {
+        beside.exists()
+    });
+    assert!(!h.state().export_asking());
+    wait_for(&mut h, Duration::from_secs(30), "in its stack", |a| {
+        a.photo_count() == 2 && a.shown_names() == ["beach.jpg"]
     });
     assert!(
         h.state()
@@ -4239,9 +4270,51 @@ fn export_a_photo() {
             .is_some_and(|n| n.contains("into the library"))
     );
     assert!(walk(&t.path().join("cache/export-staging")).is_empty());
+    // Listed in the Info panel, current.
+    wait_for(&mut h, Duration::from_secs(10), "listed", |a| {
+        a.export_state().2 == Some(1)
+    });
+    assert!(h.query_by_label("stale").is_none());
+    let exported = std::fs::read(&beside).unwrap();
+
+    // The edit changes: stale. Re-export: the new file in its place, the
+    // old one in the Trash.
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(30), "develop", |a| {
+        a.develop_ready()
+    });
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::CloseBracket);
+    h.run_steps(3);
+    h.key_press(egui::Key::G);
+    wait_for(&mut h, Duration::from_secs(30), "stale", |a| {
+        a.edited_previews().0 == 1
+    });
+    h.run_steps(3);
+    wait_for(&mut h, Duration::from_secs(10), "flagged", |_| true);
+    assert!(h.query_by_label("stale").is_some());
+    h.get_all_by_label("Re-export").last().unwrap().click();
+    wait_for(&mut h, Duration::from_secs(30), "re-exported", |_| {
+        std::fs::read(&beside).is_ok_and(|b| b != exported)
+    });
+    assert!(!h.state().export_asking());
+    let turned = shoebox_decode::render_path(
+        shoebox_decode::Format::Jpeg,
+        &beside,
+        None,
+        1,
+        shoebox_decode::Target::Srgb,
+    )
+    .unwrap();
+    assert_eq!((turned.width, turned.height), (480, 640), "the turned edit");
+    let trashed = t.path().join("trash/beach_JPEG · Full size.jpg");
+    assert_eq!(std::fs::read(&trashed).unwrap(), exported);
+    wait_for(&mut h, Duration::from_secs(10), "listed once", |a| {
+        a.export_state().2 == Some(1)
+    });
+    // ⌘Z: the earlier export is back in its place.
     h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
     wait_for(&mut h, Duration::from_secs(30), "undone", |_| {
-        walk(&inside).len() == 1
+        std::fs::read(&beside).is_ok_and(|b| b == exported)
     });
     assert_eq!(std::fs::read(root.join("beach.jpg")).unwrap(), original);
 }

@@ -1808,3 +1808,29 @@ original already had one (`original_id`):
 - Photos Shoebox moves (organise, undo, redo) take their edit and copies
   along: the worker reports them at the new path (before, only edits
   reattached after a move outside Shoebox were reported again).
+
+## Exports: outside the library, or beside the original (2026-10-21)
+
+Chosen with the user. A preset's Destination is either a folder outside
+the library or beside the original:
+
+- **Outside:** files for elsewhere, not kept track of (no rows, no stale
+  badge, no Info panel listing). Exporting onto a file asks first (Replace
+  or a new name), as before. A folder inside the library is refused: that
+  is what "beside the original" is for. Rows recorded for outside exports
+  before this stay listed.
+- **Beside the original:** the export lands in the photo's folder, joins
+  its stack as a variant (a link in `.shoebox/stacks.json`, the mechanism
+  duplicate review uses), and is kept track of per edit: a virtual copy's
+  exports are recorded with its copy id and go stale when that copy's edit
+  changes, not the master's.
+- **Re-export in the library replaces in place.** The new file is written
+  and hashed in the cache, then one batch (`FileOps::add_exports`) sends the
+  old file to the Trash, only if it still has the content recorded, and
+  copies the new one in under its name, verified. ⌘Z puts the old one back;
+  undo's preflight now lets a file move back to a place a step before it
+  freed. CLAUDE.md's rule 4 says so.
+
+A new virtual copy's history now starts with one step, "Copied from
+Master", from the defaults to the settings copied. History replays from
+the defaults, so without it a reopened copy dropped its history.

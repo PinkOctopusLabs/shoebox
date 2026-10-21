@@ -572,7 +572,10 @@ impl FileOps {
     }
 
     /// Check every move before anything runs, so a bad plan touches nothing.
-    fn preflight(&self, moves: &[PlannedMove]) -> Result<()> {
+    /// A destination may be in `freed`: a file a step before the move sends
+    /// to the Trash (undoing a re-export puts the old file back where the
+    /// new one was).
+    fn preflight(&self, moves: &[PlannedMove], freed: &HashSet<&Path>) -> Result<()> {
         let mut dsts = HashSet::new();
         for m in moves {
             self.check_unprotected(&m.src)?;
@@ -584,7 +587,7 @@ impl FileOps {
                     m.src.display()
                 )));
             }
-            if exists(&m.dst) {
+            if exists(&m.dst) && !freed.contains(m.dst.as_path()) {
                 return Err(CoreError::Refused(format!(
                     "{} already exists",
                     m.dst.display()
@@ -611,7 +614,7 @@ impl FileOps {
 
     /// Run moves as one journaled batch. Returns the batch id.
     pub fn execute(&self, label: &str, plan: &Plan) -> Result<i64> {
-        self.preflight(&plan.moves)?;
+        self.preflight(&plan.moves, &HashSet::new())?;
         let ops: Vec<Planned> = plan.moves.iter().cloned().map(Planned::Move).collect();
         self.run("move", label, None, &ops, |_| Ok(()))
     }
@@ -624,7 +627,7 @@ impl FileOps {
         plan: &Plan,
         writes: Vec<(PathBuf, Vec<u8>)>,
     ) -> Result<i64> {
-        self.preflight(&plan.moves)?;
+        self.preflight(&plan.moves, &HashSet::new())?;
         for (path, _) in &writes {
             self.check_sidecar_target(path)?;
         }
@@ -783,6 +786,57 @@ impl FileOps {
             }
             Ok(())
         })
+    }
+
+    /// Exports into the library, as one batch: the earlier exports they
+    /// replace (re-exporting a stale one) go to the Trash first, each only if
+    /// it still has the content it had when chosen; then each new file,
+    /// written and hashed in the cache, is copied in and verified. A copy
+    /// may land only where nothing is, or where a file just went to the
+    /// Trash. Then the `writes` (`.shoebox` files: stack links). Undo puts
+    /// the earlier exports back.
+    pub fn add_exports(
+        &self,
+        label: &str,
+        replaced: &[(PathBuf, [u8; 32])],
+        copies: &[PlannedCopy],
+        writes: Vec<(PathBuf, Vec<u8>)>,
+    ) -> Result<i64> {
+        let freed: HashSet<&Path> = replaced.iter().map(|(p, _)| p.as_path()).collect();
+        let mut dsts = HashSet::new();
+        for (p, _) in replaced {
+            self.check_unprotected(p)?;
+        }
+        for c in copies {
+            self.check_unprotected(&c.dst)?;
+            if (exists(&c.dst) && !freed.contains(c.dst.as_path())) || !dsts.insert(&c.dst) {
+                return Err(CoreError::Refused(format!(
+                    "{} already exists or is planned twice",
+                    c.dst.display()
+                )));
+            }
+        }
+        for (path, _) in &writes {
+            self.check_sidecar_target(path)?;
+        }
+        let ops: Vec<Planned> = replaced
+            .iter()
+            .map(|(path, hash)| Planned::Trash {
+                path: path.clone(),
+                hash: *hash,
+            })
+            .chain(copies.iter().map(|c| Planned::Copy {
+                src: c.src.clone(),
+                dst: c.dst.clone(),
+                hash: c.hash,
+            }))
+            .chain(
+                writes
+                    .into_iter()
+                    .map(|(path, bytes)| Planned::Sidecar { path, bytes }),
+            )
+            .collect();
+        self.run("import", label, None, &ops, |_| Ok(()))
     }
 
     /// Move files to the Trash (an explicit command), each only if it still
@@ -1354,7 +1408,17 @@ impl FileOps {
                 Planned::Copy { .. } => {}
             }
         }
-        self.preflight(&moves)?;
+        // Files the undo sends to the Trash (a re-export's new file) free
+        // their places for files moving back. Steps run in order, and a move
+        // never replaces: one that ran too early would fail, not overwrite.
+        let freed: HashSet<&Path> = plan
+            .iter()
+            .filter_map(|(_, back)| match back {
+                Planned::Trash { path, .. } => Some(path.as_path()),
+                _ => None,
+            })
+            .collect();
+        self.preflight(&moves, &freed)?;
         let ids: Vec<i64> = plan.iter().map(|(op, _)| op.id).collect();
         let ops: Vec<Planned> = plan.into_iter().map(|(_, b)| b).collect();
         let j = &self.journal;
@@ -1586,6 +1650,46 @@ mod tests {
         assert!(!f.exists() && root.join("trash/x.jpg").exists());
         fo.undo(b).unwrap();
         assert_eq!(std::fs::read(&f).unwrap(), b"x");
+    }
+
+    /// Re-exporting into the library: the old export to the Trash, the new
+    /// one in its place, a link written; undo puts the old one back. A copy
+    /// onto a file that isn't being replaced is refused.
+    #[test]
+    fn exports_replace_only_what_they_trash() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        let old = root.join("lib/x_web.jpg");
+        touch(&old, "old");
+        let new = root.join("cache/x_web.jpg");
+        touch(&new, "new");
+        let fo = ops(&root, vec![]).with_trash(TrashMode::Folder(root.join("trash")));
+        let copy = PlannedCopy {
+            src: new.clone(),
+            dst: old.clone(),
+            hash: h(&new),
+        };
+        assert!(
+            fo.add_exports("export", &[], std::slice::from_ref(&copy), Vec::new())
+                .is_err(),
+            "never over a file it didn't trash"
+        );
+        assert_eq!(std::fs::read(&old).unwrap(), b"old");
+        let link = root.join("lib/.shoebox/stacks.json");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        let b = fo
+            .add_exports(
+                "export",
+                &[(old.clone(), h(&old))],
+                &[copy],
+                vec![(link.clone(), b"{}".to_vec())],
+            )
+            .unwrap();
+        assert_eq!(std::fs::read(&old).unwrap(), b"new");
+        assert_eq!(std::fs::read(root.join("trash/x_web.jpg")).unwrap(), b"old");
+        assert!(link.exists());
+        fo.undo(b).unwrap();
+        assert_eq!(std::fs::read(&old).unwrap(), b"old");
     }
 
     #[test]

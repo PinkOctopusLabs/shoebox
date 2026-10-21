@@ -408,9 +408,11 @@ pub enum LibraryCommand {
     RecordExports(Vec<shoebox_core::cache::ExportRow>),
     /// A photo's exports (answered by `Exports`).
     LoadExports(PathBuf),
-    /// Copy exports rendered into the cache into the library, as one
-    /// journaled batch (never replacing), then remove them from the cache.
-    AddExports(Vec<shoebox_core::fileops::PlannedCopy>),
+    /// Copy exports rendered into the cache into the library beside their
+    /// photos and join each to its photo's stack, as one journaled batch
+    /// (replacing only the earlier exports they redo, which go to the
+    /// Trash), then remove them from the cache.
+    AddExports(Vec<crate::develop::LibraryExport>),
 }
 
 /// A move, reject, rename or trash of stacks, by the paths of their files.
@@ -1613,9 +1615,10 @@ fn library_worker(
                 }
                 (false, false)
             }
-            LibraryCommand::AddExports(copies) => {
-                let n = copies.len();
-                let r = fileops.import("export into the library", &copies, Vec::new());
+            LibraryCommand::AddExports(exports) => {
+                let n = exports.len();
+                let r = add_exports(&exports, &settings, &catalog, &fileops);
+                let copies: Vec<_> = exports.into_iter().map(|e| e.copy).collect();
                 // The cache's copies, whatever happened (an interrupted batch
                 // is resumed from the journal, so keep them then).
                 if !matches!(r, Err(shoebox_core::CoreError::BatchCancelled { .. })) {
@@ -2100,6 +2103,31 @@ fn run_organise(
     }
     edits_moved(cache, catalog, &moves, emit);
     Ok((b, moves.len()))
+}
+
+/// Exports into the library: the earlier ones they redo (still as they
+/// were) to the Trash, the new ones copied in, each joined to its photo's
+/// stack as a variant. One batch.
+fn add_exports(
+    exports: &[crate::develop::LibraryExport],
+    settings: &Settings,
+    catalog: &Catalog,
+    fileops: &FileOps,
+) -> shoebox_core::Result<i64> {
+    let replaced: Vec<(PathBuf, [u8; 32])> = exports
+        .iter()
+        .filter_map(|e| e.replaces.as_ref())
+        .filter_map(|p| Some((p.clone(), *blake3::hash(&std::fs::read(p).ok()?).as_bytes())))
+        .collect();
+    let copies: Vec<_> = exports.iter().map(|e| e.copy.clone()).collect();
+    let mut links = catalog.links.clone();
+    links.retain(|l| !exports.iter().any(|e| e.copy.dst == l.file));
+    links.extend(exports.iter().map(|e| shoebox_core::stacks::Link {
+        file: e.copy.dst.clone(),
+        of: e.photo.clone(),
+    }));
+    let writes = shoebox_core::stacks::plan_save_links(&settings.writable_roots(), &links)?;
+    fileops.add_exports("export into the library", &replaced, &copies, writes)
 }
 
 /// Photos Shoebox moved take their edits along (`Catalog::note_moved`):

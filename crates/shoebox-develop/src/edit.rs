@@ -672,14 +672,31 @@ impl EditDoc {
     }
 
     /// A virtual copy of this edit: the same settings, its own id and name,
-    /// a history of its own (empty).
+    /// a history of its own. That history starts with one step from the
+    /// defaults to the settings copied (history replays from the defaults,
+    /// so without it a reopened copy's history wouldn't match its settings).
     pub fn copy_of(&self, id: &str, name: &str) -> Self {
+        let patch = json_patch::diff(&Settings::default().to_value(), &self.settings.to_value());
+        let from = if self.copy.name.is_empty() {
+            "Master"
+        } else {
+            &self.copy.name
+        };
+        let history = if patch.0.is_empty() {
+            Vec::new()
+        } else {
+            vec![Step {
+                t: now(),
+                label: format!("Copied from {from}"),
+                patch,
+            }]
+        };
         Self {
             copy: Copy {
                 id: id.to_owned(),
                 name: name.to_owned(),
             },
-            history: Vec::new(),
+            history,
             history_at: None,
             snapshots: Vec::new(),
             ..self.clone()

@@ -1787,7 +1787,7 @@ fn details(app: &mut ShoeboxApp, ui: &mut egui::Ui, id: crate::jobs::PhotoId, id
         );
     }
     let path = photo.path.clone();
-    crate::views::export::info_section(app, ui, &path);
+    crate::views::export::info_section(app, ui, id, &path);
     let change = app
         .current
         .and_then(|c| app.photo(c))

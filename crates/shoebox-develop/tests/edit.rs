@@ -221,3 +221,20 @@ fn copy_operations_are_not_replayed() {
     assert!(back.history().is_empty());
     assert_eq!(back.settings().modules.exposure.ev, 1.0);
 }
+
+/// A copy's history starts from where it was copied: it replays to its
+/// settings, so it survives being written and read back.
+#[test]
+fn a_copys_history_starts_where_it_was_copied() {
+    let mut master = doc();
+    master.change("Exposure +1.00", |s| s.modules.exposure.ev = 1.0);
+    let mut copy = master.copy_of("copy-1", "Copy 1");
+    assert_eq!(copy.history().len(), 1);
+    assert_eq!(copy.history()[0].label, "Copied from Master");
+    copy.change("Rotate right", |s| s.geometry.quarter = 1);
+    let back = EditDoc::from_json(&copy.to_json()).unwrap();
+    assert_eq!(back.history().len(), 2, "kept on reading back");
+    assert_eq!(back.settings(), copy.settings());
+    // A copy of an untouched edit starts with no history.
+    assert!(doc().copy_of("copy-2", "Copy 2").history().is_empty());
+}

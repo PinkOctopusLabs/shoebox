@@ -26,7 +26,11 @@ pub struct Preset {
     pub size: OutputSize,
     #[serde(default)]
     pub metadata: Metadata,
-    /// Where files go; None: `~/Pictures/Shoebox Exports/<name>`.
+    /// Outside the library, or beside the original in it.
+    #[serde(default)]
+    pub destination: Destination,
+    /// With [`Destination::Folder`], where files go; None:
+    /// `~/Pictures/Shoebox Exports/<name>`.
     #[serde(default)]
     pub folder: Option<PathBuf>,
     /// File name: `{name}` (the original's), `{preset}`, `{date}`
@@ -42,6 +46,19 @@ pub struct Preset {
 
 fn default_naming() -> String {
     "{name}_{preset}".into()
+}
+
+/// Where a preset's files go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Destination {
+    /// A folder outside the library. Shoebox doesn't keep track of these.
+    #[default]
+    Folder,
+    /// Beside the original, joined to its stack: an edited version that
+    /// lives in the library, flagged when the edit changes since, and
+    /// re-exported in place.
+    Library,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -152,6 +169,7 @@ pub fn starters() -> Vec<Preset> {
             space: Space::Srgb,
             size: OutputSize::Full,
             metadata: Metadata::All,
+            destination: Destination::Folder,
             folder: None,
             naming: default_naming(),
             border: None,
@@ -167,6 +185,7 @@ pub fn starters() -> Vec<Preset> {
             space: Space::Srgb,
             size: OutputSize::LongEdge { px: 2048 },
             metadata: Metadata::AllButLocation,
+            destination: Destination::Folder,
             folder: None,
             naming: default_naming(),
             border: None,
@@ -180,6 +199,7 @@ pub fn starters() -> Vec<Preset> {
             space: Space::AdobeRgb,
             size: OutputSize::Full,
             metadata: Metadata::All,
+            destination: Destination::Folder,
             folder: None,
             naming: default_naming(),
             border: None,

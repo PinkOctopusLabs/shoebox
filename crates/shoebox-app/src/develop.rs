@@ -178,15 +178,34 @@ pub struct ExportItem {
     pub lens: Option<Arc<Shot>>,
     /// A virtual copy's name, added to the file name ("DSC_1234_Copy 1").
     pub copy_name: Option<String>,
+    /// Which edit: `edits::MAIN`, or a virtual copy's id.
+    pub copy: String,
+    /// Re-exporting an export in the library: its file, which the new one
+    /// takes the place of (the old one goes to the Trash).
+    pub replaces: Option<PathBuf>,
+}
+
+/// An export for the library, written in the cache: the library worker
+/// copies it in beside its photo and joins it to the photo's stack.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LibraryExport {
+    pub copy: shoebox_core::fileops::PlannedCopy,
+    pub photo: PathBuf,
+    /// The earlier export it replaces (to the Trash in the same batch).
+    pub replaces: Option<PathBuf>,
 }
 
 /// A file an export wrote.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Exported {
     pub photo: PathBuf,
+    /// Which edit: `edits::MAIN`, or a virtual copy's id.
+    pub copy: String,
     pub file: PathBuf,
     pub preset: Preset,
     pub edit_key: Option<String>,
+    /// In the library (kept track of: stale, re-export); outside it isn't.
+    pub tracked: bool,
 }
 
 /// What Settings → Raw shows.
@@ -230,7 +249,7 @@ pub enum Event {
         no_metadata: bool,
         /// Files for the library, in the cache: for the library worker to
         /// copy in (`LibraryCommand::AddExports`).
-        into_library: Vec<shoebox_core::fileops::PlannedCopy>,
+        into_library: Vec<LibraryExport>,
     },
     /// The export presets (saved, or the starters).
     Presets(Vec<Preset>),
@@ -819,9 +838,18 @@ fn destination(
     preset: &Preset,
     seq: usize,
 ) -> Result<(PathBuf, String), String> {
-    let folder = match &preset.folder {
-        Some(f) => f.clone(),
-        None => default_folder(&preset.name).ok_or("no home folder")?,
+    use shoebox_develop::export::Destination;
+    let folder = match preset.destination {
+        // Beside the original.
+        Destination::Library => item
+            .path
+            .parent()
+            .map(PathBuf::from)
+            .ok_or("the photo has no folder")?,
+        Destination::Folder => match &preset.folder {
+            Some(f) => f.clone(),
+            None => default_folder(&preset.name).ok_or("no home folder")?,
+        },
     };
     // Compared as real paths: /var is /private/var on macOS, and a symlink
     // mustn't sneak an export into a reference folder.
@@ -829,6 +857,12 @@ fn destination(
     if job.reference.iter().any(|r| real.starts_with(real_path(r))) {
         return Err(format!(
             "{} is in a reference folder, which Shoebox never writes to",
+            folder.display()
+        ));
+    }
+    if preset.destination == Destination::Folder && in_library(job, &folder) {
+        return Err(format!(
+            "{} is in the library: to export into it, set the preset to go beside the original",
             folder.display()
         ));
     }
@@ -935,7 +969,7 @@ struct ExportProgress {
     errors: Vec<String>,
     /// Files rendered for the library, waiting in the cache to be copied
     /// in, by the photo's place in the export.
-    into_library: Vec<(usize, shoebox_core::fileops::PlannedCopy)>,
+    into_library: Vec<(usize, LibraryExport)>,
 }
 
 /// Where each photo goes with each preset, by (photo, preset): the
@@ -953,9 +987,11 @@ fn plan_names(job: &ExportJob) -> Names {
             let planned = destination(job, item, preset, seq).map(|(folder, file)| {
                 let target = folder.join(&file);
                 // A file there before this export is replaced only when
-                // the person chose Replace.
-                // In the library, never: a new name instead.
+                // the person chose Replace. In the library, only the export
+                // being redone (its old file goes to the Trash); anything
+                // else gets a new name.
                 let free = (job.on_clash == Some(Clash::Replace) && !in_library(job, &folder))
+                    || item.replaces.as_ref() == Some(&target)
                     || !target.exists();
                 if claimed.insert(target) && free {
                     return (folder, file, true);
@@ -1054,10 +1090,14 @@ fn export_item(
                         let dst = folder.join(&file);
                         lock().into_library.push((
                             seq,
-                            shoebox_core::fileops::PlannedCopy {
-                                src: staged,
-                                dst: dst.clone(),
-                                hash,
+                            LibraryExport {
+                                copy: shoebox_core::fileops::PlannedCopy {
+                                    src: staged,
+                                    dst: dst.clone(),
+                                    hash,
+                                },
+                                photo: item.path.clone(),
+                                replaces: item.replaces.clone().filter(|r| *r == dst),
                             },
                         ));
                         return Ok(dst);
@@ -1082,9 +1122,12 @@ fn export_item(
                             seq,
                             Exported {
                                 photo: item.path.clone(),
+                                copy: item.copy.clone(),
                                 file: file.clone(),
                                 preset: preset.clone(),
                                 edit_key: item.edit_key.clone(),
+                                tracked: preset.destination
+                                    == shoebox_develop::export::Destination::Library,
                             },
                         ));
                         Some(file)
@@ -1271,6 +1314,8 @@ mod tests {
                 sidecar: None,
                 lens: None,
                 copy_name: None,
+                copy: shoebox_core::edits::MAIN.to_owned(),
+                replaces: None,
             });
         }
         let out = t.path().join("out");
@@ -1400,6 +1445,8 @@ mod tests {
             sidecar: None,
             lens: None,
             copy_name: None,
+            copy: shoebox_core::edits::MAIN.to_owned(),
+            replaces: None,
         };
         let preset = Preset {
             metadata: shoebox_develop::export::Metadata::AllButLocation,

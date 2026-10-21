@@ -941,6 +941,25 @@ impl ShoeboxApp {
             .cloned()
     }
 
+    /// The current tile's exports listed in the Info panel: whether each is
+    /// stale (tests).
+    pub fn exports_stale(&self) -> Vec<bool> {
+        self.current
+            .map(|id| views::export::listed(self, id))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(_, _, stale)| stale)
+            .collect()
+    }
+
+    /// Export the selection with preset `i` (tests).
+    pub fn export_with(&mut self, i: usize) {
+        let ids: Vec<PhotoId> = self.selection.iter().copied().collect();
+        if let Some(p) = self.export.presets.get(i).cloned() {
+            views::export::export(self, &ids, vec![p]);
+        }
+    }
+
     /// The current tile's virtual copy, if it's a copy's (tests).
     pub fn current_copy(&self) -> Option<String> {
         self.current

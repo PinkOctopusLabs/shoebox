@@ -8,7 +8,9 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use eframe::egui::{self, RichText};
-use shoebox_develop::export::{FileFormat, Metadata, OutputSize, Preset, Space, TiffCompression};
+use shoebox_develop::export::{
+    Destination, FileFormat, Metadata, OutputSize, Preset, Space, TiffCompression,
+};
 use shoebox_develop::overlay::{Anchor, Border, Mark, Watermark};
 
 use crate::app::ShoeboxApp;
@@ -51,7 +53,7 @@ pub fn export(app: &mut ShoeboxApp, ids: &[PhotoId], presets: Vec<Preset>) {
         return;
     }
     app.export.last = presets.iter().map(|p| p.name.clone()).collect();
-    send(app, ids, presets);
+    send(app, ids, presets, None);
 }
 
 /// Export one photo again with the preset it was exported with, to the
@@ -70,11 +72,20 @@ pub fn reexport(app: &mut ShoeboxApp, row: &shoebox_core::cache::ExportRow) {
         // The name as it was (braces can't be read as placeholders here).
         preset.naming = stem.to_string_lossy().replace('{', "(").replace('}', ")");
     }
-    let id = crate::jobs::photo_id(std::path::Path::new(&row.photo));
-    send(app, &[id], vec![preset]);
+    let photo = crate::jobs::photo_id(std::path::Path::new(&row.photo));
+    // A copy's export is redone from that copy.
+    let id = if row.copy == shoebox_core::edits::MAIN {
+        photo
+    } else {
+        crate::jobs::copy_id(photo, &row.copy)
+    };
+    // In the library the new file takes the old one's place (which goes to
+    // the Trash); outside, the usual question.
+    let replaces = (preset.destination == Destination::Library).then(|| file.to_path_buf());
+    send(app, &[id], vec![preset], replaces);
 }
 
-fn send(app: &mut ShoeboxApp, ids: &[PhotoId], presets: Vec<Preset>) {
+fn send(app: &mut ShoeboxApp, ids: &[PhotoId], presets: Vec<Preset>, replaces: Option<PathBuf>) {
     let mut items = Vec::new();
     for &id in ids {
         let Some(idx) = app.index(id) else { continue };
@@ -90,6 +101,12 @@ fn send(app: &mut ShoeboxApp, ids: &[PhotoId], presets: Vec<Preset>) {
             app.develop.photo == Some(app.ids[idx]) && app.develop.copy_id() == copy_id
         });
         let copy_name = copy.map(|c| c.name.clone());
+        let copy_id = copy_id.to_owned();
+        // What it's checked against for staleness: that copy's edit.
+        let edit_key = match copy {
+            Some(c) => c.key.clone(),
+            None => app.edited.get(&p.path).cloned(),
+        };
         let json = match copy {
             Some(c) => Some(&c.json),
             None => app.edited_json.get(&p.path),
@@ -114,11 +131,13 @@ fn send(app: &mut ShoeboxApp, ids: &[PhotoId], presets: Vec<Preset>) {
             format: p.format,
             orientation: p.meta.orientation(),
             settings,
-            edit_key: app.edited.get(&p.path).cloned(),
+            edit_key,
             date,
             sidecar: p.sidecar.clone(),
             lens: crate::develop::shot(p),
             copy_name,
+            copy: copy_id,
+            replaces: replaces.clone(),
         });
     }
     if items.is_empty() {
@@ -170,12 +189,14 @@ pub fn done(
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64);
+    // Only exports in the library are kept track of.
     let rows: Vec<shoebox_core::cache::ExportRow> = written
         .iter()
+        .filter(|w| w.tracked)
         .filter_map(|w| {
             Some(shoebox_core::cache::ExportRow {
                 photo: w.photo.to_str()?.to_owned(),
-                copy: shoebox_core::edits::MAIN.to_owned(),
+                copy: w.copy.clone(),
                 path: w.file.to_str()?.to_owned(),
                 preset_name: w.preset.name.clone(),
                 preset_json: serde_json::to_string(&w.preset).unwrap_or_default(),
@@ -236,6 +257,9 @@ fn summary(p: &Preset) -> String {
         OutputSize::Megapixels { mp } => format!("{mp} MP"),
     };
     let mut out = format!("{format} · {} · {size}", p.space.label());
+    if p.destination == Destination::Library {
+        out.push_str(" · in library");
+    }
     if p.border.is_some() {
         out.push_str(" · border");
     }
@@ -418,8 +442,8 @@ pub fn dialog(app: &mut ShoeboxApp, ctx: &egui::Context) {
                 }
             });
             ui.weak(
-                "A name that's taken gets -1, -2. Into your library, exports are new files \
-                 (never replacing one), and ⌘Z undoes them.",
+                "A name that's taken gets -1, -2. Exports beside the original join its stack, \
+                 and ⌘Z undoes them.",
             );
         });
     if changed {
@@ -448,6 +472,13 @@ fn unique_name(list: &[Preset], base: &str) -> String {
         .map(|n| format!("{base} {n}"))
         .find(|n| !names.contains(n.as_str()))
         .unwrap_or_else(|| base.to_owned())
+}
+
+fn destination_label(d: Destination) -> &'static str {
+    match d {
+        Destination::Folder => "A folder outside the library",
+        Destination::Library => "Beside the original, in the library",
+    }
 }
 
 /// A preset's settings.
@@ -579,27 +610,46 @@ fn editor(ui: &mut egui::Ui, p: &mut Preset) {
                 });
             ui.end_row();
 
-            ui.label("Folder");
-            let mut folder = p
-                .folder
-                .as_ref()
-                .map(|f| f.display().to_string())
-                .unwrap_or_default();
-            let hint = crate::develop::default_folder(&p.name)
-                .map(|f| f.display().to_string())
-                .unwrap_or_default();
-            if ui
-                .add(
-                    egui::TextEdit::singleline(&mut folder)
-                        .hint_text(hint)
-                        .desired_width(320.0),
-                )
-                .changed()
-            {
-                p.folder = (!folder.trim().is_empty()).then(|| PathBuf::from(folder.trim()));
-            }
+            ui.label("Destination");
+            egui::ComboBox::from_id_salt("export-destination")
+                .selected_text(destination_label(p.destination))
+                .show_ui(ui, |ui| {
+                    for d in [Destination::Folder, Destination::Library] {
+                        ui.selectable_value(&mut p.destination, d, destination_label(d))
+                            .on_hover_text(match d {
+                                Destination::Folder => {
+                                    "Files for elsewhere; Shoebox doesn't keep track of them"
+                                }
+                                Destination::Library => {
+                                    "An edited version in the photo's stack, flagged when the edit changes and re-exported in place"
+                                }
+                            });
+                    }
+                });
             ui.end_row();
 
+            if p.destination == Destination::Folder {
+                ui.label("Folder");
+                let mut folder = p
+                    .folder
+                    .as_ref()
+                    .map(|f| f.display().to_string())
+                    .unwrap_or_default();
+                let hint = crate::develop::default_folder(&p.name)
+                    .map(|f| f.display().to_string())
+                    .unwrap_or_default();
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut folder)
+                            .hint_text(hint)
+                            .desired_width(320.0),
+                    )
+                    .changed()
+                {
+                    p.folder = (!folder.trim().is_empty()).then(|| PathBuf::from(folder.trim()));
+                }
+                ui.end_row();
+            }
             ui.label("File name");
             ui.add(egui::TextEdit::singleline(&mut p.naming).desired_width(320.0))
                 .on_hover_text(
@@ -738,19 +788,38 @@ fn watermark(ui: &mut egui::Ui, p: &mut Preset) {
 }
 
 /// The Info panel's list of a photo's exports (stale ones flagged).
-pub fn info_section(app: &mut ShoeboxApp, ui: &mut egui::Ui, photo: &std::path::Path) {
+/// Tile `id`'s exports as listed (those of its copy, or the master's),
+/// each with whether its file is there and whether it's stale (the edit it
+/// was made from has changed since).
+pub fn listed(app: &ShoeboxApp, id: PhotoId) -> Vec<(shoebox_core::cache::ExportRow, bool, bool)> {
+    let Some((photo, rows)) = &app.export.of_photo else {
+        return Vec::new();
+    };
+    let copy = app.copy_of(id).unwrap_or(shoebox_core::edits::MAIN);
+    let current = match app.copy_info(id) {
+        Some(c) => c.key.as_ref(),
+        None => app.edited.get(photo),
+    };
+    rows.iter()
+        .filter(|(r, _)| r.copy == copy)
+        .map(|(r, there)| (r.clone(), *there, r.edit_key.as_ref() != current))
+        .collect()
+}
+
+/// The exports of tile `id` (the file's master edit, or a copy's).
+pub fn info_section(app: &mut ShoeboxApp, ui: &mut egui::Ui, id: PhotoId, photo: &std::path::Path) {
     if app.export.asked_for.as_deref() != Some(photo) {
         app.export.asked_for = Some(photo.to_path_buf());
         app.export.of_photo = None;
         app.command(LibraryCommand::LoadExports(photo.to_path_buf()));
     }
-    let Some((p, rows)) = &app.export.of_photo else {
-        return;
-    };
-    if p != photo || rows.is_empty() {
+    if app.export.of_photo.as_ref().is_none_or(|(p, _)| p != photo) {
         return;
     }
-    let current = app.edited.get(photo).cloned();
+    let rows = listed(app, id);
+    if rows.is_empty() {
+        return;
+    }
     ui.add_space(6.0);
     ui.label(
         RichText::new("EXPORTS")
@@ -760,7 +829,7 @@ pub fn info_section(app: &mut ShoeboxApp, ui: &mut egui::Ui, photo: &std::path::
     );
     let mut reveal = None;
     let mut again = None;
-    for (r, there) in rows.clone() {
+    for (r, there, stale) in rows {
         ui.horizontal_wrapped(|ui| {
             ui.label(&r.preset_name);
             let when = crate::app::local_time_ns(r.created_at * 1_000_000);
@@ -768,9 +837,9 @@ pub fn info_section(app: &mut ShoeboxApp, ui: &mut egui::Ui, photo: &std::path::
             if !there {
                 ui.colored_label(ui.visuals().warn_fg_color, "missing")
                     .on_hover_text("The file isn't where it was exported to");
-            } else if r.edit_key != current {
+            } else if stale {
                 ui.colored_label(ui.visuals().warn_fg_color, "stale")
-                    .on_hover_text("The photo's edit has changed since this export");
+                    .on_hover_text("The edit has changed since this export");
             }
             if there && ui.small_button("Show").on_hover_text(&r.path).clicked() {
                 reveal = Some(PathBuf::from(&r.path));
