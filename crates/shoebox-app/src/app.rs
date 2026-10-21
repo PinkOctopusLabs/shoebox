@@ -849,6 +849,11 @@ impl ShoeboxApp {
         )
     }
 
+    /// Develop's overlays: clipping, soft proofing, gamut warning (tests).
+    pub fn develop_overlays(&self) -> crate::develop::Overlays {
+        self.develop.overlays()
+    }
+
     /// Develop's comparison: the mode, the split's divider, and whether the
     /// original is rendered (tests).
     pub fn develop_compare(&self) -> (views::develop::Compare, f32, bool) {
@@ -3761,7 +3766,12 @@ impl ShoeboxApp {
             self.set_pick(None);
         }
         if pressed(egui::Key::S) {
-            self.toggle_stack();
+            if self.view == View::Develop {
+                // Develop's S is soft proofing.
+                self.develop.proof = !self.develop.proof;
+            } else {
+                self.toggle_stack();
+            }
         }
         if pressed(egui::Key::Slash) {
             self.focus_search = true;

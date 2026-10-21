@@ -3212,6 +3212,19 @@ fn develop_a_raw_photo() {
     h.run_steps(2);
     assert_eq!(h.state().develop_compare().0, Compare::Edited);
 
+    // S: soft proofing, in sRGB to start; Gamut marks what sRGB can't hold.
+    use shoebox_develop::export::Space;
+    h.key_press(egui::Key::S);
+    h.run_steps(2);
+    assert_eq!(h.state().develop_overlays().proof, Some(Space::Srgb));
+    h.get_by_label("Gamut").click();
+    h.run_steps(3);
+    assert!(h.state().develop_overlays().gamut);
+    snapshot(&mut h, "develop-proof");
+    h.key_press(egui::Key::S);
+    h.run_steps(2);
+    assert_eq!(h.state().develop_overlays().proof, None);
+
     // Kept, then written to the library's .shoebox/edits after a pause.
     let file = root.join(".shoebox/edits/2026/DSC_0001.NEF.json");
     // (Auto's step was written first; wait for the drag's.)

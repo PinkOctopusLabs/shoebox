@@ -340,6 +340,8 @@ pub struct Frame {
     pub display: Display,
     /// Show clipping: blown highlights red, crushed shadows blue (J).
     pub warnings: bool,
+    /// Soft proofing: show colours the proof space can't hold (magenta).
+    pub gamut_warning: bool,
 }
 
 /// The display transform's numbers.
@@ -360,6 +362,47 @@ pub struct Display {
     pub tone: Option<std::sync::Arc<[f32]>>,
     /// A camera match profile's look (see [`crate::profile`]).
     pub look: Option<std::sync::Arc<crate::profile::Lut3>>,
+    /// Soft proofing: colours limited to an export space's before the
+    /// output space.
+    pub proof: Option<Proof>,
+}
+
+/// Soft proofing (EDITING-SPEC, Tools beyond PhotoLab): the image as an
+/// export space would hold it. Display-linear Rec.2020 goes into the
+/// space, is clipped to it, and comes back, so the screen shows only what
+/// the file could.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Proof {
+    pub space: Target,
+    /// Linear Rec.2020 → the space's linear RGB, and back.
+    pub to: [[f32; 3]; 3],
+    pub back: [[f32; 3]; 3],
+}
+
+/// How far outside 0–1 a proofed value may be before it counts as out of
+/// gamut (rounding in the matrices).
+pub const GAMUT_SLACK: f32 = 2e-3;
+
+impl Proof {
+    pub fn new(space: Target) -> Self {
+        let to = space.from_rec2020();
+        Self {
+            space,
+            to: f32m(&to),
+            back: f32m(&colour::inv(&to).unwrap_or(colour::IDENTITY)),
+        }
+    }
+
+    /// `rec` (display-linear Rec.2020) as the space holds it, and whether
+    /// it had to change: a channel below zero, or above one where the
+    /// screen (`to_target`) wouldn't clip it anyway.
+    pub fn apply(&self, rec: [f32; 3], to_target: &[[f32; 3]; 3]) -> ([f32; 3], bool) {
+        let q = mul3(&self.to, rec);
+        let low = q.iter().any(|&v| v < -GAMUT_SLACK);
+        let high = q.iter().any(|&v| v > 1.0 + GAMUT_SLACK)
+            && mul3(to_target, rec).iter().all(|&v| v <= 1.0);
+        (mul3(&self.back, q.map(|v| v.clamp(0.0, 1.0))), low || high)
+    }
 }
 
 /// Tone for a display-referred image: `x' = (x − black) / (white − black)`,
@@ -404,6 +447,7 @@ impl Display {
             referred: None,
             tone: None,
             look: None,
+            proof: None,
             target,
         }
     }
@@ -683,8 +727,12 @@ pub fn frame(raw: &RawImage, src: &Demosaiced, s: &Settings, o: &Options) -> Fra
         .with_defringe(&s.modules.defringe),
         display,
         warnings: false,
+        gamut_warning: false,
     }
 }
+
+/// Out of the proof space's gamut, when shown.
+pub const GAMUT: [f32; 3] = [0.95, 0.2, 0.95];
 
 /// Clipping shown: any channel at white → red, every channel at black →
 /// blue (display values).
@@ -798,7 +846,8 @@ pub fn apply(src: &Rgb, f: &Frame, display: bool) -> Rgb {
                 }
                 let lin = look::look_pixel(&f.look, maps::local_pixel(&f.local, lin, sx, sy));
                 let px = if display {
-                    let d = display_pixel(&f.display, lin);
+                    let (d, out) = display_out(&f.display, lin);
+                    let d = if f.gamut_warning && out { GAMUT } else { d };
                     if f.warnings { warn(d) } else { d }
                 } else {
                     lin
@@ -903,6 +952,7 @@ fn resample(img: &Rgb, map: [[f64; 3]; 3], w: usize, h: usize) -> Rgb {
         ),
         display: Display::new(&DisplayTransform::default(), Target::Srgb),
         warnings: false,
+        gamut_warning: false,
     };
     apply(img, &f, false)
 }
@@ -1025,6 +1075,11 @@ fn toward_grey(amount: f64) -> M3 {
 /// The display transform and output for one scene-linear Rec.2020 pixel:
 /// display values (0–1, the target space's transfer curve).
 pub fn display_pixel(d: &Display, p: [f32; 3]) -> [f32; 3] {
+    display_out(d, p).0
+}
+
+/// [`display_pixel`], and whether soft proofing had to change the colour.
+pub fn display_out(d: &Display, p: [f32; 3]) -> ([f32; 3], bool) {
     let shaped = shape(d, p);
     // The camera match look (a profile's table), then the tone curve.
     let shaped = match &d.look {
@@ -1038,8 +1093,13 @@ pub fn display_pixel(d: &Display, p: [f32; 3]) -> [f32; 3] {
         }
         None => shaped,
     };
-    let lin = mul3(&d.to_target, mul3(&d.outset, shaped));
-    lin.map(|c| d.target.encode(c.clamp(0.0, 1.0)))
+    let rec = mul3(&d.outset, shaped);
+    let (rec, out) = match &d.proof {
+        Some(p) => p.apply(rec, &d.to_target),
+        None => (rec, false),
+    };
+    let lin = mul3(&d.to_target, rec);
+    (lin.map(|c| d.target.encode(c.clamp(0.0, 1.0))), out)
 }
 
 /// The display transform's tone mapping of one scene-linear Rec.2020

@@ -382,3 +382,68 @@ fn display_referred_sources_match_too() {
         assert!(d <= 1e-4, "step {step}: {d} at {at}");
     }
 }
+
+/// Soft proofing a saturated P3 render to sRGB: CPU and GPU agree, every
+/// colour shown fits in sRGB, and the gamut warning marks the same pixels.
+#[test]
+fn soft_proofing_matches_the_cpu() {
+    let Some((device, queue)) = headless() else {
+        eprintln!("skipping: no GPU adapter");
+        return;
+    };
+    let raw = zf();
+    let src = Demosaiced::new(
+        synthetic(200, 150),
+        [1.1425778, 1.0, 1.7753916],
+        shoebox_develop::cpu::Referred::Scene,
+    );
+    let pipe = Pipe::new(&device, Output::Rgba32Float).unwrap();
+    let gsrc = pipe.upload(&device, &queue, &src.rgb);
+    let mut s = Settings::default();
+    s.modules.colour.saturation = 80.0;
+    let o = Options {
+        target: Target::DisplayP3,
+        ..Options::default()
+    };
+    let mut f = cpu::frame(&raw, &src, &s, &o);
+    let plain = cpu::apply(&src.rgb, &f, true);
+    f.display.proof = Some(cpu::Proof::new(Target::Srgb));
+    let a = cpu::apply(&src.rgb, &f, true);
+    let b = pipe.render(&device, &queue, &gsrc, &f, true).unwrap();
+    let (d, i) = max_diff(&a, &b);
+    assert!(d < 1e-4, "{d} at {i}");
+    assert_ne!(a.data, plain.data, "proofing changed something");
+    // Shown in P3, every proofed colour is inside sRGB.
+    let to_srgb = shoebox_develop::colour::mul(
+        &Target::Srgb.from_rec2020(),
+        &shoebox_develop::colour::inv(&Target::DisplayP3.from_rec2020()).unwrap(),
+    );
+    for p in a.data.as_chunks::<3>().0 {
+        let lin = p.map(|v| f64::from(cpu::srgb_eotf(v)));
+        let srgb = shoebox_develop::colour::mulv(&to_srgb, lin);
+        assert!(
+            srgb.iter().all(|&v| (-2e-3..=1.0 + 2e-3).contains(&v)),
+            "{p:?} → {srgb:?}"
+        );
+    }
+    // The warning: the same pixels, give or take rounding edges.
+    f.gamut_warning = true;
+    let a = cpu::apply(&src.rgb, &f, true);
+    let b = pipe.render(&device, &queue, &gsrc, &f, true).unwrap();
+    let marked = |img: &Rgb| {
+        img.data
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .filter(|p| **p == cpu::GAMUT)
+            .count()
+    };
+    let (w, h) = (f.width, f.height);
+    assert!(marked(&a) > 0 && marked(&a) < w * h, "{}", marked(&a));
+    assert!(
+        marked(&a).abs_diff(marked(&b)) <= w * h / 500,
+        "{} vs {}",
+        marked(&a),
+        marked(&b)
+    );
+}

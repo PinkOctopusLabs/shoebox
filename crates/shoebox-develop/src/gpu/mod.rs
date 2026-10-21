@@ -637,11 +637,11 @@ impl Histogram {
     }
 }
 
-/// The uniform block (`Params` in the shader), as 42 vec4s.
+/// The uniform block (`Params` in the shader), as 48 vec4s.
 fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
     let row = |r: [f32; 3]| [r[0], r[1], r[2], 0.0];
     let d = &f.display;
-    let mut v = Vec::with_capacity(68);
+    let mut v = Vec::with_capacity(48 * 4);
     v.extend([
         f.map[0][0],
         f.map[0][1],
@@ -709,6 +709,25 @@ fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
     match &d.look {
         Some(t) => v.extend([1.0, t.size as f32, 0.0, 0.0]),
         None => v.extend([0.0, 2.0, 0.0, 0.0]),
+    }
+    let (to, back) = d
+        .proof
+        .map_or(([[0.0; 3]; 3], [[0.0; 3]; 3]), |p| (p.to, p.back));
+    for (i, r) in to.into_iter().enumerate() {
+        v.extend([
+            r[0],
+            r[1],
+            r[2],
+            if i == 0 { flag(d.proof.is_some()) } else { 0.0 },
+        ]);
+    }
+    for (i, r) in back.into_iter().enumerate() {
+        v.extend([
+            r[0],
+            r[1],
+            r[2],
+            if i == 0 { flag(f.gamut_warning) } else { 0.0 },
+        ]);
     }
     v
 }

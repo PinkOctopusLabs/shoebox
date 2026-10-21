@@ -465,7 +465,7 @@ The Develop view is a mode of the existing library window. D enters it from any 
 
 - Double-click a slider to reset it; Shift-drag for fine control; click a value to type it.
 - Slider events are coalesced: render the latest value at proxy size every frame while dragging. After 150 ms idle, render the visible area at screen resolution.
-- \\ toggles before/after; Y toggles a split before/after view; J shows clipping overlays; Z zooms 100% to the cursor; O shows the mask overlay.
+- \\ toggles before/after; Y toggles a split before/after view; J shows clipping overlays; S soft-proofs in an export space (with an optional out-of-gamut warning in magenta); Z zooms 100% to the cursor; O shows the mask overlay.
 - Cmd+Z / Cmd+Shift+Z walk history.
 - Histogram: a compute shader with atomic bins on the proxy output, so it costs under 1 ms.
 

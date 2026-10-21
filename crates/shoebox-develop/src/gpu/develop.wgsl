@@ -3,8 +3,9 @@
 // geometry map → lens grid (each channel from where the lens put it, times
 // the vignetting gain: `cpu::lens_sample`) → bilinear sample → colour matrix → local (dehaze,
 // highlights and shadows, clarity: `cpu::maps`) → look (colour, black and
-// white: `cpu::look`) → display transform → tone curve → output space and
-// sRGB transfer curve.
+// white: `cpu::look`) → display transform → tone curve → soft proof (into
+// an export space, clipped, back: `cpu::Proof`) → output space and sRGB
+// transfer curve.
 //
 // OUT_FORMAT is replaced with the output texture's format when the
 // pipeline is built (rgba32float for read-back, rgba16float for display).
@@ -48,7 +49,15 @@ struct Params {
     map2: vec4<f32>,      // the map's perspective row: (sx, sy) are divided by map2·(x, y, 1)
     fringe: vec4<f32>,    // defringe on (0/1), purple, green
     look3: vec4<f32>,     // camera match table on (0/1), its size
+    proof0: vec4<f32>,    // soft proof: Rec.2020 → the proof space; proof0.w: on (0/1)
+    proof1: vec4<f32>,
+    proof2: vec4<f32>,
+    unproof0: vec4<f32>,  // and back; unproof0.w: gamut warning shown (0/1)
+    unproof1: vec4<f32>,
+    unproof2: vec4<f32>,
 };
+
+const GAMUT_SLACK: f32 = 2e-3;
 
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var dst: texture_storage_2d<OUT_FORMAT, write>;
@@ -417,7 +426,8 @@ fn tone_curve(v: vec3<f32>) -> vec3<f32> {
     return pow(vec3<f32>(tone_at(0u, e.x), tone_at(1u, e.y), tone_at(2u, e.z)), vec3<f32>(2.2));
 }
 
-fn display(px: vec3<f32>) -> vec3<f32> {
+// Display values, and (w) 1 where soft proofing changed the colour.
+fn display(px: vec3<f32>) -> vec4<f32> {
     let v = mul3(p.inset0, p.inset1, p.inset2, px);
     var shaped: vec3<f32>;
     if (p.map1.w > 0.5) {
@@ -447,9 +457,21 @@ fn display(px: vec3<f32>) -> vec3<f32> {
     if (p.tone.x > 0.5) {
         shaped = tone_curve(shaped);
     }
-    let o = mul3(p.target0, p.target1, p.target2, mul3(p.outset0, p.outset1, p.outset2, shaped));
+    var rec = mul3(p.outset0, p.outset1, p.outset2, shaped);
+    var out = 0.0;
+    if (p.proof0.w > 0.5) {
+        let q = mul3(p.proof0, p.proof1, p.proof2, rec);
+        let t = mul3(p.target0, p.target1, p.target2, rec);
+        let low = min(min(q.x, q.y), q.z) < -GAMUT_SLACK;
+        let high = max(max(q.x, q.y), q.z) > 1.0 + GAMUT_SLACK && max(max(t.x, t.y), t.z) <= 1.0;
+        if (low || high) {
+            out = 1.0;
+        }
+        rec = mul3(p.unproof0, p.unproof1, p.unproof2, clamp(q, vec3<f32>(0.0), vec3<f32>(1.0)));
+    }
+    let o = mul3(p.target0, p.target1, p.target2, rec);
     let c = clamp(o, vec3<f32>(0.0), vec3<f32>(1.0));
-    return vec3<f32>(oetf(c.x), oetf(c.y), oetf(c.z));
+    return vec4<f32>(oetf(c.x), oetf(c.y), oetf(c.z), out);
 }
 
 @compute @workgroup_size(16, 16)
@@ -482,7 +504,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         px = look(px);
     }
     if (p.misc.w > 0.5) {
-        px = display(px);
+        let d = display(px);
+        px = d.xyz;
+        if (p.unproof0.w > 0.5 && d.w > 0.5) {
+            px = vec3<f32>(0.95, 0.2, 0.95);
+        }
         if (p.map0.w > 0.5) {
             let hi = max(max(px.x, px.y), px.z);
             if (hi >= 0.999) {

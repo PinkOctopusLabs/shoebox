@@ -100,13 +100,38 @@ enum Message {
     ConvertAhead(Vec<PathBuf>),
 }
 
+/// What's drawn over a render: clipping (J), soft proofing in an export
+/// space (S) and, with it, the colours that space can't hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Overlays {
+    pub clipping: bool,
+    pub proof: Option<shoebox_develop::export::Space>,
+    pub gamut: bool,
+}
+
+impl Overlays {
+    pub fn apply(&self, f: &mut cpu::Frame) {
+        f.warnings = self.clipping;
+        f.display.proof = self.proof.map(|s| cpu::Proof::new(s.target()));
+        f.gamut_warning = self.proof.is_some() && self.gamut;
+    }
+
+    /// Keys renders made with them.
+    pub fn key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.hash(&mut h);
+        h.finish()
+    }
+}
+
 /// A part of a photo to render at full resolution: `region` is
 /// `[x, y, width, height]` in the full-size render's pixels.
 pub struct RegionJob {
     pub request: Request,
     pub settings: shoebox_develop::edit::Settings,
     pub options: cpu::Options,
-    pub warnings: bool,
+    pub overlays: Overlays,
     pub region: [usize; 4],
     /// Echoed back, to tell which request a result answers.
     pub key: u64,
@@ -493,7 +518,7 @@ fn worker(
                     ..job.options
                 };
                 let mut frame = cpu::frame(&f.meta, &f.src, &job.settings, &o);
-                frame.warnings = job.warnings;
+                job.overlays.apply(&mut frame);
                 let size = (frame.width, frame.height);
                 let frame = frame.region(job.region);
                 let x = job.region[0].min(size.0.saturating_sub(1));

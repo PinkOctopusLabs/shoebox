@@ -19,10 +19,11 @@ use shoebox_develop::cpu::{self, Frame, Options, Target};
 use shoebox_develop::edit::{
     Demosaic, EditDoc, Highlights, Settings, Source, WbMode, WhiteBalance,
 };
+use shoebox_develop::export::Space;
 use shoebox_develop::gpu::{Output, Pipe};
 
 use crate::app::ShoeboxApp;
-use crate::develop::{Event, Ready, Request};
+use crate::develop::{Event, Overlays, Ready, Request};
 use crate::jobs::{LibraryCommand, PhotoId, Size};
 
 /// Keep a changed edit in the catalog once sliders have been still this
@@ -81,6 +82,11 @@ pub struct State {
     pub photo_rect: Option<Rect>,
     /// Show clipped highlights and shadows (J).
     pub warnings: bool,
+    /// Soft proofing (S): the edit as `proof_space` would hold it, and
+    /// with `gamut_warning`, the colours it can't hold in magenta.
+    pub proof: bool,
+    pub proof_space: Space,
+    pub gamut_warning: bool,
     /// Picking a neutral for white balance (W): the next click on the photo.
     pub picking: bool,
     /// Zoomed to 100% (Z): the frame point at the centre of the view, as
@@ -141,13 +147,24 @@ struct RegionShown {
     texture: egui::TextureHandle,
 }
 
-/// What a zoomed region depends on (settings and the clipping overlay).
-fn region_key(settings: &Settings, warnings: bool) -> u64 {
+/// What a zoomed region depends on (settings and the overlays).
+fn region_key(settings: &Settings, overlays: Overlays) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     EditDoc::settings_hash(settings).hash(&mut h);
-    warnings.hash(&mut h);
+    overlays.hash(&mut h);
     h.finish()
+}
+
+impl State {
+    /// What's drawn over the edited render.
+    pub fn overlays(&self) -> Overlays {
+        Overlays {
+            clipping: self.warnings,
+            proof: self.proof.then_some(self.proof_space),
+            gamut: self.gamut_warning,
+        }
+    }
 }
 
 /// Display values as an egui image.
@@ -180,7 +197,7 @@ struct GpuShared {
 
 /// A render on screen and what it was rendered from.
 struct Shown {
-    key: (PhotoId, String, bool),
+    key: (PhotoId, String, u64),
     size: [usize; 2],
     /// On the GPU: the texture egui draws.
     gpu: Option<(eframe::wgpu::Texture, egui::TextureId)>,
@@ -235,6 +252,9 @@ impl State {
             edited: self.edited.take(),
             original: self.original.take(),
             warnings: self.warnings,
+            proof: self.proof,
+            proof_space: self.proof_space,
+            gamut_warning: self.gamut_warning,
             zoom: self.zoom,
             compare: self.compare,
             split_at: self.split_at,
@@ -762,6 +782,7 @@ fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_w
             }
         }
     }
+    let overlays = st.overlays();
     let on_gpu = on_gpu.zip(st.gpu.as_mut());
 
     // A histogram on its way back from the GPU.
@@ -774,8 +795,8 @@ fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_w
     }
 
     let mut frame = cpu::frame(&ready.meta, &ready.src, &settings, &o);
-    frame.warnings = st.warnings;
-    let key = (ready.id, EditDoc::settings_hash(&settings), st.warnings);
+    overlays.apply(&mut frame);
+    let key = (ready.id, EditDoc::settings_hash(&settings), overlays.key());
     if st.edited.as_ref().is_none_or(|v| v.key != key) {
         let h = render_into(
             &mut st.edited,
@@ -796,7 +817,7 @@ fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_w
         let key = (
             ready.id,
             format!("original {}", EditDoc::settings_hash(&s)),
-            false,
+            0,
         );
         if st.original.as_ref().is_none_or(|v| v.key != key) {
             render_into(
@@ -817,7 +838,7 @@ fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_w
 /// CPU it's returned.
 fn render_into(
     slot: &mut Option<Shown>,
-    key: (PhotoId, String, bool),
+    key: (PhotoId, String, u64),
     frame: &Frame,
     // The source on the CPU, and whether it's the unprocessed one (the
     // GPU's `base`).
@@ -869,9 +890,10 @@ fn render_into(
                 _ => &g.source,
             };
             g.pipe.encode(device, &mut enc, source, frame, true, &tv);
-            // Count the render, not the clipping overlay.
+            // Count the render, not the clipping or gamut overlay.
             let counted = count
                 && !frame.warnings
+                && !frame.gamut_warning
                 && g.histogram.as_mut().is_some_and(|h| {
                     h.encode(device, &mut enc, &tv, size[0] as u32, size[1] as u32)
                 });
@@ -885,7 +907,7 @@ fn render_into(
         None => {
             // No GPU (or it failed): the same pipe on the CPU.
             let img = cpu::apply(img, frame, true);
-            if count && !frame.warnings {
+            if count && !frame.warnings && !frame.gamut_warning {
                 counts = Some(Box::new(cpu::histogram(&img)));
             }
             let pixels: Vec<Color32> = img
@@ -1115,6 +1137,13 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
             painter.image(t, target, full, Color32::WHITE);
         }
         _ => {}
+    }
+    if app.develop.proof && compare != Compare::Original && tex.is_some() {
+        chip(
+            &painter,
+            target.left_bottom() + egui::vec2(10.0, -30.0),
+            &format!("Proof: {}", app.develop.proof_space.label()),
+        );
     }
     if zoom.is_some() && compare == Compare::Edited {
         zoomed_region(app, &ctx, &painter, target, area, full_size, ppp);
@@ -1364,7 +1393,7 @@ fn zoomed_region(
             }
         }
     }
-    let key = region_key(&settings, st.warnings);
+    let key = region_key(&settings, st.overlays());
     let to_screen = |r: [usize; 4]| {
         Rect::from_min_size(
             target.min + egui::vec2(r[0] as f32 / ppp, r[1] as f32 / ppp),
@@ -1410,7 +1439,7 @@ fn zoomed_region(
         return;
     }
     st.asked_region = Some((key, wanted));
-    let warnings = st.warnings;
+    let overlays = st.overlays();
     let Some(photo) = app.index(id).map(|i| &app.catalog.photos[i]) else {
         return;
     };
@@ -1425,7 +1454,7 @@ fn zoomed_region(
         request,
         settings,
         options: o,
-        warnings,
+        overlays,
         region: wanted,
         key,
     });
@@ -1630,6 +1659,31 @@ fn offer_import(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     ui.add_space(6.0);
 }
 
+/// Soft proofing: on and off (S), the space, and the gamut warning.
+fn soft_proof(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    let st = &mut app.develop;
+    ui.horizontal(|ui| {
+        ui.toggle_value(&mut st.proof, "Soft proof")
+            .on_hover_text("Show the edit as an export in this colour space would hold it (S)");
+        ui.add_enabled_ui(st.proof, |ui| {
+            egui::ComboBox::from_id_salt("proof-space")
+                .selected_text(st.proof_space.label())
+                .show_ui(ui, |ui| {
+                    for s in [
+                        Space::Srgb,
+                        Space::DisplayP3,
+                        Space::AdobeRgb,
+                        Space::ProPhoto,
+                    ] {
+                        ui.selectable_value(&mut st.proof_space, s, s.label());
+                    }
+                });
+            ui.toggle_value(&mut st.gamut_warning, "Gamut")
+                .on_hover_text("Show in magenta the colours this space can't hold");
+        });
+    });
+}
+
 /// The right panel in Develop: the modules.
 pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     if let Some(h) = &app.develop.histogram {
@@ -1655,6 +1709,7 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             ));
         });
     }
+    soft_proof(app, ui);
     if let Some(text) = app
         .develop
         .photo

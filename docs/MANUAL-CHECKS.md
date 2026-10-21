@@ -50,6 +50,12 @@ check fails, note the file and what's wrong, and copy the file into
 - [ ] **Noise reduction** on the 10 highest-ISO files: noise clearly lower,
   detail (hair, foliage, text) kept, no blotches.
 - [ ] **Auto** on the 30: rarely far from the camera JPEG's brightness.
+- [ ] **Soft proofing** on a few very saturated photos (flowers, neon,
+  sunsets): with S on and sRGB chosen, the preview matches an sRGB JPEG
+  export of the same edit opened in Preview, and Gamut marks the colours
+  that changed.
+- [ ] **Watermark and border** exports: a text and a PNG-logo watermark
+  look crisp at 100% in a full-size JPEG and a Web 2048 export.
 - [ ] **Fit the camera match profile.** On an APFS clone, collect a few
   hundred varied NEF+JPEG pairs (same names) in one folder. Shoot them with
   the Picture Control you use, and with Active D-Lighting off if you can.

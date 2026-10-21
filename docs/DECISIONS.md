@@ -1768,3 +1768,21 @@ the build through egui, so no new code was fetched). The default font is
 the app's own text font; a preset can name a .ttf or .otf file instead.
 A watermark image or font that can't be read fails that preset's export
 with a message, rather than quietly leaving the watermark out.
+
+## Soft proofing (2026-10-21)
+
+S in Develop (or the Soft proof toggle under Clipping) shows the edit as
+an export in sRGB, Display P3, Adobe RGB or ProPhoto would hold it: the
+display-linear Rec.2020 values go into that space, are clipped to it,
+and come back before the screen's own output space (`cpu::Proof`,
+mirrored in the shader and held to the CPU within 1e-4). Gamut paints
+magenta where proofing changed a colour: a channel below zero in the
+proof space, or above one where the screen wouldn't clip it anyway, so
+blown highlights aren't flagged twice. Only the edit is proofed, not the
+Original side of a comparison. The histogram counts the proofed render,
+not the warning.
+
+In the library S still folds and unfolds stacks; in Develop, where stacks
+don't apply, it's soft proofing, as in Lightroom. Proofing against
+printer ICC profiles (moxcms can read them) is left for later; the four
+export spaces cover what Shoebox exports.
