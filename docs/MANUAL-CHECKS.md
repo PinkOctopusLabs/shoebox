@@ -7,6 +7,10 @@ library. Tick them off (with the date and the result) as they're done; when a
 check fails, note the file and what's wrong, and copy the file into
 `tests/fixtures/real/` (gitignored).
 
+**All of these wait until every editing phase is built** (decided
+2026-10-22): new checks are added here as features land, and they're run
+together at the end, before the release.
+
 ## Phase 1 gate (deferred 2026-10-20)
 
 - [ ] **30 NEFs render cleanly.** A mix of low light, high ISO, backlit,
@@ -66,3 +70,20 @@ check fails, note the file and what's wrong, and copy the file into
   `profiles/` folder (beside `export-presets.json` in its Application
   Support folder), and "Camera match" appears beside Auto. Then check it
   by eye against the camera JPEGs on a few photos it wasn't fitted on.
+
+## Library and export (from 2026-10-21)
+
+- [ ] **Text size and spacing** at each Text size (Settings → Appearance,
+  ⌘+ / ⌘−): nothing clipped or overlapping in the grid, Develop, the
+  export dialog and Settings, on the laptop screen and an external one.
+- [ ] **Virtual copies as tiles** on a few real photos (NEF+JPG stacks
+  too): S opens the stack with each copy showing its own edit; D on a copy
+  opens that copy; Delete Copy from its menu leaves the file alone.
+- [ ] **Exports beside the original**: a JPEG export of a NEF lands in its
+  folder, joins its stack (S), and shows in the Info panel; change the
+  edit, it goes stale; Re-export puts the new one in place and the old one
+  in the Trash; ⌘Z brings the old one back. Check the export opens in
+  Preview with the right colours and metadata.
+- [ ] **Exports outside the library** aren't listed in the Info panel, and
+  a preset pointed at a folder inside the library is refused with a clear
+  message.
