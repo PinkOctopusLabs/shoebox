@@ -50,6 +50,8 @@ pub enum FileFormat {
     },
     /// 16 bits a channel.
     Tiff { compression: TiffCompression },
+    /// 16 bits a channel.
+    Png,
 }
 
 fn yes() -> bool {
@@ -61,6 +63,15 @@ impl FileFormat {
         match self {
             FileFormat::Jpeg { .. } => "jpg",
             FileFormat::Tiff { .. } => "tif",
+            FileFormat::Png => "png",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FileFormat::Jpeg { .. } => "JPEG",
+            FileFormat::Tiff { .. } => "TIFF (16-bit)",
+            FileFormat::Png => "PNG (16-bit)",
         }
     }
 }
@@ -280,7 +291,27 @@ pub fn encode(img: &Rgb, preset: &Preset) -> Result<Vec<u8>, String> {
             },
         ),
         FileFormat::Tiff { compression } => tiff16(img, target, compression),
+        FileFormat::Png => png16(img, target),
     }
+}
+
+/// A 16-bit PNG with the space's ICC profile (iCCP).
+fn png16(img: &Rgb, target: Target) -> Result<Vec<u8>, String> {
+    let err = |e: png::EncodingError| e.to_string();
+    let mut info = png::Info::with_size(img.width as u32, img.height as u32);
+    info.color_type = png::ColorType::Rgb;
+    info.bit_depth = png::BitDepth::Sixteen;
+    info.icc_profile = Some(icc(target)?.into());
+    let mut out = Vec::new();
+    {
+        let mut enc = png::Encoder::with_info(&mut out, info).map_err(err)?;
+        enc.set_compression(png::Compression::Balanced);
+        let mut w = enc.write_header().map_err(err)?;
+        // PNG samples are big-endian.
+        let data: Vec<u8> = to_u16(img).iter().flat_map(|v| v.to_be_bytes()).collect();
+        w.write_image_data(&data).map_err(err)?;
+    }
+    Ok(out)
 }
 
 fn tiff16(img: &Rgb, target: Target, c: TiffCompression) -> Result<Vec<u8>, String> {

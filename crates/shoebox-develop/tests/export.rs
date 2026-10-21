@@ -77,6 +77,26 @@ fn a_16_bit_tiff_reads_back_with_its_profile() {
         let want = shoebox_develop::cpu::to_u16(&img);
         assert_eq!(px, want);
     }
+    // A 16-bit PNG: the same values, big-endian, and the profile.
+    let p = Preset {
+        format: FileFormat::Png,
+        ..starters()[2].clone()
+    };
+    let bytes = encode(&img, &p).unwrap();
+    let mut r = png::Decoder::new(std::io::Cursor::new(&bytes))
+        .read_info()
+        .unwrap();
+    let info = r.info();
+    assert_eq!((info.width, info.height), (40, 30));
+    assert_eq!(info.bit_depth, png::BitDepth::Sixteen);
+    assert!(info.icc_profile.as_ref().is_some_and(|v| v.len() > 100));
+    let mut buf = vec![0; r.output_buffer_size().unwrap()];
+    r.next_frame(&mut buf).unwrap();
+    let px: Vec<u16> = buf
+        .chunks(2)
+        .map(|b| u16::from_be_bytes([b[0], b[1]]))
+        .collect();
+    assert_eq!(px, shoebox_develop::cpu::to_u16(&img));
     // And a JPEG is a JPEG.
     let jpg = encode(&img, &starters()[0]).unwrap();
     assert_eq!(&jpg[..2], &[0xFF, 0xD8]);

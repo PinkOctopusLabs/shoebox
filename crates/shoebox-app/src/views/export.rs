@@ -226,6 +226,7 @@ fn summary(p: &Preset) -> String {
     let format = match p.format {
         FileFormat::Jpeg { quality, .. } => format!("JPEG {quality}"),
         FileFormat::Tiff { .. } => "TIFF 16-bit".to_owned(),
+        FileFormat::Png => "PNG 16-bit".to_owned(),
     };
     let size = match p.size {
         OutputSize::Full => "full size".to_owned(),
@@ -451,21 +452,24 @@ fn editor(ui: &mut egui::Ui, p: &mut Preset) {
             ui.end_row();
 
             ui.label("Format");
-            let jpeg = matches!(p.format, FileFormat::Jpeg { .. });
             egui::ComboBox::from_id_salt("export-format")
-                .selected_text(if jpeg { "JPEG" } else { "TIFF (16-bit)" })
+                .selected_text(p.format.label())
                 .show_ui(ui, |ui| {
-                    if ui.selectable_label(jpeg, "JPEG").clicked() && !jpeg {
-                        p.format = FileFormat::Jpeg {
+                    for f in [
+                        FileFormat::Jpeg {
                             quality: 90,
                             full_chroma: false,
                             progressive: true,
-                        };
-                    }
-                    if ui.selectable_label(!jpeg, "TIFF (16-bit)").clicked() && jpeg {
-                        p.format = FileFormat::Tiff {
+                        },
+                        FileFormat::Tiff {
                             compression: TiffCompression::Zip,
-                        };
+                        },
+                        FileFormat::Png,
+                    ] {
+                        let on = std::mem::discriminant(&f) == std::mem::discriminant(&p.format);
+                        if ui.selectable_label(on, f.label()).clicked() && !on {
+                            p.format = f;
+                        }
                     }
                 });
             ui.end_row();
@@ -493,6 +497,7 @@ fn editor(ui: &mut egui::Ui, p: &mut Preset) {
                     });
                     ui.end_row();
                 }
+                FileFormat::Png => {}
             }
 
             ui.label("Colour space");
