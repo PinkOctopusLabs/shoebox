@@ -3729,6 +3729,36 @@ fn virtual_copies() {
             && edits.join("pier.jpg.copy-1.json").exists()
             && a.copy_count("pier.jpg") == 1
     });
+    // The copy has its own tile in the library: its stack opened when it
+    // was made, the copy current. Its tile shows its own edit.
+    wait_for(&mut h, Duration::from_secs(20), "the copy's tile", |a| {
+        a.shown_names() == ["pier.jpg", "pier.jpg (Copy 1)"]
+    });
+    assert_eq!(h.state().current_copy().as_deref(), Some("copy-1"));
+    h.key_press(egui::Key::G);
+    h.run_steps(3);
+    wait_for(&mut h, Duration::from_secs(30), "previews", |a| {
+        a.edited_previews().1 >= 2
+    });
+    snapshot(&mut h, "copies-grid");
+    // The master's tile opens the master in Develop; the copy's, the copy.
+    h.get_by_label("pier.jpg").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(10), "master", |a| {
+        a.develop_doc().is_some() && a.develop_copies().1 == "main"
+    });
+    assert_eq!(quarter(&h), 1);
+    h.key_press(egui::Key::G);
+    h.run_steps(2);
+    h.get_by_label("pier.jpg (Copy 1)").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(10), "copy", |a| {
+        a.develop_doc().is_some() && a.develop_copies().1 == "copy-1"
+    });
+    assert_eq!(quarter(&h), 2);
+
     // Delete the copy (right-click): to the Trash, back to the master.
     h.get_by_label("Copy 1").click_secondary();
     h.run_steps(2);
@@ -3739,6 +3769,72 @@ fn virtual_copies() {
     assert!(t.path().join("trash/pier.jpg.copy-1.json").exists());
     assert_eq!(h.state().develop_copies().1, "main");
     assert_eq!(quarter(&h), 1);
+    // Its tile is gone; the master is current.
+    assert_eq!(h.state().shown_names(), ["pier.jpg"]);
+    assert_eq!(h.state().current_copy(), None);
+}
+
+/// Moving a photo (through Shoebox, journaled) takes its edit and its
+/// virtual copy along: the library knows them at the new place, and ⌘Z
+/// brings everything back.
+#[test]
+fn copies_follow_a_moved_photo() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(root.join("later")).unwrap();
+    let img = shoebox_fixtures::scene(7, 400, 300);
+    std::fs::write(
+        root.join("dock.jpg"),
+        shoebox_fixtures::jpeg(&img, 90).unwrap(),
+    )
+    .unwrap();
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let mut h = harness(p, egui::vec2(1400.0, 1500.0));
+    settle(&mut h, Duration::from_secs(60));
+    h.get_by_label("dock.jpg").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(30), "develop", |a| {
+        a.develop_ready()
+    });
+    h.run_steps(3);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::CloseBracket);
+    h.run_steps(3);
+    h.get_by_label("New copy").click();
+    h.run_steps(3);
+    let edits = root.join(".shoebox/edits");
+    wait_for(&mut h, Duration::from_secs(20), "written", |a| {
+        edits.join("dock.jpg.copy-1.json").exists() && a.copy_count("dock.jpg") == 1
+    });
+    h.key_press(egui::Key::G);
+    h.run_steps(3);
+    // The catalog's own path (the temp folder is reached through a link).
+    let here = h.state().copy_path("dock.jpg").unwrap();
+    let lib = here.parent().unwrap().to_path_buf();
+    let moved = lib.join("later/dock.jpg");
+    h.state_mut()
+        .request_org(shoebox_app::jobs::OrgRequest::MoveTo {
+            photos: vec![here.clone()],
+            folder: lib.join("later"),
+        });
+    wait_for(&mut h, Duration::from_secs(20), "dry run", |a| {
+        a.org_preview().is_some()
+    });
+    // The photo and its two edit files (master and copy).
+    assert_eq!(h.state().org_preview(), Some(Ok(3)));
+    h.state_mut().confirm_org();
+    wait_for(&mut h, Duration::from_secs(20), "moved", |a| {
+        moved.exists()
+            && a.copy_path("dock.jpg") == Some(moved.clone())
+            && a.edited_previews().0 == 1
+    });
+    assert!(edits.join("later/dock.jpg.copy-1.json").exists());
+    assert_eq!(h.state().copy_count("dock.jpg"), 1);
+    // Undo: back where it was, edit and copy with it.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    wait_for(&mut h, Duration::from_secs(20), "back", |a| {
+        here.exists() && a.copy_path("dock.jpg") == Some(here.clone()) && a.edited_previews().0 == 1
+    });
 }
 
 /// A photo in a reference folder opens in Develop read-only, with an offer

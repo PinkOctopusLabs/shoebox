@@ -49,7 +49,7 @@ fn pane(app: &mut ShoeboxApp, ui: &mut egui::Ui, id: PhotoId, role: &str, area: 
     let painter = ui.painter_at(img_rect);
     painter.rect_filled(img_rect, 0.0, Color32::from_gray(18));
     let (zoom, center) = (app.compare.zoom, app.compare.center);
-    let (target, fit) = draw_zoomed(app, &painter, img_rect, idx, zoom, center);
+    let (target, fit) = draw_zoomed(app, &painter, img_rect, id, zoom, center);
     if role == "Select" {
         app.compare.select_fit = fit;
     }

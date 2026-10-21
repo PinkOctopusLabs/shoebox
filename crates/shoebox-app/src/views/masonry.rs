@@ -106,7 +106,7 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     let aspects: Vec<f32> = app
         .shown
         .iter()
-        .map(|&i| app.catalog.photos[i].meta.aspect().unwrap_or(1.5))
+        .map(|t| app.catalog.photos[t.idx].meta.aspect().unwrap_or(1.5))
         .collect();
     let mut layout = std::mem::take(&mut app.masonry);
     layout.update(

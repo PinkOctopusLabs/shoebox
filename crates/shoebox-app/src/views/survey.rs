@@ -59,7 +59,7 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         );
         let painter = ui.painter_at(tile);
         painter.rect_filled(tile, 4.0, Color32::from_gray(24));
-        draw_zoomed(app, &painter, img.shrink(4.0), idx, 1.0, pos2(0.5, 0.5));
+        draw_zoomed(app, &painter, img.shrink(4.0), id, 1.0, pos2(0.5, 0.5));
         super::mark_badges(&app.catalog.photos[idx].marks, &painter, img);
         if resp.clicked() {
             app.activate(id);

@@ -1663,9 +1663,8 @@ Develop level, on the storage that already supports them
 - Exporting the photo open in Develop uses the edit as it is now (any
   copy), with a copy's name added to the file name ("DSC_1234_Copy 1").
   An export from elsewhere uses the master.
-- Still to come: copies as their own tiles in the library (stacked with the
-  original), and stale-export badges per copy (export rows are recorded
-  against the master's hash for now).
+- Still to come: stale-export badges per copy (export rows are recorded
+  against the master's hash for now). Copies as tiles: below.
 
 ## Camera match profiles (2026-10-20)
 
@@ -1786,3 +1785,26 @@ In the library S still folds and unfolds stacks; in Develop, where stacks
 don't apply, it's soft proofing, as in Lightroom. Proofing against
 printer ICC profiles (moxcms can read them) is left for later; the four
 export spaces cover what Shoebox exports.
+
+## Virtual copies as tiles (2026-10-21)
+
+A virtual copy is a tile of its own, stacked with its file: an open stack
+(S) lists its files, then their copies, each showing its own edit's
+preview with a "NEF · Copy 1" badge; a folded stack says "EDITED +n" (or
+"+n COPIES" when the master is unedited). The catalog stays one entry per
+file, so a copy's tile has an id of its own (`jobs::copy_id`, from the
+file's id and the copy's) that resolves to its file, the way the loupe's
+original already had one (`original_id`):
+
+- Its textures are its preview; selection, current photo, Compare, Survey
+  and the loupe work on it like any tile.
+- Marks, moves, renames, rejects and the Trash act on the file (marks live
+  in the file's sidecar, so a copy shares its file's rating, flag and
+  label); a file and its copy both selected count once.
+- D on a copy's tile opens that copy in Develop, and switching copies in
+  Develop moves the current tile to match (opening the stack). Export and
+  Paste settings use the copy's edit; its menu has Delete Copy (its edit
+  file to the Trash, undoable), never touching the file.
+- Photos Shoebox moves (organise, undo, redo) take their edit and copies
+  along: the worker reports them at the new path (before, only edits
+  reattached after a move outside Shoebox were reported again).

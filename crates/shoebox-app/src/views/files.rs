@@ -118,13 +118,7 @@ fn source_thumb(
 fn library_thumb(app: &mut ShoeboxApp, ui: &mut egui::Ui, path: &Path, size: f32) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
     let id = crate::jobs::photo_id(path);
-    if let Some(idx) = app.index(id) {
-        app.want(
-            idx,
-            crate::jobs::Size::Small,
-            crate::jobs::Priority::Visible,
-        );
-    }
+    app.want(id, crate::jobs::Size::Small, crate::jobs::Priority::Visible);
     draw_thumb(app, ui, rect, id, "?");
 }
 

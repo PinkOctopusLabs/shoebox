@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use eframe::egui::{self, Color32, Rect, RichText, Sense, Stroke, StrokeKind, pos2, vec2};
 use walkers::{HttpOptions, HttpTiles, MapMemory, Position, lat_lon, sources::OpenStreetMap};
 
-use crate::app::{ShoeboxApp, View};
+use crate::app::{ShoeboxApp, Tile, View};
 use crate::jobs::{PhotoId, Priority, Size};
 use crate::views::duplicates::plural;
 
@@ -104,10 +104,11 @@ fn fit(points: &[Point], size: egui::Vec2) -> Option<(Position, f64)> {
 
 fn build(app: &mut ShoeboxApp) {
     let mut points = Vec::new();
-    for (pos, &i) in app.shown.iter().enumerate() {
+    for (pos, t) in app.shown.iter().enumerate() {
+        let i = t.idx;
         let st = &app.catalog.stacks[app.catalog.stack_of[i]];
-        if st.primary != i {
-            continue; // an expanded stack's other members
+        if st.primary != i || t.id != app.ids[i] {
+            continue; // an expanded stack's other members and copies
         }
         // The primary's position, else any member's (a JPG may have GPS
         // when its export doesn't).
@@ -154,7 +155,10 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     let total = app
         .shown
         .iter()
-        .filter(|&&i| app.catalog.stacks[app.catalog.stack_of[i]].primary == i)
+        .filter(|t| {
+            app.catalog.stacks[app.catalog.stack_of[t.idx]].primary == t.idx
+                && t.id == app.ids[t.idx]
+        })
         .count();
     ui.horizontal(|ui| {
         ui.label(format!(
@@ -203,9 +207,9 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     };
     match action {
         Some(Action::Select(positions)) => {
-            app.selection = positions.iter().map(|&p| app.ids[app.shown[p]]).collect();
+            app.selection = positions.iter().map(|&p| app.shown[p].id).collect();
             if let Some(&p) = positions.first() {
-                app.current = Some(app.ids[app.shown[p]]);
+                app.current = Some(app.shown[p].id);
             }
         }
         Some(Action::ZoomInto(at)) => {
@@ -265,9 +269,8 @@ fn markers(
         let (first, at) = g[0];
         let n = g.len();
         let r = Rect::from_center_size(at, vec2(MARKER, MARKER));
-        let idx = app.shown[first.pos];
-        let id = app.ids[idx];
-        app.want(idx, Size::Small, Priority::Visible);
+        let Tile { idx, id } = app.shown[first.pos];
+        app.want(id, Size::Small, Priority::Visible);
         // A pin's point under the marker, a white frame, the thumbnail.
         painter.circle_filled(at + vec2(0.0, MARKER / 2.0 + 3.0), 3.0, Color32::WHITE);
         painter.rect_filled(r.expand(2.0), 5.0, Color32::WHITE);
@@ -291,7 +294,7 @@ fn markers(
         }
         let selected = g
             .iter()
-            .any(|(p, _)| app.selection.contains(&app.ids[app.shown[p.pos]]));
+            .any(|(p, _)| app.selection.contains(&app.shown[p.pos].id));
         if selected {
             painter.rect_stroke(
                 r.expand(3.0),

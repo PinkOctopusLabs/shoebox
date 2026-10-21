@@ -82,20 +82,21 @@ fn send(app: &mut ShoeboxApp, ids: &[PhotoId], presets: Vec<Preset>) {
         if p.format.is_movie() {
             continue;
         }
-        // The photo open in Develop: its edit as it is now (the copy shown).
-        let open = app
-            .develop
-            .doc
-            .as_ref()
-            .filter(|_| app.develop.photo == Some(id));
-        let copy_name = open
-            .filter(|_| app.develop.copy_id() != shoebox_core::edits::MAIN)
-            .map(|d| d.copy.name.clone());
+        // A virtual copy's tile exports that copy; the file, the master.
+        let copy = app.copy_info(id);
+        let copy_id = copy.map_or(shoebox_core::edits::MAIN, |c| c.id.as_str());
+        // Open in Develop: the edit as it is now.
+        let open = app.develop.doc.as_ref().filter(|_| {
+            app.develop.photo == Some(app.ids[idx]) && app.develop.copy_id() == copy_id
+        });
+        let copy_name = copy.map(|c| c.name.clone());
+        let json = match copy {
+            Some(c) => Some(&c.json),
+            None => app.edited_json.get(&p.path),
+        };
         let settings = match open {
             Some(doc) => doc.settings().clone(),
-            None => app
-                .edited_json
-                .get(&p.path)
+            None => json
                 .and_then(|j| shoebox_develop::edit::EditDoc::from_json(j).ok())
                 .map(|d| d.settings().clone())
                 .unwrap_or_default(),

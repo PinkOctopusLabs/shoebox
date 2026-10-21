@@ -29,8 +29,7 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             if resp.clicked() {
                 if app.view == crate::app::View::Compare {
                     // In Compare the filmstrip picks the candidate.
-                    if let Some(&i) = app.shown.get(pos) {
-                        let id = app.ids[i];
+                    if let Some(id) = app.shown.get(pos).map(|t| t.id) {
                         app.compare.candidate = Some(id);
                         app.activate(id);
                     }

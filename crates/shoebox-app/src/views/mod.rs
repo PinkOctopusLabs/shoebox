@@ -20,7 +20,7 @@ pub mod timeline;
 use eframe::egui::{self, Color32, Rect, Stroke, StrokeKind, pos2, vec2};
 
 use crate::app::ShoeboxApp;
-use crate::jobs::{Priority, Size};
+use crate::jobs::{PhotoId, Priority, Size};
 
 pub const GAP: f32 = 4.0;
 
@@ -51,21 +51,32 @@ pub fn fit(rect: Rect, aspect: f32) -> Rect {
     Rect::from_center_size(rect.center(), vec2(w, h))
 }
 
-/// Full-resolution size of photo `idx` in image pixels (metadata, else the
-/// best texture, else 3:2).
-pub fn full_size(app: &mut ShoeboxApp, idx: usize) -> egui::Vec2 {
-    let p = &app.catalog.photos[idx];
-    if let (Some(w), Some(h)) = (p.meta.width, p.meta.height) {
+/// Full-resolution size of tile `id` in image pixels: an edit's, its
+/// preview's (a crop changes the shape); else the file's metadata, else the
+/// best texture, else 3:2.
+pub fn full_size(app: &mut ShoeboxApp, id: PhotoId) -> egui::Vec2 {
+    let texture = |app: &mut ShoeboxApp| {
+        app.textures
+            .best(id, Size::Full)
+            .map(|t| vec2(t.size()[0] as f32, t.size()[1] as f32))
+    };
+    if app.is_edited(id)
+        && let Some(v) = texture(app)
+    {
+        return v;
+    }
+    if let Some(i) = app.index(id)
+        && let (Some(w), Some(h)) = (
+            app.catalog.photos[i].meta.width,
+            app.catalog.photos[i].meta.height,
+        )
+    {
         return vec2(w as f32, h as f32);
     }
-    let id = app.ids[idx];
-    match app.textures.best(id, Size::Full) {
-        Some(t) => vec2(t.size()[0] as f32, t.size()[1] as f32),
-        None => vec2(3.0, 2.0),
-    }
+    texture(app).unwrap_or(vec2(3.0, 2.0))
 }
 
-/// Draw photo `idx` into `rect`: `zoom` over fit (1 = fit), with image point
+/// Draw tile `id` into `rect`: `zoom` over fit (1 = fit), with image point
 /// `center` (fractions) at the middle of `rect`. Loads what it needs
 /// (the 1024 px thumbnail, and the full image once zoomed or large).
 /// Returns where the image went and the fit scale (points per image pixel).
@@ -73,17 +84,16 @@ pub fn draw_zoomed(
     app: &mut ShoeboxApp,
     painter: &egui::Painter,
     rect: Rect,
-    idx: usize,
+    id: PhotoId,
     zoom: f32,
     center: egui::Pos2,
 ) -> (Rect, f32) {
-    let id = app.ids[idx];
-    app.want(idx, Size::Large, Priority::Visible);
+    app.want(id, Size::Large, Priority::Visible);
     let ppp = painter.ctx().pixels_per_point();
-    let full = full_size(app, idx);
+    let full = full_size(app, id);
     let fit = (rect.width() / full.x).min(rect.height() / full.y);
     if zoom > 1.01 || rect.width().max(rect.height()) * ppp > 1100.0 {
-        app.want(idx, Size::Full, Priority::Visible);
+        app.want(id, Size::Full, Priority::Visible);
     }
     let size = full * fit * zoom;
     let target = Rect::from_min_size(
@@ -168,34 +178,42 @@ pub fn cell(
 ) -> egui::Response {
     // A menu action earlier this frame (say, taking a photo out of the
     // collection being shown) can shrink `shown` under the loop drawing it.
-    let Some(&idx) = app.shown.get(pos) else {
+    let Some(crate::app::Tile { idx, id }) = app.shown.get(pos).copied() else {
         return ui.interact(
             rect,
             ui.scope_id().with(("gone", pos)),
             egui::Sense::hover(),
         );
     };
-    let id = app.ids[idx];
+    // One of the file's virtual copies, not the file itself.
+    let copy = app.copy_info(id).map(|c| c.name.clone());
     let resp = ui.interact(
         rect,
         ui.scope_id().with(("cell", id)),
         egui::Sense::click_and_drag(),
     );
     if resp.drag_started() {
-        // Drag the selection if this photo is in it, else just this one.
+        // Drag the selection if this photo is in it, else just this one
+        // (files: a copy's tile stands for its file).
         let ids: Vec<crate::jobs::PhotoId> = if app.selection.contains(&id) {
             app.selection.iter().copied().collect()
         } else {
             vec![id]
         };
-        resp.dnd_set_drag_payload(DragPhotos(ids));
+        let mut files: Vec<crate::jobs::PhotoId> = ids
+            .into_iter()
+            .filter_map(|id| app.index(id).map(|i| app.ids[i]))
+            .collect();
+        files.sort_unstable();
+        files.dedup();
+        resp.dnd_set_drag_payload(DragPhotos(files));
     }
     let painter = ui.painter_at(rect);
     let visuals = ui.visuals().clone();
     let size = size_for(rect.width().max(rect.height()), ui.ctx().pixels_per_point());
-    app.want(idx, size, Priority::Visible);
+    app.want(id, size, Priority::Visible);
     if size == Size::Large {
-        app.want(idx, Size::Small, Priority::Visible); // something to show meanwhile
+        app.want(id, Size::Small, Priority::Visible); // something to show meanwhile
     }
 
     let selected = app.selection.contains(&id);
@@ -264,7 +282,10 @@ pub fn cell(
     let expanded = app.expanded.contains(&app.ids[st.primary]);
     let is_movie = |i: usize| app.catalog.photos[i].format.is_movie();
     let live = st.primary == idx && !is_movie(idx) && st.all().any(is_movie);
-    let label = if live && st.len() == 2 {
+    let label = if let Some(name) = &copy {
+        // A virtual copy: the file's type and the copy's name.
+        format!("{} · {name}", photo.format.label())
+    } else if live && st.len() == 2 {
         // A Live Photo: the picture and its short video.
         "LIVE".to_owned()
     } else if st.len() > 1 && st.primary == idx && !expanded {
@@ -276,23 +297,26 @@ pub fn cell(
     } else {
         photo.format.label().to_owned()
     };
-    // Edited in Develop (any of the stack): the tile shows the edit.
-    let label = if st
+    // Edited in Develop (any of the stack): the tile shows the edit. A
+    // folded stack counts its virtual copies: "EDITED +2".
+    let edited = st
         .all()
-        .any(|i| app.edited.contains_key(&app.catalog.photos[i].path))
-    {
-        // Virtual copies besides the master: "EDITED +2".
-        let copies: usize = st
-            .all()
-            .filter_map(|i| app.copy_counts.get(&app.catalog.photos[i].path))
-            .sum();
-        if copies > 0 {
-            format!("{label} · EDITED +{copies}")
-        } else {
-            format!("{label} · EDITED")
-        }
+        .any(|i| app.edited.contains_key(&app.catalog.photos[i].path));
+    let copies: usize = if copy.is_none() && st.primary == idx && !expanded {
+        st.all()
+            .filter_map(|i| app.copies.get(&app.catalog.photos[i].path))
+            .map(Vec::len)
+            .sum()
     } else {
-        label
+        0
+    };
+    let label = match (copy.is_some(), edited, copies) {
+        (true, _, _) => label,
+        (false, true, 0) => format!("{label} · EDITED"),
+        (false, true, n) => format!("{label} · EDITED +{n}"),
+        (false, false, 0) => label,
+        (false, false, 1) => format!("{label} · +1 COPY"),
+        (false, false, n) => format!("{label} · +{n} COPIES"),
     };
     // In the cloud only (the whole stack, as it's what opening fetches).
     let label = if st.all().any(|i| app.catalog.photos[i].cloud) {
@@ -385,6 +409,11 @@ pub fn cell(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
+    // A copy's tile is named for the copy too: "DSC_0042.NEF (Copy 1)".
+    let name = match &copy {
+        Some(c) => format!("{name} ({c})"),
+        None => name,
+    };
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Image, true, &name));
     if resp.hovered() {
         resp.clone().on_hover_text(photo.rel.clone());
@@ -435,9 +464,25 @@ pub fn photo_menu(app: &mut ShoeboxApp, resp: &egui::Response, pos: usize) {
                 .on_hover_text("All photos in the grid, with the ones taken around this one")
                 .clicked()
         {
-            if let Some(&i) = app.shown.get(pos) {
-                app.show_in_all(app.ids[i]);
+            if let Some(t) = app.shown.get(pos) {
+                app.show_in_all(t.id);
             }
+            ui.close();
+        }
+        // A virtual copy's tile: delete the copy (never the file).
+        let tile = app.shown.get(pos).copied();
+        if let Some(t) = tile
+            && let Some(copy) = app.copy_of(t.id).map(str::to_owned)
+            && !app.catalog.is_reference(t.idx)
+            && ui
+                .button("Delete Copy")
+                .on_hover_text(
+                    "Move this copy's edit to the Trash (⌘Z brings it back); the photo stays",
+                )
+                .clicked()
+        {
+            let file = app.ids[t.idx];
+            develop::remove_copy(app, file, &copy);
             ui.close();
         }
         if ui
@@ -474,8 +519,8 @@ pub fn photo_menu(app: &mut ShoeboxApp, resp: &egui::Response, pos: usize) {
                 .on_disabled_hover_text("Semantic search is getting ready (see Search in Settings)")
                 .clicked()
         {
-            if let Some(&i) = app.shown.get(pos) {
-                app.find_similar(app.ids[i]);
+            if let Some(t) = app.shown.get(pos) {
+                app.find_similar(app.ids[t.idx]);
             }
             ui.close();
         }
@@ -485,8 +530,8 @@ pub fn photo_menu(app: &mut ShoeboxApp, resp: &egui::Response, pos: usize) {
                 .on_hover_text("This photo's face isn't them")
                 .clicked()
         {
-            if let Some(&i) = app.shown.get(pos) {
-                app.not_person(app.ids[i]);
+            if let Some(t) = app.shown.get(pos) {
+                app.not_person(app.ids[t.idx]);
             }
             ui.close();
         }

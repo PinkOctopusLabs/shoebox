@@ -347,6 +347,15 @@ impl FolderNode {
     }
 }
 
+/// One place in the grid and the other views: a file (its own id), or one
+/// of the file's virtual copies (`jobs::copy_id`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tile {
+    /// The file's catalog index.
+    pub idx: usize,
+    pub id: PhotoId,
+}
+
 pub struct ShoeboxApp {
     pub(crate) loader: Loader,
     library: Library,
@@ -362,8 +371,8 @@ pub struct ShoeboxApp {
     /// Folder filter from the left panel (None = whole library).
     /// Folders the grid shows (any of them, and below); ⌘-click adds one.
     pub(crate) folders: Vec<PathBuf>,
-    /// Catalog indices shown in the centre, in display order.
-    pub(crate) shown: Vec<usize>,
+    /// The tiles shown in the centre, in display order.
+    pub(crate) shown: Vec<Tile>,
     /// Bumped whenever `shown` changes (layout caches key on it).
     pub(crate) shown_gen: u64,
     pub(crate) selection: BTreeSet<PhotoId>,
@@ -489,8 +498,11 @@ pub struct ShoeboxApp {
     pub(crate) collection_edit: Option<(Option<String>, String)>,
     /// A short note for the status bar (what the last operation did).
     pub(crate) notice: Option<String>,
-    /// Photos with virtual copies, and how many (the grid's badge).
-    pub(crate) copy_counts: HashMap<PathBuf, usize>,
+    /// Photos' virtual copies: their tiles when the stack is open, and the
+    /// grid's "EDITED +n".
+    pub(crate) copies: HashMap<PathBuf, Vec<crate::jobs::CopyInfo>>,
+    /// Copy tiles' ids → the photo's path and the copy's id.
+    pub(crate) copy_tiles: HashMap<PhotoId, (PathBuf, String)>,
     /// Settings copied in Develop (⇧⌘C), for pasting onto other photos.
     pub(crate) settings_clipboard: Option<shoebox_develop::preset::Preset>,
     pub(crate) timeline: views::timeline::State,
@@ -640,7 +652,8 @@ impl ShoeboxApp {
             collection_edit: None,
             notice: None,
             settings_clipboard: None,
-            copy_counts: HashMap::new(),
+            copies: HashMap::new(),
+            copy_tiles: HashMap::new(),
             timeline: views::timeline::State::default(),
             map: views::map::State::new(tile_cache),
             collapsed: HashSet::new(),
@@ -915,9 +928,24 @@ impl ShoeboxApp {
             .photos
             .iter()
             .find(|p| p.path.file_name().is_some_and(|n| n == name))
-            .and_then(|p| self.copy_counts.get(&p.path))
-            .copied()
-            .unwrap_or(0)
+            .and_then(|p| self.copies.get(&p.path))
+            .map_or(0, Vec::len)
+    }
+
+    /// Where the library knows a photo with virtual copies, by its file
+    /// name (tests).
+    pub fn copy_path(&self, name: &str) -> Option<PathBuf> {
+        self.copies
+            .keys()
+            .find(|p| p.file_name().is_some_and(|n| n == name))
+            .cloned()
+    }
+
+    /// The current tile's virtual copy, if it's a copy's (tests).
+    pub fn current_copy(&self) -> Option<String> {
+        self.current
+            .and_then(|c| self.copy_of(c))
+            .map(str::to_owned)
     }
 
     /// The edit presets' names (tests).
@@ -1009,14 +1037,20 @@ impl ShoeboxApp {
     pub fn shown_names(&self) -> Vec<String> {
         self.shown
             .iter()
-            .filter_map(|&i| self.catalog.photos[i].path.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
+            .filter_map(|t| {
+                let name = self.catalog.photos[t.idx].path.file_name()?;
+                let name = name.to_string_lossy().into_owned();
+                Some(match self.copy_info(t.id) {
+                    Some(c) => format!("{name} ({})", c.name),
+                    None => name,
+                })
+            })
             .collect()
     }
 
     pub fn set_view(&mut self, v: View) {
         if v == View::Loupe && self.current.is_none() {
-            self.current = self.shown.first().map(|&i| self.ids[i]);
+            self.current = self.shown.first().map(|t| t.id);
         }
         // Compare and Survey outside a duplicate group start from the selection.
         if self.dupes.open.is_none() {
@@ -1037,7 +1071,7 @@ impl ShoeboxApp {
             self.back_view = self.view;
         }
         if v == View::Develop && self.current.is_none() {
-            self.current = self.shown.first().map(|&i| self.ids[i]);
+            self.current = self.shown.first().map(|t| t.id);
         }
         if self.view == View::Develop && v != View::Develop {
             views::develop::leave(self);
@@ -1068,15 +1102,7 @@ impl ShoeboxApp {
                 } => {
                     views::develop::edit_loaded(self, root, rel, copy, copies, json);
                 }
-                LibraryEvent::Copies(list) => {
-                    for (path, n) in list {
-                        if n == 0 {
-                            self.copy_counts.remove(&path);
-                        } else {
-                            self.copy_counts.insert(path, n);
-                        }
-                    }
-                }
+                LibraryEvent::Copies(list) => self.note_copies(list),
                 LibraryEvent::Catalog {
                     published,
                     settings,
@@ -1339,8 +1365,20 @@ impl ShoeboxApp {
         // Drop what belongs to photos that are gone, and the images of
         // files that changed on disk so they reload.
         let stale = p.stale;
+        // Copies of photos that are gone go too.
         let index_of = &self.index_of;
-        let keep = |id: &PhotoId| index_of.contains_key(id) && !stale.contains(id);
+        self.copies
+            .retain(|path, _| index_of.contains_key(&crate::jobs::photo_id(path)));
+        self.copy_tiles
+            .retain(|_, (path, _)| index_of.contains_key(&crate::jobs::photo_id(path)));
+        let copy_tiles = &self.copy_tiles;
+        // A copy's tile goes with its file.
+        let file = |id: &PhotoId| {
+            copy_tiles
+                .get(id)
+                .map_or(*id, |(path, _)| crate::jobs::photo_id(path))
+        };
+        let keep = |id: &PhotoId| index_of.contains_key(&file(id)) && !stale.contains(&file(id));
         self.textures.retain_photos(keep);
         self.histograms.retain(|id, _| keep(id));
         self.textures.failed.clear();
@@ -1639,8 +1677,9 @@ impl ShoeboxApp {
         let primaries: Vec<PhotoId> = self
             .shown
             .iter()
-            .filter(|&&i| self.catalog.stacks[self.catalog.stack_of[i]].primary == i)
-            .map(|&i| self.ids[i])
+            .filter(|t| t.id == self.ids[t.idx])
+            .filter(|t| self.catalog.stacks[self.catalog.stack_of[t.idx]].primary == t.idx)
+            .map(|t| t.id)
             .collect();
         self.selection = primaries.iter().copied().collect();
         if self.current.is_none_or(|c| !self.selection.contains(&c)) {
@@ -1981,7 +2020,7 @@ impl ShoeboxApp {
             self.refilter();
         }
         // A file of a folded stack has no tile of its own: its stack's.
-        let shown = |a: &Self, id| a.index(id).is_some_and(|i| a.shown.contains(&i));
+        let shown = |a: &Self, id| a.shown.iter().any(|t| t.id == id);
         let id = if shown(self, id) {
             id
         } else {
@@ -2112,9 +2151,23 @@ impl ShoeboxApp {
         self.shown.clear();
         for s in stacks {
             let st = &self.catalog.stacks[s];
-            self.shown.push(st.primary);
+            let file = |i: usize| Tile {
+                idx: i,
+                id: self.ids[i],
+            };
+            self.shown.push(file(st.primary));
             if self.expanded.contains(&self.ids[st.primary]) {
-                self.shown.extend(st.all().skip(1));
+                self.shown.extend(st.all().skip(1).map(file));
+                // Then the files' virtual copies.
+                for i in st.all() {
+                    let p = &self.catalog.photos[i].path;
+                    for c in self.copies.get(p).map_or(&[][..], Vec::as_slice) {
+                        self.shown.push(Tile {
+                            idx: i,
+                            id: crate::jobs::copy_id(self.ids[i], &c.id),
+                        });
+                    }
+                }
             }
         }
         self.shown_gen += 1;
@@ -2214,7 +2267,7 @@ impl ShoeboxApp {
         let mut v: Vec<usize> = self
             .shown
             .iter()
-            .map(|&i| self.catalog.stack_of[i])
+            .map(|t| self.catalog.stack_of[t.idx])
             .collect();
         v.sort_unstable();
         v.dedup();
@@ -2422,7 +2475,7 @@ impl ShoeboxApp {
     pub(crate) fn selected_in_order(&self) -> Vec<PhotoId> {
         self.shown
             .iter()
-            .map(|&i| self.ids[i])
+            .map(|t| t.id)
             .filter(|id| self.selection.contains(id))
             .collect()
     }
@@ -2433,13 +2486,11 @@ impl ShoeboxApp {
         let (a, b) = if sel.len() >= 2 {
             (Some(sel[0]), Some(sel[1]))
         } else {
-            let a = self
-                .current
-                .or_else(|| self.shown.first().map(|&i| self.ids[i]));
+            let a = self.current.or_else(|| self.shown.first().map(|t| t.id));
             let next = a
-                .and_then(|a| self.shown.iter().position(|&i| self.ids[i] == a))
+                .and_then(|a| self.shown.iter().position(|t| t.id == a))
                 .and_then(|p| self.shown.get(p + 1))
-                .map(|&i| self.ids[i]);
+                .map(|t| t.id);
             (a, next)
         };
         self.compare = CompareState {
@@ -2456,7 +2507,7 @@ impl ShoeboxApp {
     pub(crate) fn compare_pool(&self) -> Vec<PhotoId> {
         match self.open_group_ids() {
             Some(ids) => ids,
-            None => self.shown.iter().map(|&i| self.ids[i]).collect(),
+            None => self.shown.iter().map(|t| t.id).collect(),
         }
     }
 
@@ -2721,7 +2772,8 @@ impl ShoeboxApp {
     pub(crate) fn rejected_shown(&self) -> Vec<PathBuf> {
         self.shown
             .iter()
-            .map(|&i| &self.catalog.photos[i])
+            .filter(|t| t.id == self.ids[t.idx]) // files, not copies
+            .map(|t| &self.catalog.photos[t.idx])
             .filter(|p| p.marks.pick == Some(Pick::Reject))
             .map(|p| p.path.clone())
             .collect()
@@ -3169,9 +3221,11 @@ impl ShoeboxApp {
         let mut base: Vec<usize> = self
             .shown
             .iter()
-            .copied()
-            .filter(|&i| self.selection.contains(&self.ids[i]))
+            .filter(|t| self.selection.contains(&t.id))
+            .map(|t| t.idx)
             .collect();
+        // A file and its copy both selected: marked once.
+        base.dedup();
         if base.is_empty()
             && let Some(i) = self.current.and_then(|c| self.index(c))
         {
@@ -3296,8 +3350,23 @@ impl ShoeboxApp {
         self.index_of.get(&id).map(|&i| &self.catalog.photos[i])
     }
 
+    /// The catalog index of a tile's file (a copy's tile: its photo's).
     pub(crate) fn index(&self, id: PhotoId) -> Option<usize> {
-        self.index_of.get(&id).copied()
+        self.index_of.get(&id).copied().or_else(|| {
+            let (path, _) = self.copy_tiles.get(&id)?;
+            self.index_of.get(&crate::jobs::photo_id(path)).copied()
+        })
+    }
+
+    /// The virtual copy a tile stands for (None: the file itself).
+    pub(crate) fn copy_of(&self, id: PhotoId) -> Option<&str> {
+        self.copy_tiles.get(&id).map(|(_, c)| c.as_str())
+    }
+
+    /// A copy's details, by its tile's id.
+    pub(crate) fn copy_info(&self, id: PhotoId) -> Option<&crate::jobs::CopyInfo> {
+        let (path, copy) = self.copy_tiles.get(&id)?;
+        self.copies.get(path)?.iter().find(|c| c.id == *copy)
     }
 
     // --- loading -----------------------------------------------------------
@@ -3329,32 +3398,76 @@ impl ShoeboxApp {
             if self.previews_ready.contains(&key) {
                 continue;
             }
-            let Some(idx) = self.index(id) else { continue };
-            let Ok(doc) = shoebox_develop::edit::EditDoc::from_json(&info.json) else {
-                continue;
-            };
-            let p = &self.catalog.photos[idx];
-            self.developer.preview(crate::develop::PreviewJob {
-                id,
-                path: p.path.clone(),
-                lens: crate::develop::shot(p),
-                format: p.format,
-                orientation: p.meta.orientation(),
-                settings: doc.settings().clone(),
-                key,
-                target: match self.target {
-                    shoebox_decode::Target::DisplayP3 => shoebox_develop::cpu::Target::DisplayP3,
-                    _ => shoebox_develop::cpu::Target::Srgb,
-                },
-            });
+            self.render_preview(id, &info.json, key);
         }
+    }
+
+    /// Render an edit's preview (for tile `id`) in the background.
+    fn render_preview(&mut self, id: PhotoId, json: &str, key: String) {
+        let Some(idx) = self.index(id) else { return };
+        let Ok(doc) = shoebox_develop::edit::EditDoc::from_json(json) else {
+            return;
+        };
+        let p = &self.catalog.photos[idx];
+        self.developer.preview(crate::develop::PreviewJob {
+            id,
+            path: p.path.clone(),
+            lens: crate::develop::shot(p),
+            format: p.format,
+            orientation: p.meta.orientation(),
+            settings: doc.settings().clone(),
+            key,
+            target: match self.target {
+                shoebox_decode::Target::DisplayP3 => shoebox_develop::cpu::Target::DisplayP3,
+                _ => shoebox_develop::cpu::Target::Srgb,
+            },
+        });
+    }
+
+    /// Photos' virtual copies listed or changed: their tiles, and previews
+    /// made where need be.
+    fn note_copies(&mut self, list: Vec<(PathBuf, Vec<crate::jobs::CopyInfo>)>) {
+        for (path, copies) in list {
+            let photo = crate::jobs::photo_id(&path);
+            for old in self.copies.remove(&path).unwrap_or_default() {
+                let id = crate::jobs::copy_id(photo, &old.id);
+                let now = copies.iter().find(|c| c.id == old.id);
+                if now.is_none_or(|c| c.key != old.key) {
+                    self.textures.retain_photos(|p| *p != id);
+                }
+                if now.is_none() {
+                    // Removed: its tile goes, and the photo stands for it.
+                    self.copy_tiles.remove(&id);
+                    self.selection.remove(&id);
+                    if self.current == Some(id) {
+                        self.current = Some(photo);
+                    }
+                }
+            }
+            for c in &copies {
+                let id = crate::jobs::copy_id(photo, &c.id);
+                self.copy_tiles.insert(id, (path.clone(), c.id.clone()));
+                if let Some(key) = &c.key
+                    && !self.previews_ready.contains(key)
+                {
+                    self.render_preview(id, &c.json, key.clone());
+                }
+            }
+            if !copies.is_empty() {
+                self.copies.insert(path, copies);
+            }
+        }
+        self.refilter();
     }
 
     /// An edit's preview is ready: photos showing that edit load it.
     pub(crate) fn preview_ready(&mut self, id: PhotoId, key: String) {
-        let current = self
-            .index(id)
-            .and_then(|i| self.edited.get(&self.catalog.photos[i].path));
+        let current = match self.copy_info(id) {
+            Some(c) => c.key.as_ref(),
+            None => self
+                .index(id)
+                .and_then(|i| self.edited.get(&self.catalog.photos[i].path)),
+        };
         if current == Some(&key) {
             self.textures.retain_photos(|p| *p != id);
             self.histograms.remove(&id);
@@ -3362,29 +3475,48 @@ impl ShoeboxApp {
         self.previews_ready.insert(key);
     }
 
-    pub(crate) fn want(&mut self, idx: usize, size: Size, priority: Priority) {
-        self.want_job(idx, size, priority, false, false);
+    /// Ask for tile `id`'s image this frame (no-op if loaded or failed).
+    pub(crate) fn want(&mut self, id: PhotoId, size: Size, priority: Priority) {
+        self.want_job(id, size, priority, false, false);
     }
 
     /// Like [`Self::want`] for the photo being opened: one in the cloud only
     /// is downloaded (elsewhere only its cached thumbnails show).
-    pub(crate) fn want_open(&mut self, idx: usize, size: Size) {
-        self.want_job(idx, size, Priority::Visible, true, false);
+    pub(crate) fn want_open(&mut self, id: PhotoId, size: Size) {
+        self.want_job(id, size, Priority::Visible, true, false);
     }
 
     /// The photo being opened as it was before its edit, under
     /// [`crate::jobs::original_id`].
-    pub(crate) fn want_original(&mut self, idx: usize, size: Size) {
-        self.want_job(idx, size, Priority::Visible, true, true);
+    pub(crate) fn want_original(&mut self, id: PhotoId, size: Size) {
+        self.want_job(id, size, Priority::Visible, true, true);
     }
 
-    /// Whether this photo shows an edit.
-    pub(crate) fn is_edited(&self, idx: usize) -> bool {
-        self.edited.contains_key(&self.catalog.photos[idx].path)
+    /// Whether this tile shows an edit (a copy's: one that changes
+    /// something).
+    pub(crate) fn is_edited(&self, id: PhotoId) -> bool {
+        match self.copy_info(id) {
+            Some(c) => c.key.is_some(),
+            None => self
+                .index(id)
+                .is_some_and(|i| self.edited.contains_key(&self.catalog.photos[i].path)),
+        }
     }
 
-    fn want_job(&mut self, idx: usize, size: Size, priority: Priority, open: bool, original: bool) {
-        let id = self.ids[idx];
+    fn want_job(
+        &mut self,
+        id: PhotoId,
+        size: Size,
+        priority: Priority,
+        open: bool,
+        original: bool,
+    ) {
+        let Some(idx) = self.index(id) else { return };
+        // A copy shows its own edit's preview; the file, the master's.
+        let edit = match self.copy_info(id) {
+            Some(c) => c.key.clone(),
+            None => self.edited.get(&self.catalog.photos[idx].path).cloned(),
+        };
         let key = Key {
             photo: if original {
                 crate::jobs::original_id(id)
@@ -3410,11 +3542,9 @@ impl ShoeboxApp {
                 mtime_ns: p.mtime_ns,
                 orientation: p.meta.orientation(),
                 target: self.target,
-                edited: self
-                    .edited
-                    .get(&p.path)
-                    .filter(|k| !original && self.previews_ready.contains(*k))
-                    .map(|k| self.developer.preview_path(k)),
+                edited: edit
+                    .filter(|k| !original && self.previews_ready.contains(k))
+                    .map(|k| self.developer.preview_path(&k)),
                 cloud: p.cloud && !open,
                 keep: true,
             },
@@ -3541,10 +3671,9 @@ impl ShoeboxApp {
     /// Click with modifiers, as in Lightroom: plain = select one,
     /// Cmd = toggle, Shift = range from the anchor.
     pub(crate) fn click(&mut self, pos_in_shown: usize, modifiers: egui::Modifiers) {
-        let Some(&i) = self.shown.get(pos_in_shown) else {
+        let Some(id) = self.shown.get(pos_in_shown).map(|t| t.id) else {
             return;
         };
-        let id = self.ids[i];
         if modifiers.command {
             if !self.selection.remove(&id) {
                 self.selection.insert(id);
@@ -3553,10 +3682,10 @@ impl ShoeboxApp {
         } else if modifiers.shift
             && let Some(a) = self
                 .anchor
-                .and_then(|a| self.shown.iter().position(|&i| self.ids[i] == a))
+                .and_then(|a| self.shown.iter().position(|t| t.id == a))
         {
             let (lo, hi) = (a.min(pos_in_shown), a.max(pos_in_shown));
-            self.selection = self.shown[lo..=hi].iter().map(|&i| self.ids[i]).collect();
+            self.selection = self.shown[lo..=hi].iter().map(|t| t.id).collect();
         } else {
             self.selection = BTreeSet::from([id]);
             self.anchor = Some(id);
@@ -3570,11 +3699,11 @@ impl ShoeboxApp {
         }
         let pos = self
             .current
-            .and_then(|c| self.shown.iter().position(|&i| self.ids[i] == c))
+            .and_then(|c| self.shown.iter().position(|t| t.id == c))
             .map_or(0, |p| {
                 (p as isize + delta).clamp(0, self.shown.len() as isize - 1) as usize
             });
-        let id = self.ids[self.shown[pos]];
+        let id = self.shown[pos].id;
         self.current = Some(id);
         self.selection = BTreeSet::from([id]);
         self.anchor = Some(id);
@@ -3588,8 +3717,8 @@ impl ShoeboxApp {
         let mut paths: Vec<&Path> = self
             .shown
             .iter()
-            .filter(|&&i| self.selection.contains(&self.ids[i]))
-            .map(|&i| self.catalog.photos[i].path.as_path())
+            .filter(|t| self.selection.contains(&t.id))
+            .map(|t| self.catalog.photos[t.idx].path.as_path())
             .collect();
         if paths.is_empty()
             && let Some(p) = self.current.and_then(|c| self.photo(c))
@@ -3602,10 +3731,9 @@ impl ShoeboxApp {
     /// Right-click on a photo: like Finder, a click outside the selection
     /// selects just that photo first.
     pub(crate) fn secondary_click(&mut self, pos_in_shown: usize) {
-        let Some(&i) = self.shown.get(pos_in_shown) else {
+        let Some(id) = self.shown.get(pos_in_shown).map(|t| t.id) else {
             return;
         };
-        let id = self.ids[i];
         if !self.selection.contains(&id) {
             self.click(pos_in_shown, egui::Modifiers::NONE);
         }
@@ -3617,7 +3745,7 @@ impl ShoeboxApp {
 
     pub(crate) fn current_pos(&self) -> Option<usize> {
         let c = self.current?;
-        self.shown.iter().position(|&i| self.ids[i] == c)
+        self.shown.iter().position(|t| t.id == c)
     }
 
     // --- input -------------------------------------------------------------
@@ -3715,7 +3843,7 @@ impl ShoeboxApp {
                 self.bars_open = true;
             }
             if pressed(egui::Key::A) {
-                self.selection = self.shown.iter().map(|&i| self.ids[i]).collect();
+                self.selection = self.shown.iter().map(|t| t.id).collect();
             }
             if pressed(egui::Key::D) {
                 self.selection.clear();

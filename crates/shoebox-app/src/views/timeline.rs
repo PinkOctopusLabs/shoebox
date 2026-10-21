@@ -70,9 +70,10 @@ enum Row {
 fn build(app: &ShoeboxApp) -> Layout {
     let mut stacks = Vec::new();
     let mut pos_of_stack = ByStack::new(app.catalog.stacks.len());
-    for (pos, &i) in app.shown.iter().enumerate() {
-        let s = app.catalog.stack_of[i];
-        if app.catalog.stacks[s].primary == i {
+    for (pos, t) in app.shown.iter().enumerate() {
+        let s = app.catalog.stack_of[t.idx];
+        // A stack's own tile (not an open stack's other files or copies).
+        if app.catalog.stacks[s].primary == t.idx && t.id == app.ids[t.idx] {
             stacks.push(s);
             pos_of_stack.insert(s, pos);
         }

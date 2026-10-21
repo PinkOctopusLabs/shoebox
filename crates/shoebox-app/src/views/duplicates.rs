@@ -430,11 +430,11 @@ fn entry_tile(app: &mut ShoeboxApp, ui: &mut egui::Ui, r: &Review, gi: usize, k:
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 3.0, ui.visuals().faint_bg_color);
         let id = photo_id(&f.path);
-        if let Some(idx) = app.index(id) {
+        if app.index(id).is_some() {
             let size = super::size_for(thumb.x, ui.ctx().pixels_per_point());
-            app.want(idx, size, Priority::Visible);
+            app.want(id, size, Priority::Visible);
             if size == Size::Large {
-                app.want(idx, Size::Small, Priority::Visible); // meanwhile
+                app.want(id, Size::Small, Priority::Visible); // meanwhile
             }
             match app.textures.best(id, size) {
                 Some(t) => {

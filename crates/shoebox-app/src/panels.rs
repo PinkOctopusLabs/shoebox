@@ -1667,7 +1667,7 @@ pub fn info(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 return;
             };
             let Some(idx) = app.index(id) else { return };
-            app.want(idx, crate::jobs::Size::Small, crate::jobs::Priority::Near);
+            app.want(id, crate::jobs::Size::Small, crate::jobs::Priority::Near);
             let (open, _) = section(app, ui, "Histogram", None);
             if open && let Some(h) = app.histograms.get(&id) {
                 histogram(ui, h);
@@ -1689,6 +1689,11 @@ fn details(app: &mut ShoeboxApp, ui: &mut egui::Ui, id: crate::jobs::PhotoId, id
     // Rows with nothing to say are left out.
     let opt = |v: Option<String>| v.unwrap_or_default();
     let rows: Vec<(&str, String)> = vec![
+        // A virtual copy's tile: which copy (the rest is its file's).
+        (
+            "Virtual copy",
+            opt(app.copy_info(id).map(|c| c.name.clone())),
+        ),
         (
             "Captured",
             opt(x.capture_time.as_ref().map(|t| {

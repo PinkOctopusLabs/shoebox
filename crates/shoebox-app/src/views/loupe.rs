@@ -14,12 +14,12 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         return;
     };
     // A photo in the cloud only is downloaded as it opens.
-    app.want_open(idx, Size::Large);
-    app.want_open(idx, Size::Full);
+    app.want_open(id, Size::Large);
+    app.want_open(id, Size::Full);
     if let Some(pos) = app.current_pos() {
         for n in [pos + 1, pos.wrapping_sub(1)] {
-            if let Some(&j) = app.shown.get(n) {
-                app.want(j, Size::Large, Priority::Near);
+            if let Some(t) = app.shown.get(n).copied() {
+                app.want(t.id, Size::Large, Priority::Near);
             }
         }
     }
@@ -38,10 +38,10 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, Color32::from_gray(18));
 
-    let original = app.loupe.original && app.is_edited(idx);
+    let original = app.loupe.original && app.is_edited(id);
     if original {
-        app.want_original(idx, Size::Large);
-        app.want_original(idx, Size::Full);
+        app.want_original(id, Size::Large);
+        app.want_original(id, Size::Full);
     }
     let photo = &app.catalog.photos[idx];
     let before = original

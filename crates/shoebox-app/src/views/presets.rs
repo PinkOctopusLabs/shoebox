@@ -302,7 +302,8 @@ pub fn paste(app: &mut ShoeboxApp) {
     } else {
         sel
     };
-    let open = app.develop.doc.as_ref().and(app.develop.photo);
+    // The tile open in Develop (a copy's, when it's a copy).
+    let open = app.develop.doc.as_ref().and(app.current);
     let mut others = Vec::new();
     let mut skipped = 0;
     let mut here = false;
@@ -317,7 +318,12 @@ pub fn paste(app: &mut ShoeboxApp) {
             continue;
         }
         let p = &app.catalog.photos[i];
-        others.push((app.catalog.roots[p.root].path.clone(), p.rel.clone()));
+        let copy = app.copy_of(id).unwrap_or(shoebox_core::edits::MAIN);
+        others.push((
+            app.catalog.roots[p.root].path.clone(),
+            p.rel.clone(),
+            copy.to_owned(),
+        ));
     }
     if here && !app.develop.read_only {
         let p = preset.clone();

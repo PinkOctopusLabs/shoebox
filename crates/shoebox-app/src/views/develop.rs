@@ -370,6 +370,55 @@ fn switch_copy(app: &mut ShoeboxApp, id: &str) {
         rel,
         copy: id.to_owned(),
     });
+    current_follows_copy(app);
+}
+
+/// The library's current photo is the copy being edited: its own tile (its
+/// stack opened so the tile is there), or the file for the master.
+fn current_follows_copy(app: &mut ShoeboxApp) {
+    let Some(file) = app.develop.photo else {
+        return;
+    };
+    let Some(idx) = app.index(file) else { return };
+    let copy = app.develop.copy_id().to_owned();
+    let tile = if copy == shoebox_core::edits::MAIN {
+        file
+    } else {
+        let id = crate::jobs::copy_id(file, &copy);
+        let path = app.catalog.photos[idx].path.clone();
+        app.copy_tiles.entry(id).or_insert((path, copy));
+        let primary = app.ids[app.stack_of(idx).primary];
+        if app.expanded.insert(primary) {
+            app.refilter();
+        }
+        id
+    };
+    if app.current != Some(tile) {
+        app.activate(tile);
+        app.scroll_to_current = true;
+    }
+}
+
+/// Delete a virtual copy of `file` (its edit file goes to the Trash, as an
+/// undoable batch): from Develop's list, or its tile's menu.
+pub fn remove_copy(app: &mut ShoeboxApp, file: PhotoId, copy: &str) {
+    let Some(idx) = app.index(file) else { return };
+    if copy == shoebox_core::edits::MAIN || app.catalog.is_reference(idx) {
+        return;
+    }
+    if app.develop.photo == Some(file) {
+        if app.develop.copy_id() == copy {
+            switch_copy(app, shoebox_core::edits::MAIN);
+        }
+        app.develop.copies.retain(|c| c.0 != copy);
+    }
+    let p = &app.catalog.photos[idx];
+    let (root, rel) = (app.catalog.roots[p.root].path.clone(), p.rel.clone());
+    app.command(LibraryCommand::RemoveCopy {
+        root,
+        rel,
+        copy: copy.to_owned(),
+    });
 }
 
 /// A new virtual copy of the edit as it is now, opened.
@@ -389,6 +438,7 @@ fn new_copy(app: &mut ShoeboxApp) {
     st.applied = None;
     touched(st);
     keep(app, true);
+    current_follows_copy(app);
 }
 
 /// Copies of the photo's edit: the master and virtual copies.
@@ -487,17 +537,8 @@ fn copies(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             }
         }
         Some(("delete", id)) => {
-            if app.develop.copy_id() == id {
-                switch_copy(app, shoebox_core::edits::MAIN);
-            }
-            let st = &mut app.develop;
-            st.copies.retain(|c| c.0 != id);
-            if let Some((root, rel)) = st.file.clone() {
-                app.command(LibraryCommand::RemoveCopy {
-                    root,
-                    rel,
-                    copy: id,
-                });
+            if let Some(file) = app.develop.photo {
+                remove_copy(app, file, &id);
             }
         }
         _ => {}
@@ -638,14 +679,29 @@ pub fn poll(app: &mut ShoeboxApp) {
 }
 
 /// Follow the current photo: load its edit and ask for it to be prepared.
+/// A virtual copy's tile opens that copy of its file.
 fn follow(app: &mut ShoeboxApp) {
-    let Some((id, idx)) = app.current.and_then(|id| app.index(id).map(|i| (id, i))) else {
+    let Some(current) = app.current else { return };
+    let Some(idx) = app.index(current) else {
         return;
     };
+    // Develop works on the file; which copy follows the tile.
+    let id = app.ids[idx];
+    let copy = app
+        .copy_of(current)
+        .unwrap_or(shoebox_core::edits::MAIN)
+        .to_owned();
+    if app.develop.photo == Some(id) && app.develop.copy_id() != copy && app.develop.doc.is_some() {
+        switch_copy(app, &copy);
+        return;
+    }
     if app.develop.photo != Some(id) {
         keep(app, true);
         app.develop.reset();
         app.develop.photo = Some(id);
+        if copy != shoebox_core::edits::MAIN {
+            app.develop.copy = copy.clone();
+        }
         let p = &app.catalog.photos[idx];
         if p.format.is_movie() {
             app.develop.status = Status::Unsupported;
@@ -657,14 +713,14 @@ fn follow(app: &mut ShoeboxApp) {
         app.command(LibraryCommand::LoadEdit {
             root,
             rel: p.rel.clone(),
-            copy: shoebox_core::edits::MAIN.to_owned(),
+            copy,
         });
         // The photos either side, converted while this one is edited.
         let near: Vec<PathBuf> = app
             .current_pos()
             .into_iter()
             .flat_map(|pos| [pos + 1, pos.wrapping_sub(1)])
-            .filter_map(|n| app.shown.get(n).copied())
+            .filter_map(|n| app.shown.get(n).map(|t| t.idx))
             .filter(|&j| app.needs_dng(j))
             .map(|j| app.catalog.photos[j].path.clone())
             .collect();
@@ -968,7 +1024,7 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
         Some((t, s)) => (Some(t), [s[0] as f32, s[1] as f32]),
         None => {
             // The embedded preview while the raw is prepared.
-            app.want_open(idx, Size::Full);
+            app.want_open(id, Size::Full);
             match app.textures.best(id, Size::Full) {
                 Some(t) => (Some(t.id()), [t.size()[0] as f32, t.size()[1] as f32]),
                 None => (None, [3.0, 2.0]),

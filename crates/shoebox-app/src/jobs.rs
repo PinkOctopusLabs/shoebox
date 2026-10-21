@@ -34,6 +34,15 @@ pub fn photo_id(path: &std::path::Path) -> PhotoId {
     h.finish()
 }
 
+/// The id of a photo's virtual copy's tile (its textures, selection and
+/// place in the grid).
+pub fn copy_id(photo: PhotoId, copy: &str) -> PhotoId {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (photo, "copy", copy).hash(&mut h);
+    h.finish()
+}
+
 /// The id an edited photo's unedited image is kept under (the loupe's \).
 pub fn original_id(id: PhotoId) -> PhotoId {
     use std::hash::{Hash, Hasher};
@@ -390,7 +399,8 @@ pub enum LibraryCommand {
     /// Apply a preset (or pasted settings) to these photos' edits, as one
     /// step in each one's history, and write them as one batch.
     ApplyPreset {
-        photos: Vec<(PathBuf, String)>,
+        /// (root, rel, copy): a virtual copy's tile pastes onto that copy.
+        photos: Vec<(PathBuf, String, String)>,
         preset: shoebox_develop::preset::Preset,
         label: String,
     },
@@ -633,8 +643,8 @@ pub enum LibraryEvent {
     /// deleted; listed in Settings).
     Unattached(Vec<PathBuf>),
     /// A photo's edit, if it has one (answer to `LoadEdit`).
-    /// How many virtual copies these photos have (merged into the app's).
-    Copies(Vec<(PathBuf, usize)>),
+    /// These photos' virtual copies (each list replaces the photo's).
+    Copies(Vec<(PathBuf, Vec<CopyInfo>)>),
     EditLoaded {
         /// Which copy (`edits::MAIN`, or a virtual copy's id).
         copy: String,
@@ -657,19 +667,54 @@ pub struct EditInfo {
     pub json: String,
 }
 
+/// A photo's virtual copy, as the library shows it (its own tile when the
+/// photo's stack is open).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CopyInfo {
+    pub id: String,
+    pub name: String,
+    /// Names its rendered preview, as [`EditInfo::key`].
+    pub key: Option<String>,
+    pub json: String,
+}
+
 /// Bumped when previews must be rendered again (a new process version).
 const PREVIEW_VERSION: &str = "1";
 
-fn edit_info(root: &Path, rel: &str, json: String) -> Option<EditInfo> {
-    let doc = shoebox_develop::edit::EditDoc::from_json(&json).ok()?;
-    let key = (!doc.settings().is_default()).then(|| {
+/// What names an edit's rendered preview; None when it changes nothing.
+fn preview_key(doc: &shoebox_develop::edit::EditDoc) -> Option<String> {
+    (!doc.settings().is_default()).then(|| {
         let id = format!(
             "{}:{}:{PREVIEW_VERSION}",
             doc.source.blake3,
             doc.render_hash()
         );
         blake3::hash(id.as_bytes()).to_hex()[..32].to_owned()
-    });
+    })
+}
+
+fn copy_info(copy: &str, json: String) -> Option<CopyInfo> {
+    let doc = shoebox_develop::edit::EditDoc::from_json(&json).ok()?;
+    Some(CopyInfo {
+        id: copy.to_owned(),
+        name: if doc.copy.name.is_empty() {
+            copy.to_owned()
+        } else {
+            doc.copy.name.clone()
+        },
+        key: preview_key(&doc),
+        json,
+    })
+}
+
+/// Copies in the order they were made (copy-2 before copy-10).
+fn sort_copies(list: &mut [CopyInfo]) {
+    list.sort_by(|a, b| (a.id.len(), &a.id).cmp(&(b.id.len(), &b.id)));
+}
+
+fn edit_info(root: &Path, rel: &str, json: String) -> Option<EditInfo> {
+    let doc = shoebox_develop::edit::EditDoc::from_json(&json).ok()?;
+    let key = preview_key(&doc);
     Some(EditInfo {
         path: root.join(rel),
         key,
@@ -968,9 +1013,17 @@ fn library_worker(
                 }
                 match cache.edits() {
                     Ok(rows) => {
-                        let mut copies: HashMap<PathBuf, usize> = HashMap::new();
+                        let mut copies: HashMap<PathBuf, Vec<CopyInfo>> = HashMap::new();
                         for r in rows.iter().filter(|r| r.2 != shoebox_core::edits::MAIN) {
-                            *copies.entry(Path::new(&r.0).join(&r.1)).or_default() += 1;
+                            if let Some(c) = copy_info(&r.2, r.3.clone()) {
+                                copies
+                                    .entry(Path::new(&r.0).join(&r.1))
+                                    .or_default()
+                                    .push(c);
+                            }
+                        }
+                        for list in copies.values_mut() {
+                            sort_copies(list);
                         }
                         emit(LibraryEvent::Copies(copies.into_iter().collect()));
                         emit(LibraryEvent::Edits(
@@ -1106,7 +1159,7 @@ fn library_worker(
                     (&mut redo, &mut undo)
                 };
                 let Some(batch) = from.pop() else { continue };
-                match undo_batch(batch, &fileops, &mut catalog, &mut cache) {
+                match undo_batch(batch, &fileops, &mut catalog, &mut cache, &emit) {
                     Ok(u) => to.push(u),
                     Err(e) => emit(LibraryEvent::Error(format!(
                         "{}: {e}",
@@ -1141,7 +1194,7 @@ fn library_worker(
                 (false, false)
             }
             LibraryCommand::UndoBatch(batch) => {
-                let r = undo_batch(batch, &fileops, &mut catalog, &mut cache);
+                let r = undo_batch(batch, &fileops, &mut catalog, &mut cache, &emit);
                 if r.is_ok() {
                     undo.retain(|&b| b != batch);
                     history(&undo, &redo);
@@ -1377,7 +1430,7 @@ fn library_worker(
                 (false, false)
             }
             LibraryCommand::RunOrganise(req) => {
-                match run_organise(&req, &settings, &mut catalog, &fileops, &mut cache) {
+                match run_organise(&req, &settings, &mut catalog, &fileops, &mut cache, &emit) {
                     Ok((b, files)) => {
                         undo.push(b);
                         redo.clear();
@@ -1521,7 +1574,7 @@ fn library_worker(
                         }
                         Err(e) => emit(LibraryEvent::Error(format!("removing the copy: {e}"))),
                     }
-                    emit(copy_count(&cache, &root, &rel));
+                    emit(copies_of(&cache, &root, &rel));
                 }
                 (false, false)
             }
@@ -1539,7 +1592,7 @@ fn library_worker(
                             emit(LibraryEvent::Error(format!("keeping the edit: {e}")));
                         }
                         if copy != shoebox_core::edits::MAIN {
-                            emit(copy_count(&cache, &root, &rel));
+                            emit(copies_of(&cache, &root, &rel));
                         }
                         // The master's edit is what the library shows.
                         if copy == shoebox_core::edits::MAIN
@@ -1607,15 +1660,10 @@ fn library_worker(
             } => {
                 use shoebox_develop::edit::{EditDoc, Source};
                 let mut infos = Vec::new();
-                for (root, rel) in photos {
-                    let json = shoebox_core::edits::load(
-                        &cache,
-                        &root,
-                        &rel,
-                        shoebox_core::edits::MAIN,
-                        render_hash,
-                    )
-                    .unwrap_or_default();
+                let mut copied = Vec::new();
+                for (root, rel, copy) in photos {
+                    let json = shoebox_core::edits::load(&cache, &root, &rel, &copy, render_hash)
+                        .unwrap_or_default();
                     let mut doc = json
                         .and_then(|j| EditDoc::from_json(&j).ok())
                         .unwrap_or_else(|| {
@@ -1632,18 +1680,14 @@ fn library_worker(
                     }
                     let kept =
                         complete_source(&root, &rel, &doc.to_json()).and_then(|(json, hash)| {
-                            shoebox_core::edits::put(
-                                &cache,
-                                &root,
-                                &rel,
-                                shoebox_core::edits::MAIN,
-                                &json,
-                                &hash,
-                            )
-                            .map_err(|e| e.to_string())?;
+                            shoebox_core::edits::put(&cache, &root, &rel, &copy, &json, &hash)
+                                .map_err(|e| e.to_string())?;
                             Ok(json)
                         });
                     match kept {
+                        Ok(_) if copy != shoebox_core::edits::MAIN => {
+                            copied.push(copies_of(&cache, &root, &rel));
+                        }
                         Ok(json) => infos.extend(edit_info(&root, &rel, json)),
                         Err(e) => emit(LibraryEvent::Error(format!("{label}: {rel}: {e}"))),
                     }
@@ -1653,6 +1697,9 @@ fn library_worker(
                 }
                 if !infos.is_empty() {
                     emit(LibraryEvent::Edits(infos));
+                }
+                for ev in copied {
+                    emit(ev);
                 }
                 (false, false)
             }
@@ -1865,6 +1912,7 @@ fn undo_batch(
     fileops: &FileOps,
     catalog: &mut Catalog,
     cache: &mut shoebox_core::cache::Cache,
+    emit: &(dyn Fn(LibraryEvent) + Sync),
 ) -> Result<i64, String> {
     let ops = fileops.journal().ops(batch).unwrap_or_default();
     let touched: Vec<PathBuf> = ops
@@ -1883,6 +1931,7 @@ fn undo_batch(
     if let Err(e) = catalog.note_moved(&back, cache) {
         tracing::warn!("carrying the cache across undo: {e}");
     }
+    edits_moved(cache, catalog, &back, emit);
     let label = fileops
         .journal()
         .batch(u)
@@ -1899,15 +1948,30 @@ fn undo_batch(
 /// Stacks of these files.
 /// An edit document's render hash (for the catalog row); empty if it
 /// doesn't parse.
-/// A photo's virtual copies, counted (for the grid's badge).
-fn copy_count(cache: &shoebox_core::cache::Cache, root: &Path, rel: &str) -> LibraryEvent {
-    let n = root
+/// A photo's virtual copies (for their tiles and the grid's badge).
+fn copies_of(cache: &shoebox_core::cache::Cache, root: &Path, rel: &str) -> LibraryEvent {
+    let mut list: Vec<CopyInfo> = root
         .to_str()
-        .and_then(|r| cache.edit_copies(r, rel).ok())
-        .map_or(0, |c| {
-            c.iter().filter(|c| *c != shoebox_core::edits::MAIN).count()
-        });
-    LibraryEvent::Copies(vec![(root.join(rel), n)])
+        .and_then(|r| {
+            let ids = cache.edit_copies(r, rel).ok()?;
+            Some(
+                ids.iter()
+                    .filter(|c| *c != shoebox_core::edits::MAIN)
+                    .filter_map(|c| {
+                        let key = shoebox_core::cache::EditKey {
+                            root: r,
+                            rel,
+                            copy: c,
+                        };
+                        let json = cache.edit(&key).ok()??.json;
+                        copy_info(c, json)
+                    })
+                    .collect(),
+            )
+        })
+        .unwrap_or_default();
+    sort_copies(&mut list);
+    LibraryEvent::Copies(vec![(root.join(rel), list)])
 }
 
 fn render_hash(json: &str) -> String {
@@ -1997,6 +2061,7 @@ fn run_organise(
     catalog: &mut Catalog,
     fileops: &FileOps,
     cache: &mut shoebox_core::cache::Cache,
+    emit: &(dyn Fn(LibraryEvent) + Sync),
 ) -> Result<(i64, usize), String> {
     let (moves, _) = plan_organise(catalog, req)?;
     if moves.is_empty() {
@@ -2033,7 +2098,57 @@ fn run_organise(
     if let Err(e) = catalog.note_moved(&moves, cache) {
         tracing::warn!("carrying the cache across moves: {e}");
     }
+    edits_moved(cache, catalog, &moves, emit);
     Ok((b, moves.len()))
+}
+
+/// Photos Shoebox moved take their edits along (`Catalog::note_moved`):
+/// the app hears of the master's edit and the virtual copies at the new
+/// path, and forgets them at the old one.
+fn edits_moved(
+    cache: &shoebox_core::cache::Cache,
+    catalog: &Catalog,
+    moves: &[PlannedMove],
+    emit: &(dyn Fn(LibraryEvent) + Sync),
+) {
+    let from: HashMap<&Path, &Path> = moves
+        .iter()
+        .map(|m| (m.dst.as_path(), m.src.as_path()))
+        .collect();
+    let mut infos = Vec::new();
+    let mut copies = Vec::new();
+    for p in &catalog.photos {
+        let Some(&src) = from.get(p.path.as_path()) else {
+            continue;
+        };
+        let root = &catalog.roots[p.root].path;
+        let Some(r) = root.to_str() else { continue };
+        let key = shoebox_core::cache::EditKey {
+            root: r,
+            rel: &p.rel,
+            copy: shoebox_core::edits::MAIN,
+        };
+        if let Ok(Some(e)) = cache.edit(&key) {
+            infos.extend(edit_info(root, &p.rel, e.json));
+            infos.push(EditInfo {
+                path: src.to_path_buf(),
+                key: None,
+                json: String::new(),
+            });
+        }
+        if let LibraryEvent::Copies(list) = copies_of(cache, root, &p.rel)
+            && list.iter().any(|(_, c)| !c.is_empty())
+        {
+            copies.extend(list);
+            copies.push((src.to_path_buf(), Vec::new()));
+        }
+    }
+    if !infos.is_empty() {
+        emit(LibraryEvent::Edits(infos));
+    }
+    if !copies.is_empty() {
+        emit(LibraryEvent::Copies(copies));
+    }
 }
 
 /// Run duplicate detection and publish the groups.

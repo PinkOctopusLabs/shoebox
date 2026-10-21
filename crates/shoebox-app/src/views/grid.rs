@@ -101,7 +101,7 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         let days: Option<Vec<String>> = headers.then(|| {
             app.shown
                 .iter()
-                .map(|&i| app.capture_day(i).unwrap_or_default())
+                .map(|t| app.capture_day(t.idx).unwrap_or_default())
                 .collect()
         });
         let (lines, height) = lines(app.shown.len(), cols, size, days.as_deref());
