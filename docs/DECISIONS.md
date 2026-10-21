@@ -1745,3 +1745,26 @@ Larger) zooms all of it together, stored in the settings and changed with
 ⌘+ / ⌘− / ⌘0 (egui's own keyboard zoom is off, so the choice persists).
 Labels painted on photos (badges, timeline axes) keep fixed sizes and
 scale only with the zoom.
+
+## Export: 16-bit PNG, borders and watermarks (2026-10-21)
+
+PNG joins JPEG and TIFF as an export format: 16 bits a channel, with the
+space's ICC profile in an iCCP chunk (the `png` crate, already used by
+the tests).
+
+Borders and watermarks are export preset options (`overlay.rs`), applied
+after the resize in the preset's colour space. A border is a width (% of
+the long edge) and an sRGB colour. The file keeps the preset's long edge
+and the photo shrinks to make room, keeping its shape; the border is even
+all round, so the short side comes out a little longer than a plain
+resize. A watermark is one line of text or a PNG (its transparency kept),
+with a size (% of the photo's long edge), opacity, one of nine positions
+and a margin, placed on the photo inside the border. Colours are given in
+sRGB and converted to the export's space.
+
+Text is drawn from the font's outlines with `skrifa` and filled
+anti-aliased with `tiny-skia` (MIT/Apache and BSD-3; both were already in
+the build through egui, so no new code was fetched). The default font is
+the app's own text font; a preset can name a .ttf or .otf file instead.
+A watermark image or font that can't be read fails that preset's export
+with a message, rather than quietly leaving the watermark out.

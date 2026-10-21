@@ -866,6 +866,11 @@ impl ShoeboxApp {
         }
     }
 
+    /// Change every export preset (tests).
+    pub fn edit_export_presets(&mut self, mut f: impl FnMut(&mut shoebox_develop::export::Preset)) {
+        self.export.presets.iter_mut().for_each(&mut f);
+    }
+
     /// Export presets loaded, an export running, files listed for the
     /// current photo, and the last notice and error (tests).
     pub fn export_state(&self) -> (usize, bool, Option<usize>, Option<String>, Option<String>) {

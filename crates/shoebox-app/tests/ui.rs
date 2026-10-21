@@ -3940,6 +3940,70 @@ fn likely_edits_convert_when_idle() {
     assert!(runs.contains("DSC_0001.NEF"), "{runs}");
 }
 
+/// An export preset with a border and a text watermark: the editor shows
+/// their rows, and the file has the border (its width kept).
+#[test]
+fn export_with_a_border_and_watermark() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(&root).unwrap();
+    let img = shoebox_fixtures::scene(5, 640, 480);
+    std::fs::write(
+        root.join("beach.jpg"),
+        shoebox_fixtures::jpeg(&img, 92).unwrap(),
+    )
+    .unwrap();
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let mut h = harness(p, egui::vec2(1400.0, 1100.0));
+    settle(&mut h, Duration::from_secs(60));
+    wait_for(&mut h, Duration::from_secs(10), "presets", |a| {
+        a.export_state().0 > 0
+    });
+    let out = t.path().join("exports");
+    h.state_mut().set_export_folder(&out);
+    h.state_mut().edit_export_presets(|p| {
+        p.border = Some(shoebox_develop::overlay::Border {
+            width: 4.0,
+            colour: [255, 255, 255],
+        });
+        p.watermark = Some(shoebox_develop::overlay::Watermark::text("© Shoebox"));
+    });
+    h.get_by_label("beach.jpg").click();
+    h.run_steps(2);
+    h.key_press_modifiers(
+        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+        egui::Key::E,
+    );
+    h.run_steps(3);
+    // The first preset's editor shows the border and watermark rows.
+    h.get_by_label("JPEG · Full size").click();
+    h.run_steps(3);
+    assert!(h.query_by_label("Watermark").is_some());
+    assert!(h.query_by_label("Position").is_some());
+    snapshot(&mut h, "export-watermark");
+    h.get_all_by_label("Export").last().unwrap().click();
+    h.run_steps(2);
+    wait_for(&mut h, Duration::from_secs(30), "export", |a| {
+        !a.export_state().1 && a.export_state().3.is_some()
+    });
+    let files: Vec<_> = walk(&out);
+    assert_eq!(files.len(), 1, "{files:?}");
+    let d = shoebox_decode::render_path(
+        shoebox_decode::Format::Jpeg,
+        &files[0],
+        None,
+        1,
+        shoebox_decode::Target::Srgb,
+    )
+    .unwrap();
+    // Still 640 wide, a white border (4%: 26 px) all round.
+    assert_eq!(d.width, 640);
+    let at = |x: u32, y: u32| &d.px[((y * d.width + x) * 3) as usize..][..3];
+    for (x, y) in [(2, 2), (637, 2), (2, d.height - 3), (320, 5)] {
+        assert!(at(x, y).iter().all(|&v| v > 240), "{:?}", at(x, y));
+    }
+}
+
 /// Export: ⇧⌘E, the first preset (JPEG, full size), into a folder outside
 /// the library; the Info panel lists it. Into a folder in the library, it
 /// lands as a new file (journaled, never replacing, no question asked) and

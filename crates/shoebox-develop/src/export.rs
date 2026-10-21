@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cpu::{Rgb, Target, to_u16};
 use crate::encode::{Jpeg, icc, jpeg};
+use crate::overlay::{self, Border, Watermark};
 
 /// A named set of export settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -32,6 +33,11 @@ pub struct Preset {
     /// (YYYY-MM-DD, capture), `{seq}` (1, 2, … in this export).
     #[serde(default = "default_naming")]
     pub naming: String,
+    /// A border around the photo (inside the preset's size).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border: Option<Border>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watermark: Option<Watermark>,
 }
 
 fn default_naming() -> String {
@@ -148,6 +154,8 @@ pub fn starters() -> Vec<Preset> {
             metadata: Metadata::All,
             folder: None,
             naming: default_naming(),
+            border: None,
+            watermark: None,
         },
         Preset {
             name: "JPEG · Web 2048".into(),
@@ -161,6 +169,8 @@ pub fn starters() -> Vec<Preset> {
             metadata: Metadata::AllButLocation,
             folder: None,
             naming: default_naming(),
+            border: None,
+            watermark: None,
         },
         Preset {
             name: "TIFF · 16-bit".into(),
@@ -172,6 +182,8 @@ pub fn starters() -> Vec<Preset> {
             metadata: Metadata::All,
             folder: None,
             naming: default_naming(),
+            border: None,
+            watermark: None,
         },
     ]
 }
@@ -271,6 +283,25 @@ pub fn resize(img: &Rgb, w: usize, h: usize) -> Rgb {
             }
         });
     out
+}
+
+/// A full-size render (display values in the preset's space) as the file
+/// will hold it: resized to the preset's size, then its border and
+/// watermark. `default_font`: for a text watermark that names no font.
+pub fn finish(img: &Rgb, preset: &Preset, default_font: &[u8]) -> Result<Rgb, String> {
+    let target = preset.space.target();
+    let (w, h) = output_size(img.width, img.height, preset.size);
+    let ((iw, ih), px) = overlay::inside(w, h, preset.border.as_ref());
+    let mut out = resize(img, iw, ih);
+    if let Some(b) = &preset.border
+        && px > 0
+    {
+        out = overlay::add_border(&out, px, overlay::from_srgb(b.colour, target));
+    }
+    if let Some(m) = &preset.watermark {
+        overlay::draw(&mut out, (px, px, iw, ih), m, target, default_font)?;
+    }
+    Ok(out)
 }
 
 /// Encode display values (in `preset`'s space) as the preset's file.

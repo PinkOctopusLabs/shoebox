@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use eframe::egui::{self, RichText};
 use shoebox_develop::export::{FileFormat, Metadata, OutputSize, Preset, Space, TiffCompression};
+use shoebox_develop::overlay::{Anchor, Border, Mark, Watermark};
 
 use crate::app::ShoeboxApp;
 use crate::develop::{Clash, ExportItem, ExportJob};
@@ -233,7 +234,14 @@ fn summary(p: &Preset) -> String {
         OutputSize::LongEdge { px } => format!("{px} px"),
         OutputSize::Megapixels { mp } => format!("{mp} MP"),
     };
-    format!("{format} · {} · {size}", p.space.label())
+    let mut out = format!("{format} · {} · {size}", p.space.label());
+    if p.border.is_some() {
+        out.push_str(" · border");
+    }
+    if p.watermark.is_some() {
+        out.push_str(" · watermark");
+    }
+    out
 }
 
 /// Files an export would land on are there: replace them, or save new
@@ -597,7 +605,135 @@ fn editor(ui: &mut egui::Ui, p: &mut Preset) {
                     "{name} the original's name, {preset}, {date} (capture), {seq} (1, 2, …)",
                 );
             ui.end_row();
+
+            border(ui, p);
+            watermark(ui, p);
         });
+}
+
+/// A path typed in, None when empty.
+fn path_field(ui: &mut egui::Ui, path: Option<&PathBuf>, hint: &str) -> Option<Option<PathBuf>> {
+    let mut text = path.map(|f| f.display().to_string()).unwrap_or_default();
+    ui.add(
+        egui::TextEdit::singleline(&mut text)
+            .hint_text(hint)
+            .desired_width(320.0),
+    )
+    .changed()
+    .then(|| (!text.trim().is_empty()).then(|| PathBuf::from(text.trim())))
+}
+
+/// The border rows of the preset editor.
+fn border(ui: &mut egui::Ui, p: &mut Preset) {
+    ui.label("Border");
+    ui.horizontal(|ui| {
+        let mut on = p.border.is_some();
+        if ui.checkbox(&mut on, "").changed() {
+            p.border = on.then(Border::default);
+        }
+        if let Some(b) = &mut p.border {
+            ui.add(
+                egui::DragValue::new(&mut b.width)
+                    .range(0.1..=25.0)
+                    .speed(0.1)
+                    .suffix(" %"),
+            )
+            .on_hover_text("Width, as a share of the long edge");
+            ui.color_edit_button_srgb(&mut b.colour);
+        }
+    });
+    ui.end_row();
+}
+
+/// The watermark rows of the preset editor.
+fn watermark(ui: &mut egui::Ui, p: &mut Preset) {
+    ui.label("Watermark");
+    let kind = match p.watermark.as_ref().map(|w| &w.mark) {
+        None => 0,
+        Some(Mark::Text { .. }) => 1,
+        Some(Mark::Image { .. }) => 2,
+    };
+    egui::ComboBox::from_id_salt("export-watermark")
+        .selected_text(["None", "Text", "Image"][kind])
+        .show_ui(ui, |ui| {
+            if ui.selectable_label(kind == 0, "None").clicked() {
+                p.watermark = None;
+            }
+            if ui.selectable_label(kind == 1, "Text").clicked() && kind != 1 {
+                p.watermark = Some(Watermark::text("©"));
+            }
+            if ui.selectable_label(kind == 2, "Image").clicked() && kind != 2 {
+                p.watermark = Some(Watermark {
+                    mark: Mark::Image {
+                        path: PathBuf::new(),
+                    },
+                    size: 15.0,
+                    ..Watermark::text("")
+                });
+            }
+        });
+    ui.end_row();
+    let Some(w) = &mut p.watermark else { return };
+    match &mut w.mark {
+        Mark::Text { text, font, colour } => {
+            ui.label("Text");
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(text).desired_width(280.0));
+                ui.color_edit_button_srgb(colour);
+            });
+            ui.end_row();
+            ui.label("Font");
+            if let Some(f) = path_field(ui, font.as_ref(), "Shoebox's own (a .ttf or .otf file)") {
+                *font = f;
+            }
+            ui.end_row();
+        }
+        Mark::Image { path } => {
+            ui.label("Image");
+            if let Some(f) = path_field(
+                ui,
+                Some(&*path).filter(|p| !p.as_os_str().is_empty()),
+                "A PNG file",
+            ) {
+                *path = f.unwrap_or_default();
+            }
+            ui.end_row();
+        }
+    }
+    ui.label("");
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::DragValue::new(&mut w.size)
+                .range(0.5..=100.0)
+                .speed(0.1)
+                .prefix("Size ")
+                .suffix(" %"),
+        )
+        .on_hover_text("Text: its size; an image: its width; as a share of the long edge");
+        ui.add(
+            egui::DragValue::new(&mut w.opacity)
+                .range(0.0..=100.0)
+                .prefix("Opacity ")
+                .suffix(" %"),
+        );
+        ui.add(
+            egui::DragValue::new(&mut w.margin)
+                .range(0.0..=25.0)
+                .speed(0.1)
+                .prefix("Margin ")
+                .suffix(" %"),
+        );
+    });
+    ui.end_row();
+    ui.label("Position");
+    egui::ComboBox::from_id_salt("export-anchor")
+        .selected_text(w.anchor.label())
+        .show_ui(ui, |ui| {
+            for a in Anchor::ALL {
+                ui.selectable_value(&mut w.anchor, a, a.label());
+            }
+        });
+    ui.end_row();
 }
 
 /// The Info panel's list of a photo's exports (stale ones flagged).

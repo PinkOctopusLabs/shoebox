@@ -953,6 +953,19 @@ fn plan_names(job: &ExportJob) -> Names {
     out
 }
 
+/// The font a text watermark uses when its preset names none: the app's
+/// own text font.
+fn watermark_font() -> &'static [u8] {
+    static FONT: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    FONT.get_or_init(|| {
+        eframe::egui::FontDefinitions::default()
+            .font_data
+            .get("Ubuntu-Light")
+            .map(|f| (*f.font).as_ref().to_vec())
+            .unwrap_or_default()
+    })
+}
+
 /// Export one photo with each preset.
 #[allow(clippy::too_many_arguments)]
 fn export_item(
@@ -996,9 +1009,7 @@ fn export_item(
                     };
                     let frame = cpu::frame(&ready.meta, &ready.src, &item.settings, &o);
                     let img = cpu::apply_from(&ready.src, &item.settings, &frame, true);
-                    let (w, h) =
-                        shoebox_develop::export::output_size(img.width, img.height, preset.size);
-                    let img = shoebox_develop::export::resize(&img, w, h);
+                    let img = shoebox_develop::export::finish(&img, preset, watermark_font())?;
                     let bytes = shoebox_develop::export::encode(&img, preset)?;
                     let ext = preset.format.extension();
                     let stem = file.strip_suffix(&format!(".{ext}")).unwrap_or(&file);

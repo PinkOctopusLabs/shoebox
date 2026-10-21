@@ -6057,6 +6057,7 @@ version = "0.2.3"
 dependencies = [
  "blake3",
  "criterion",
+ "epaint_default_fonts",
  "jiff",
  "jpeg-encoder",
  "json-patch",
@@ -6068,9 +6069,11 @@ dependencies = [
  "serde_json",
  "shoebox-decode",
  "shoebox-fixtures",
+ "skrifa",
  "tempfile",
  "thiserror 2.0.21",
  "tiff",
+ "tiny-skia",
  "tracing",
  "wgpu",
 ]
