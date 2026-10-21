@@ -1574,20 +1574,6 @@ fn fine(
     ((v * q).round() / q).clamp(*range.start(), *range.end())
 }
 
-fn module(ui: &mut egui::Ui, title: &str, reset: bool) -> bool {
-    let mut clicked = false;
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(title).strong());
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            clicked = ui
-                .add_enabled(reset, egui::Button::new("Reset").small())
-                .on_hover_text("Back to the default")
-                .clicked();
-        });
-    });
-    clicked
-}
-
 /// The camera settings under the histogram: ISO, shutter, aperture, focal
 /// length and lens, as far as the file says.
 pub fn exif_summary(x: &shoebox_core::exif::ExifInfo) -> Option<String> {
@@ -1759,209 +1745,237 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             .show(ui, |ui| {
                 // White balance.
                 let wb = &s.modules.white_balance;
-                if module(ui, "White balance", *wb != WhiteBalance::default()) {
+                let reset = super::look::section(
+                    ui,
+                    "White balance",
+                    *wb != WhiteBalance::default(),
+                    true,
+                    |ui| {
+                        let (temp, tint) = if display_referred {
+                            let (t, n, _) = shoebox_develop::wb::relative(wb);
+                            (t, n)
+                        } else {
+                            let r = shoebox_develop::wb::resolve(&meta, wb);
+                            (r.temp, r.tint)
+                        };
+                        let modes = [
+                            (WbMode::AsShot, "As shot"),
+                            (WbMode::Daylight, "Daylight"),
+                            (WbMode::Cloudy, "Cloudy"),
+                            (WbMode::Shade, "Shade"),
+                            (WbMode::Tungsten, "Tungsten"),
+                            (WbMode::Fluorescent, "Fluorescent"),
+                            (WbMode::Flash, "Flash"),
+                            (WbMode::Custom, "Custom"),
+                        ];
+                        let name = modes.iter().find(|m| m.0 == wb.mode).map_or("", |m| m.1);
+                        egui::ComboBox::from_id_salt("wb-mode")
+                            .selected_text(name)
+                            .show_ui(ui, |ui| {
+                                for (m, label) in modes {
+                                    if ui.selectable_label(wb.mode == m, label).clicked()
+                                        && wb.mode != m
+                                    {
+                                        edit(app, "wb", format!("White balance {label}"), |s| {
+                                            let w = &mut s.modules.white_balance;
+                                            w.mode = m;
+                                            if m == WbMode::Custom {
+                                                w.temp = Some(temp.round());
+                                                w.tint = Some(tint.round());
+                                            } else {
+                                                w.temp = None;
+                                                w.tint = None;
+                                            }
+                                        });
+                                    }
+                                }
+                            });
+                        let mut picking = app.develop.picking;
+                        if ui
+                            .toggle_value(&mut picking, "Pick neutral")
+                            .on_hover_text("Click something that should be grey or white (W)")
+                            .changed()
+                        {
+                            app.develop.picking = picking;
+                        }
+                        egui::Grid::new("wb-grid").num_columns(2).show(ui, |ui| {
+                            if let Some(t) =
+                                slider(ui, "Temperature", temp.round(), 2000.0..=12000.0, temp, 0)
+                            {
+                                let tint = tint.round();
+                                edit(app, "temp", format!("Temperature {t:.0} K"), |s| {
+                                    s.modules.white_balance = WhiteBalance {
+                                        mode: WbMode::Custom,
+                                        temp: Some(t),
+                                        tint: Some(tint),
+                                    };
+                                });
+                            }
+                            if let Some(n) =
+                                slider(ui, "Tint", tint.round(), -150.0..=150.0, tint, 0)
+                            {
+                                let temp = temp.round();
+                                edit(app, "tint", format!("Tint {n:+.0}"), |s| {
+                                    s.modules.white_balance = WhiteBalance {
+                                        mode: WbMode::Custom,
+                                        temp: Some(temp),
+                                        tint: Some(n),
+                                    };
+                                });
+                            }
+                        });
+                    },
+                );
+                if reset {
                     edit(app, "wb", "Reset white balance".into(), |s| {
                         s.modules.white_balance = WhiteBalance::default();
                     });
                 }
-                let (temp, tint) = if display_referred {
-                    let (t, n, _) = shoebox_develop::wb::relative(wb);
-                    (t, n)
-                } else {
-                    let r = shoebox_develop::wb::resolve(&meta, wb);
-                    (r.temp, r.tint)
-                };
-                let modes = [
-                    (WbMode::AsShot, "As shot"),
-                    (WbMode::Daylight, "Daylight"),
-                    (WbMode::Cloudy, "Cloudy"),
-                    (WbMode::Shade, "Shade"),
-                    (WbMode::Tungsten, "Tungsten"),
-                    (WbMode::Fluorescent, "Fluorescent"),
-                    (WbMode::Flash, "Flash"),
-                    (WbMode::Custom, "Custom"),
-                ];
-                let name = modes.iter().find(|m| m.0 == wb.mode).map_or("", |m| m.1);
-                egui::ComboBox::from_id_salt("wb-mode")
-                    .selected_text(name)
-                    .show_ui(ui, |ui| {
-                        for (m, label) in modes {
-                            if ui.selectable_label(wb.mode == m, label).clicked() && wb.mode != m {
-                                edit(app, "wb", format!("White balance {label}"), |s| {
-                                    let w = &mut s.modules.white_balance;
-                                    w.mode = m;
-                                    if m == WbMode::Custom {
-                                        w.temp = Some(temp.round());
-                                        w.tint = Some(tint.round());
-                                    } else {
-                                        w.temp = None;
-                                        w.tint = None;
-                                    }
-                                });
-                            }
-                        }
-                    });
-                let mut picking = app.develop.picking;
-                if ui
-                    .toggle_value(&mut picking, "Pick neutral")
-                    .on_hover_text("Click something that should be grey or white (W)")
-                    .changed()
-                {
-                    app.develop.picking = picking;
-                }
-                egui::Grid::new("wb-grid").num_columns(2).show(ui, |ui| {
-                    if let Some(t) =
-                        slider(ui, "Temperature", temp.round(), 2000.0..=12000.0, temp, 0)
-                    {
-                        let tint = tint.round();
-                        edit(app, "temp", format!("Temperature {t:.0} K"), |s| {
-                            s.modules.white_balance = WhiteBalance {
-                                mode: WbMode::Custom,
-                                temp: Some(t),
-                                tint: Some(tint),
-                            };
-                        });
-                    }
-                    if let Some(n) = slider(ui, "Tint", tint.round(), -150.0..=150.0, tint, 0) {
-                        let temp = temp.round();
-                        edit(app, "tint", format!("Tint {n:+.0}"), |s| {
-                            s.modules.white_balance = WhiteBalance {
-                                mode: WbMode::Custom,
-                                temp: Some(temp),
-                                tint: Some(n),
-                            };
-                        });
-                    }
-                });
-                ui.separator();
 
                 // Exposure.
                 let e = &s.modules.exposure;
-                if module(ui, "Exposure", *e != defaults.modules.exposure) {
+                let reset = super::look::section(
+                    ui,
+                    "Exposure",
+                    *e != defaults.modules.exposure,
+                    true,
+                    |ui| {
+                        egui::Grid::new("ev-grid").num_columns(2).show(ui, |ui| {
+                            if let Some(v) = slider(ui, "Exposure", e.ev, -5.0..=5.0, 0.0, 2) {
+                                edit(app, "ev", format!("Exposure {v:+.2}"), |s| {
+                                    s.modules.exposure.ev = v
+                                });
+                            }
+                        });
+                    },
+                );
+                if reset {
                     edit(app, "ev", "Reset exposure".into(), |s| {
                         s.modules.exposure = Default::default();
                     });
                 }
-                egui::Grid::new("ev-grid").num_columns(2).show(ui, |ui| {
-                    if let Some(v) = slider(ui, "Exposure", e.ev, -5.0..=5.0, 0.0, 2) {
-                        edit(app, "ev", format!("Exposure {v:+.2}"), |s| {
-                            s.modules.exposure.ev = v
-                        });
-                    }
-                });
-                ui.separator();
 
                 // Tone (the display transform).
                 let t = &s.modules.display_transform;
                 let hs = &s.modules.highlights_shadows;
                 let toned = *t != defaults.modules.display_transform
                     || *hs != defaults.modules.highlights_shadows;
-                if module(ui, "Tone", toned) {
+                let reset = super::look::section(ui, "Tone", toned, true, |ui| {
+                    egui::Grid::new("tone-grid").num_columns(2).show(ui, |ui| {
+                        if let Some(v) = slider(ui, "Contrast", t.contrast, -100.0..=100.0, 0.0, 0)
+                        {
+                            edit(app, "contrast", format!("Contrast {v:+.0}"), |s| {
+                                s.modules.display_transform.contrast = v;
+                            });
+                        }
+                        if let Some(v) =
+                            slider(ui, "Highlights", hs.highlights, -100.0..=100.0, 0.0, 0)
+                        {
+                            edit(app, "highlights", format!("Highlights {v:+.0}"), |s| {
+                                s.modules.highlights_shadows.highlights = v;
+                            });
+                        }
+                        if let Some(v) = slider(ui, "Shadows", hs.shadows, -100.0..=100.0, 0.0, 0) {
+                            edit(app, "shadows", format!("Shadows {v:+.0}"), |s| {
+                                s.modules.highlights_shadows.shadows = v;
+                            });
+                        }
+                        if let Some(v) = slider(ui, "Whites", t.white_ev, -3.0..=3.0, 0.0, 2) {
+                            edit(app, "whites", format!("Whites {v:+.2}"), |s| {
+                                s.modules.display_transform.white_ev = v;
+                            });
+                        }
+                        if let Some(v) = slider(ui, "Blacks", t.black_ev, -3.0..=3.0, 0.0, 2) {
+                            edit(app, "blacks", format!("Blacks {v:+.2}"), |s| {
+                                s.modules.display_transform.black_ev = v;
+                            });
+                        }
+                    });
+                    let mut hue = t.preserve_hue;
+                    if ui.checkbox(&mut hue, "Preserve hue").changed() {
+                        edit(
+                            app,
+                            "hue",
+                            format!("Preserve hue {}", if hue { "on" } else { "off" }),
+                            |s| {
+                                s.modules.display_transform.preserve_hue = hue;
+                            },
+                        );
+                    }
+                });
+                if reset {
                     edit(app, "tone", "Reset tone".into(), |s| {
                         s.modules.display_transform = Default::default();
                         s.modules.highlights_shadows = Default::default();
                     });
                 }
-                egui::Grid::new("tone-grid").num_columns(2).show(ui, |ui| {
-                    if let Some(v) = slider(ui, "Contrast", t.contrast, -100.0..=100.0, 0.0, 0) {
-                        edit(app, "contrast", format!("Contrast {v:+.0}"), |s| {
-                            s.modules.display_transform.contrast = v;
-                        });
-                    }
-                    if let Some(v) = slider(ui, "Highlights", hs.highlights, -100.0..=100.0, 0.0, 0)
-                    {
-                        edit(app, "highlights", format!("Highlights {v:+.0}"), |s| {
-                            s.modules.highlights_shadows.highlights = v;
-                        });
-                    }
-                    if let Some(v) = slider(ui, "Shadows", hs.shadows, -100.0..=100.0, 0.0, 0) {
-                        edit(app, "shadows", format!("Shadows {v:+.0}"), |s| {
-                            s.modules.highlights_shadows.shadows = v;
-                        });
-                    }
-                    if let Some(v) = slider(ui, "Whites", t.white_ev, -3.0..=3.0, 0.0, 2) {
-                        edit(app, "whites", format!("Whites {v:+.2}"), |s| {
-                            s.modules.display_transform.white_ev = v;
-                        });
-                    }
-                    if let Some(v) = slider(ui, "Blacks", t.black_ev, -3.0..=3.0, 0.0, 2) {
-                        edit(app, "blacks", format!("Blacks {v:+.2}"), |s| {
-                            s.modules.display_transform.black_ev = v;
-                        });
-                    }
-                });
-                let mut hue = t.preserve_hue;
-                if ui.checkbox(&mut hue, "Preserve hue").changed() {
-                    edit(
-                        app,
-                        "hue",
-                        format!("Preserve hue {}", if hue { "on" } else { "off" }),
-                        |s| {
-                            s.modules.display_transform.preserve_hue = hue;
-                        },
-                    );
-                }
-                ui.separator();
 
                 super::look::modules(app, ui, &s);
 
                 // Geometry: crop, and rotation (with the largest crop that
                 // stays inside).
                 let g = &s.geometry;
-                if module(ui, "Crop & rotate", *g != defaults.geometry) {
+                let reset = super::look::section(
+                    ui,
+                    "Crop & rotate",
+                    *g != defaults.geometry,
+                    true,
+                    |ui| {
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button("Rotate left")
+                                .on_hover_text("A quarter turn anticlockwise (⌘[)")
+                                .clicked()
+                            {
+                                turn(app, false);
+                            }
+                            if ui
+                                .button("Rotate right")
+                                .on_hover_text("A quarter turn clockwise (⌘])")
+                                .clicked()
+                            {
+                                turn(app, true);
+                            }
+                            if ui
+                                .button("Flip")
+                                .on_hover_text("Mirror left to right")
+                                .clicked()
+                            {
+                                edit(app, "flip", "Flip".into(), |s| s.geometry.mirror());
+                            }
+                        });
+                        egui::Grid::new("geo-grid").num_columns(2).show(ui, |ui| {
+                            if let Some(v) = slider(ui, "Angle", g.rotate, -45.0..=45.0, 0.0, 1) {
+                                let (w, h) = cpu::upright(src_size.0, src_size.1, orientation);
+                                let crop = cpu::max_crop(w as f64, h as f64, v);
+                                edit(app, "rotate", format!("Rotate {v:+.1}°"), |s| {
+                                    s.geometry.rotate = v;
+                                    s.geometry.crop = crop;
+                                });
+                                if let Some(c) = &mut app.develop.crop {
+                                    c.rect = crop;
+                                }
+                            }
+                        });
+                        let cropping = app.develop.crop.is_some();
+                        if ui
+                            .button(if cropping { "Done cropping" } else { "Crop…" })
+                            .on_hover_text("Draw the crop on the photo (R)")
+                            .clicked()
+                        {
+                            if cropping {
+                                finish_crop(app, true);
+                            } else {
+                                start_crop(app);
+                            }
+                        }
+                    },
+                );
+                if reset {
                     edit(app, "rotate", "Reset rotation".into(), |s| {
                         s.geometry = Default::default()
                     });
                 }
-                ui.horizontal(|ui| {
-                    if ui
-                        .button("Rotate left")
-                        .on_hover_text("A quarter turn anticlockwise (⌘[)")
-                        .clicked()
-                    {
-                        turn(app, false);
-                    }
-                    if ui
-                        .button("Rotate right")
-                        .on_hover_text("A quarter turn clockwise (⌘])")
-                        .clicked()
-                    {
-                        turn(app, true);
-                    }
-                    if ui
-                        .button("Flip")
-                        .on_hover_text("Mirror left to right")
-                        .clicked()
-                    {
-                        edit(app, "flip", "Flip".into(), |s| s.geometry.mirror());
-                    }
-                });
-                egui::Grid::new("geo-grid").num_columns(2).show(ui, |ui| {
-                    if let Some(v) = slider(ui, "Angle", g.rotate, -45.0..=45.0, 0.0, 1) {
-                        let (w, h) = cpu::upright(src_size.0, src_size.1, orientation);
-                        let crop = cpu::max_crop(w as f64, h as f64, v);
-                        edit(app, "rotate", format!("Rotate {v:+.1}°"), |s| {
-                            s.geometry.rotate = v;
-                            s.geometry.crop = crop;
-                        });
-                        if let Some(c) = &mut app.develop.crop {
-                            c.rect = crop;
-                        }
-                    }
-                });
-                let cropping = app.develop.crop.is_some();
-                if ui
-                    .button(if cropping { "Done cropping" } else { "Crop…" })
-                    .on_hover_text("Draw the crop on the photo (R)")
-                    .clicked()
-                {
-                    if cropping {
-                        finish_crop(app, true);
-                    } else {
-                        start_crop(app);
-                    }
-                }
-                ui.separator();
 
                 if display_referred {
                     // A finished image has no raw stages.
@@ -1969,66 +1983,75 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 }
                 // Raw: how the sensor data becomes RGB (prepared again on change).
                 let r = &s.modules.raw;
-                if module(ui, "Raw", *r != defaults.modules.raw) {
+                let reset =
+                    super::look::section(ui, "Raw", *r != defaults.modules.raw, false, |ui| {
+                        let mut hl = r.highlights;
+                        let mut dm = r.demosaic;
+                        egui::Grid::new("raw-grid").num_columns(2).show(ui, |ui| {
+                            ui.label("Highlights");
+                            egui::ComboBox::from_id_salt("raw-highlights")
+                                .selected_text(match hl {
+                                    Highlights::InpaintOpposed => "Reconstruct",
+                                    Highlights::Clip => "Clip",
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut hl,
+                                        Highlights::InpaintOpposed,
+                                        "Reconstruct",
+                                    );
+                                    ui.selectable_value(&mut hl, Highlights::Clip, "Clip");
+                                });
+                            ui.end_row();
+                            ui.label("Demosaic");
+                            egui::ComboBox::from_id_salt("raw-demosaic")
+                                .selected_text(match dm {
+                                    Demosaic::Rcd => "RCD",
+                                    Demosaic::Bilinear => "Bilinear",
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut dm, Demosaic::Rcd, "RCD");
+                                    ui.selectable_value(&mut dm, Demosaic::Bilinear, "Bilinear");
+                                });
+                            ui.end_row();
+                        });
+                        if hl != r.highlights {
+                            edit(app, "raw", format!("Highlights {hl:?}"), |s| {
+                                s.modules.raw.highlights = hl
+                            });
+                        }
+                        if dm != r.demosaic {
+                            edit(app, "raw", format!("Demosaic {dm:?}"), |s| {
+                                s.modules.raw.demosaic = dm
+                            });
+                        }
+                        let mut hot = r.hot_pixels;
+                        if ui.checkbox(&mut hot, "Fix hot and dead pixels").changed() {
+                            let label = format!("Hot pixels {}", if hot { "on" } else { "off" });
+                            edit(app, "raw", label, |s| s.modules.raw.hot_pixels = hot);
+                        }
+                        // Levels re-prepare the photo (the develop thread takes the
+                        // newest, so a drag doesn't queue them up).
+                        egui::Grid::new("raw-levels").num_columns(2).show(ui, |ui| {
+                            if let Some(v) =
+                                slider(ui, "Black point", r.black, -0.05..=0.05, 0.0, 3)
+                            {
+                                edit(app, "raw-black", format!("Raw black {v:+.3}"), |s| {
+                                    s.modules.raw.black = v;
+                                });
+                            }
+                            if let Some(v) = slider(ui, "White point", r.white, 0.5..=1.2, 1.0, 2) {
+                                edit(app, "raw-white", format!("Raw white {v:.2}"), |s| {
+                                    s.modules.raw.white = v;
+                                });
+                            }
+                        });
+                    });
+                if reset {
                     edit(app, "raw", "Reset raw".into(), |s| {
                         s.modules.raw = Default::default()
                     });
                 }
-                let mut hl = r.highlights;
-                let mut dm = r.demosaic;
-                egui::Grid::new("raw-grid").num_columns(2).show(ui, |ui| {
-                    ui.label("Highlights");
-                    egui::ComboBox::from_id_salt("raw-highlights")
-                        .selected_text(match hl {
-                            Highlights::InpaintOpposed => "Reconstruct",
-                            Highlights::Clip => "Clip",
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut hl, Highlights::InpaintOpposed, "Reconstruct");
-                            ui.selectable_value(&mut hl, Highlights::Clip, "Clip");
-                        });
-                    ui.end_row();
-                    ui.label("Demosaic");
-                    egui::ComboBox::from_id_salt("raw-demosaic")
-                        .selected_text(match dm {
-                            Demosaic::Rcd => "RCD",
-                            Demosaic::Bilinear => "Bilinear",
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut dm, Demosaic::Rcd, "RCD");
-                            ui.selectable_value(&mut dm, Demosaic::Bilinear, "Bilinear");
-                        });
-                    ui.end_row();
-                });
-                if hl != r.highlights {
-                    edit(app, "raw", format!("Highlights {hl:?}"), |s| {
-                        s.modules.raw.highlights = hl
-                    });
-                }
-                if dm != r.demosaic {
-                    edit(app, "raw", format!("Demosaic {dm:?}"), |s| {
-                        s.modules.raw.demosaic = dm
-                    });
-                }
-                let mut hot = r.hot_pixels;
-                if ui.checkbox(&mut hot, "Fix hot and dead pixels").changed() {
-                    let label = format!("Hot pixels {}", if hot { "on" } else { "off" });
-                    edit(app, "raw", label, |s| s.modules.raw.hot_pixels = hot);
-                }
-                // Levels re-prepare the photo (the develop thread takes the
-                // newest, so a drag doesn't queue them up).
-                egui::Grid::new("raw-levels").num_columns(2).show(ui, |ui| {
-                    if let Some(v) = slider(ui, "Black point", r.black, -0.05..=0.05, 0.0, 3) {
-                        edit(app, "raw-black", format!("Raw black {v:+.3}"), |s| {
-                            s.modules.raw.black = v;
-                        });
-                    }
-                    if let Some(v) = slider(ui, "White point", r.white, 0.5..=1.2, 1.0, 2) {
-                        edit(app, "raw-white", format!("Raw white {v:.2}"), |s| {
-                            s.modules.raw.white = v;
-                        });
-                    }
-                });
             });
     });
 }
