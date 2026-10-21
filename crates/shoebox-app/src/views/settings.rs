@@ -12,6 +12,7 @@ use crate::jobs::LibraryCommand;
 pub enum Tab {
     #[default]
     Library,
+    Appearance,
     Sidecars,
     Naming,
     Search,
@@ -23,8 +24,9 @@ pub enum Tab {
 }
 
 impl Tab {
-    const ALL: [Tab; 9] = [
+    const ALL: [Tab; 10] = [
         Tab::Library,
+        Tab::Appearance,
         Tab::Sidecars,
         Tab::Naming,
         Tab::Search,
@@ -38,6 +40,7 @@ impl Tab {
     fn name(self) -> &'static str {
         match self {
             Tab::Library => "Library",
+            Tab::Appearance => "Appearance",
             Tab::Sidecars => "Sidecars",
             Tab::Naming => "Naming",
             Tab::Search => "Search",
@@ -92,6 +95,7 @@ pub fn show(app: &mut ShoeboxApp, ctx: &egui::Context) {
             let mut s = app.settings.clone();
             match app.settings_ui.tab {
                 Tab::Library => library(app, ui),
+                Tab::Appearance => appearance(ui, &mut s),
                 Tab::Sidecars => sidecars(ui, &mut s),
                 Tab::Naming => naming(app, ui, &mut s),
                 Tab::Search => search(app, ui, &mut s),
@@ -152,6 +156,20 @@ fn library(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         "Your folders are the library. Removing one only stops Shoebox showing it; \
          nothing on disk changes. Reference folders are read-only: duplicates of \
          their files can be found elsewhere, but they are never moved or written to.",
+    );
+}
+
+fn appearance(ui: &mut egui::Ui, s: &mut Settings) {
+    ui.horizontal(|ui| {
+        ui.label("Text size");
+        for size in shoebox_core::settings::TextSize::ALL {
+            ui.selectable_value(&mut s.text_size, size, crate::theme::label(size));
+        }
+    });
+    note(
+        ui,
+        "Text, controls and spacing all scale together. ⌘+ and ⌘− change it \
+         anywhere in Shoebox; ⌘0 goes back to Medium.",
     );
 }
 

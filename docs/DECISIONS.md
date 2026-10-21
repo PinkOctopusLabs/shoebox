@@ -1734,3 +1734,14 @@ photo or copy opens. Presets, Auto and Paste settings are always new steps,
 because each is an action of its own; a preset's Amount slider folds into
 the preset it scales. The tone curve counts as one setting, so dragging
 several points is one line.
+
+## Theme and text size (2026-10-21)
+
+egui's defaults (12.5 pt text, 18 px rows, 3 px between rows) felt cramped
+on a desktop. `theme.rs` sets text sizes and spacing in one place: body
+and buttons 13.5 pt, small text 11.5 pt, 22 px controls, 6 px between rows,
+roomier padding and margins. A Text size setting (Small, Medium, Large,
+Larger) zooms all of it together, stored in the settings and changed with
+⌘+ / ⌘− / ⌘0 (egui's own keyboard zoom is off, so the choice persists).
+Labels painted on photos (badges, timeline axes) keep fixed sizes and
+scale only with the zoom.

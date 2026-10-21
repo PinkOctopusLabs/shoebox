@@ -78,6 +78,40 @@ pub struct Settings {
     /// Develop: this preset (by name) instead of Auto for new photos.
     #[serde(default)]
     pub new_photo_preset: Option<String>,
+    /// How big text and controls are (⌘+ / ⌘− / ⌘0).
+    #[serde(default)]
+    pub text_size: TextSize,
+}
+
+/// The app's text size: everything (text, controls, spacing) scales with it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextSize {
+    Small,
+    #[default]
+    Medium,
+    Large,
+    Larger,
+}
+
+impl TextSize {
+    pub const ALL: [TextSize; 4] = [
+        TextSize::Small,
+        TextSize::Medium,
+        TextSize::Large,
+        TextSize::Larger,
+    ];
+
+    /// One size up (`up`) or down, stopping at the ends.
+    pub fn step(self, up: bool) -> Self {
+        let i = Self::ALL.iter().position(|&t| t == self).unwrap_or(1);
+        let j = if up {
+            (i + 1).min(Self::ALL.len() - 1)
+        } else {
+            i.saturating_sub(1)
+        };
+        Self::ALL[j]
+    }
 }
 
 /// Default for [`Settings::dng_cache_gb`].
@@ -228,5 +262,14 @@ mod tests {
             Settings::load(&t.path().join("missing.json")).unwrap(),
             Settings::default()
         );
+    }
+
+    #[test]
+    fn text_size_steps_and_reads_old_files() {
+        assert_eq!(TextSize::Medium.step(true), TextSize::Large);
+        assert_eq!(TextSize::Larger.step(true), TextSize::Larger);
+        assert_eq!(TextSize::Small.step(false), TextSize::Small);
+        let old: Settings = serde_json::from_str(r#"{"roots": []}"#).unwrap();
+        assert_eq!(old.text_size, TextSize::Medium);
     }
 }

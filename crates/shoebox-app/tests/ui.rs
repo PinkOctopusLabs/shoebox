@@ -3487,7 +3487,7 @@ fn develop_look_modules() {
     let p = paths(t.path(), std::slice::from_ref(&root));
     // Tall enough that the panel doesn't scroll (kittest's positions don't
     // follow a scroll).
-    let mut h = harness(p, egui::vec2(1400.0, 1500.0));
+    let mut h = harness(p, egui::vec2(1400.0, 2100.0));
     settle(&mut h, Duration::from_secs(60));
     h.get_by_label("look.jpg").click();
     h.run_steps(2);

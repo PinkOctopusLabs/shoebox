@@ -510,12 +510,7 @@ impl ShoeboxApp {
         let ctx = &cc.egui_ctx;
         crate::icons::install(ctx);
         crate::platform::own_titlebar_clicks(cc);
-        // egui's small text (9 pt) is too small for paths and captions.
-        ctx.all_styles_mut(|s| {
-            if let Some(f) = s.text_styles.get_mut(&egui::TextStyle::Small) {
-                f.size = 11.0;
-            }
-        });
+        crate::theme::install(ctx);
         let tile_cache = paths.tile_cache.clone();
         let display = crate::display::DisplayTagger::new(cc);
         let target = crate::display::DisplayTagger::target(display.as_ref());
@@ -3621,6 +3616,11 @@ impl ShoeboxApp {
         if crate::menu::take_open_settings() {
             self.open_settings();
         }
+        if let Some(size) = crate::theme::size_key(ctx, self.settings.text_size) {
+            let mut s = self.settings.clone();
+            s.text_size = size;
+            self.save_settings(s);
+        }
         let comma = ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Comma));
         if comma && !self.settings_ui.open {
             self.open_settings();
@@ -3926,6 +3926,7 @@ impl eframe::App for ShoeboxApp {
             d.ensure();
         }
         self.textures.begin_frame();
+        crate::theme::apply(&ctx, self.settings.text_size);
         self.apply_events(&ctx);
         self.tick_semantic(&ctx);
         if let Some(id) = self.show_in_all_request.take() {

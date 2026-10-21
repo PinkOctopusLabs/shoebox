@@ -12,6 +12,7 @@ mod picker;
 mod platform;
 pub mod semantic;
 pub mod textures;
+mod theme;
 pub mod updater;
 pub mod views;
 mod watch;
