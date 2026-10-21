@@ -562,9 +562,161 @@ fn flip_aspect(a: &str) -> String {
 pub struct Settings {
     pub modules: Modules,
     pub geometry: Geometry,
-    /// Local adjustment layers (Phase 3); kept as written until then.
+    /// Local adjustment layers, applied in order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub locals: Vec<Value>,
+    pub locals: Vec<Local>,
+}
+
+/// A local adjustment (EDITING-SPEC, Local adjustments): a mask and the
+/// slider values applied through it, in linear light before the colour
+/// stage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Local {
+    /// Unique within the edit ("l1", "l2", …).
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    /// How much of the adjustment applies, 0–100.
+    pub amount: f64,
+    pub mask: Mask,
+    pub adjust: LocalAdjust,
+}
+
+impl Default for Local {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            enabled: true,
+            amount: 100.0,
+            mask: Mask::default(),
+            adjust: LocalAdjust::default(),
+        }
+    }
+}
+
+/// A mask: its parts, combined in order, each by its own [`Op`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Mask {
+    pub parts: Vec<Part>,
+}
+
+/// One part of a mask. A part this build doesn't know (written by a newer
+/// one) is kept as it was and leaves the mask alone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Part {
+    Known(MaskPart),
+    Other(Value),
+}
+
+/// How a part combines with the parts before it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Op {
+    #[default]
+    Add,
+    Subtract,
+    Intersect,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MaskPart {
+    #[serde(default)]
+    pub op: Op,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub invert: bool,
+    #[serde(flatten)]
+    pub shape: Shape,
+}
+
+/// What a part covers. Positions are in the stored image (before the
+/// file's orientation, the edit's turns and crop), in units of its long
+/// edge from the top left, so masks stay on what they cover whatever the
+/// framing, and mean the same on the proxy and the full image.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Shape {
+    /// Full effect at `from`, fading to none at `to`.
+    Linear { from: [f64; 2], to: [f64; 2] },
+    /// An ellipse: full effect inside, fading over `feather` (0–1 of the
+    /// radius) to none at the edge. `angle` turns it (degrees, clockwise).
+    Radial {
+        centre: [f64; 2],
+        radii: [f64; 2],
+        #[serde(default)]
+        angle: f64,
+        #[serde(default = "half")]
+        feather: f64,
+    },
+    /// Painted strokes.
+    Brush {
+        #[serde(default)]
+        strokes: Vec<Stroke>,
+    },
+    /// Pixels by their brightness as shown (0–1), full effect inside
+    /// `range`, fading over `smooth` either side.
+    Luminance {
+        range: [f64; 2],
+        #[serde(default = "tenth")]
+        smooth: f64,
+    },
+    /// Pixels by their colour: hue (degrees, Oklab) within `width` either
+    /// side of the one picked, fading over as much again; greys never.
+    Colour {
+        hue: f64,
+        #[serde(default = "twenty")]
+        width: f64,
+    },
+}
+
+fn half() -> f64 {
+    0.5
+}
+
+fn tenth() -> f64 {
+    0.1
+}
+
+fn twenty() -> f64 {
+    20.0
+}
+
+/// One brush stroke: a path, its radius (the long edge's units), feather
+/// (0–1 of the radius) and flow (0–1: how much one stroke paints).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Stroke {
+    pub points: Vec<[f64; 2]>,
+    pub radius: f64,
+    #[serde(default = "half")]
+    pub feather: f64,
+    #[serde(default = "one")]
+    pub flow: f64,
+    /// Erases what earlier strokes painted.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub erase: bool,
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+/// A local adjustment's sliders: exposure in stops (−4 to +4), the rest
+/// −100 to +100.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LocalAdjust {
+    pub exposure: f64,
+    pub contrast: f64,
+    pub highlights: f64,
+    pub shadows: f64,
+    pub temperature: f64,
+    pub tint: f64,
+    pub saturation: f64,
+    pub clarity: f64,
+    pub dehaze: f64,
 }
 
 impl Settings {

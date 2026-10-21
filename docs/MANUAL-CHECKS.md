@@ -87,3 +87,12 @@ together at the end, before the release.
 - [ ] **Exports outside the library** aren't listed in the Info panel, and
   a preset pointed at a folder inside the library is refused with a clear
   message.
+
+## Phase 3 (as features land)
+
+- [ ] **Local adjustments** on a few real photos: a graduated sky
+  (linear, exposure −1), a vignette-like ellipse on a face, a brushed-in
+  dodge on a NEF at 100% and in a full-size export: the masks stay put
+  after rotating 90°, cropping and with lens corrections on; the
+  exported JPEG matches Develop; brush strokes feel responsive with a
+  large brush; O shows the mask where expected.

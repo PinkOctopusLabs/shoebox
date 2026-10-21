@@ -72,7 +72,7 @@ pub struct Look {
 }
 
 /// Linear Rec.2020 ↔ Oklab's LMS.
-fn lms_matrices() -> ([[f32; 3]; 3], [[f32; 3]; 3]) {
+pub(crate) fn lms_matrices() -> ([[f32; 3]; 3], [[f32; 3]; 3]) {
     let to_srgb = colour::mul(
         &colour::xyz_to_rgb(&colour::SRGB, colour::D65),
         &colour::rgb_to_xyz(&colour::REC2020, colour::D65),

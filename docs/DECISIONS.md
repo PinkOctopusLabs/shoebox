@@ -1834,3 +1834,62 @@ the library or beside the original:
 A new virtual copy's history now starts with one step, "Copied from
 Master", from the defaults to the settings copied. History replays from
 the defaults, so without it a reopened copy dropped its history.
+
+## Phase 3, first chunk: local adjustments (2026-10-22)
+
+Phase 3 starts with the mask machinery, since AI masks, Point Color and
+healing build on it. Order from here: local adjustments; Point Color;
+spot heal and clone; red-eye; auto-upright; reference view and match
+total exposures; Apple Vision subject and person masks; SAM 2.1 click
+masks; AI raw denoise (RawNIND); Smart-light tone; finer AI masks.
+
+- **The recipe, not pixels** (EDITING-SPEC): `Settings.locals` is a list
+  of layers (id, name, on, amount, mask, sliders). A mask is parts in
+  order, each with its own op (add takes the maximum, subtract multiplies
+  by 1 − v, intersect multiplies) and invert: PhotoLab 9's model. A part
+  this build doesn't know is kept as JSON and leaves the mask alone.
+- **Coordinates:** the stored image (before EXIF orientation, turns and
+  crop), in units of its long edge, so masks stay on what they cover when
+  the photo is turned or cropped and mean the same on the proxy and the
+  full image. Masks are read at the geometry map's source position before
+  lens corrections (where they were drawn); the global maps at the
+  lens-corrected one, as before.
+- **Rasterised on the CPU** to one 8-bit plane per layer on a grid of at
+  most 2560 px (the proxy's own size), cached on the source by a hash of
+  the masks; the GPU gets them packed four to a word and samples them
+  bilinearly, the CPU reference the same bytes, so the pipes agree within
+  1e-4. A proxy-sized mask with a gradient, an ellipse and a 400-point
+  stroke rasterises in 18 ms (release), so dragging a handle stays live.
+  Exports read the same 2560 px grid; the guided-filter upsampling the
+  spec asks for comes with the AI masks.
+- **Brush:** within one stroke the strongest dab counts (a stroke doesn't
+  build up over itself); strokes build on each other by flow; ⌥ erases.
+  Each stroke is one history step. The edge-aware auto-mask waits for the
+  AI masks chunk.
+- **Ranges** read the picture as the frame shows it: brightness is the
+  display transform of the pixel's luminance (0–1), hue is Oklab's, and
+  greys (relative chroma under 0.02–0.08) are never in a colour range.
+  They're computed on the same grid from the source.
+- **Where in the pipe:** after the global dehaze, highlights, shadows and
+  clarity, before the colour stage, in linear Rec.2020 (the spec's diagram
+  places locals after the tone curve, but the tone curve here runs on
+  display values; local exposure should behave like global exposure).
+- **Sliders:** exposure, contrast (about mid grey, 0.35 stop per stop at
+  100), highlights, shadows, clarity and dehaze (through the global maps,
+  computed whenever any layer needs them), temperature and tint
+  (Bradford from a light ±60 mired from daylight, tint at half the global
+  scale) and saturation (towards luminance). Sharpening and AI-denoise
+  strength per layer come with AI denoise (they act on the source, before
+  geometry).
+- **Presets and copy/paste:** "Local adjustments" is a part, unticked by
+  default when copying (EDITING-SPEC, Batch editing); carried whole, not
+  scaled by a preset's Amount.
+- **UI:** a Local adjustments section with New mask (linear, radial,
+  brush, luminance range, colour range), the masks (on/off, select,
+  delete), the selected mask's parts (op, invert, add/subtract/intersect
+  another), its own settings and the sliders. On the photo: handles for
+  gradients and ellipses (the long axis's handle sizes and turns it),
+  the brush with its circle, a click to pick a range. O shows the mask in
+  red, "Mask only" alone; Escape puts the mask down before leaving
+  Develop. New gradients start in place rather than being drawn; drag
+  their handles.

@@ -26,10 +26,11 @@ pub enum Part {
     Transform,
     Crop,
     Raw,
+    Locals,
 }
 
 impl Part {
-    pub const ALL: [Part; 13] = [
+    pub const ALL: [Part; 14] = [
         Part::WhiteBalance,
         Part::Exposure,
         Part::Tone,
@@ -43,6 +44,7 @@ impl Part {
         Part::Transform,
         Part::Crop,
         Part::Raw,
+        Part::Locals,
     ];
 
     pub fn label(self) -> &'static str {
@@ -60,13 +62,18 @@ impl Part {
             Part::Transform => "Transform",
             Part::Crop => "Crop & rotate",
             Part::Raw => "Raw",
+            Part::Locals => "Local adjustments",
         }
     }
 
-    /// Ticked when copying settings: geometry and raw handling rarely
-    /// carry over from one frame to another (EDITING-SPEC, Batch editing).
+    /// Ticked when copying settings: geometry, raw handling and local
+    /// adjustments rarely carry over from one frame to another
+    /// (EDITING-SPEC, Batch editing).
     pub fn copied_by_default(self) -> bool {
-        !matches!(self, Part::Transform | Part::Crop | Part::Raw)
+        !matches!(
+            self,
+            Part::Transform | Part::Crop | Part::Raw | Part::Locals
+        )
     }
 
     /// Where it lives in the settings' JSON.
@@ -94,6 +101,7 @@ impl Part {
                 &["geometry", "aspect"],
             ],
             Part::Raw => &[&["modules", "raw"]],
+            Part::Locals => &[&["locals"]],
         }
     }
 }
@@ -126,9 +134,15 @@ fn set(v: &mut Value, path: &[&str], x: Value) {
     cur[path[path.len() - 1]] = x;
 }
 
-/// Settings as full JSON (defaults included, unlike `Settings::to_value`).
+/// Settings as full JSON (defaults included, unlike `Settings::to_value`;
+/// no local adjustments is an empty list, so it travels too).
 fn full(s: &Settings) -> Value {
-    serde_json::to_value(s).unwrap_or(Value::Null)
+    let mut v = serde_json::to_value(s).unwrap_or(Value::Null);
+    if let Value::Object(m) = &mut v {
+        m.entry("locals")
+            .or_insert_with(|| Value::Array(Vec::new()));
+    }
+    v
 }
 
 impl Preset {

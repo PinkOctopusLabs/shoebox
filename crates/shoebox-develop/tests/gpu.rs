@@ -174,6 +174,23 @@ fn gpu_matches_the_cpu_reference() {
     s.modules.defringe.purple = 80.0;
     s.modules.defringe.green = 60.0;
     cases.push(("defringe", s, o));
+    // Local adjustments: every kind of part and every slider.
+    let mut s = base.clone();
+    s.modules.highlights_shadows.shadows = 20.0;
+    s.locals = local_layers();
+    cases.push(("local adjustments", s.clone(), o));
+    cases.push(("local adjustments, mask shown", s.clone(), o));
+    cases.push(("local adjustments, mask alone", s.clone(), o));
+    s.geometry.rotate = 2.5;
+    s.geometry.crop = [0.05, 0.1, 0.9, 0.95];
+    cases.push((
+        "local adjustments, turned",
+        s,
+        Options {
+            orientation: 6,
+            ..o
+        },
+    ));
     // A camera match look for this camera (the test raw's model, "Z f").
     let mut table = shoebox_develop::profile::Lut3::identity(shoebox_develop::profile::SIZE);
     for c in &mut table.data {
@@ -216,7 +233,15 @@ fn gpu_matches_the_cpu_reference() {
         } else {
             &src
         };
-        let f = cpu::frame(&raw, src, s, o);
+        let mut f = cpu::frame(&raw, src, s, o);
+        if name.ends_with("mask shown") {
+            f.mask_view = Some((1, false));
+        } else if name.ends_with("mask alone") {
+            f.mask_view = Some((0, true));
+        }
+        if name.starts_with("local") {
+            assert_eq!(f.layers.list.len(), 2, "{name}");
+        }
         for display in [true, false] {
             let want = cpu::apply(&src.rgb, &f, display);
             let got = pipe.render(&device, &queue, &gsrc, &f, display).unwrap();
@@ -446,4 +471,92 @@ fn soft_proofing_matches_the_cpu() {
         marked(&a),
         marked(&b)
     );
+}
+
+/// Two layers using every part and slider.
+fn local_layers() -> Vec<shoebox_develop::edit::Local> {
+    use shoebox_develop::edit::{Local, LocalAdjust, Mask, MaskPart, Op, Part, Shape, Stroke};
+    let part = |op, invert, shape| Part::Known(MaskPart { op, invert, shape });
+    vec![
+        Local {
+            id: "l1".into(),
+            mask: Mask {
+                parts: vec![
+                    part(
+                        Op::Add,
+                        false,
+                        Shape::Linear {
+                            from: [0.1, 0.2],
+                            to: [0.8, 0.6],
+                        },
+                    ),
+                    part(
+                        Op::Add,
+                        false,
+                        Shape::Brush {
+                            strokes: vec![Stroke {
+                                points: vec![[0.2, 0.6], [0.5, 0.65], [0.7, 0.5]],
+                                radius: 0.06,
+                                feather: 0.5,
+                                flow: 0.8,
+                                erase: false,
+                            }],
+                        },
+                    ),
+                    part(
+                        Op::Intersect,
+                        true,
+                        Shape::Luminance {
+                            range: [0.0, 0.2],
+                            smooth: 0.1,
+                        },
+                    ),
+                ],
+            },
+            adjust: LocalAdjust {
+                exposure: 0.7,
+                contrast: 30.0,
+                temperature: 40.0,
+                tint: -20.0,
+                saturation: 25.0,
+                shadows: 40.0,
+                highlights: -50.0,
+                clarity: 30.0,
+                dehaze: 20.0,
+            },
+            ..Default::default()
+        },
+        Local {
+            id: "l2".into(),
+            amount: 70.0,
+            mask: Mask {
+                parts: vec![
+                    part(
+                        Op::Add,
+                        false,
+                        Shape::Radial {
+                            centre: [0.6, 0.4],
+                            radii: [0.3, 0.15],
+                            angle: 20.0,
+                            feather: 0.6,
+                        },
+                    ),
+                    part(
+                        Op::Subtract,
+                        false,
+                        Shape::Colour {
+                            hue: 30.0,
+                            width: 25.0,
+                        },
+                    ),
+                ],
+            },
+            adjust: LocalAdjust {
+                exposure: -0.5,
+                saturation: -60.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    ]
 }

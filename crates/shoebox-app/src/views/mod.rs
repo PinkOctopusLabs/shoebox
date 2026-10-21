@@ -8,6 +8,7 @@ pub mod export;
 pub mod files;
 pub mod filmstrip;
 pub mod grid;
+pub mod local;
 pub mod look;
 pub mod loupe;
 pub mod map;

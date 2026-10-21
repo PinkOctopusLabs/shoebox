@@ -22,6 +22,7 @@
 #![allow(clippy::needless_range_loop)]
 
 pub mod detail;
+pub mod layers;
 pub mod look;
 pub mod maps;
 pub mod raw;
@@ -312,7 +313,7 @@ pub fn downscale(img: &Rgb, long_edge: usize) -> Rgb {
     out
 }
 
-fn f32m(m: &M3) -> [[f32; 3]; 3] {
+pub(crate) fn f32m(m: &M3) -> [[f32; 3]; 3] {
     m.map(|r| r.map(|v| v as f32))
 }
 
@@ -335,6 +336,8 @@ pub struct Frame {
     pub lens: Option<std::sync::Arc<crate::lens::Grid>>,
     /// Dehaze, highlights and shadows, clarity (see [`maps`]).
     pub local: maps::Local,
+    /// Local adjustments (see [`layers`]).
+    pub layers: layers::Layers,
     /// Colour and black and white, per pixel (see [`look`]).
     pub look: look::Look,
     pub display: Display,
@@ -342,6 +345,9 @@ pub struct Frame {
     pub warnings: bool,
     /// Soft proofing: show colours the proof space can't hold (magenta).
     pub gamut_warning: bool,
+    /// A local adjustment's mask shown (O): its index in `layers`, and
+    /// whether alone (else as a red tint).
+    pub mask_view: Option<(usize, bool)>,
 }
 
 /// The display transform's numbers.
@@ -718,6 +724,7 @@ pub fn frame(raw: &RawImage, src: &Demosaiced, s: &Settings, o: &Options) -> Fra
         map: map.map(|r| r.map(|v| v as f32)),
         lens,
         local: maps::local(src, &colour, s),
+        layers: layers::layers(src, &colour, &display, s),
         colour,
         look: look::Look::new(
             &s.modules.colour,
@@ -728,6 +735,7 @@ pub fn frame(raw: &RawImage, src: &Demosaiced, s: &Settings, o: &Options) -> Fra
         display,
         warnings: false,
         gamut_warning: false,
+        mask_view: None,
     }
 }
 
@@ -814,7 +822,7 @@ pub fn sample(img: &Rgb, x: f32, y: f32) -> [f32; 3] {
     out
 }
 
-fn mul3(m: &[[f32; 3]; 3], p: [f32; 3]) -> [f32; 3] {
+pub(crate) fn mul3(m: &[[f32; 3]; 3], p: [f32; 3]) -> [f32; 3] {
     [
         m[0][0] * p[0] + m[0][1] * p[1] + m[0][2] * p[2],
         m[1][0] * p[0] + m[1][1] * p[1] + m[1][2] * p[2],
@@ -833,8 +841,8 @@ pub fn apply(src: &Rgb, f: &Frame, display: bool) -> Rgb {
         .for_each(|(y, line)| {
             for x in 0..f.width {
                 let (xf, yf) = (x as f32, y as f32);
-                let (sx, sy) = f.source_at(xf, yf);
-                let (rgb, sx, sy) = lens_sample(src, f.lens.as_deref(), sx, sy);
+                let (mx, my) = f.source_at(xf, yf);
+                let (rgb, sx, sy) = lens_sample(src, f.lens.as_deref(), mx, my);
                 let mut lin = mul3(&f.colour, rgb);
                 if f.look.fringe {
                     let y = |dx: f32, dy: f32| {
@@ -844,11 +852,17 @@ pub fn apply(src: &Rgb, f: &Frame, display: bool) -> Rgb {
                     let e = look::edge(y(-1.0, 0.0), y(1.0, 0.0), y(0.0, -1.0), y(0.0, 1.0));
                     lin = look::defringe_pixel(&f.look, lin, e);
                 }
-                let lin = look::look_pixel(&f.look, maps::local_pixel(&f.local, lin, sx, sy));
+                let lin = maps::local_pixel(&f.local, lin, sx, sy);
+                let lin = layers::layers_pixel(&f.layers, &f.local, lin, mx, my, sx, sy);
+                let lin = look::look_pixel(&f.look, lin);
                 let px = if display {
                     let (d, out) = display_out(&f.display, lin);
                     let d = if f.gamut_warning && out { GAMUT } else { d };
-                    if f.warnings { warn(d) } else { d }
+                    let d = if f.warnings { warn(d) } else { d };
+                    match f.mask_view {
+                        Some((k, only)) => layers::mask_shown(&f.layers, k, only, d, mx, my),
+                        None => d,
+                    }
                 } else {
                     lin
                 };
@@ -945,6 +959,7 @@ fn resample(img: &Rgb, map: [[f64; 3]; 3], w: usize, h: usize) -> Rgb {
         lens: None,
         colour: f32m(&colour::IDENTITY),
         local: maps::Local::none(),
+        layers: Default::default(),
         look: look::Look::new(
             &Default::default(),
             &Default::default(),
@@ -953,6 +968,7 @@ fn resample(img: &Rgb, map: [[f64; 3]; 3], w: usize, h: usize) -> Rgb {
         display: Display::new(&DisplayTransform::default(), Target::Srgb),
         warnings: false,
         gamut_warning: false,
+        mask_view: None,
     };
     apply(img, &f, false)
 }

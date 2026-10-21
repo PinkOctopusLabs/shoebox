@@ -130,6 +130,11 @@ pub struct State {
     /// the point being dragged.
     pub(super) curve_channel: usize,
     pub(super) curve_drag: Option<usize>,
+    /// Local adjustments: the mask selected, its tool and handles.
+    pub local: super::local::Tool,
+    /// The frame the edit was last rendered with (handles are placed
+    /// through it).
+    pub(super) frame: Option<Frame>,
     gpu: Option<GpuShared>,
     edited: Option<Shown>,
     original: Option<Shown>,
@@ -159,11 +164,37 @@ fn region_key(settings: &Settings, overlays: Overlays) -> u64 {
 impl State {
     /// What's drawn over the edited render.
     pub fn overlays(&self) -> Overlays {
+        let mask = self
+            .local
+            .show_mask
+            .then_some(())
+            .and_then(|_| {
+                let id = self.local.selected.as_ref()?;
+                self.doc
+                    .as_ref()?
+                    .settings()
+                    .locals
+                    .iter()
+                    .position(|l| &l.id == id)
+            })
+            .map(|k| (k, self.local.mask_only));
         Overlays {
             clipping: self.warnings,
             proof: self.proof.then_some(self.proof_space),
             gamut: self.gamut_warning,
+            mask,
         }
+    }
+
+    /// The local adjustment layers in the last render (tests).
+    pub fn layers_rendered(&self) -> usize {
+        self.frame.as_ref().map_or(0, |f| f.layers.list.len())
+    }
+
+    /// The next change is a step of its own (a new drag, stroke or mask),
+    /// not folded into the last.
+    pub(super) fn last_step_done(&mut self) {
+        self.last = None;
     }
 }
 
@@ -259,6 +290,10 @@ impl State {
             compare: self.compare,
             split_at: self.split_at,
             looks: std::mem::take(&mut self.looks),
+            local: super::local::Tool {
+                brush: self.local.brush,
+                ..Default::default()
+            },
             ..Default::default()
         };
     }
@@ -852,6 +887,7 @@ fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_w
 
     let mut frame = cpu::frame(&ready.meta, &ready.src, &settings, &o);
     overlays.apply(&mut frame);
+    st.frame = Some(frame.clone());
     let key = (ready.id, EditDoc::settings_hash(&settings), overlays.key());
     if st.edited.as_ref().is_none_or(|v| v.key != key) {
         let h = render_into(
@@ -1203,6 +1239,10 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
     }
     if zoom.is_some() && compare == Compare::Edited {
         zoomed_region(app, &ctx, &painter, target, area, full_size, ppp);
+    }
+    // The selected mask's handles.
+    if app.develop.crop.is_none() && compare != Compare::Original && edited.is_some() {
+        super::local::on_photo(app, ui, &resp, &painter, target);
     }
     // Cropping: the crop over the whole frame, its aspect and Done above.
     if let (Some(_), Some((_, s))) = (&app.develop.crop, edited) {
@@ -2087,6 +2127,8 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                         s.geometry = Default::default()
                     });
                 }
+
+                super::local::section(app, ui, &s);
 
                 if display_referred {
                     // A finished image has no raw stages.

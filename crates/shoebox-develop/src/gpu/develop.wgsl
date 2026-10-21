@@ -2,7 +2,8 @@
 // `cpu::display_pixel`, which this follows operation for operation):
 // geometry map → lens grid (each channel from where the lens put it, times
 // the vignetting gain: `cpu::lens_sample`) → bilinear sample → colour matrix → local (dehaze,
-// highlights and shadows, clarity: `cpu::maps`) → look (colour, black and
+// highlights and shadows, clarity: `cpu::maps`) → local adjustments
+// (`cpu::layers`, masks from `mask`) → look (colour, black and
 // white: `cpu::look`) → display transform → tone curve → soft proof (into
 // an export space, clipped, back: `cpu::Proof`) → output space and sRGB
 // transfer curve.
@@ -55,6 +56,8 @@ struct Params {
     unproof0: vec4<f32>,  // and back; unproof0.w: gamut warning shown (0/1)
     unproof1: vec4<f32>,
     unproof2: vec4<f32>,
+    layers: vec4<f32>,    // local adjustments: count, mask width, mask height, mask shown (index + 1; 0: none)
+    mscale: vec4<f32>,    // source → mask pixels (x, y); z: the mask alone (0/1)
 };
 
 const GAMUT_SLACK: f32 = 2e-3;
@@ -258,6 +261,13 @@ fn look(px: vec3<f32>) -> vec3<f32> {
     return out;
 }
 
+// Local adjustment masks (see `mask::Masks`): one byte per pixel, four to
+// a word, layer after layer.
+@group(0) @binding(7) var<storage, read> masks: array<u32>;
+// Their layers (see `cpu::layers::Layer`): LAYER floats each.
+@group(0) @binding(8) var<storage, read> layer: array<f32>;
+const LAYER: u32 = 20u;
+
 fn map_at(x: u32, y: u32, k: u32) -> f32 {
     return maps[(y * u32(p.maps.y) + x) * STRIDE + k];
 }
@@ -293,8 +303,7 @@ fn stops(y: f32) -> f32 {
     return log2(max(y, 1e-6) / p.misc.y);
 }
 
-fn dehaze(px: vec3<f32>, t0: f32) -> vec3<f32> {
-    let amount = p.local.w;
+fn dehaze(px: vec3<f32>, t0: f32, amount: f32) -> vec3<f32> {
     if (amount > 0.0) {
         let t = clamp(t0, 0.1, 1.0);
         let j = (px - p.air.xyz) / t + p.air.xyz;
@@ -303,31 +312,114 @@ fn dehaze(px: vec3<f32>, t0: f32) -> vec3<f32> {
     return px + (-amount) * 0.5 * (p.air.xyz - px);
 }
 
+// Dehaze with the maps there (see `cpu::maps::dehaze_at`).
+fn dehaze_at(m: Coeffs, px: vec3<f32>, amount: f32) -> vec3<f32> {
+    let g = clamp(dot(p.luma.xyz, px) / max(p.air.w, 1e-6), 0.0, 2.0);
+    return dehaze(px, m.dz.x * g + m.dz.y, amount);
+}
+
+// Highlights, shadows and clarity as a gain in stops (see
+// `cpu::maps::tone_gain`).
+fn tone_gain(m: Coeffs, s: f32, shadows: f32, highlights: f32, clarity: f32) -> f32 {
+    var gain = 0.0;
+    if (shadows != 0.0 || highlights != 0.0) {
+        let base = m.hs.x * s + m.hs.y;
+        gain += shadows * 1.5 * (1.0 - smooth01(-3.0, 0.0, base));
+        gain += highlights * 1.5 * smooth01(-0.5, 2.5, base);
+    }
+    if (clarity != 0.0) {
+        let base = m.cl.x * s + m.cl.y;
+        let detail = clamp(s - base, -3.0, 3.0);
+        let mid = 1.0 - smooth01(2.0, 4.0, abs(base + 0.5));
+        gain += clarity * 0.7 * detail * mid;
+    }
+    return gain;
+}
+
 // Dehaze, highlights and shadows, clarity (see `cpu::maps::local_pixel`).
 fn local_px(px0: vec3<f32>, sx: f32, sy: f32) -> vec3<f32> {
     let m = coeffs(sx, sy);
     var px = px0;
     if (p.local.w != 0.0) {
-        let g = clamp(dot(p.luma.xyz, px) / max(p.air.w, 1e-6), 0.0, 2.0);
-        px = dehaze(px, m.dz.x * g + m.dz.y);
+        px = dehaze_at(m, px, p.local.w);
     }
-    let s = stops(dot(p.luma.xyz, px));
-    var gain = 0.0;
-    if (p.local.x != 0.0 || p.local.y != 0.0) {
-        let base = m.hs.x * s + m.hs.y;
-        gain += p.local.x * 1.5 * (1.0 - smooth01(-3.0, 0.0, base));
-        gain += p.local.y * 1.5 * smooth01(-0.5, 2.5, base);
-    }
-    if (p.local.z != 0.0) {
-        let base = m.cl.x * s + m.cl.y;
-        let detail = clamp(s - base, -3.0, 3.0);
-        let mid = 1.0 - smooth01(2.0, 4.0, abs(base + 0.5));
-        gain += p.local.z * 0.7 * detail * mid;
-    }
+    let gain = tone_gain(m, stops(dot(p.luma.xyz, px)), p.local.x, p.local.y, p.local.z);
     if (gain == 0.0) {
         return px;
     }
     return px * exp2(gain);
+}
+
+fn mask_byte(i: u32) -> f32 {
+    return f32((masks[i / 4u] >> (8u * (i % 4u))) & 0xffu) / 255.0;
+}
+
+// Layer k's mask at grid position (x, y) (see `mask::sample`).
+fn mask_at(k: u32, x0f: f32, y0f: f32) -> f32 {
+    let w = p.layers.y;
+    let h = p.layers.z;
+    let x = clamp(x0f, 0.0, w - 1.0);
+    let y = clamp(y0f, 0.0, h - 1.0);
+    let x0 = u32(floor(x));
+    let y0 = u32(floor(y));
+    let x1 = min(x0 + 1u, u32(w) - 1u);
+    let y1 = min(y0 + 1u, u32(h) - 1u);
+    let fx = x - f32(x0);
+    let fy = y - f32(y0);
+    let wi = u32(w);
+    let base = k * wi * u32(h);
+    let a = mask_byte(base + y0 * wi + x0);
+    let b = mask_byte(base + y0 * wi + x1);
+    let c = mask_byte(base + y1 * wi + x0);
+    let d = mask_byte(base + y1 * wi + x1);
+    let top = a + (b - a) * fx;
+    let bot = c + (d - c) * fx;
+    return top + (bot - top) * fy;
+}
+
+fn layer_row(k: u32, r: u32) -> vec3<f32> {
+    let i = k * LAYER + r * 4u;
+    return vec3<f32>(layer[i], layer[i + 1u], layer[i + 2u]);
+}
+
+// The local adjustments (see `cpu::layers::layers_pixel`): masks read at
+// (mx, my), before lens corrections; the maps at (sx, sy).
+fn layers_px(px0: vec3<f32>, mx: f32, my: f32, sx: f32, sy: f32) -> vec3<f32> {
+    let gx = (mx + 0.5) * p.mscale.x - 0.5;
+    let gy = (my + 0.5) * p.mscale.y - 0.5;
+    let has_maps = p.maps.x > 0.5;
+    var m = Coeffs(vec2<f32>(0.0), vec2<f32>(0.0), vec2<f32>(0.0));
+    if (has_maps) {
+        m = coeffs(sx, sy);
+    }
+    var px = px0;
+    for (var k = 0u; k < u32(p.layers.x); k++) {
+        let i = k * LAYER;
+        if (layer[i + 17u] < 0.5) {
+            continue;
+        }
+        let w = mask_at(k, gx, gy);
+        if (w <= 0.0) {
+            continue;
+        }
+        let contrast = layer[i + 12u];
+        let dz = layer[i + 16u];
+        var q = px;
+        if (dz != 0.0 && has_maps) {
+            q = dehaze_at(m, q, dz);
+        }
+        q = vec3<f32>(dot(layer_row(k, 0u), q), dot(layer_row(k, 1u), q), dot(layer_row(k, 2u), q));
+        let s = stops(dot(p.luma.xyz, q));
+        var gain = clamp(s, -4.0, 4.0) * 0.35 * contrast;
+        if (has_maps) {
+            gain += tone_gain(m, s, layer[i + 13u], layer[i + 14u], layer[i + 15u]);
+        }
+        if (gain != 0.0) {
+            q = q * exp2(gain);
+        }
+        px = px + (q - px) * w;
+    }
+    return px;
 }
 
 fn grid_at(x: u32, y: u32, k: u32) -> f32 {
@@ -484,6 +576,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let pw = p.map2.x * x + p.map2.y * y + p.map2.z;
     var sx = (p.map0.x * x + p.map0.y * y + p.map0.z) / pw;
     var sy = (p.map1.x * x + p.map1.y * y + p.map1.z) / pw;
+    let mx = sx;
+    let my = sy;
     var raw: vec3<f32>;
     if (p.lens.x > 0.5) {
         let l = lens_sample(sx, sy);
@@ -500,6 +594,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (p.maps.x > 0.5) {
         px = local_px(px, sx, sy);
     }
+    if (p.layers.x > 0.5) {
+        px = layers_px(px, mx, my, sx, sy);
+    }
     if (p.look.x > 0.5) {
         px = look(px);
     }
@@ -515,6 +612,19 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 px = vec3<f32>(1.0, 0.1, 0.1);
             } else if (hi <= 0.001) {
                 px = vec3<f32>(0.1, 0.3, 1.0);
+            }
+        }
+        // A layer's mask shown (see `cpu::layers::mask_shown`).
+        if (p.layers.w > 0.5 && u32(p.layers.w) <= u32(p.layers.x)) {
+            let w = mask_at(
+                u32(p.layers.w) - 1u,
+                (mx + 0.5) * p.mscale.x - 0.5,
+                (my + 0.5) * p.mscale.y - 0.5,
+            );
+            if (p.mscale.z > 0.5) {
+                px = vec3<f32>(w);
+            } else {
+                px = px + (vec3<f32>(1.0, 0.0, 0.0) - px) * (0.5 * w);
             }
         }
     }

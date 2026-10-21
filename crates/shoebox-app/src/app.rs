@@ -998,6 +998,13 @@ impl ShoeboxApp {
         self.develop.photo_rect
     }
 
+    /// Develop's local adjustments: the mask selected, its part, and how
+    /// many layers the last render had (tests).
+    pub fn develop_local(&self) -> (Option<String>, usize, usize) {
+        let t = &self.develop.local;
+        (t.selected.clone(), t.part, self.develop.layers_rendered())
+    }
+
     /// Where Develop's split divider is drawn (tests).
     pub fn develop_divider_x(&self) -> Option<f32> {
         self.develop.divider_x
@@ -3969,6 +3976,10 @@ impl ShoeboxApp {
             if pressed(egui::Key::W) {
                 self.develop.picking = !self.develop.picking;
             }
+            if pressed(egui::Key::O) && self.develop.local.selected.is_some() {
+                let t = &mut self.develop.local;
+                t.show_mask = !t.show_mask;
+            }
             if (pressed(egui::Key::Z) || pressed(egui::Key::Space)) && self.develop.crop.is_none() {
                 // Fit ↔ 100%, about the centre.
                 self.develop.zoom = match self.develop.zoom {
@@ -3991,6 +4002,13 @@ impl ShoeboxApp {
                 if pressed(egui::Key::Escape) {
                     views::develop::finish_crop(self, false);
                 }
+            } else if pressed(egui::Key::Escape)
+                && self.develop.local.selected.is_some()
+                && !ctx.any_popup_open()
+            {
+                // Escape puts the mask down first.
+                self.develop.local.selected = None;
+                self.develop.local.picking = false;
             } else if pressed(egui::Key::Escape) && !self.fullscreen && !ctx.any_popup_open() {
                 self.set_view(self.back_view);
             }

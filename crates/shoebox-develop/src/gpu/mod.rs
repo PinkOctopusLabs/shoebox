@@ -49,6 +49,35 @@ pub struct Pipe {
     pipeline: wgpu::ComputePipeline,
     /// The last local maps uploaded, and their buffer.
     maps: std::sync::Mutex<Option<(std::sync::Arc<crate::cpu::maps::Maps>, wgpu::Buffer)>>,
+    /// The last local adjustment masks uploaded, and their buffer.
+    masks: std::sync::Mutex<Option<(std::sync::Arc<crate::mask::Masks>, wgpu::Buffer)>>,
+}
+
+/// A read-only storage buffer at `binding`.
+fn storage(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+/// A storage buffer holding `bytes` (a placeholder when empty: bindings
+/// can't be zero-sized).
+fn storage_buffer(device: &wgpu::Device, label: &str, bytes: &[u8]) -> wgpu::Buffer {
+    wgpu::util::DeviceExt::create_buffer_init(
+        device,
+        &wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: if bytes.is_empty() { &[0; 16] } else { bytes },
+            usage: wgpu::BufferUsages::STORAGE,
+        },
+    )
 }
 
 /// The demosaiced image on the GPU.
@@ -112,46 +141,12 @@ impl Pipe {
                     },
                     count: None,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 5,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 6,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
+                storage(3),
+                storage(4),
+                storage(5),
+                storage(6),
+                storage(7),
+                storage(8),
             ],
         });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -172,6 +167,7 @@ impl Pipe {
             layout,
             pipeline,
             maps: Default::default(),
+            masks: Default::default(),
         }
     }
 
@@ -311,10 +307,37 @@ impl Pipe {
                 usage: wgpu::BufferUsages::STORAGE,
             },
         );
+        let masks = self.masks_buffer(device, frame);
+        let layers: Vec<u8> = frame
+            .layers
+            .list
+            .iter()
+            .flat_map(|l| {
+                let m = l.matrix;
+                let mut v = Vec::with_capacity(20);
+                // An inactive layer only shows its mask: identity, no gain.
+                for r in m {
+                    v.extend([r[0], r[1], r[2], 0.0]);
+                }
+                v.extend([l.contrast, l.shadows, l.highlights, l.clarity]);
+                v.extend([l.dehaze, if l.active { 1.0 } else { 0.0 }, 0.0, 0.0]);
+                v
+            })
+            .flat_map(f32::to_le_bytes)
+            .collect();
+        let layers = storage_buffer(device, "local layers", &layers);
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("develop"),
             layout: &self.layout,
             entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: masks.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: layers.as_entire_binding(),
+                },
                 wgpu::BindGroupEntry {
                     binding: 6,
                     resource: lut.as_entire_binding(),
@@ -387,6 +410,25 @@ impl Pipe {
             },
         );
         *kept = Some((maps.clone(), b.clone()));
+        b
+    }
+
+    /// The frame's masks on the GPU, packed four bytes to a word; kept
+    /// while they're the same masks.
+    fn masks_buffer(&self, device: &wgpu::Device, frame: &Frame) -> wgpu::Buffer {
+        let Some(masks) = &frame.layers.masks else {
+            return storage_buffer(device, "masks (none)", &[]);
+        };
+        let mut kept = self.masks.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((m, b)) = &*kept
+            && std::sync::Arc::ptr_eq(m, masks)
+        {
+            return b.clone();
+        }
+        let mut bytes = masks.data.clone();
+        bytes.resize(bytes.len().div_ceil(4) * 4, 0);
+        let b = storage_buffer(device, "masks", &bytes);
+        *kept = Some((masks.clone(), b.clone()));
         b
     }
 
@@ -637,11 +679,11 @@ impl Histogram {
     }
 }
 
-/// The uniform block (`Params` in the shader), as 48 vec4s.
+/// The uniform block (`Params` in the shader), as 50 vec4s.
 fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
     let row = |r: [f32; 3]| [r[0], r[1], r[2], 0.0];
     let d = &f.display;
-    let mut v = Vec::with_capacity(48 * 4);
+    let mut v = Vec::with_capacity(50 * 4);
     v.extend([
         f.map[0][0],
         f.map[0][1],
@@ -729,6 +771,16 @@ fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
             if i == 0 { flag(f.gamut_warning) } else { 0.0 },
         ]);
     }
+    let ls = &f.layers;
+    let (lw, lh) = ls
+        .masks
+        .as_ref()
+        .map_or((1.0, 1.0), |m| (m.width as f32, m.height as f32));
+    let (shown, only) = f
+        .mask_view
+        .map_or((0.0, 0.0), |(k, o)| ((k + 1) as f32, flag(o)));
+    v.extend([ls.list.len() as f32, lw, lh, shown]);
+    v.extend([ls.scale[0], ls.scale[1], only, 0.0]);
     v
 }
 

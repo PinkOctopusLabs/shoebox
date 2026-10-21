@@ -394,6 +394,8 @@ Lens corrections come from the Lensfun database through a pure-Rust crate. All g
 
 A local adjustment is a mask plus a small set of slider values, applied in linear light before tone mapping. Masks are built from parts that combine by add, subtract and intersect, the same model PhotoLab 9 now uses.
 
+As built (2026-10-22, DECISIONS): layers run after the global dehaze, highlights, shadows and clarity and before the colour stage; part positions are stored in the stored image's coordinates, in units of its long edge, so masks follow turns and crops; masks are rasterised to 8 bits on a grid of at most 2560 px. Sharpening and AI-denoise strength per layer arrive with AI raw denoise.
+
 **Adjustable per layer:** exposure, contrast, highlights, shadows, temperature, tint, saturation, clarity, dehaze, sharpening amount and AI-denoise strength.
 
 **Mask parts**

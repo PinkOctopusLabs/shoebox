@@ -65,6 +65,8 @@ struct Inner {
     maps: Option<(u64, Arc<Maps>)>,
     noise: Option<super::detail::Noise>,
     detailed: Option<(super::detail::Detail, Arc<Rgb>)>,
+    masks: Option<(u64, Arc<crate::mask::Masks>)>,
+    mask_source: Option<Arc<Rgb>>,
 }
 
 impl Cache {
@@ -78,6 +80,38 @@ impl Cache {
             .lock()
             .noise
             .get_or_insert_with(|| super::detail::estimate(img))
+    }
+
+    /// The local adjustments' masks for `key` (`make` runs on a miss).
+    pub fn masks(
+        &self,
+        key: u64,
+        make: impl FnOnce() -> crate::mask::Masks,
+    ) -> Arc<crate::mask::Masks> {
+        if let Some((k, m)) = &self.lock().masks
+            && *k == key
+        {
+            return m.clone();
+        }
+        let m = Arc::new(make());
+        self.lock().masks = Some((key, m.clone()));
+        m
+    }
+
+    /// `img` (the source) on the masks' `w`×`h` grid, made once.
+    pub fn mask_source(&self, img: &Rgb, w: usize, h: usize) -> Arc<Rgb> {
+        if let Some(m) = &self.lock().mask_source
+            && (m.width, m.height) == (w, h)
+        {
+            return m.clone();
+        }
+        let m = Arc::new(if (img.width, img.height) == (w, h) {
+            img.clone()
+        } else {
+            resize(img, w, h)
+        });
+        self.lock().mask_source = Some(m.clone());
+        m
     }
 
     /// The detail stage's result for `d` (`make` runs on a miss).
@@ -144,12 +178,21 @@ pub fn local(src: &Demosaiced, colour: &[[f32; 3]; 3], s: &Settings) -> Local {
         dehaze: unit(m.dehaze.amount),
         ..Local::none()
     };
+    // Local adjustments use the same maps.
+    let layers = s.locals.iter().filter(|l| l.enabled).map(|l| &l.adjust);
+    let (mut tones, mut clarity, mut haze) = (false, false, false);
+    for a in layers {
+        tones |= a.shadows != 0.0 || a.highlights != 0.0;
+        clarity |= a.clarity != 0.0;
+        haze |= a.dehaze != 0.0;
+    }
     let need = Need {
-        tones: l.shadows != 0.0 || l.highlights != 0.0,
-        clarity: l.clarity != 0.0,
+        tones: tones || l.shadows != 0.0 || l.highlights != 0.0,
+        clarity: clarity || l.clarity != 0.0,
+        haze: haze || l.dehaze != 0.0,
         dehaze: l.dehaze,
     };
-    if !need.tones && !need.clarity && need.dehaze == 0.0 {
+    if !need.tones && !need.clarity && !need.haze {
         return l;
     }
     let key = {
@@ -160,7 +203,7 @@ pub fn local(src: &Demosaiced, colour: &[[f32; 3]; 3], s: &Settings) -> Local {
                 v.to_bits().hash(&mut h);
             }
         }
-        (need.tones, need.clarity, need.dehaze.to_bits()).hash(&mut h);
+        (need.tones, need.clarity, need.haze, need.dehaze.to_bits()).hash(&mut h);
         h.finish()
     };
     let mut cache = src.cache.lock();
@@ -187,6 +230,9 @@ pub fn local(src: &Demosaiced, colour: &[[f32; 3]; 3], s: &Settings) -> Local {
 struct Need {
     tones: bool,
     clarity: bool,
+    /// The transmission map (for the global dehaze or a layer's).
+    haze: bool,
+    /// The global dehaze, applied before the tone maps are analysed.
     dehaze: f32,
 }
 
@@ -199,6 +245,11 @@ pub fn small(img: &Rgb) -> Rgb {
     let k = SMALL as f64 / long as f64;
     let w = ((img.width as f64 * k).round() as usize).max(1);
     let h = ((img.height as f64 * k).round() as usize).max(1);
+    resize(img, w, h)
+}
+
+/// An area-averaged copy at `w`×`h` (no larger than `img`).
+pub fn resize(img: &Rgb, w: usize, h: usize) -> Rgb {
     let xs = weights(img.width, w);
     let ys = weights(img.height, h);
     let mut rows = vec![0f32; w * img.height * 3];
@@ -261,7 +312,7 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
 }
 
 /// Stops from mid grey.
-fn stops(y: f32) -> f32 {
+pub(crate) fn stops(y: f32) -> f32 {
     (y.max(1e-6) / super::MID_GREY).log2()
 }
 
@@ -279,7 +330,7 @@ fn analyse(small: &Rgb, colour: &[[f32; 3]; 3], need: &Need) -> Maps {
         .collect();
     let mut data = vec![0f32; w * h * STRIDE];
     let mut airlight = [1.0f32; 3];
-    if need.dehaze != 0.0 {
+    if need.haze {
         let dark = min_filter(
             &lin.iter()
                 .map(|p| p[0].min(p[1]).min(p[2]))
@@ -441,6 +492,15 @@ fn guided(
     (box_mean(&a, w, h, r), box_mean(&b, w, h, r))
 }
 
+/// The maps at source position `(sx, sy)`.
+pub fn at_source(l: &Local, maps: &Maps, sx: f32, sy: f32) -> [f32; STRIDE] {
+    sample(
+        maps,
+        (sx + 0.5) * l.scale[0] - 0.5,
+        (sy + 0.5) * l.scale[1] - 0.5,
+    )
+}
+
 /// The maps at map position `(x, y)` (bilinear, clamped to the edges).
 pub fn sample(m: &Maps, x: f32, y: f32) -> [f32; STRIDE] {
     let x = x.clamp(0.0, (m.width - 1) as f32);
@@ -468,32 +528,51 @@ pub fn local_pixel(l: &Local, p: [f32; 3], sx: f32, sy: f32) -> [f32; 3] {
     let Some(maps) = &l.maps else {
         return p;
     };
-    let m = sample(
-        maps,
-        (sx + 0.5) * l.scale[0] - 0.5,
-        (sy + 0.5) * l.scale[1] - 0.5,
-    );
+    let m = at_source(l, maps, sx, sy);
     let mut p = p;
     if l.dehaze != 0.0 {
-        let g = haze_guide(dot(l.luma, p), dot(l.luma, maps.airlight));
-        p = dehaze_px(p, m[4] * g + m[5], maps.airlight, l.dehaze);
+        p = dehaze_at(maps, &m, p, l.luma, l.dehaze);
     }
-    let s = stops(dot(l.luma, p));
-    let mut gain = 0.0;
-    if l.shadows != 0.0 || l.highlights != 0.0 {
-        let base = m[0] * s + m[1];
-        gain += l.shadows * 1.5 * (1.0 - smoothstep(-3.0, 0.0, base));
-        gain += l.highlights * 1.5 * smoothstep(-0.5, 2.5, base);
-    }
-    if l.clarity != 0.0 {
-        let base = m[2] * s + m[3];
-        let detail = (s - base).clamp(-3.0, 3.0);
-        let mid = 1.0 - smoothstep(2.0, 4.0, (base + 0.5).abs());
-        gain += l.clarity * 0.7 * detail * mid;
-    }
+    let gain = tone_gain(
+        &m,
+        stops(dot(l.luma, p)),
+        l.shadows,
+        l.highlights,
+        l.clarity,
+    );
     if gain == 0.0 {
         return p;
     }
     let k = gain.exp2();
     p.map(|v| v * k)
+}
+
+/// Highlights, shadows and clarity as a gain in stops, for a pixel `s`
+/// stops from mid grey with maps `m` there.
+pub fn tone_gain(m: &[f32; STRIDE], s: f32, shadows: f32, highlights: f32, clarity: f32) -> f32 {
+    let mut gain = 0.0;
+    if shadows != 0.0 || highlights != 0.0 {
+        let base = m[0] * s + m[1];
+        gain += shadows * 1.5 * (1.0 - smoothstep(-3.0, 0.0, base));
+        gain += highlights * 1.5 * smoothstep(-0.5, 2.5, base);
+    }
+    if clarity != 0.0 {
+        let base = m[2] * s + m[3];
+        let detail = (s - base).clamp(-3.0, 3.0);
+        let mid = 1.0 - smoothstep(2.0, 4.0, (base + 0.5).abs());
+        gain += clarity * 0.7 * detail * mid;
+    }
+    gain
+}
+
+/// Dehaze at a pixel with maps `m` there.
+pub fn dehaze_at(
+    maps: &Maps,
+    m: &[f32; STRIDE],
+    p: [f32; 3],
+    luma: [f32; 3],
+    amount: f32,
+) -> [f32; 3] {
+    let g = haze_guide(dot(luma, p), dot(luma, maps.airlight));
+    dehaze_px(p, m[4] * g + m[5], maps.airlight, amount)
 }

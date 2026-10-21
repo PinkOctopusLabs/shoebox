@@ -107,6 +107,9 @@ pub struct Overlays {
     pub clipping: bool,
     pub proof: Option<shoebox_develop::export::Space>,
     pub gamut: bool,
+    /// A local adjustment's mask shown (O): its place in the settings'
+    /// `locals`, and whether alone.
+    pub mask: Option<(usize, bool)>,
 }
 
 impl Overlays {
@@ -114,6 +117,10 @@ impl Overlays {
         f.warnings = self.clipping;
         f.display.proof = self.proof.map(|s| cpu::Proof::new(s.target()));
         f.gamut_warning = self.proof.is_some() && self.gamut;
+        f.mask_view = self.mask.and_then(|(k, only)| {
+            let at = f.layers.from.iter().position(|&j| j == k)?;
+            Some((at, only))
+        });
     }
 
     /// Keys renders made with them.

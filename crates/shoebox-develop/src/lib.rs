@@ -15,6 +15,7 @@ pub mod export;
 pub mod golden;
 pub mod gpu;
 pub mod lens;
+pub mod mask;
 pub mod overlay;
 pub mod preset;
 pub mod profile;

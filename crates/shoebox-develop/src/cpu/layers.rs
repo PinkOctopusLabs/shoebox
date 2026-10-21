@@ -1,0 +1,279 @@
+//! Local adjustments in the live pipe (EDITING-SPEC, Local adjustments):
+//! after the global highlights, shadows, clarity and dehaze, before the
+//! colour stage, in linear Rec.2020. Each layer's sliders make an adjusted
+//! pixel, and its mask (see [`crate::mask`]) blends it in.
+//!
+//! Per layer: dehaze (the global transmission map), then exposure, white
+//! balance and saturation as one matrix, contrast about mid grey, and
+//! highlights, shadows and clarity through the global maps' base layers.
+//! The shader (`develop.wgsl`) follows these operation for operation.
+
+use std::sync::Arc;
+
+use rayon::prelude::*;
+
+use super::{Demosaiced, Display, Rgb, look, maps};
+use crate::colour::{self, M3};
+use crate::edit::{Local, Settings};
+use crate::mask::{self, Masks, Tones};
+
+/// A layer's numbers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Layer {
+    /// Any slider moved (a layer with none is kept for its mask to show).
+    pub active: bool,
+    /// Exposure, white balance and saturation.
+    pub matrix: [[f32; 3]; 3],
+    /// −1 to 1.
+    pub contrast: f32,
+    pub shadows: f32,
+    pub highlights: f32,
+    pub clarity: f32,
+    pub dehaze: f32,
+}
+
+/// What the live pipe needs for the local adjustments.
+#[derive(Debug, Clone, Default)]
+pub struct Layers {
+    pub list: Vec<Layer>,
+    /// The layers' ids, as `list`, and where each is in the settings'
+    /// `locals`.
+    pub ids: Vec<String>,
+    pub from: Vec<usize>,
+    /// One plane per layer in `list`.
+    pub masks: Option<Arc<Masks>>,
+    /// Source pixels → mask pixels.
+    pub scale: [f32; 2],
+}
+
+impl Layers {
+    pub fn is_empty(&self) -> bool {
+        self.list.is_empty()
+    }
+}
+
+/// The layers with a mask, and where each is in `locals`.
+fn active(s: &Settings) -> (Vec<&Local>, Vec<usize>) {
+    s.locals
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.enabled && !l.mask.parts.is_empty())
+        .map(|(i, l)| (l, i))
+        .unzip()
+}
+
+/// The layers for `src` under the frame's colour matrix and display.
+pub fn layers(src: &Demosaiced, colour: &[[f32; 3]; 3], display: &Display, s: &Settings) -> Layers {
+    let (locals, from) = active(s);
+    if locals.is_empty() {
+        return Layers::default();
+    }
+    let (sw, sh) = (src.rgb.width, src.rgb.height);
+    let (gw, gh) = mask::grid(sw, sh);
+    let long = sw.max(sh).max(1) as f64;
+    let units = [sw as f64 / long, sh as f64 / long];
+    let tones = mask::needs_tones(&locals);
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for l in &locals {
+            serde_json::to_string(&(&l.mask, l.amount))
+                .unwrap_or_default()
+                .hash(&mut h);
+        }
+        (gw, gh).hash(&mut h);
+        if tones {
+            // Ranges read the picture as the frame shows it.
+            for v in colour.iter().flatten() {
+                v.to_bits().hash(&mut h);
+            }
+            format!("{:?}{:?}", display.curve, display.referred).hash(&mut h);
+        }
+        h.finish()
+    };
+    let masks = src.cache.masks(key, || {
+        let t = tones.then(|| {
+            let small = src.cache.mask_source(&src.rgb, gw, gh);
+            tones_of(&small, colour, display)
+        });
+        mask::rasterise(&locals, gw, gh, units, t.as_ref())
+    });
+    Layers {
+        list: locals.iter().map(|l| layer(l)).collect(),
+        ids: locals.iter().map(|l| l.id.clone()).collect(),
+        from,
+        masks: Some(masks),
+        scale: [gw as f32 / sw as f32, gh as f32 / sh as f32],
+    }
+}
+
+fn layer(l: &Local) -> Layer {
+    let a = &l.adjust;
+    let unit = |v: f64| (v / 100.0) as f32;
+    Layer {
+        active: l.amount > 0.0 && *a != Default::default(),
+        matrix: super::f32m(&matrix(a.exposure, a.temperature, a.tint, a.saturation)),
+        contrast: unit(a.contrast),
+        shadows: unit(a.shadows),
+        highlights: unit(a.highlights),
+        clarity: unit(a.clarity),
+        dehaze: unit(a.dehaze),
+    }
+}
+
+/// Exposure (stops), temperature and tint (−100 to +100: warmer, more
+/// magenta) and saturation (−100 to +100) as one matrix on linear
+/// Rec.2020.
+fn matrix(exposure: f64, temperature: f64, tint: f64, saturation: f64) -> M3 {
+    let mut m = colour::diag([2f64.powf(exposure); 3]);
+    if temperature != 0.0 || tint != 0.0 {
+        // Adapt from a light as much warmer or cooler than daylight; at
+        // +100, about 10 700 K.
+        let base = 1.0e6 / 6504.0;
+        let from = colour::temp_tint_to_xy(1.0e6 / (base - temperature * 0.6), tint * 0.5);
+        let to = colour::temp_tint_to_xy(1.0e6 / base, 0.0);
+        let wb = colour::mul(
+            &colour::xyz_to_rgb(&colour::REC2020, colour::D65),
+            &colour::mul(
+                &colour::bradford(from, to),
+                &colour::rgb_to_xyz(&colour::REC2020, colour::D65),
+            ),
+        );
+        m = colour::mul(&wb, &m);
+    }
+    if saturation != 0.0 {
+        let s = (saturation / 100.0).max(-1.0);
+        let y = colour::rgb_to_xyz(&colour::REC2020, colour::D65)[1];
+        let mut sat = [[0.0; 3]; 3];
+        for (r, row) in sat.iter_mut().enumerate() {
+            for (c, v) in row.iter_mut().enumerate() {
+                *v = if r == c { 1.0 + s } else { 0.0 } - s * y[c];
+            }
+        }
+        m = colour::mul(&sat, &m);
+    }
+    m
+}
+
+/// Brightness as shown, hue and relative chroma of each pixel of `img`.
+fn tones_of(img: &Rgb, colour: &[[f32; 3]; 3], display: &Display) -> Tones {
+    let (to_lms, _) = look::lms_matrices();
+    let luma = maps::Local::none().luma;
+    let px: Vec<(f32, f32, f32)> = img
+        .data
+        .as_chunks::<3>()
+        .0
+        .par_iter()
+        .map(|p| tone_with(*p, colour, display, &to_lms, luma))
+        .collect();
+    Tones {
+        shown: px.iter().map(|p| p.0).collect(),
+        hue: px.iter().map(|p| p.1).collect(),
+        chroma: px.iter().map(|p| p.2).collect(),
+    }
+}
+
+/// A source pixel's brightness as shown (0–1), Oklab hue (degrees) and
+/// chroma relative to lightness, under the frame's colour matrix and
+/// display: what luminance and colour range parts read (and pick).
+pub fn tone_of(p: [f32; 3], colour: &[[f32; 3]; 3], display: &Display) -> (f32, f32, f32) {
+    let luma = maps::Local::none().luma;
+    tone_with(p, colour, display, &look::lms_matrices().0, luma)
+}
+
+fn tone_with(
+    p: [f32; 3],
+    colour: &[[f32; 3]; 3],
+    display: &Display,
+    to_lms: &[[f32; 3]; 3],
+    luma: [f32; 3],
+) -> (f32, f32, f32) {
+    let lin = super::mul3(colour, p);
+    let y = luma[0] * lin[0] + luma[1] * lin[1] + luma[2] * lin[2];
+    let shown = super::shape(display, [y; 3])[0].max(0.0).powf(1.0 / 2.2);
+    let lms = super::mul3(to_lms, lin).map(|v| v.signum() * v.abs().cbrt());
+    let [l, a, b] = super::mul3(&look::LMS_TO_LAB, lms);
+    let hue = b.atan2(a).to_degrees().rem_euclid(360.0);
+    (shown, hue, a.hypot(b) / l.max(1e-4))
+}
+
+/// The local adjustments for one linear Rec.2020 pixel: masks read at
+/// source position `(mx, my)` (before lens corrections, where they were
+/// drawn), the global maps at `(sx, sy)`.
+pub fn layers_pixel(
+    ls: &Layers,
+    local: &maps::Local,
+    p: [f32; 3],
+    mx: f32,
+    my: f32,
+    sx: f32,
+    sy: f32,
+) -> [f32; 3] {
+    let Some(masks) = &ls.masks else {
+        return p;
+    };
+    let (gx, gy) = (
+        (mx + 0.5) * ls.scale[0] - 0.5,
+        (my + 0.5) * ls.scale[1] - 0.5,
+    );
+    let mut p = p;
+    for (i, l) in ls.list.iter().enumerate() {
+        if !l.active {
+            continue;
+        }
+        let w = mask::sample(masks, i, gx, gy);
+        if w <= 0.0 {
+            continue;
+        }
+        let q = adjust(l, local, p, sx, sy);
+        p = [0, 1, 2].map(|c| p[c] + (q[c] - p[c]) * w);
+    }
+    p
+}
+
+/// One layer's sliders on a pixel.
+fn adjust(l: &Layer, local: &maps::Local, p: [f32; 3], sx: f32, sy: f32) -> [f32; 3] {
+    let m = local
+        .maps
+        .as_ref()
+        .map(|maps| (maps, maps::at_source(local, maps, sx, sy)));
+    let mut q = p;
+    if l.dehaze != 0.0
+        && let Some((maps, m)) = &m
+    {
+        q = maps::dehaze_at(maps, m, q, local.luma, l.dehaze);
+    }
+    q = super::mul3(&l.matrix, q);
+    let s = maps::stops(local.luma[0] * q[0] + local.luma[1] * q[1] + local.luma[2] * q[2]);
+    let mut gain = s.clamp(-4.0, 4.0) * 0.35 * l.contrast;
+    if let Some((_, m)) = &m {
+        gain += maps::tone_gain(m, s, l.shadows, l.highlights, l.clarity);
+    }
+    if gain == 0.0 {
+        return q;
+    }
+    let k = gain.exp2();
+    q.map(|v| v * k)
+}
+
+/// Layer `k`'s mask shown over display values `d` at source position
+/// `(mx, my)`: tinted red, or (`only`) the mask alone in grey.
+pub fn mask_shown(ls: &Layers, k: usize, only: bool, d: [f32; 3], mx: f32, my: f32) -> [f32; 3] {
+    let Some(masks) = ls.masks.as_ref().filter(|m| k < m.count) else {
+        return d;
+    };
+    let w = mask::sample(
+        masks,
+        k,
+        (mx + 0.5) * ls.scale[0] - 0.5,
+        (my + 0.5) * ls.scale[1] - 0.5,
+    );
+    if only {
+        return [w; 3];
+    }
+    let t = 0.5 * w;
+    [0, 1, 2].map(|c| d[c] + (MASK_TINT[c] - d[c]) * t)
+}
+
+/// The mask overlay's colour.
+pub const MASK_TINT: [f32; 3] = [1.0, 0.0, 0.0];

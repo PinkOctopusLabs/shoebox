@@ -4331,3 +4331,170 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
     }
     out
 }
+
+/// Local adjustments: a radial mask from the panel, its exposure from its
+/// own slider, its centre dragged on the photo (one step), the mask shown
+/// with O; a brush mask painted, and erased with ⌥; ⌘Z takes a stroke
+/// back; Escape puts the mask down without leaving Develop.
+#[test]
+fn develop_local_adjustments() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(&root).unwrap();
+    let img = shoebox_fixtures::scene(5, 800, 600);
+    std::fs::write(
+        root.join("local.jpg"),
+        shoebox_fixtures::jpeg(&img, 92).unwrap(),
+    )
+    .unwrap();
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let mut h = harness(p, egui::vec2(1400.0, 2600.0));
+    settle(&mut h, Duration::from_secs(60));
+    h.get_by_label("local.jpg").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(30), "develop", |a| {
+        a.develop_ready()
+    });
+    wait_for(&mut h, Duration::from_secs(30), "histogram", |a| {
+        a.develop_histogram().0.is_some()
+    });
+    h.run_steps(3);
+    let locals =
+        |h: &Harness<'_, ShoeboxApp>| h.state().develop_doc().unwrap().settings().locals.clone();
+
+    h.get_by_label("New mask").click();
+    h.run_steps(2);
+    h.get_by_label("Radial gradient").click();
+    h.run_steps(3);
+    let l = locals(&h);
+    assert_eq!(l.len(), 1);
+    assert_eq!(h.state().develop_local().0.as_deref(), Some("l1"));
+    assert_eq!(h.state().develop_local().2, 1, "rendered with the mask");
+
+    // The mask's Temperature (the last of the two) moves its own value.
+    let temp = h.query_all_by_label("Temperature").last().unwrap().rect();
+    let on_rail = egui::pos2(temp.right() + 30.0, temp.center().y);
+    let button = |pos, pressed, modifiers| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers,
+    };
+    h.event(egui::Event::PointerMoved(on_rail));
+    h.run_steps(1);
+    h.event(button(on_rail, true, egui::Modifiers::NONE));
+    h.event(button(on_rail, false, egui::Modifiers::NONE));
+    h.run_steps(3);
+    let l = locals(&h);
+    assert_ne!(l[0].adjust.temperature, 0.0, "{:?}", l[0].adjust);
+    let doc = h.state().develop_doc().unwrap();
+    assert_eq!(
+        doc.settings().modules.white_balance,
+        Default::default(),
+        "the global white balance is untouched"
+    );
+    assert!(
+        doc.history()
+            .last()
+            .unwrap()
+            .label
+            .starts_with("Mask temperature")
+    );
+
+    // Drag the ellipse's centre right: one step however many frames.
+    let photo = h.state().develop_photo_rect().unwrap();
+    let steps = h.state().develop_doc().unwrap().history().len();
+    let drag = |h: &mut Harness<'_, ShoeboxApp>, from: egui::Pos2, by: egui::Vec2, m| {
+        // Held keys, as the system reports them while the mouse moves.
+        h.event(egui::Event::ModifiersChanged(m));
+        h.event(egui::Event::PointerMoved(from));
+        h.run_steps(1);
+        h.event(button(from, true, m));
+        h.run_steps(1);
+        for k in 1..=6 {
+            h.event(egui::Event::PointerMoved(from + by * (k as f32 / 6.0)));
+            h.run_steps(1);
+        }
+        h.event(button(from + by, false, m));
+        h.run_steps(3);
+        h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    };
+    drag(
+        &mut h,
+        photo.center(),
+        egui::vec2(80.0, 0.0),
+        egui::Modifiers::NONE,
+    );
+    let l = locals(&h);
+    let shoebox_develop::edit::Part::Known(p) = &l[0].mask.parts[0] else {
+        panic!()
+    };
+    let shoebox_develop::edit::Shape::Radial { centre, .. } = p.shape else {
+        panic!("{:?}", p.shape)
+    };
+    assert!(centre[0] > 0.55, "moved right: {centre:?}");
+    let doc = h.state().develop_doc().unwrap();
+    assert_eq!(doc.history().len(), steps + 1);
+    assert_eq!(doc.history().last().unwrap().label, "Move radial gradient");
+
+    // O shows the mask.
+    h.key_press(egui::Key::O);
+    h.run_steps(3);
+    assert_eq!(h.state().develop_overlays().mask, Some((0, false)));
+    snapshot(&mut h, "develop-local-radial");
+    h.key_press(egui::Key::O);
+    h.run_steps(2);
+
+    // A brush mask: paint a stroke, then erase part of it.
+    h.get_by_label("New mask").click();
+    h.run_steps(2);
+    h.get_by_label("Brush").click();
+    h.run_steps(3);
+    assert_eq!(h.state().develop_local().0.as_deref(), Some("l2"));
+    let from = photo.center() + egui::vec2(-120.0, 60.0);
+    drag(&mut h, from, egui::vec2(240.0, 0.0), egui::Modifiers::NONE);
+    let brush = |h: &Harness<'_, ShoeboxApp>| {
+        let l = locals(h);
+        match &l[1].mask.parts[0] {
+            shoebox_develop::edit::Part::Known(shoebox_develop::edit::MaskPart {
+                shape: shoebox_develop::edit::Shape::Brush { strokes },
+                ..
+            }) => strokes.clone(),
+            other => panic!("{other:?}"),
+        }
+    };
+    let strokes = brush(&h);
+    assert_eq!(strokes.len(), 1);
+    assert!(strokes[0].points.len() >= 3, "{:?}", strokes[0].points);
+    assert!(!strokes[0].erase);
+    assert_eq!(
+        h.state()
+            .develop_doc()
+            .unwrap()
+            .history()
+            .last()
+            .unwrap()
+            .label,
+        "Brush"
+    );
+    drag(
+        &mut h,
+        from + egui::vec2(100.0, -20.0),
+        egui::vec2(0.0, 40.0),
+        egui::Modifiers::ALT,
+    );
+    let strokes = brush(&h);
+    assert_eq!(strokes.len(), 2);
+    assert!(strokes[1].erase);
+    // ⌘Z takes the erasing back.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(3);
+    assert_eq!(brush(&h).len(), 1);
+
+    // Escape puts the mask down; Develop stays.
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert_eq!(h.state().develop_local().0, None);
+    assert_eq!(h.state().view_name(), shoebox_app::app::View::Develop);
+}
