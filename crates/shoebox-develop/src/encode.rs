@@ -1,7 +1,8 @@
 //! Writing rendered images: JPEG (pure Rust, `jpeg-encoder`) with an
 //! embedded ICC profile (`moxcms`), for previews and export; AVIF (`rav1e`
 //! and `avif-serialize`, pure Rust) tagged by CICP; and linear DNGs
-//! (`rawler`'s DNG writer).
+//! (`rawler`'s DNG writer): 16-bit for exports, floating point for photo
+//! merges.
 
 use shoebox_decode::raw::ColorMatrix;
 
@@ -432,4 +433,218 @@ fn illuminant(kelvin: f32) -> rawler::imgop::xyz::Illuminant {
     .into_iter()
     .min_by(|a, b| (a.1 - kelvin).abs().total_cmp(&(b.1 - kelvin).abs()))
     .map_or(I::D65, |(i, _)| i)
+}
+
+/// What goes into a floating-point linear DNG (see [`float_dng`]).
+#[derive(Clone, Copy)]
+pub struct FloatDng<'a> {
+    pub width: usize,
+    pub height: usize,
+    /// Camera-native linear RGB, row by row, upright: black 0, the sensor's
+    /// white 1.0, values above it kept (an HDR merge's highlights).
+    pub data: &'a [f32],
+    pub make: &'a str,
+    pub model: &'a str,
+    /// The camera RGB of a neutral as shot (AsShotNeutral), green 1.
+    pub neutral: [f32; 3],
+    /// XYZ → camera matrices by calibration temperature, lowest first: the
+    /// first and last are written.
+    pub matrices: &'a [ColorMatrix],
+    /// An upright 8-bit sRGB thumbnail (width, height, pixels) for IFD 0.
+    pub thumbnail: Option<(usize, usize, &'a [u8])>,
+    /// A larger preview, a baseline JPEG in sRGB, in a SubIFD.
+    pub preview: Option<&'a [u8]>,
+    /// EXIF to copy (camera, lens, exposure, dates), as rawler read it from
+    /// a source.
+    pub exif: Option<&'a rawler::decoders::RawMetadata>,
+    /// An XMP packet for IFD 0.
+    pub xmp: Option<&'a [u8]>,
+}
+
+/// Tiles of the floating-point image: this many pixels square.
+const FLOAT_TILE: usize = 256;
+
+/// Write a floating-point linear DNG (DNG 1.4): the image a LinearRaw
+/// SubIFD of 16-bit (half) floats, three samples a pixel, in 256-pixel
+/// tiles, deflated with the floating-point predictor (TIFF predictor 3:
+/// each row's bytes split into planes, most significant first, then
+/// differenced), as Adobe's HDR merges are stored. WhiteLevel is 1.0, so
+/// values above it (to 65504) are highlights beyond the sensor's white.
+/// The colour tags are as [`linear_dng`]'s.
+pub fn float_dng(d: &FloatDng) -> Result<Vec<u8>, String> {
+    if d.data.len() != d.width * d.height * 3 || d.width == 0 || d.height == 0 {
+        return Err("float DNG: the image doesn't match its size".into());
+    }
+    if d.width > usize::from(u16::MAX) || d.height > usize::from(u16::MAX) {
+        return Err(format!("{}×{} is too large for DNG", d.width, d.height));
+    }
+    let (Some(low), Some(high)) = (d.matrices.first(), d.matrices.last()) else {
+        return Err("float DNG: no colour matrix".into());
+    };
+    let tiles = float_tiles(d.data, d.width, d.height)?;
+    // rawler's writer asserts on input it doesn't expect.
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        write_float_dng(
+            d,
+            &tiles,
+            low,
+            (high.temperature > low.temperature).then_some(high),
+        )
+    }))
+    .map_err(|_| "the DNG writer failed".to_owned())?
+    .map_err(|e| format!("DNG: {e}"))
+}
+
+/// Each tile half floats, byte planes differenced, deflated; row-major,
+/// edge tiles padded by repeating the last row and column (readers crop).
+fn float_tiles(data: &[f32], width: usize, height: usize) -> Result<Vec<Vec<u8>>, String> {
+    use rayon::prelude::*;
+    use std::io::Write;
+    let across = width.div_ceil(FLOAT_TILE);
+    let down = height.div_ceil(FLOAT_TILE);
+    (0..across * down)
+        .into_par_iter()
+        .map(|t| {
+            let (tx, ty) = (t % across * FLOAT_TILE, t / across * FLOAT_TILE);
+            let row_bytes = FLOAT_TILE * 3 * 2;
+            let mut raw = vec![0u8; row_bytes * FLOAT_TILE];
+            for (r, row) in raw.chunks_exact_mut(row_bytes).enumerate() {
+                let y = (ty + r).min(height - 1);
+                let (hi, lo) = row.split_at_mut(FLOAT_TILE * 3);
+                for col in 0..FLOAT_TILE {
+                    let x = (tx + col).min(width - 1);
+                    for c in 0..3 {
+                        let v = data[(y * width + x) * 3 + c];
+                        let v = if v.is_finite() {
+                            v.clamp(0.0, 65504.0)
+                        } else {
+                            0.0
+                        };
+                        let [h, l] = half::f16::from_f32(v).to_bits().to_be_bytes();
+                        hi[col * 3 + c] = h;
+                        lo[col * 3 + c] = l;
+                    }
+                }
+                // Difference each byte from the one a pixel before it.
+                for i in (3..row.len()).rev() {
+                    row[i] = row[i].wrapping_sub(row[i - 3]);
+                }
+            }
+            let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(5));
+            z.write_all(&raw).map_err(|e| e.to_string())?;
+            z.finish().map_err(|e| e.to_string())
+        })
+        .collect()
+}
+
+fn write_float_dng(
+    d: &FloatDng,
+    tiles: &[Vec<u8>],
+    low: &ColorMatrix,
+    high: Option<&ColorMatrix>,
+) -> Result<Vec<u8>, rawler::dng::writer::DngError> {
+    use rawler::dng::DNG_VERSION_V1_4;
+    use rawler::dng::writer::DngWriter;
+    use rawler::formats::tiff::{Rational, SRational};
+    use rawler::tags::{DngTag, TiffCommonTag};
+    let mut buf = std::io::Cursor::new(Vec::new());
+    let mut dng = DngWriter::new(&mut buf, DNG_VERSION_V1_4)?;
+    if let Some(meta) = d.exif {
+        dng.load_metadata(meta)?;
+    }
+    let mut offsets = Vec::with_capacity(tiles.len());
+    let mut counts = Vec::with_capacity(tiles.len());
+    for t in tiles {
+        offsets.push(dng.dng.write_data(t)?);
+        counts.push(t.len() as u32);
+    }
+    {
+        let mut raw = dng.subframe(0);
+        let ifd = raw.ifd_mut();
+        ifd.add_tag(TiffCommonTag::ImageWidth, d.width as u32);
+        ifd.add_tag(TiffCommonTag::ImageLength, d.height as u32);
+        ifd.add_tag(TiffCommonTag::BitsPerSample, &[16u16, 16, 16][..]);
+        ifd.add_tag(TiffCommonTag::SampleFormat, &[3u16, 3, 3][..]);
+        // Adobe's deflate; the floating-point predictor.
+        ifd.add_tag(TiffCommonTag::Compression, 8u16);
+        ifd.add_tag(TiffCommonTag::Predictor, 3u16);
+        ifd.add_tag(TiffCommonTag::PhotometricInt, 34892u16);
+        ifd.add_tag(TiffCommonTag::SamplesPerPixel, 3u16);
+        // PlanarConfiguration: chunky.
+        ifd.add_untyped_tag(0x011C, 1u16);
+        ifd.add_tag(TiffCommonTag::TileWidth, FLOAT_TILE as u32);
+        ifd.add_tag(TiffCommonTag::TileLength, FLOAT_TILE as u32);
+        ifd.add_tag(TiffCommonTag::TileOffsets, &offsets[..]);
+        ifd.add_tag(TiffCommonTag::TileByteCounts, &counts[..]);
+        ifd.add_tag(TiffCommonTag::WhiteLevel, &[1u32, 1, 1][..]);
+        raw.finalize()?;
+    }
+    if let Some(jpeg) = d.preview
+        && let Ok((w, h)) = shoebox_decode::jpeg::dimensions(jpeg)
+    {
+        let at = dng.dng.write_data(jpeg)?;
+        let mut p = dng.subframe(1);
+        let ifd = p.ifd_mut();
+        ifd.add_tag(TiffCommonTag::ImageWidth, w);
+        ifd.add_tag(TiffCommonTag::ImageLength, h);
+        ifd.add_tag(TiffCommonTag::BitsPerSample, &[8u16, 8, 8][..]);
+        ifd.add_tag(TiffCommonTag::Compression, 7u16);
+        ifd.add_tag(TiffCommonTag::PhotometricInt, 6u16);
+        ifd.add_tag(TiffCommonTag::SamplesPerPixel, 3u16);
+        ifd.add_tag(TiffCommonTag::StripOffsets, at);
+        ifd.add_tag(TiffCommonTag::StripByteCounts, jpeg.len() as u32);
+        ifd.add_tag(TiffCommonTag::RowsPerStrip, h);
+        // sRGB.
+        ifd.add_tag(DngTag::PreviewColorSpace, 2u32);
+        p.finalize()?;
+    }
+    let neutral: Vec<Rational> = d
+        .neutral
+        .iter()
+        .map(|v| Rational::new((v.clamp(0.0, 64.0) * 1e6).round() as u32, 1_000_000))
+        .collect();
+    dng.as_shot_neutral(&neutral);
+    let matrix = |m: &ColorMatrix| -> Vec<SRational> {
+        m.xyz_to_cam
+            .iter()
+            .flatten()
+            .map(|v| SRational::new((v * 10_000.0).round() as i32, 10_000))
+            .collect()
+    };
+    dng.color_matrix(1, illuminant(low.temperature), matrix(low));
+    if let Some(high) = high {
+        dng.color_matrix(2, illuminant(high.temperature), matrix(high));
+    }
+    if let Some(xmp) = d.xmp {
+        dng.xpacket(xmp)?;
+    }
+    let root = dng.root_ifd_mut();
+    root.add_tag(TiffCommonTag::Make, d.make);
+    root.add_tag(TiffCommonTag::Model, d.model);
+    let unique = if d.model.starts_with(d.make) {
+        d.model.to_owned()
+    } else {
+        format!("{} {}", d.make, d.model)
+    };
+    root.add_tag(DngTag::UniqueCameraModel, unique.as_str());
+    root.add_tag(TiffCommonTag::Software, "Shoebox");
+    root.add_tag(TiffCommonTag::Orientation, 1u16);
+    if let Some((w, h, px)) = d.thumbnail
+        && px.len() == w * h * 3
+    {
+        let offset = dng.dng.write_data(px)?;
+        let root = dng.root_ifd_mut();
+        root.add_tag(TiffCommonTag::NewSubFileType, 1u32);
+        root.add_tag(TiffCommonTag::ImageWidth, w as u32);
+        root.add_tag(TiffCommonTag::ImageLength, h as u32);
+        root.add_tag(TiffCommonTag::BitsPerSample, &[8u16, 8, 8][..]);
+        root.add_tag(TiffCommonTag::Compression, 1u16);
+        root.add_tag(TiffCommonTag::PhotometricInt, 2u16);
+        root.add_tag(TiffCommonTag::SamplesPerPixel, 3u16);
+        root.add_tag(TiffCommonTag::StripOffsets, offset);
+        root.add_tag(TiffCommonTag::StripByteCounts, px.len() as u32);
+        root.add_tag(TiffCommonTag::RowsPerStrip, h as u32);
+    }
+    dng.close()?;
+    Ok(buf.into_inner())
 }

@@ -21,6 +21,7 @@ pub mod gpu;
 pub mod heal;
 pub mod lens;
 pub mod mask;
+pub mod merge;
 pub mod overlay;
 pub mod preset;
 pub mod profile;

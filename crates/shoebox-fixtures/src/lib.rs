@@ -264,6 +264,8 @@ pub struct Dng {
     /// Capture metadata (an Exif IFD, and IFD 0's orientation), if any;
     /// it replaces `iso`.
     pub shot: Option<Shot>,
+    /// The exposure time `shot` records, as a fraction (1/250 if None).
+    pub exposure: Option<(u32, u32)>,
 }
 
 impl Dng {
@@ -295,6 +297,7 @@ impl Dng {
             iso: None,
             preview: None,
             shot: None,
+            exposure: None,
         }
     }
 
@@ -372,7 +375,7 @@ impl Dng {
             entries.push((0xC620, Val::Long(vec![cw, ch])));
         }
         if let Some(shot) = &self.shot {
-            let exif = exif_entries(&mut w, shot);
+            let exif = exif_entries_at(&mut w, shot, self.exposure.unwrap_or((1, 250)));
             entries.push((0x8769, Val::Long(vec![exif])));
         } else if let Some(iso) = self.iso {
             let exif = w.ifd(vec![(0x8827, Val::Short(vec![iso]))], 0);
@@ -466,12 +469,16 @@ pub struct Shot {
 }
 
 fn exif_entries(w: &mut TiffWriter, shot: &Shot) -> u32 {
+    exif_entries_at(w, shot, (1, 250))
+}
+
+fn exif_entries_at(w: &mut TiffWriter, shot: &Shot, exposure: (u32, u32)) -> u32 {
     w.ifd(
         vec![
             (0x9003, Val::Ascii(shot.datetime.into())),
             (0x9291, Val::Ascii(shot.subsec.into())),
             (0x9011, Val::Ascii("+09:00".into())),
-            (0x829A, Val::Rational(vec![(1, 250)])),
+            (0x829A, Val::Rational(vec![exposure])),
             (0x829D, Val::Rational(vec![(28, 10)])),
             (0x8827, Val::Short(vec![400])),
             (0x920A, Val::Rational(vec![(400, 10)])),
@@ -490,6 +497,155 @@ fn ifd0_camera(shot: &Shot, exif: u32) -> Vec<(u16, Val)> {
         (0x0132, Val::Ascii(shot.datetime.into())),
         (0x8769, Val::Long(vec![exif])),
     ]
+}
+
+/// Smooth value noise in 0–1: random values on a grid of `cell` pixels,
+/// blended with smoothstep (corners where cells meet, for alignment).
+fn value_noise(x: f64, y: f64, cell: f64, seed: u64) -> f64 {
+    let (gx, gy) = (x / cell, y / cell);
+    let (ix, iy) = (gx.floor(), gy.floor());
+    let s = |t: f64| t * t * (3.0 - 2.0 * t);
+    let (fx, fy) = (s(gx - ix), s(gy - iy));
+    let at = |i: f64, j: f64| {
+        let mut r = Rng((i as i64 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ (j as i64 as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+            ^ seed
+            | 1);
+        r.next();
+        f64::from(r.f())
+    };
+    let top = at(ix, iy) * (1.0 - fx) + at(ix + 1.0, iy) * fx;
+    let bottom = at(ix, iy + 1.0) * (1.0 - fx) + at(ix + 1.0, iy + 1.0) * fx;
+    top * (1.0 - fy) + bottom * fy
+}
+
+/// The HDR test scene's light at `(x, y)` of a `w`×`h` view, relative to
+/// the sensor's white at the 0 EV frame's exposure: a textured room (0.02–
+/// 0.17), a dark corner (about 0.005), and a window of sky 1.4–3.2 (clipped
+/// at 0 EV, held by −2 EV) with dark glazing bars.
+pub fn hdr_light(x: f64, y: f64, w: f64, h: f64) -> f64 {
+    let (u, v) = (x / w, y / h);
+    if (0.56..0.86).contains(&u) && (0.14..0.56).contains(&v) {
+        if (u - 0.71).abs() < 0.012 || (v - 0.35).abs() < 0.015 {
+            return 0.06;
+        }
+        let down = (v - 0.14) / 0.42;
+        return 1.4 + 1.5 * (1.0 - down) + 0.3 * value_noise(x, y, 9.0, 3);
+    }
+    if u < 0.22 && v > 0.7 {
+        return 0.003 + 0.004 * value_noise(x, y, 11.0, 5);
+    }
+    0.02 + 0.15 * (0.6 * value_noise(x, y, 14.0, 1) + 0.4 * value_noise(x, y, 5.0, 2))
+}
+
+/// One frame of a synthetic HDR bracket: [`hdr_light`] seen `ev` stops
+/// brighter than 0 EV, moved and turned (hand-held), with sensor noise and
+/// clipping, as a raw DNG with EXIF (ISO 400, the exposure time).
+#[derive(Debug, Clone)]
+pub struct Bracket {
+    pub width: u32,
+    pub height: u32,
+    pub ev: f64,
+    /// Where the scene sits in this frame: frame pixel `p` sees the scene
+    /// at `R(rotate)·(p − centre) + centre + shift`.
+    pub shift: (f64, f64),
+    /// Degrees.
+    pub rotate: f64,
+    /// Something in the room only this frame saw: `[x0, y0, x1, y1]` of the
+    /// scene, and its light.
+    pub mover: Option<([f64; 4], f64)>,
+    pub seed: u64,
+    pub datetime: &'static str,
+    pub subsec: &'static str,
+}
+
+impl Bracket {
+    pub fn new(width: u32, height: u32, ev: f64) -> Self {
+        Self {
+            width,
+            height,
+            ev,
+            shift: (0.0, 0.0),
+            rotate: 0.0,
+            mover: None,
+            seed: 1,
+            datetime: "2026:10:22 14:30:00",
+            subsec: "10",
+        }
+    }
+
+    fn centre(&self) -> (f64, f64) {
+        (
+            (f64::from(self.width) - 1.0) / 2.0,
+            (f64::from(self.height) - 1.0) / 2.0,
+        )
+    }
+
+    /// Frame pixel → scene (the 0 EV frame's pixels, when it doesn't move).
+    pub fn to_scene(&self, x: f64, y: f64) -> (f64, f64) {
+        let (cx, cy) = self.centre();
+        let (s, c) = self.rotate.to_radians().sin_cos();
+        let (dx, dy) = (x - cx, y - cy);
+        (
+            c * dx - s * dy + cx + self.shift.0,
+            s * dx + c * dy + cy + self.shift.1,
+        )
+    }
+
+    /// Scene → frame pixel.
+    pub fn to_frame(&self, x: f64, y: f64) -> (f64, f64) {
+        let (cx, cy) = self.centre();
+        let (s, c) = self.rotate.to_radians().sin_cos();
+        let (dx, dy) = (x - cx - self.shift.0, y - cy - self.shift.1);
+        (c * dx + s * dy + cx, -s * dx + c * dy + cy)
+    }
+
+    /// The light at frame pixel `(x, y)`.
+    pub fn light(&self, x: f64, y: f64) -> f64 {
+        let (sx, sy) = self.to_scene(x, y);
+        if let Some(([x0, y0, x1, y1], m)) = self.mover
+            && (x0..x1).contains(&sx)
+            && (y0..y1).contains(&sy)
+        {
+            return m;
+        }
+        hdr_light(sx, sy, f64::from(self.width), f64::from(self.height))
+    }
+
+    pub fn write(&self) -> Vec<u8> {
+        let dng = Dng {
+            shot: Some(Shot {
+                datetime: self.datetime,
+                subsec: self.subsec,
+                orientation: 1,
+                serial: "7654321",
+            }),
+            exposure: Some(((2f64.powf(self.ev) * 4000.0).round() as u32, 1_000_000)),
+            ..Dng::new(self.width, self.height)
+        };
+        let gain = 2f64.powf(self.ev);
+        let range = f64::from(dng.white - dng.black);
+        // ISO 400's noise, as the merge models it: shot and read.
+        let (a, b) = (8e-5, 1.6e-8);
+        let mut rng = Rng(self.seed.wrapping_mul(0x2545_F491_4F6C_DD1D) | 1);
+        let mut noise = move || {
+            let u1 = (f64::from(rng.f()) + 1e-4).min(1.0);
+            let u2 = f64::from(rng.f());
+            (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+        };
+        let mut px = vec![0u16; (self.width * self.height) as usize];
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let c = usize::from(dng.cfa[(y % 2) as usize][(x % 2) as usize]);
+                let v = self.light(f64::from(x), f64::from(y)) * f64::from(dng.neutral[c]) * gain;
+                let v = v + noise() * (a * v.max(0.0) + b).sqrt();
+                let counts = f64::from(dng.black) + v.clamp(0.0, 1.0) * range;
+                px[(y * self.width + x) as usize] = counts.round() as u16;
+            }
+        }
+        let w = self.width;
+        dng.write(|x, y| px[(y * w + x) as usize])
+    }
 }
 
 /// A NEF-shaped TIFF: IFD0 (thumbnail descriptor + camera tags), IFD1 with a

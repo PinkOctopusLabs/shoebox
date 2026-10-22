@@ -6327,6 +6327,7 @@ dependencies = [
  "blake3",
  "criterion",
  "epaint_default_fonts",
+ "flate2",
  "half",
  "jiff",
  "jpeg-encoder",
