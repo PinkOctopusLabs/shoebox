@@ -648,6 +648,236 @@ impl Bracket {
     }
 }
 
+/// The depth of the focus test scene's disc (0 near … 1 far).
+pub const FOCUS_DISC_DEPTH: f64 = 0.1;
+
+/// The focus test scene's wall at `(x, y)` of a `w`×`h` view: its light
+/// (camera RGB, the sensor's white 1) and depth, a textured wall slanting
+/// away from near (left, depth 0) to far (right, depth 1). Fine texture
+/// (cells of 2.5 and 6 pixels), so a pixel of blur shows.
+pub fn focus_wall(x: f64, y: f64, w: f64, _h: f64) -> ([f64; 3], f64) {
+    let t = 0.55 * value_noise(x, y, 2.5, 21) + 0.45 * value_noise(x, y, 6.0, 22);
+    let v = 0.04 + 0.16 * t;
+    ([0.55 * v, v, 0.75 * v], (x / w).clamp(0.0, 1.0))
+}
+
+/// The focus test scene's disc at `(x, y)`: its light, and how much of the
+/// pixel it covers (a pixel's worth of soft edge). Brighter than the wall
+/// and near the camera ([`FOCUS_DISC_DEPTH`]), in front of the wall's far
+/// side: a depth edge.
+pub fn focus_disc(x: f64, y: f64, w: f64, h: f64) -> ([f64; 3], f64) {
+    let (cx, cy, r) = (0.72 * w, 0.5 * h, 0.2 * h);
+    let a = (r - (x - cx).hypot(y - cy) + 0.5).clamp(0.0, 1.0);
+    let t = 0.5 * value_noise(x, y, 2.5, 23) + 0.5 * value_noise(x, y, 5.0, 24);
+    let v = 0.3 + 0.3 * t;
+    ([0.6 * v, v, 0.5 * v], a)
+}
+
+/// A separable Gaussian blur of `c`-channel pixels, edges clamped.
+fn gauss(img: &[f64], w: usize, h: usize, c: usize, sigma: f64) -> Vec<f64> {
+    if sigma < 0.05 {
+        return img.to_vec();
+    }
+    let r = (3.0 * sigma).ceil() as isize;
+    let k: Vec<f64> = (-r..=r)
+        .map(|i| (-(i * i) as f64 / (2.0 * sigma * sigma)).exp())
+        .collect();
+    let sum: f64 = k.iter().sum();
+    let k: Vec<f64> = k.iter().map(|v| v / sum).collect();
+    let (wi, hi) = (w as isize, h as isize);
+    let mut tmp = vec![0.0; img.len()];
+    for y in 0..h {
+        for x in 0..w {
+            for ch in 0..c {
+                let mut s = 0.0;
+                for (j, kv) in k.iter().enumerate() {
+                    let xx = (x as isize + j as isize - r).clamp(0, wi - 1) as usize;
+                    s += kv * img[(y * w + xx) * c + ch];
+                }
+                tmp[(y * w + x) * c + ch] = s;
+            }
+        }
+    }
+    let mut out = vec![0.0; img.len()];
+    for y in 0..h {
+        for x in 0..w {
+            for ch in 0..c {
+                let mut s = 0.0;
+                for (j, kv) in k.iter().enumerate() {
+                    let yy = (y as isize + j as isize - r).clamp(0, hi - 1) as usize;
+                    s += kv * tmp[(yy * w + x) * c + ch];
+                }
+                out[(y * w + x) * c + ch] = s;
+            }
+        }
+    }
+    out
+}
+
+/// One frame of a synthetic focus bracket of [`focus_wall`] and
+/// [`focus_disc`]: focused at depth `focus`, everything else blurred by
+/// how far it is from it (layered: the disc's blur spreads over the wall,
+/// as a lens's does), magnified about the centre (focus breathing) and
+/// shifted, with ISO 400's noise, as a raw DNG with EXIF.
+#[derive(Debug, Clone)]
+pub struct FocusFrame {
+    pub width: u32,
+    pub height: u32,
+    /// The depth in focus (0 near … 1 far).
+    pub focus: f64,
+    /// Blur (a Gaussian's σ, pixels) per unit of depth from the focus.
+    pub blur: f64,
+    /// Frame pixel `p` sees the scene at `(p − centre) / scale + centre +
+    /// shift`.
+    pub scale: f64,
+    pub shift: (f64, f64),
+    /// Everything in focus: the truth a stack aims at.
+    pub sharp: bool,
+    pub noise: bool,
+    pub seed: u64,
+    pub subsec: &'static str,
+}
+
+impl FocusFrame {
+    pub fn new(width: u32, height: u32, focus: f64) -> Self {
+        Self {
+            width,
+            height,
+            focus,
+            blur: 5.0,
+            scale: 1.0,
+            shift: (0.0, 0.0),
+            sharp: false,
+            noise: true,
+            seed: 1,
+            subsec: "10",
+        }
+    }
+
+    fn centre(&self) -> (f64, f64) {
+        (
+            (f64::from(self.width) - 1.0) / 2.0,
+            (f64::from(self.height) - 1.0) / 2.0,
+        )
+    }
+
+    /// Frame pixel → scene.
+    pub fn to_scene(&self, x: f64, y: f64) -> (f64, f64) {
+        let (cx, cy) = self.centre();
+        (
+            (x - cx) / self.scale + cx + self.shift.0,
+            (y - cy) / self.scale + cy + self.shift.1,
+        )
+    }
+
+    /// Scene → frame pixel.
+    pub fn to_frame(&self, x: f64, y: f64) -> (f64, f64) {
+        let (cx, cy) = self.centre();
+        (
+            (x - cx - self.shift.0) * self.scale + cx,
+            (y - cy - self.shift.1) * self.scale + cy,
+        )
+    }
+
+    /// The light each pixel sees (camera RGB, three a pixel, row by row),
+    /// without noise.
+    pub fn light(&self) -> Vec<f64> {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let (fw, fh) = (f64::from(self.width), f64::from(self.height));
+        let mut wall = vec![0.0; w * h * 3];
+        let mut depth = vec![0.0; w * h];
+        let mut disc = vec![0.0; w * h * 3];
+        let mut alpha = vec![0.0; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let (sx, sy) = self.to_scene(x as f64, y as f64);
+                let i = y * w + x;
+                let (c, d) = focus_wall(sx, sy, fw, fh);
+                let (f, a) = focus_disc(sx, sy, fw, fh);
+                wall[i * 3..i * 3 + 3].copy_from_slice(&c);
+                depth[i] = d;
+                for k in 0..3 {
+                    disc[i * 3 + k] = f[k] * a;
+                }
+                alpha[i] = a;
+            }
+        }
+        if self.sharp {
+            return (0..w * h * 3)
+                .map(|j| disc[j] + wall[j] * (1.0 - alpha[j / 3]))
+                .collect();
+        }
+        let sd = self.blur * (FOCUS_DISC_DEPTH - self.focus).abs();
+        let disc = gauss(&disc, w, h, 3, sd);
+        let alpha = gauss(&alpha, w, h, 1, sd);
+        // The wall's blur varies with its depth: blurs every half pixel of
+        // σ (each from the last), mixed per pixel between the two nearest.
+        let most = depth
+            .iter()
+            .map(|d| self.blur * (d - self.focus).abs())
+            .fold(0.0, f64::max);
+        let n = (most / 0.5).ceil() as usize + 1;
+        let mut out = vec![0.0; w * h * 3];
+        let mut cur = wall;
+        for j in 0..n {
+            let step = 0.5 * ((2 * j + 1) as f64).sqrt();
+            let next = gauss(&cur, w, h, 3, step);
+            for i in 0..w * h {
+                let t = self.blur * (depth[i] - self.focus).abs() / 0.5;
+                if (t.floor() as usize).min(n - 1) != j {
+                    continue;
+                }
+                let f = (t - j as f64).clamp(0.0, 1.0);
+                for k in 0..3 {
+                    let v = cur[i * 3 + k] * (1.0 - f) + next[i * 3 + k] * f;
+                    out[i * 3 + k] = disc[i * 3 + k] + v * (1.0 - alpha[i]);
+                }
+            }
+            cur = next;
+        }
+        out
+    }
+
+    pub fn write(&self) -> Vec<u8> {
+        let dng = Dng {
+            shot: Some(Shot {
+                datetime: "2026:10:22 15:10:00",
+                subsec: self.subsec,
+                orientation: 1,
+                serial: "7654321",
+            }),
+            exposure: Some((4000, 1_000_000)),
+            ..Dng::new(self.width, self.height)
+        };
+        let light = self.light();
+        let range = f64::from(dng.white - dng.black);
+        // ISO 400's noise, as Bracket's.
+        let (a, b) = if self.noise {
+            (8e-5, 1.6e-8)
+        } else {
+            (0.0, 0.0)
+        };
+        let mut rng = Rng(self.seed.wrapping_mul(0x2545_F491_4F6C_DD1D) | 1);
+        let mut noise = move || {
+            let u1 = (f64::from(rng.f()) + 1e-4).min(1.0);
+            let u2 = f64::from(rng.f());
+            (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+        };
+        let w = self.width as usize;
+        let mut px = vec![0u16; w * self.height as usize];
+        for y in 0..self.height as usize {
+            for x in 0..w {
+                let c = usize::from(dng.cfa[y % 2][x % 2]);
+                let v = light[(y * w + x) * 3 + c];
+                let v = v + noise() * (a * v.max(0.0) + b).sqrt();
+                let counts = f64::from(dng.black) + v.clamp(0.0, 1.0) * range;
+                px[y * w + x] = counts.round() as u16;
+            }
+        }
+        dng.write(|x, y| px[y as usize * w + x as usize])
+    }
+}
+
 /// A NEF-shaped TIFF: IFD0 (thumbnail descriptor + camera tags), IFD1 with a
 /// small JPEG preview, SubIFD0 with the full-size `JpgFromRaw`, SubIFD1 with
 /// fake raw strip data.

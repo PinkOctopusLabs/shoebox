@@ -128,7 +128,7 @@ pub const MAX_FRAMES: usize = 9;
 /// The noise model's variance of a camera-native value `v` (white 1) at
 /// `iso`: shot noise of a sensor holding about 50 000 electrons at white at
 /// ISO 100, and a read noise of a few electrons, both scaled by gain.
-fn noise(iso: f64) -> (f32, f32) {
+pub(crate) fn noise(iso: f64) -> (f32, f32) {
     let g = (iso / 100.0).max(0.1) as f32;
     (2e-5 * g, 4e-9 * g)
 }

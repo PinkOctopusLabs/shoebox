@@ -12,6 +12,8 @@
 //! - [`align`]: global alignment (features and RANSAC, then a direct
 //!   refinement on the pixels), for every kind of merge.
 //! - [`hdr`]: bracketed exposures into one image of the scene's light.
+//! - [`focus`]: frames focused at different distances into one sharp
+//!   throughout.
 //! - [`dng`]: the result as a float DNG: the reference source's size,
 //!   matrices, as-shot white and EXIF, a preview at the code defaults, and
 //!   an XMP record of what it was made from.
@@ -20,6 +22,7 @@
 #![allow(clippy::needless_range_loop)]
 
 pub mod align;
+pub mod focus;
 pub mod hdr;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
