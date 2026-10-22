@@ -2907,3 +2907,14 @@ Face parts, Object), from EDITING-SPEC's "Rendering masks".
 `{"kind":"linear_dng"}`. `ten_bit` and `speed` take their defaults when
 missing, and older presets load unchanged. There are no new starter
 presets.
+
+## Wave 1 follow-ups, decided (2026-10-22)
+
+- **AVIF:** rav1e's NEON assembly stays on (aarch64 only; the C compiler
+  builds it, no NASM), for the 2.5–3.5× speed.
+- **Landscape model:** ConvNeXt-B in f32 (489 MB) stays: accuracy over
+  download size. No half-precision variant.
+- **DNG and AVIF in the library:** yes. The library reads both (Shoebox's
+  own linear DNGs open in Develop as raws past demosaic and AI denoise),
+  and both formats can then be exported beside the original. Lifts the
+  folder-only rule in "AVIF and linear DNG export".
