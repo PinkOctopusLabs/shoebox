@@ -11,6 +11,7 @@ pub mod models;
 pub mod objects;
 mod panels;
 pub mod people;
+pub mod photos;
 mod picker;
 mod platform;
 pub mod semantic;

@@ -105,10 +105,13 @@ impl SidecarDate {
     /// `2024:06:03 14:15:02`; a date without a time isn't a capture time.
     pub fn parse(s: &str) -> Option<Self> {
         let s = s.trim();
-        if s.len() < 19 {
+        // Byte offsets below assume ASCII; anything else isn't a date.
+        let (Some(dt), Some(rest)) = (s.get(..19), s.get(19..)) else {
+            return None;
+        };
+        if !dt.is_ascii() {
             return None;
         }
-        let (dt, rest) = s.split_at(19);
         let b = dt.as_bytes();
         let digits = |r: std::ops::Range<usize>| b[r].iter().all(u8::is_ascii_digit);
         let ok = digits(0..4)

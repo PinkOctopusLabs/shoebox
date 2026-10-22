@@ -49,9 +49,29 @@ pub fn rename_excl(src: &Path, dst: &Path) -> io::Result<()> {
     }
 }
 
+/// Bytes free for an unprivileged writer on the volume holding `path`.
+pub fn free_bytes(path: &Path) -> io::Result<u64> {
+    let p = cstr(path)?;
+    // SAFETY: an all-zero statvfs is a valid value for the out parameter.
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `p` is a valid NUL-terminated string and `st` a valid out pointer.
+    let rc = unsafe { libc::statvfs(p.as_ptr(), &mut st) };
+    if rc == 0 {
+        Ok(u64::from(st.f_bavail).saturating_mul(st.f_frsize))
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn free_space_is_known() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(free_bytes(d.path()).unwrap() > 0);
+    }
 
     #[test]
     fn refuses_to_overwrite() {

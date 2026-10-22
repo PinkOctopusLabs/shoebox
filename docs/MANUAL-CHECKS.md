@@ -24,7 +24,7 @@ they're run now, together, before the release. This file is the runbook.
   references. darktable, RawTherapee, Preview, Photos and Finder are fine
   where a check asks whether a file opens elsewhere.
 
-**60 checks** (58 carried over, 2 gate verdicts added), plus one already
+**61 checks** (58 carried over, 2 gate verdicts added, 1 for iCloud Photos), plus one already
 done:
 
 | Area | Checks |
@@ -39,6 +39,7 @@ done:
 | [8. Merges](#8-merges) | 10 |
 | [9. Export](#9-export) | 7 |
 | [10. Last: the gate verdicts and goldens](#10-last-the-gate-verdicts-and-goldens) | 3 |
+| [11. iCloud Photos (a test macOS account)](#11-icloud-photos-a-test-macos-account) | 1 |
 
 ## The gates
 
@@ -658,3 +659,39 @@ Once everything above is done and the 30 are edited.
   `SHOEBOX_GOLDEN_DIR=<folder> SHOEBOX_GOLDEN_BLESS=1 cargo test -p shoebox-develop --test golden real_goldens`.
   From then on, the same command without `SHOEBOX_GOLDEN_BLESS` catches
   any change to the renders.
+
+## 11. iCloud Photos (a test macOS account)
+
+Independent of the others: PhotoKit only opens the Mac's own Photos
+library, so these run in a separate macOS user account whose Photos
+library is a test library (CLAUDE.md, safety rule 9), never in yours.
+
+- [ ] **The Photos probe** (PHOTOS-SPEC Phases 0 and 3; added 2026-10-23).
+  Set up once:
+  1. System Settings → Users & Groups: add a standard user, "Shoebox Test".
+     Log in to it. For the iCloud facts, sign it in to a throwaway Apple ID
+     with iCloud Photos on; without one the probe still runs, but no asset
+     has a cloud id (fact 2) and nothing downloads from iCloud.
+  2. In its Photos: import `cargo run -p shoebox-fixtures -- <empty
+     folder>`'s photos, a few screenshots (no EXIF date) and a short movie;
+     make an album **Shoebox test library** and one inside a folder
+     (`Trips › Japan`); favourite two photos, hide one, and edit one in
+     Photos (Adjust, then Done).
+  3. Build the bundle in your own account (`scripts/bundle-macos.sh`), copy
+     `target/release/bundle/Shoebox.app` to `/Users/Shared`, and in the test
+     account run
+     `/Users/Shared/Shoebox.app/Contents/MacOS/Shoebox --photos-probe /Users/Shared/probe`
+     (a new folder). Allow Photos access when asked.
+
+  Passes: `report.txt` says fact 1 "same bytes" for every sample, fact 2
+  names how many assets have cloud ids (all of them with iCloud on), the
+  edit shows under "Edits by who made them" as Photos', the albums are
+  listed with their folders; the sync copies every planned asset (hidden and
+  untouched burst frames left out, the screenshots "dated by Photos"), "Sync
+  again" has 0 new, and "Undone" leaves 0 records. Then run it again into
+  another new folder with `--keep` after the folder, and look at
+  `<folder>/library`: day folders named as card imports are, each Live
+  Photo's movie beside its photo, the edited photo's `-photos` copy beside
+  it, the favourites rated ★5 and the album photos in its event (open the
+  folder in Shoebox in the test account to see). Copy `report.txt` into
+  DECISIONS ("iCloud Photos: PhotoKit").

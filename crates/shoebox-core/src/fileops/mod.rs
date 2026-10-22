@@ -7,6 +7,8 @@
 pub mod journal;
 mod sys;
 
+pub use sys::free_bytes;
+
 use std::collections::HashSet;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};

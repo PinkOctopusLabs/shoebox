@@ -1,6 +1,41 @@
 //! Small platform queries.
 #![cfg_attr(target_os = "macos", allow(unsafe_code))]
 
+/// Keeps the Mac from sleeping while it's held (a long iCloud Photos
+/// sync): `NSProcessInfo`'s user-initiated activity. Dropping it ends it.
+pub struct Awake {
+    #[cfg(target_os = "macos")]
+    activity:
+        objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_foundation::NSObjectProtocol>>,
+}
+
+pub fn keep_awake(reason: &str) -> Awake {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+        let activity = NSProcessInfo::processInfo().beginActivityWithOptions_reason(
+            NSActivityOptions::UserInitiated,
+            &NSString::from_str(reason),
+        );
+        Awake { activity }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = reason;
+        Awake {}
+    }
+}
+
+impl Drop for Awake {
+    fn drop(&mut self) {
+        #[cfg(target_os = "macos")]
+        // SAFETY: ends the activity this value began, once.
+        unsafe {
+            objc2_foundation::NSProcessInfo::processInfo().endActivity(&self.activity);
+        }
+    }
+}
+
 /// Whether Caps Lock is on (Lightroom's auto-advance switch). macOS only;
 /// elsewhere use the toolbar toggle.
 pub fn caps_lock() -> bool {

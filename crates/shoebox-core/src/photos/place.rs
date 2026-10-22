@@ -272,6 +272,16 @@ fn ext_of(name: &str) -> &str {
     }
 }
 
+/// A record's path, if it stays inside its root (relative, no `..`): the
+/// record is a file anyone could edit, and a copy goes beside it.
+fn inside(rel: &str) -> Option<&Path> {
+    let p = Path::new(rel);
+    (p.components().next().is_some()
+        && p.components()
+            .all(|c| matches!(c, std::path::Component::Normal(_))))
+    .then_some(p)
+}
+
 /// `dir/20240603-141502-120.heic` → `dir/20240603-141502-120-photos.jpg`.
 fn photos_variant(of: &Path, ext: &str) -> PathBuf {
     let stem = of
@@ -447,7 +457,11 @@ pub fn place(
     // earlier sync made (if it's still there), or where the template puts it.
     let beside: PathBuf = match (
         frame.iter().position(|s| s.kind == ResourceKind::Original),
-        previous.and_then(|(r, e)| e.file(ResourceKind::Original).map(|f| r.join(&f.rel))),
+        previous.and_then(|(r, e)| {
+            e.file(ResourceKind::Original)
+                .and_then(|f| inside(&f.rel))
+                .map(|rel| r.join(rel))
+        }),
     ) {
         (Some(i), _) => wants[i].clone(),
         (None, Some(p)) if p.exists() => p,
@@ -618,6 +632,16 @@ mod tests {
         assert_eq!(d.date.as_ref().unwrap().time, "2019:01:01 11:00:00");
         assert_eq!(d.date.unwrap().to_xmp(), "2019-01-01T11:00:00.500+01:00");
         assert_eq!(date_for(&asset(None), None, &tz), Dated::default());
+    }
+
+    #[test]
+    fn record_paths_stay_inside_the_root() {
+        assert!(inside("2024/a.jpg").is_some());
+        for bad in ["../a.jpg", "/etc/a.jpg", "2024/../../a.jpg", ""] {
+            assert!(inside(bad).is_none(), "{bad}");
+        }
+        assert!(SidecarDate::parse("2024-06-03T14:15:0é.1").is_none());
+        assert!(SidecarDate::parse("ééééééééééééééééééééé").is_none());
     }
 
     #[test]

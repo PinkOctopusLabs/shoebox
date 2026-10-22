@@ -23,14 +23,12 @@ has no `TODO` or `FIXME` comments).
 
 Provisional choices the person should confirm or change.
 
-- [ ] **iCloud Photos (M7): the four Phase 0 facts.** The spec was accepted
-  (2026-10-20) and its core is built (Phases 1–2: planning, placing, the
-  sync record, the sync in one batch, all against the fake library), but it
-  rests on four PhotoKit facts nobody has checked yet: originals come back
-  byte-identical, `PHCloudIdentifier` is there for a test library, our
-  adjustment data round-trips, and whether resource sizes are given. The
-  probe (Phase 0) is still to write, and runs only in a test macOS account.
-  Source: PHOTOS-SPEC, "Plan"; DECISIONS "iCloud Photos: the core".
+- [ ] **iCloud Photos (M7): the probe in a test account.** Phases 1–3
+  are built, but no PhotoKit code has run against a Photos library yet. The
+  probe (`--photos-probe`, MANUAL-CHECKS 11) checks the facts the sync
+  rests on: originals byte-identical, cloud ids, who edited, and how long
+  listing 30k assets takes. Adjustment data round-tripping waits for push
+  (Phase 5). Source: PHOTOS-SPEC "Plan"; DECISIONS "iCloud Photos: PhotoKit".
 - [ ] **Spec items not built and not dropped.** Neither built nor recorded
   as out of scope: AMaZE demosaic ("max detail"), export output sharpening
   (screen, matte, glossy), preset packs (`.shoeboxpack`), Lightroom XMP
@@ -117,6 +115,12 @@ Provisional choices the person should confirm or change.
   Open questions.
 
 ## Bugs
+
+- [ ] **`virtual_copies` (UI test) fails under a full workspace run.** It
+  passes alone and in `--test ui`, but failed twice (2026-10-22, 2026-10-23)
+  when every crate's tests ran at once, at its wait for the deleted copy
+  (`tests/ui.rs`, "copy removed", 20 s). Likely a timing flake under load.
+  S. Source: these runs.
 
 - [ ] **A sidecar date stays in the metadata cache after it's removed.**
   A capture time from a sidecar (iCloud Photos' date, or one set in another
@@ -221,6 +225,10 @@ Defaults that are guesses so far.
 ## Enhancements
 
 ### Library
+
+- [ ] **iCloud Photos: quick re-sync by change token.** Every sync lists
+  every asset now; `fetchPersistentChangesSinceToken` would list only
+  what changed. M. Source: DECISIONS "iCloud Photos: PhotoKit".
 
 - [ ] **Face thumbnails in the People list.** S. Source: DECISIONS "M6
   faces: People".

@@ -97,6 +97,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSDownloadsFolderUsageDescription</key><string>Shoebox shows and organises the photos in library folders you add.</string>
   <key>NSRemovableVolumesUsageDescription</key><string>Shoebox imports photos from memory cards and shows library folders on external drives.</string>
   <key>NSNetworkVolumesUsageDescription</key><string>Shoebox shows library folders you add.</string>
+  <key>NSPhotoLibraryUsageDescription</key><string>Shoebox copies photos from your Photos library into your Shoebox library, and adds photos you send to Photos.</string>
 $UPDATER_KEYS
 </dict>
 </plist>
@@ -122,7 +123,12 @@ if [ -d "$SPARKLE_FW" ]; then
   codesign "${SIGN_ARGS[@]}" "$SPARKLE_FW/Versions/B/Updater.app"
   codesign "${SIGN_ARGS[@]}" "$SPARKLE_FW"
 fi
-codesign "${SIGN_ARGS[@]}" "$APP"
+# The hardened runtime needs the Photos entitlement for PhotoKit.
+APP_ARGS=("${SIGN_ARGS[@]}")
+if [ "$IDENTITY" != "-" ]; then
+  APP_ARGS+=(--entitlements assets/Shoebox.entitlements)
+fi
+codesign "${APP_ARGS[@]}" "$APP"
 codesign --verify --deep --strict --verbose=1 "$APP"
 
 if [ -n "${NOTARY_PROFILE:-}" ]; then

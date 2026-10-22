@@ -418,6 +418,25 @@ pub enum LibraryCommand {
     /// first source, with its record, as one journaled batch (rule 3), then
     /// remove it from the cache. Answered by `Merged`.
     AddMerge(Box<crate::merge::Done>),
+    /// A step of an iCloud Photos sync (`crate::photos`), which runs on its
+    /// own thread: the batch's begin, its steps and its end, each answered
+    /// on the channel (the batch id, or why it failed).
+    PhotosBatch(
+        PhotosOp,
+        crossbeam_channel::Sender<Result<i64, shoebox_core::CoreError>>,
+    ),
+}
+
+/// What an iCloud Photos sync asks of the library worker.
+#[derive(Debug)]
+pub enum PhotosOp {
+    Begin(String),
+    Step {
+        batch: i64,
+        copies: Vec<shoebox_core::fileops::PlannedCopy>,
+        writes: Vec<(PathBuf, Vec<u8>)>,
+    },
+    End(i64),
 }
 
 /// A move, reject, rename or trash of stacks, by the paths of their files.
@@ -764,6 +783,12 @@ impl Library {
             events: ev_rx,
             import_stop,
         }
+    }
+
+    /// A sender for threads that send commands themselves (an iCloud
+    /// Photos sync).
+    pub fn sender(&self) -> crossbeam_channel::Sender<LibraryCommand> {
+        self.commands.clone()
     }
 
     pub fn send(&self, c: LibraryCommand) {
@@ -1392,6 +1417,36 @@ fn library_worker(
                 }
                 batches(&fileops);
                 (false, true)
+            }
+            LibraryCommand::PhotosBatch(op, reply) => {
+                let stop = std::sync::atomic::AtomicBool::new(false);
+                let (answer, closed) = match op {
+                    PhotosOp::Begin(label) => (fileops.begin_import(&label), None),
+                    PhotosOp::Step {
+                        batch,
+                        copies,
+                        writes,
+                    } => match fileops.import_step(batch, &copies, writes, &|_| {}, &stop) {
+                        Ok(()) => (Ok(batch), None),
+                        // A failed step closes its batch: it's done with.
+                        Err(e) => (Err(e), Some(batch)),
+                    },
+                    PhotosOp::End(batch) => {
+                        (fileops.end_import(batch).map(|()| batch), Some(batch))
+                    }
+                };
+                let _ = reply.send(answer);
+                match closed {
+                    Some(batch) => {
+                        undo.push(batch);
+                        redo.clear();
+                        fresh.set(true);
+                        history(&undo, &redo);
+                        batches(&fileops);
+                        (false, true)
+                    }
+                    None => (false, false),
+                }
             }
             LibraryCommand::Eject(volume) => {
                 emit(LibraryEvent::Ejected(eject(&volume)));

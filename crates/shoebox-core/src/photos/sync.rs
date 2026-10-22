@@ -57,6 +57,43 @@ pub struct Report {
     pub marked: usize,
     /// Stopped before the end, as asked.
     pub stopped: bool,
+    /// Stopped before the end: too little free space.
+    pub low_space: bool,
+}
+
+/// Where a sync's steps run: [`FileOps`] itself, or (in the app) the
+/// library worker, which owns it.
+pub trait Batches {
+    /// Begin the sync's batch.
+    fn begin(&self, label: &str) -> Result<i64>;
+    /// Copy and write one step (see [`FileOps::import_step`]).
+    fn step(
+        &self,
+        batch: i64,
+        copies: Vec<PlannedCopy>,
+        writes: Vec<(PathBuf, Vec<u8>)>,
+    ) -> Result<()>;
+    /// Close the batch.
+    fn end(&self, batch: i64) -> Result<()>;
+}
+
+impl Batches for FileOps {
+    fn begin(&self, label: &str) -> Result<i64> {
+        self.begin_import(label)
+    }
+
+    fn step(
+        &self,
+        batch: i64,
+        copies: Vec<PlannedCopy>,
+        writes: Vec<(PathBuf, Vec<u8>)>,
+    ) -> Result<()> {
+        self.import_step(batch, &copies, writes, &|_| {}, &AtomicBool::new(false))
+    }
+
+    fn end(&self, batch: i64) -> Result<()> {
+        self.end_import(batch)
+    }
 }
 
 /// What a sync works with.
@@ -64,7 +101,7 @@ pub struct Job<'a> {
     pub source: &'a dyn PhotoSource,
     pub library: &'a Library,
     pub catalog: &'a Catalog,
-    pub fileops: &'a FileOps,
+    pub batches: &'a dyn Batches,
     /// Every root's path, in the order the ledgers were loaded.
     pub roots: &'a [PathBuf],
     /// Roots that can be written (events go to each).
@@ -76,6 +113,117 @@ pub struct Job<'a> {
     pub label: &'a str,
     /// Assets per step.
     pub step: usize,
+    /// Downloads at once.
+    pub parallel: usize,
+    /// Stop before a step when the library's or the cache's volume has less
+    /// free than this (bytes; 0: don't check).
+    pub min_free: u64,
+}
+
+/// What the download threads need (all of it shareable).
+#[derive(Clone, Copy)]
+struct Fetch<'a> {
+    source: &'a dyn PhotoSource,
+    library: &'a Library,
+    staging: &'a Path,
+    parallel: usize,
+}
+
+/// An asset's files, read, or why they didn't arrive.
+type Fetched = std::result::Result<Vec<Staged>, Missed>;
+
+/// Why an asset's files didn't arrive.
+enum Missed {
+    Stopped,
+    Failed(String),
+}
+
+/// Download and read one asset's wanted files into the staging folder.
+fn fetch_one(
+    job: Fetch<'_>,
+    planned: &super::plan::Planned,
+    shared: &std::sync::Mutex<(Progress, Vec<PathBuf>)>,
+    progress: &(dyn Fn(&Progress) + Sync),
+    stop: &AtomicBool,
+) -> Fetched {
+    let asset = &job.library.assets[planned.asset];
+    let mut staged = Vec::new();
+    for kind in &planned.resources {
+        if stop.load(Ordering::Relaxed) {
+            return Err(Missed::Stopped);
+        }
+        let name = asset
+            .resource(*kind)
+            .map(|r| r.file_name.clone())
+            .unwrap_or_default();
+        let ext = name
+            .rsplit_once('.')
+            .map(|(_, e)| e)
+            .filter(|e| !e.is_empty() && e.chars().all(|c| c.is_ascii_alphanumeric()))
+            .unwrap_or("bin");
+        let to = job
+            .staging
+            .join(format!("{}-{kind:?}.{ext}", planned.asset));
+        if let Ok(mut g) = shared.lock() {
+            g.0.current = Some(name);
+            g.0.fraction = 0.0;
+            g.1.push(to.clone());
+            progress(&g.0);
+        }
+        let on = |f: f64| {
+            if let Ok(mut g) = shared.try_lock() {
+                g.0.fraction = f;
+                progress(&g.0);
+            }
+        };
+        match job.source.download(&asset.id, *kind, &to, &on, stop) {
+            Ok(()) => {}
+            Err(CoreError::Cancelled) => return Err(Missed::Stopped),
+            Err(e) => return Err(Missed::Failed(e.to_string())),
+        }
+        let s = Staged::read(*kind, &to).map_err(|e| Missed::Failed(e.to_string()))?;
+        if let Ok(mut g) = shared.lock() {
+            g.0.bytes += s.size;
+        }
+        staged.push(s);
+    }
+    Ok(staged)
+}
+
+/// Download a step's assets, `job.parallel` at a time; results in order.
+fn fetch_step(
+    job: Fetch<'_>,
+    step: &[super::plan::Planned],
+    shared: &std::sync::Mutex<(Progress, Vec<PathBuf>)>,
+    progress: &(dyn Fn(&Progress) + Sync),
+    stop: &AtomicBool,
+) -> Vec<Fetched> {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let slots: Vec<std::sync::Mutex<Option<Fetched>>> =
+        step.iter().map(|_| std::sync::Mutex::new(None)).collect();
+    std::thread::scope(|s| {
+        for _ in 0..job.parallel.clamp(1, step.len().max(1)) {
+            s.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(planned) = step.get(i) else { break };
+                    let r = fetch_one(job, planned, shared, progress, stop);
+                    if let Ok(mut g) = slots[i].lock() {
+                        *g = Some(r);
+                    }
+                }
+            });
+        }
+    });
+    slots
+        .into_iter()
+        .map(|m| {
+            m.into_inner()
+                .ok()
+                .flatten()
+                .unwrap_or(Err(Missed::Failed("not downloaded".into())))
+        })
+        .collect()
 }
 
 /// Run `plan` (from [`super::plan::plan`]). `cx.albums` holds the album
@@ -98,9 +246,9 @@ pub fn run(
     let root_index = |p: &Path| job.roots.iter().position(|r| r == p);
     let dest = root_index(cx.root)
         .ok_or_else(|| CoreError::Invalid(format!("{} isn't a library root", cx.root.display())))?;
-    let batch = job.fileops.begin_import(job.label)?;
+    let batch = job.batches.begin(job.label)?;
     report.batch = Some(batch);
-    let events_before = cx.events.clone();
+    let mut events_seen = cx.events.clone();
 
     // First step: marks on photos synced before, and the album choices.
     let mut writes = marks_for_synced(job, plan, ledgers, cx, &mut report)?;
@@ -120,8 +268,7 @@ pub fn run(
                      mut writes: Vec<(PathBuf, Vec<u8>)>,
                      records: &mut HashMap<usize, Vec<(AssetId, Entry)>>,
                      cx: &mut Context<'_>,
-                     ledgers: &mut Ledgers,
-                     events_before: &mut Vec<events::Event>|
+                     ledgers: &mut Ledgers|
      -> Result<()> {
         step_n += 1;
         for (root, list) in records.drain() {
@@ -138,143 +285,125 @@ pub fn run(
                 ledgers.record(root, &id, e);
             }
         }
-        if cx.events != *events_before {
+        if cx.events != events_seen {
             writes.extend(events::plan_save(job.writable, &cx.events)?);
-            *events_before = cx.events.clone();
+            events_seen = cx.events.clone();
         }
         if copies.is_empty() && writes.is_empty() {
             return Ok(());
         }
-        job.fileops
-            .import_step(batch, &copies, writes, &|_| {}, &AtomicBool::new(false))
+        job.batches.step(batch, copies, writes)
     };
-    let mut events_seen = events_before;
 
-    let mut p = Progress {
-        total,
-        ..Progress::default()
-    };
-    progress(&p);
+    let shared = std::sync::Mutex::new((
+        Progress {
+            total,
+            ..Progress::default()
+        },
+        Vec::<PathBuf>::new(),
+    ));
+    if let Ok(g) = shared.lock() {
+        progress(&g.0);
+    }
     let todo: Vec<_> = plan.downloads().cloned().collect();
-    let mut copies: Vec<PlannedCopy> = Vec::new();
-    let mut staged_files: Vec<PathBuf> = Vec::new();
-    let mut in_step = 0usize;
     let result = (|| -> Result<()> {
-        for planned in &todo {
+        // The first step's marks and choices go with the first downloads.
+        let mut pending = std::mem::take(&mut writes);
+        for step in todo.chunks(job.step.max(1)) {
             if stop.load(Ordering::Relaxed) {
                 report.stopped = true;
                 break;
             }
-            let asset = &job.library.assets[planned.asset];
-            let mut staged = Vec::new();
-            let mut failed = None;
-            for kind in &planned.resources {
-                let name = asset
-                    .resource(*kind)
-                    .map(|r| r.file_name.clone())
-                    .unwrap_or_default();
-                let ext = name.rsplit_once('.').map(|(_, e)| e).unwrap_or("bin");
-                let to = job
-                    .staging
-                    .join(format!("{}-{kind:?}.{ext}", planned.asset));
-                p.current = Some(name);
-                p.fraction = 0.0;
-                progress(&p);
-                let r = job.source.download(&asset.id, *kind, &to, &|_| {}, stop);
-                match r {
-                    Ok(()) => {
-                        staged_files.push(to.clone());
-                        match Staged::read(*kind, &to) {
-                            Ok(s) => {
-                                p.bytes += s.size;
-                                staged.push(s);
-                            }
-                            Err(e) => {
-                                failed = Some(e.to_string());
-                                break;
-                            }
-                        }
-                    }
-                    Err(CoreError::Cancelled) => {
+            if job.min_free > 0 {
+                let low = [cx.root, job.staging]
+                    .iter()
+                    .any(|p| crate::fileops::free_bytes(p).is_ok_and(|free| free < job.min_free));
+                if low {
+                    report.low_space = true;
+                    break;
+                }
+            }
+            let fetch = Fetch {
+                source: job.source,
+                library: job.library,
+                staging: job.staging,
+                parallel: job.parallel,
+            };
+            let fetched = fetch_step(fetch, step, &shared, progress, stop);
+            let mut copies = Vec::new();
+            for (planned, got) in step.iter().zip(fetched) {
+                let asset = &job.library.assets[planned.asset];
+                let staged = match got {
+                    Ok(s) => s,
+                    Err(Missed::Stopped) => {
                         report.stopped = true;
-                        return Ok(());
+                        continue;
                     }
-                    Err(e) => {
-                        failed = Some(e.to_string());
-                        break;
+                    Err(Missed::Failed(why)) => {
+                        tracing::warn!("photos: {} failed: {why}", asset.id.local);
+                        report.failed.push((asset.id.clone(), why));
+                        continue;
                     }
+                };
+                let previous = ledgers.find(&asset.id);
+                let prev = previous.map(|(r, e)| (job.roots[r].as_path(), e));
+                let placed = place::place(cx, asset, prev, &staged)?;
+                let root = root_index(&placed.root).unwrap_or(dest);
+                if placed.copies.is_empty() {
+                    if previous.is_none() {
+                        report.in_library += 1;
+                    }
+                } else {
+                    report.copied += 1;
+                    report.files += placed.copies.len();
+                    report.dated_by_photos += usize::from(placed.dated_by_photos);
+                    report.undated += usize::from(placed.undated);
+                }
+                copies.extend(placed.copies);
+                pending.extend(placed.sidecars);
+                if let Some(e) = placed.entry {
+                    records.entry(root).or_default().push((asset.id.clone(), e));
                 }
             }
-            p.done += 1;
-            if let Some(why) = failed {
-                tracing::warn!("photos: {} failed: {why}", asset.id.local);
-                report.failed.push((asset.id.clone(), why));
-                progress(&p);
-                continue;
+            if let Ok(mut g) = shared.lock() {
+                g.0.done += step.len();
+                progress(&g.0);
             }
-            let previous = ledgers.find(&asset.id);
-            let prev = previous.map(|(r, e)| (job.roots[r].as_path(), e));
-            let placed = place::place(cx, asset, prev, &staged)?;
-            let root = root_index(&placed.root).unwrap_or(dest);
-            if placed.copies.is_empty() {
-                if previous.is_none() {
-                    report.in_library += 1;
-                }
-            } else {
-                report.copied += 1;
-                report.files += placed.copies.len();
-            }
-            report.dated_by_photos +=
-                usize::from(placed.dated_by_photos && !placed.copies.is_empty());
-            report.undated += usize::from(placed.undated && !placed.copies.is_empty());
-            copies.extend(placed.copies);
-            writes.extend(placed.sidecars);
-            if let Some(e) = placed.entry {
-                records.entry(root).or_default().push((asset.id.clone(), e));
-            }
-            in_step += 1;
-            progress(&p);
-            if in_step >= job.step.max(1) {
-                flush(
-                    std::mem::take(&mut copies),
-                    std::mem::take(&mut writes),
-                    &mut records,
-                    cx,
-                    ledgers,
-                    &mut events_seen,
-                )?;
-                for f in staged_files.drain(..) {
-                    let _ = std::fs::remove_file(f);
-                }
-                in_step = 0;
+            flush(
+                copies,
+                std::mem::take(&mut pending),
+                &mut records,
+                cx,
+                ledgers,
+            )?;
+            remove_staged(&shared);
+            if report.stopped {
+                break;
             }
         }
-        Ok(())
+        // Marks and records with no downloads after them (or none at all).
+        flush(Vec::new(), pending, &mut records, cx, ledgers)
     })();
-    let last = result.and_then(|()| {
-        flush(
-            std::mem::take(&mut copies),
-            std::mem::take(&mut writes),
-            &mut records,
-            cx,
-            ledgers,
-            &mut events_seen,
-        )
-    });
     // The cache's own files: removing them breaks no rule.
-    for f in staged_files.drain(..) {
-        let _ = std::fs::remove_file(f);
-    }
-    match last {
+    remove_staged(&shared);
+    match result {
         Ok(()) => {
-            job.fileops.end_import(batch)?;
+            job.batches.end(batch)?;
             Ok(report)
         }
         // A step that failed or was stopped closed the batch itself.
         Err(e @ (CoreError::BatchFailed { .. } | CoreError::BatchCancelled { .. })) => Err(e),
         Err(e) => {
-            job.fileops.end_import(batch)?;
+            job.batches.end(batch)?;
             Err(e)
+        }
+    }
+}
+
+fn remove_staged(shared: &std::sync::Mutex<(Progress, Vec<PathBuf>)>) {
+    if let Ok(mut g) = shared.lock() {
+        for f in g.1.drain(..) {
+            let _ = std::fs::remove_file(f);
         }
     }
 }

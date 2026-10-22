@@ -128,6 +128,11 @@ impl World {
 
     /// Plan and run a sync into `into`, with the plan's album choices.
     fn sync(&mut self, into: &Path) -> (Plan, Report) {
+        self.sync_with(into, 0, false)
+    }
+
+    /// [`World::sync`] with a free-space floor, stopped from the start.
+    fn sync_with(&mut self, into: &Path, min_free: u64, stopped: bool) -> (Plan, Report) {
         let catalog = self.catalog();
         let roots = self.roots();
         let mut ledgers = Ledgers::load(&roots);
@@ -157,13 +162,15 @@ impl World {
             source: &self.source,
             library: &library,
             catalog: &catalog,
-            fileops: &self.fo,
+            batches: &self.fo,
             roots: &roots,
             writable: &roots,
             staging: &staging,
             run: &format!("run{}", events::now_ms()),
             label: "Sync iCloud Photos",
             step: 2,
+            parallel: 3,
+            min_free,
         };
         let report = sync::run(
             &job,
@@ -171,7 +178,7 @@ impl World {
             &mut ledgers,
             &mut cx,
             &|_| {},
-            &AtomicBool::new(false),
+            &AtomicBool::new(stopped),
         )
         .unwrap();
         (p, report)
@@ -443,4 +450,22 @@ fn a_lost_record_falls_back_to_the_files() {
     assert_eq!(files(&lib), before);
     let (p, _) = w.plan();
     assert_eq!(p.synced, 5);
+}
+
+#[test]
+fn a_stop_or_a_full_disk_copies_nothing_more() {
+    let mut w = World::new();
+    library(&w);
+    let lib = w.lib.clone();
+    let before = files(&lib);
+    let (_, report) = w.sync_with(&lib, 0, true);
+    assert!(report.stopped && report.copied == 0, "{report:?}");
+    let (_, report) = w.sync_with(&lib, u64::MAX, false);
+    assert!(report.low_space && report.copied == 0, "{report:?}");
+    assert_eq!(files(&lib), before);
+    assert_eq!(w.source.downloads(), 0);
+    // Both batches were closed, so neither waits for crash recovery.
+    assert!(w.fo.journal().incomplete().unwrap().is_empty());
+    let (p, _) = w.plan();
+    assert_eq!(p.new.len(), 5);
 }

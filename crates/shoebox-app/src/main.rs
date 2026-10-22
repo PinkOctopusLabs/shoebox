@@ -72,6 +72,17 @@ fn main() -> anyhow::Result<()> {
         println!("Shoebox {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+    // PHOTOS-SPEC Phase 0: run from the bundle in a test macOS account.
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--photos-probe") {
+        let out = args
+            .get(i + 1)
+            .ok_or_else(|| anyhow::anyhow!("--photos-probe needs an empty folder"))?;
+        let keep = args.iter().any(|a| a == "--keep");
+        let report = shoebox_photos::probe::run(std::path::Path::new(out), keep)?;
+        println!("{report}");
+        return Ok(());
+    }
     init_logging();
     tracing::info!("starting Shoebox {}", env!("CARGO_PKG_VERSION"));
     let paths = AppPaths::default_locations()?;

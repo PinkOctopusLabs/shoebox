@@ -4026,3 +4026,59 @@ and 2 built in `shoebox_core::photos`, against a fake library; PhotoKit
   (everything found in the library, nothing copied). Units: the ledger's
   merge across roots and undo, the date rules, GPS text read back.
 
+## iCloud Photos: PhotoKit (2026-10-23)
+PHOTOS-SPEC Phase 3: `shoebox-photos` (`PhotoKitSource` on `objc2-photos`,
+Zlib/Apache-2.0/MIT), the app's Photos thread, the bundle's permission.
+Nothing here has run against a Photos library yet: the probe waits for a
+test account (MANUAL-CHECKS 11); until then this is the code's design.
+- **Never asked without a bundle.** macOS ends a process that asks for
+  Photos without `NSPhotoLibraryUsageDescription`, so `PhotoKitSource`
+  asks only when the main bundle has it (`can_ask`); `cargo run` and the
+  tests never ask, and the tests only read their own Info.plist. The
+  bundle script adds the usage string, and for Developer ID (hardened
+  runtime) builds `assets/Shoebox.entitlements`
+  (`com.apple.security.personal-information.photos-library`).
+- **The probe is in the app**, `Shoebox.app/Contents/MacOS/Shoebox
+  --photos-probe <empty folder> [--keep]`, not an example binary: TCC
+  grants Photos to a signed bundle, and the probe should see what the app
+  sees. It refuses a library without an album named `Shoebox test library`,
+  checked by listing album titles only before anything else is read. Besides
+  the facts it syncs into `<folder>/library` (its own journal), plans again
+  and undoes the sync (kept with `--keep`).
+- **Listing.** Every asset (`includeHiddenAssets`, `includeAllBurstAssets`,
+  so Shoebox's options decide), in autorelease pools of 500; resources by
+  `PHAssetResourceType` (photo and video → original, alternatePhoto,
+  pairedVideo, fullSizePhoto and fullSizeVideo → edited; adjustment data
+  and the rest aren't copied); regular albums only (not smart or shared),
+  with their folders from `fetchCollectionListsContainingCollection`; cloud
+  ids from `cloudIdentifierMappingsForLocalIdentifiers` in batches of 1000.
+- **Who edited** comes from `PHAsset.adjustmentFormatIdentifier` (public),
+  so Shoebox's own pushed edits (format `com.crankyunicorn.shoebox`, the
+  bundle id) are known without reading adjustment data.
+- **No file sizes.** PhotoKit has no public size (only an undocumented KVC
+  key that raises if missing), so the plan's sizes are unknown and the sync
+  checks free space instead: before each step, at least 10 GB on the
+  library's and the cache's volumes (`fileops::free_bytes`, statvfs), else
+  it stops cleanly (`Report::low_space`).
+- **Downloads** stream with `requestDataForAssetResource` (network allowed)
+  into a new file in the staging folder, so a stop cancels the request
+  (`cancelDataRequest`) and the partial file is removed; four at once
+  (`sync::Job::parallel`, scoped threads per step, results placed in
+  order); steps of 20 assets.
+- **The library stays usable.** The sync runs on the Photos thread; each
+  step goes to the library worker (`LibraryCommand::PhotosBatch`: begin,
+  step, end, each answered), which owns `FileOps`, so other commands
+  interleave with a sync's steps. `sync::Batches` abstracts it (tests use
+  `FileOps` directly). The undo stack gets the batch when it ends (or a
+  step fails).
+- **Keep awake** with `NSProcessInfo` user-initiated activity
+  (`platform::keep_awake`) for the run.
+- **Not yet:** the change token (every sync lists everything; metadata
+  only, but per-asset resource lists for 30k assets may take a minute:
+  timed by the probe), and the Import screen (Phase 4).
+- **Tests:** core `a_stop_or_a_full_disk_copies_nothing_more` (stopped
+  from the start, and a free-space floor no disk meets: nothing copied,
+  both batches closed); app `photos::syncs_through_the_library_worker`
+  (FakeSource through the real library worker: one batch, done, nothing
+  new on a second plan); `shoebox-photos` units (kinds, dates, never
+  asking unbundled).

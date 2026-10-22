@@ -1,6 +1,6 @@
 # Shoebox — iCloud Photos Spec
 
-Oct 20, 2026 · Accepted; Phases 1–2 built Oct 22
+Oct 20, 2026 · Accepted; Phases 1–2 built Oct 22, Phase 3 Oct 23
 
 Copy photos out of the Mac's Photos library (and so iCloud Photos) into a Shoebox library root, sync again later without copying anything twice, and send a photo, usually one edited in Develop, back into Photos. Once this spec is accepted, it is the source of truth for the feature the way `docs/EDITING-SPEC.md` is for editing.
 
@@ -37,7 +37,7 @@ PhotoKit (`Photos.framework`) is Apple's supported API for the system Photo Libr
 | List assets | `PHAsset.fetchAssets(with:)` over images and videos, sorted by creation date; metadata only, which is quick even for 30k assets |
 | Stable identity | `PHCloudIdentifier` (from `localIdentifier` via `cloudIdentifierMappings`): stays the same across Macs and a rebuilt Photos library. `localIdentifier` is kept too, as a fallback for assets that aren't in iCloud |
 | Files of an asset | `PHAssetResource.assetResources(for:)`: `.photo` (the original), `.alternatePhoto` (the JPEG of a RAW+JPEG pair), `.pairedVideo` (a Live Photo's MOV), `.fullSizePhoto` / `.fullSizeVideo` (the current Photos edit), `.video` |
-| Copy a file out | `PHAssetResourceManager.writeData(for:toFile:options:)` with `isNetworkAccessAllowed = true` (downloads from iCloud as needed, with a progress callback) |
+| Copy a file out | `PHAssetResourceManager.requestData(for:options:dataReceivedHandler:completionHandler:)` with `isNetworkAccessAllowed = true` (downloads from iCloud as needed, with a progress callback), streamed into a new file; `cancelDataRequest` stops it |
 | What changed since last time | `PHPhotoLibrary.fetchPersistentChanges(since:)` with a stored `PHPersistentChangeToken` |
 | Albums | `PHAssetCollection.fetchAssetCollections(with: .album …)` and the folders above them (`PHCollectionList`) |
 | New asset | `PHAssetCreationRequest.forAsset().addResource(with: .photo, fileURL:)` inside `performChanges` |
@@ -93,9 +93,9 @@ These follow the folder-names feature: the plan lists each album with what it be
 
 **Downloading**
 
-- Originals of an "Optimise Mac Storage" library are mostly in iCloud. The plan shows how many assets need downloading and the total size (from the resources' recorded sizes, where PhotoKit reports them; otherwise "about N GB", estimated from the ones known).
-- Before starting, check free space on the destination volume and the cache volume: the import needs the planned size plus 10 GB headroom. If it doesn't fit, say so and offer to import a date range.
-- Each resource downloads with `writeData` into a staging folder in the cache (`<cache>/photos-staging/<batch>/`), is hashed, and then is copied into the library through `fileops` as any import file is: journaled first, verified by BLAKE3, never overwriting. The staged file is then removed (it's in a cache directory, so rule 1 allows it). Staging keeps `fileops` the only thing that writes into the library and keeps a half-downloaded file out of it.
+- Originals of an "Optimise Mac Storage" library are mostly in iCloud. The plan shows how many assets need downloading. PhotoKit gives no public file sizes, so it can't show the total in advance.
+- Before each step, check free space on the destination volume and the cache volume: below 10 GB, the sync stops cleanly (what's copied stays) and says why.
+- Each resource downloads into a staging folder in the cache (`<cache>/photos-staging/`), is hashed, and then is copied into the library through `fileops` as any import file is: journaled first, verified by BLAKE3, never overwriting. The staged file is then removed (it's in a cache directory, so rule 1 allows it). Staging keeps `fileops` the only thing that writes into the library and keeps a half-downloaded file out of it.
 - Four downloads at once, with the copy into the library running behind them. Progress shows assets and bytes downloaded, the speed and time left, separately from the copy's progress.
 - **Resumable.** Assets are copied and recorded a few at a time (a step), the records written with the step's copies, so a cancelled, quit or crashed import loses at most the step in flight (and its files are then found in the library by hash next time). Running it again continues where it stopped. The batch for the run stays one History entry and is undoable as a whole.
 - An asset that fails (download error, iCloud says it's unavailable, decode error on a file that's then found to be corrupt) is skipped with its reason and listed at the end with **Try again**. It's not recorded as synced.
@@ -196,7 +196,7 @@ shoebox-app
 ```
 
 - **Why a trait in core.** All the logic that decides what to copy, what's synced, and what a push does lives in core and is tested against `FakeSource`, including the UI tests, so the rules are exercised on every CI run without PhotoKit. `shoebox-photos` is only translation. It's the same shape as `semantic.rs`'s `Model` and `people.rs`'s `FaceModel`.
-- **Bindings:** `objc2-photos` (0.3, MIT/Apache-2.0/Zlib, compatible with GPL-3.0) alongside the `objc2`, `objc2-foundation` and `block2` the app already uses. Completion-handler APIs (`requestAuthorization`, `writeData`, `performChanges`) are wrapped to block the Photos thread on a channel, never the UI thread.
+- **Bindings:** `objc2-photos` (0.3, MIT/Apache-2.0/Zlib, compatible with GPL-3.0) alongside the `objc2`, `objc2-foundation` and `block2` the app already uses. Completion-handler APIs (`requestAuthorization`, `requestData`, `performChanges`) are wrapped to block the Photos thread on a channel, never the UI thread.
 - **Unsafe:** add `crates/shoebox-photos/src/sys.rs` to CLAUDE.md's list of FFI wrappers.
 - **Bundle:** `scripts/bundle-macos.sh` adds `NSPhotoLibraryUsageDescription` ("Shoebox copies photos from your Photos library into your Shoebox library, and adds photos you send to Photos.") and the photos-library entitlement to the signing step. An unbundled `cargo run` binary can't get Photos access reliably (TCC attributes it to the terminal), so PhotoKit work is tested from a bundled build (`SHOEBOX_DATA_DIR=<scratch>`, `BUNDLE_ID=…photostest`).
 - **CLI:** `shoebox photos status --root <root>` (reads the ledger; no Photos access needed) and `shoebox photos import --root <root> --dry-run`. Real imports from the CLI need the terminal to have Photos access, so they're documented as a convenience, not the main path.
@@ -206,12 +206,12 @@ shoebox-app
 
 Each phase is one reviewable chunk, finished with `cargo fmt`, `clippy -D warnings` and `cargo test`.
 
-**Status (2026-10-22):** Phases 1 and 2 are built (`shoebox_core::photos`, `tests/photos.rs`; DECISIONS "iCloud Photos: the core"), against the fake library. Phase 0's probe needs PhotoKit and a test account, so it's written with Phase 3 and run with the manual checks.
+**Status (2026-10-23):** Phases 1–3 are built (DECISIONS "iCloud Photos: the core" and "iCloud Photos: PhotoKit"). The Phase 0 probe is the app's `--photos-probe` (it also runs Phase 3's sync check), waiting to be run in a test account (MANUAL-CHECKS, section 11). Phase 4 (the Import screen) is next.
 
 **Phase 0 — Spike (in a test macOS account)**
 - Create the test account and its test Photos library: about 200 synthetic assets from `shoebox-fixtures` (HEIC, JPEG with and without EXIF, a Live Photo pair, a RAW+JPEG pair, a video, a few edited in Photos, two albums in a folder, favourites, one hidden), with the `Shoebox test library` album.
 - `shoebox-photos/examples/photos_probe.rs`: authorise, count, list assets with cloud ids and resources, write one original and one paired video to a scratch folder, time it, read a change token, make a test push of each kind (new asset, edit, revert).
-- Confirm the four facts this spec depends on, and record them in `docs/DECISIONS.md`: originals from `writeData` are byte-identical across runs (so BLAKE3 skipping works); `PHCloudIdentifier` is available for the test library; the adjustment-data round trip identifies our own edits; resource sizes are or aren't available.
+- Confirm the four facts this spec depends on, and record them in `docs/DECISIONS.md`: originals downloaded twice are byte-identical across runs (so BLAKE3 skipping works); `PHCloudIdentifier` is available for the test library; the adjustment-data round trip identifies our own edits; resource sizes are or aren't available.
 - *Done when* the probe runs from a bundled build in the test account and the four facts are written down. If a fact fails, revise this spec before Phase 1.
 
 **Phase 1 — Core model and ledger, with the fake source**
@@ -224,7 +224,7 @@ Each phase is one reviewable chunk, finished with `cargo fmt`, `clippy -D warnin
 
 **Phase 3 — Staged copy and the PhotoKit backend**
 - App `photos.rs`: downloads to staging (four at a time), hash, hand over to the library worker's import, ledger after each verified asset, cancel and resume, free-space check, keep-awake, failures with Try again.
-- `shoebox-photos`: `PhotoKitSource` for authorisation, fetch, change tokens, `writeData`; bundle script changes.
+- `shoebox-photos`: `PhotoKitSource` for authorisation, fetch, streamed downloads; bundle script changes (change tokens later: OPEN-ITEMS).
 - *Done when* an import of the test library in the test account produces exactly the names and stacks the fake predicts for the same assets, a second run copies nothing, a run killed mid-way resumes, and undo puts the root back.
 
 **Phase 4 — Import UI**
