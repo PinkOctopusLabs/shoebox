@@ -102,6 +102,35 @@ enum Message {
     /// AI raw denoise for the photo open in Develop, at the proxy's size
     /// (on its own thread; a newer one stops the last).
     Ai(Request),
+    /// Read the colour files again (DNG camera profiles, looks); with a
+    /// folder, first make it if it isn't there and show it in Finder.
+    /// Answered by `Colours`.
+    Colours(Option<ColourFolder>),
+}
+
+/// The person's own colour files, in Shoebox's data folder: only read,
+/// never written (the folder is made if it isn't there, to show it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColourFolder {
+    /// `<data>/profiles`: DNG camera profiles (`.dcp`) and camera match
+    /// profiles.
+    Profiles,
+}
+
+impl ColourFolder {
+    fn path(self, data: &std::path::Path) -> PathBuf {
+        match self {
+            ColourFolder::Profiles => data.join("profiles"),
+        }
+    }
+}
+
+/// Read the DNG camera profiles in the data folder (`data`).
+fn load_colours(data: &std::path::Path) {
+    let n = shoebox_develop::dcp::load_dir(&ColourFolder::Profiles.path(data));
+    if n > 0 {
+        tracing::info!("{n} DNG camera profiles");
+    }
 }
 
 /// What's drawn over a render: clipping (J), soft proofing in an export
@@ -269,6 +298,8 @@ pub enum Event {
     Presets(Vec<Preset>),
     /// The edit presets.
     Looks(Vec<shoebox_develop::preset::Preset>),
+    /// The colour files were read again.
+    Colours,
     /// The converter and cache, as checked.
     Status(RawStatus),
     /// An edit's preview is in the previews folder.
@@ -321,6 +352,12 @@ impl Develop {
 
     pub fn save_looks(&self, looks: Vec<shoebox_develop::preset::Preset>) {
         let _ = self.requests.send(Message::SaveLooks(looks));
+    }
+
+    /// Read the colour files again (answered by `Colours`); with a folder,
+    /// show it in Finder too.
+    pub fn colours(&self, show: Option<ColourFolder>) {
+        let _ = self.requests.send(Message::Colours(show));
     }
 
     pub fn new(
@@ -537,6 +574,11 @@ fn worker(
     if n > 0 {
         tracing::info!("{n} camera match profiles");
     }
+    let data = presets_file
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_default();
+    load_colours(&data);
     // Load Lensfun's database now, so turning lens corrections on doesn't
     // wait for it.
     let _ = std::thread::Builder::new()
@@ -589,6 +631,17 @@ fn worker(
                     ai_cancel.store(true, Ordering::Relaxed);
                     ai_cancel = Arc::new(AtomicBool::new(false));
                     let _ = ai_tx.send((r, converter.clone(), ai_cancel.clone()));
+                }
+                Message::Colours(show) => {
+                    if let Some(f) = show {
+                        let dir = f.path(&data);
+                        match std::fs::create_dir_all(&dir) {
+                            Ok(()) => crate::app::open_file(&dir),
+                            Err(e) => tracing::warn!("{}: {e}", dir.display()),
+                        }
+                    }
+                    load_colours(&data);
+                    emit(Event::Colours);
                 }
                 Message::LoadPresets => emit(Event::Presets(load_presets(presets_file))),
                 Message::LoadLooks => emit(Event::Looks(shoebox_develop::preset::load(

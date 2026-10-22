@@ -51,8 +51,76 @@ pub struct Pipe {
     maps: std::sync::Mutex<Option<(std::sync::Arc<crate::cpu::maps::Maps>, wgpu::Buffer)>>,
     /// The last local adjustment masks uploaded, and their buffer.
     masks: std::sync::Mutex<Option<(std::sync::Arc<crate::mask::Masks>, wgpu::Buffer)>>,
+    /// The last colour tables uploaded, and their buffer.
+    tables: std::sync::Mutex<Option<(Tables, wgpu::Buffer)>>,
     /// Bound for the images beside the source when there are none.
     no_aux: wgpu::TextureView,
+}
+
+/// The colour tables a frame uses, as one storage buffer (binding 6; the
+/// shader may bind only eight): the camera match look, then a DNG
+/// profile's HueSatMap tables, LookTable and tone curve. Kept by the
+/// tables themselves, so the buffer is rebuilt only when one changes.
+#[derive(Debug, Clone, Default)]
+struct Tables {
+    look: Option<std::sync::Arc<crate::profile::Lut3>>,
+    dcp: Option<std::sync::Arc<crate::dcp::Dcp>>,
+    tone: Option<std::sync::Arc<[f32]>>,
+}
+
+impl Tables {
+    fn of(f: &Frame) -> Self {
+        Self {
+            look: f.display.look.clone(),
+            dcp: f.dcp.as_ref().map(|d| d.dcp.clone()),
+            tone: f.display.dcp_tone.as_ref().map(|t| t.table.clone()),
+        }
+    }
+
+    fn same(&self, o: &Self) -> bool {
+        fn eq<T: ?Sized>(a: &Option<std::sync::Arc<T>>, b: &Option<std::sync::Arc<T>>) -> bool {
+            match (a, b) {
+                (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            }
+        }
+        eq(&self.look, &o.look) && eq(&self.dcp, &o.dcp) && eq(&self.tone, &o.tone)
+    }
+
+    /// In the buffer's order: camera look, HueSatMap (cooler, warmer),
+    /// LookTable, tone curve.
+    fn parts(&self) -> [Option<&[f32]>; 5] {
+        let hs = |i: usize| {
+            self.dcp
+                .as_ref()
+                .and_then(|d| d.hue_sat.get(i))
+                .map(|t| t.1.data.as_flattened())
+        };
+        [
+            self.look.as_ref().map(|l| l.data.as_flattened()),
+            hs(0),
+            hs(1),
+            self.dcp
+                .as_ref()
+                .and_then(|d| d.look.as_ref())
+                .map(|t| t.data.as_flattened()),
+            self.tone.as_deref(),
+        ]
+    }
+
+    /// Where each part starts, in floats, plus one (0: not there).
+    fn offsets(&self) -> [f32; 5] {
+        let mut at = 0usize;
+        self.parts().map(|p| match p {
+            Some(p) => {
+                let o = at + 1;
+                at += p.len();
+                o as f32
+            }
+            None => 0.0,
+        })
+    }
 }
 
 /// A read-only storage buffer at `binding`.
@@ -307,6 +375,7 @@ impl Pipe {
             pipeline,
             maps: Default::default(),
             masks: Default::default(),
+            tables: Default::default(),
             no_aux,
         }
     }
@@ -422,23 +491,7 @@ impl Pipe {
                 usage: wgpu::BufferUsages::STORAGE,
             },
         );
-        let lut: Vec<u8> = match &frame.display.look {
-            Some(l) => l
-                .data
-                .iter()
-                .flatten()
-                .flat_map(|v| v.to_le_bytes())
-                .collect(),
-            None => vec![0; 12],
-        };
-        let lut = wgpu::util::DeviceExt::create_buffer_init(
-            device,
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("camera look"),
-                contents: &lut,
-                usage: wgpu::BufferUsages::STORAGE,
-            },
-        );
+        let lut = self.tables_buffer(device, frame);
         let masks = self.masks_buffer(device, frame);
         let layers: Vec<u8> = frame
             .layers
@@ -579,6 +632,28 @@ impl Pipe {
             },
         );
         *kept = Some((maps.clone(), b.clone()));
+        b
+    }
+
+    /// The frame's tables on the GPU (see [`Tables`]), kept while they're
+    /// the same tables.
+    fn tables_buffer(&self, device: &wgpu::Device, frame: &Frame) -> wgpu::Buffer {
+        let now = Tables::of(frame);
+        let mut kept = self.tables.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((t, b)) = &*kept
+            && t.same(&now)
+        {
+            return b.clone();
+        }
+        let bytes: Vec<u8> = now
+            .parts()
+            .iter()
+            .flatten()
+            .flat_map(|p| p.iter())
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let b = storage_buffer(device, "colour tables", &bytes);
+        *kept = Some((now, b.clone()));
         b
     }
 
@@ -917,8 +992,10 @@ fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
     }
     v.extend([f.map[2][0], f.map[2][1], f.map[2][2], 0.0]);
     v.extend([flag(l.fringe), l.purple, l.green, 0.0]);
+    let tables = Tables::of(f);
+    let offs = tables.offsets();
     match &d.look {
-        Some(t) => v.extend([1.0, t.size as f32, 0.0, 0.0]),
+        Some(t) => v.extend([1.0, t.size as f32, offs[0], 0.0]),
         None => v.extend([0.0, 2.0, 0.0, 0.0]),
     }
     let (to, back) = d
@@ -974,6 +1051,38 @@ fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
         at(w.softens, a.soften),
     ]);
     v.extend([w.ai, w.sharpen, 0.0, 0.0]);
+    // A DNG camera profile's tables and tone curve (see `dcp`).
+    let st = f.dcp.as_ref();
+    v.extend([
+        flag(st.is_some()),
+        st.map_or(1.0, |s| s.weight),
+        st.map_or(1.0, |s| s.unexposed),
+        flag(d.dcp_tone.is_some()),
+    ]);
+    let dims = |t: Option<&crate::dcp::Table>| {
+        t.map_or([0.0, 2.0, 1.0, 0.0], |t| {
+            [t.hues as f32, t.sats as f32, t.vals as f32, flag(t.srgb)]
+        })
+    };
+    let hs = dims(
+        tables
+            .dcp
+            .as_ref()
+            .and_then(|d| d.hue_sat.first())
+            .map(|t| &t.1),
+    );
+    let lt = dims(tables.dcp.as_ref().and_then(|d| d.look.as_ref()));
+    v.extend([offs[1], offs[2], hs[0], hs[1]]);
+    v.extend([hs[2], hs[3], offs[3], offs[4]]);
+    v.extend(lt);
+    let (to, back) = match (st, &d.dcp_tone) {
+        (Some(s), _) => (s.to_pp, s.from_pp),
+        (None, Some(t)) => (t.to_pp, t.from_pp),
+        _ => ([[0.0; 3]; 3], [[0.0; 3]; 3]),
+    };
+    for r in to.into_iter().chain(back) {
+        v.extend(row(r));
+    }
     v
 }
 

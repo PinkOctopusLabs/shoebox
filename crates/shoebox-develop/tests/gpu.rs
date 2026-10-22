@@ -578,6 +578,137 @@ fn display_referred_sources_match_too() {
     }
 }
 
+/// A DNG camera profile with two HueSatMaps blended by temperature, a 3D
+/// sRGB-encoded LookTable, forward matrices and a tone curve.
+fn test_dcp() -> std::sync::Arc<shoebox_develop::dcp::Dcp> {
+    use shoebox_develop::dcp::{Dcp, Table};
+    let table = |hues: usize, sats: usize, vals: usize, k: f32, srgb: bool| {
+        let mut data = Vec::new();
+        for v in 0..vals {
+            for h in 0..hues {
+                for s in 0..sats {
+                    // Greys (saturation 0) change alike whatever their hue, as real
+                    // tables have them: a grey's hue is noise.
+                    let c = s as f32 / (sats - 1) as f32;
+                    let (h, s, v) = (h as f32, s as f32, v as f32);
+                    data.push([
+                        c * k * 25.0 * (h * 0.7 + v * 0.3).sin(),
+                        1.0 + c * 0.3 * k * (h * 0.4 + s).cos(),
+                        1.0 + 0.1 * k * v + c * 0.2 * k * (h * 0.9 - v).sin(),
+                    ]);
+                }
+            }
+        }
+        Table {
+            hues,
+            sats,
+            vals,
+            data,
+            srgb,
+        }
+    };
+    let m = |v: [f64; 9]| [[v[0], v[1], v[2]], [v[3], v[4], v[5]], [v[6], v[7], v[8]]];
+    let tone: Vec<[f32; 2]> = (0..=64)
+        .map(|i| {
+            let x = i as f32 / 64.0;
+            [x, (x.powf(0.55) * 1.05).min(1.0)]
+        })
+        .collect();
+    let d = Dcp {
+        name: "GPU test".into(),
+        camera: "Nikon Z f".into(),
+        blake3: "gpu-test-profile".into(),
+        matrices: vec![
+            (
+                2850.0,
+                m([
+                    1.3904, -0.7947, 0.0654, -0.432, 1.2105, 0.2497, -0.0235, 0.083, 0.9243,
+                ]),
+            ),
+            (
+                6500.0,
+                m([
+                    1.1607, -0.4491, -0.0977, -0.4522, 1.246, 0.2304, -0.0458, 0.1519, 0.7616,
+                ]),
+            ),
+        ],
+        forward: vec![
+            (
+                2850.0,
+                m([0.62, 0.25, 0.0942, 0.27, 0.83, -0.10, 0.01, -0.21, 1.0249]),
+            ),
+            (
+                6500.0,
+                m([0.66, 0.20, 0.1042, 0.29, 0.79, -0.08, 0.02, -0.18, 0.9849]),
+            ),
+        ],
+        hue_sat: vec![
+            (2850.0, table(24, 6, 1, 1.0, false)),
+            (6500.0, table(24, 6, 1, -0.6, false)),
+        ],
+        look: Some(table(18, 5, 6, 0.8, true)),
+        tone: Some(shoebox_develop::dcp::tone_table(&tone)),
+        tone_points: tone,
+        exposure_offset: -0.3,
+        black_render: 0,
+    };
+    shoebox_develop::dcp::register(d)
+}
+
+#[test]
+fn dcp_profiles_match_the_cpu() {
+    let Some((device, queue)) = headless() else {
+        eprintln!("skipping: no GPU adapter");
+        return;
+    };
+    use shoebox_develop::edit::Profile;
+    let d = test_dcp();
+    assert!(d.tone.is_some());
+    let raw = zf();
+    let src = Demosaiced::new(
+        synthetic(160, 120),
+        [1.1425778, 1.0, 1.7753916],
+        shoebox_develop::cpu::Referred::Scene,
+    );
+    let pipe = Pipe::new(&device, Output::Rgba32Float).unwrap();
+    let gsrc = pipe.upload(&device, &queue, &src.rgb);
+    let mut s = Settings::default();
+    s.modules.input_colour.profile = Profile::Dcp;
+    s.modules.input_colour.dcp = Some(d.file_ref());
+    for step in 0..4 {
+        match step {
+            1 => {
+                s.modules.white_balance.mode = WbMode::Custom;
+                s.modules.white_balance.temp = Some(4100.0);
+                s.modules.white_balance.tint = Some(8.0);
+                s.modules.exposure.ev = 0.6;
+            }
+            2 => s.modules.input_colour.dcp_tone_curve = true,
+            3 => s.modules.colour.saturation = 30.0,
+            _ => {}
+        }
+        let f = cpu::frame(&raw, &src, &s, &Options::default());
+        assert!(f.dcp.is_some());
+        assert_eq!(f.display.dcp_tone.is_some(), step >= 2);
+        for display in [true, false] {
+            let want = cpu::apply(&src.rgb, &f, display);
+            let got = pipe.render(&device, &queue, &gsrc, &f, display).unwrap();
+            let (diff, at) = max_diff(&want, &got);
+            let scale = if display {
+                1.0
+            } else {
+                want.data.iter().fold(1.0f32, |m, v| m.max(v.abs()))
+            };
+            assert!(
+                diff / scale <= 1e-4,
+                "step {step} (display {display}): {diff} at {at}: cpu {:?} gpu {:?}",
+                want.px(at % want.width, at / want.width),
+                got.px(at % got.width, at / got.width)
+            );
+        }
+    }
+}
+
 /// Soft proofing a saturated P3 render to sRGB: CPU and GPU agree, every
 /// colour shown fits in sRGB, and the gamut warning marks the same pixels.
 #[test]

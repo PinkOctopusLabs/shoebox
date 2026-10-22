@@ -642,6 +642,145 @@ fn first_look(app: &mut ShoeboxApp) {
     }
 }
 
+/// A profile chosen in the menu beside Auto.
+enum ProfilePick {
+    Matrix,
+    CameraMatch,
+    Dcp(shoebox_develop::edit::FileRef),
+}
+
+/// Develop's profile menu (raw photos): Matrix; Camera match when there's
+/// one for this camera; the DNG camera profiles in the profiles folder
+/// made for this camera; and the one the edit uses, should it be gone.
+/// Returns a new choice.
+fn profile_choice(app: &ShoeboxApp, ui: &mut egui::Ui) -> Option<ProfilePick> {
+    use shoebox_develop::edit::Profile;
+    let st = &app.develop;
+    let (Some(doc), Some(ready)) = (&st.doc, &st.ready) else {
+        return None;
+    };
+    if ready.src.referred != cpu::Referred::Scene {
+        return None;
+    }
+    let ic = &doc.settings().modules.input_colour;
+    let meta = &ready.meta;
+    let matched = !meta.model.is_empty() && shoebox_develop::profile::has(&meta.model);
+    let dcps = shoebox_develop::dcp::for_camera(&meta.make, &meta.model);
+    let chosen = ic.dcp.as_ref().filter(|_| ic.profile == Profile::Dcp);
+    let missing = chosen.is_some_and(|r| shoebox_develop::dcp::find(r).is_none());
+    let selected = match (ic.profile, chosen) {
+        (Profile::CameraMatch, _) => "Camera match".to_owned(),
+        (Profile::Dcp, Some(r)) if missing => format!("{} (missing)", r.name),
+        (Profile::Dcp, Some(r)) => r.name.clone(),
+        _ => "Matrix".to_owned(),
+    };
+    let mut pick = None;
+    egui::ComboBox::from_id_salt("input-profile")
+        .selected_text(selected)
+        .show_ui(ui, |ui| {
+            if ui
+                .selectable_label(ic.profile == Profile::Matrix, "Matrix")
+                .clicked()
+                && ic.profile != Profile::Matrix
+            {
+                pick = Some(ProfilePick::Matrix);
+            }
+            if (matched || ic.profile == Profile::CameraMatch)
+                && ui
+                    .selectable_label(ic.profile == Profile::CameraMatch, "Camera match")
+                    .clicked()
+                && ic.profile != Profile::CameraMatch
+            {
+                pick = Some(ProfilePick::CameraMatch);
+            }
+            for d in &dcps {
+                let on = chosen.is_some_and(|r| r.blake3 == d.blake3);
+                if ui
+                    .selectable_label(on, &d.name)
+                    .on_hover_text(format!("A DNG camera profile for the {}", d.camera))
+                    .clicked()
+                    && !on
+                {
+                    pick = Some(ProfilePick::Dcp(d.file_ref()));
+                }
+            }
+            ui.separator();
+            if ui
+                .button("Show profiles folder")
+                .on_hover_text("DNG camera profiles (.dcp) for your cameras go here")
+                .clicked()
+            {
+                app.developer
+                    .colours(Some(crate::develop::ColourFolder::Profiles));
+            }
+            if ui.button("Read profiles again").clicked() {
+                app.developer.colours(None);
+            }
+        })
+        .response
+        .on_hover_text(
+            "Matrix: the camera's colour, neutral. Camera match: a look fitted to this camera's own JPEGs. Or a DNG camera profile from the profiles folder",
+        );
+    pick
+}
+
+/// Under the profile menu, for a DNG camera profile: that it's missing
+/// (and, when one of its name has changed, using that), or its tone curve.
+fn dcp_extras(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    use shoebox_develop::edit::Profile;
+    let st = &app.develop;
+    let (Some(doc), Some(ready)) = (&st.doc, &st.ready) else {
+        return;
+    };
+    let ic = &doc.settings().modules.input_colour;
+    let Some(r) = ic.dcp.clone().filter(|_| ic.profile == Profile::Dcp) else {
+        return;
+    };
+    if ready.src.referred != cpu::Referred::Scene {
+        return;
+    }
+    let tone_on = ic.dcp_tone_curve;
+    match shoebox_develop::dcp::find(&r) {
+        None => {
+            ui.label(
+                egui::RichText::new(format!(
+                    "The profile “{}” isn't in the profiles folder (or has changed): showing the matrix.",
+                    r.name
+                ))
+                .color(ui.visuals().warn_fg_color),
+            );
+            if let Some(now) = shoebox_develop::dcp::named(&r.name)
+                && ui
+                    .button(format!("Use “{}” as it is now", now.name))
+                    .clicked()
+            {
+                let to = now.file_ref();
+                edit(app, "profile", format!("Profile {}", now.name), |s| {
+                    s.modules.input_colour.dcp = Some(to);
+                });
+            }
+        }
+        Some(d) if d.tone.is_some() => {
+            let mut on = tone_on;
+            if ui
+                .checkbox(&mut on, "Profile's tone curve")
+                .on_hover_text(
+                    "The profile's own tone curve in place of Shoebox's; Contrast, Whites and Blacks then do nothing",
+                )
+                .changed()
+            {
+                edit(
+                    app,
+                    "dcp-tone",
+                    format!("Profile tone curve {}", if on { "on" } else { "off" }),
+                    |s| s.modules.input_colour.dcp_tone_curve = on,
+                );
+            }
+        }
+        Some(_) => {}
+    }
+}
+
 /// Auto on the photo in Develop, as a step (raw photos: it's measured as
 /// they're prepared).
 pub fn run_auto(app: &mut ShoeboxApp) {
@@ -672,7 +811,10 @@ pub fn run_auto(app: &mut ShoeboxApp) {
         .filter(|_| ready.src.referred == cpu::Referred::Scene);
     edit(app, "auto", "Auto".into(), |s| {
         *s = shoebox_develop::auto::settings(s, &stats, iso, lens, ai_from);
-        s.modules.input_colour.profile = profile;
+        // A DNG camera profile someone chose stays.
+        if s.modules.input_colour.profile != shoebox_develop::edit::Profile::Dcp {
+            s.modules.input_colour.profile = profile;
+        }
     });
 }
 
@@ -698,6 +840,12 @@ pub fn poll(app: &mut ShoeboxApp) {
             }
             Event::Looks(list) => {
                 app.develop.looks = list;
+                continue;
+            }
+            Event::Colours => {
+                // A profile or look that was missing may be there now.
+                app.develop.edited = None;
+                app.develop.original = None;
                 continue;
             }
             Event::Presets(list) => {
@@ -2018,15 +2166,8 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         return;
     };
     let can_auto = ready.auto.is_some() && !st.read_only;
-    // Camera match is offered when there's a profile for this camera.
-    let model = ready.meta.model.clone();
-    let matched = !model.is_empty() && shoebox_develop::profile::has(&model);
-    let profile = st
-        .doc
-        .as_ref()
-        .map(|d| d.settings().modules.input_colour.profile);
-    let mut pick = None;
     let mut auto = false;
+    let mut pick = None;
     ui.horizontal(|ui| {
         auto = ui
             .add_enabled(can_auto, egui::Button::new("Auto"))
@@ -2034,40 +2175,38 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 "Exposure, noise reduction, sharpening, dehaze and lens corrections from the photo itself",
             )
             .clicked();
-        if matched || profile == Some(shoebox_develop::edit::Profile::CameraMatch) {
-            use shoebox_develop::edit::Profile;
-            let name = |p: Option<Profile>| match p {
-                Some(Profile::CameraMatch) => "Camera match",
-                _ => "Matrix",
-            };
-            egui::ComboBox::from_id_salt("input-profile")
-                .selected_text(name(profile))
-                .show_ui(ui, |ui| {
-                    for p in [Profile::Matrix, Profile::CameraMatch] {
-                        if ui.selectable_label(profile == Some(p), name(Some(p))).clicked() {
-                            pick = Some(p);
-                        }
-                    }
-                })
-                .response
-                .on_hover_text("Matrix: the camera's colour, neutral. Camera match: a look fitted to this camera's own JPEGs");
-        }
+        pick = profile_choice(app, ui);
     });
     if auto {
         run_auto(app);
         return;
     }
-    if let Some(p) = pick
-        && Some(p) != profile
-    {
-        let label = match p {
-            shoebox_develop::edit::Profile::CameraMatch => "Profile Camera match",
-            shoebox_develop::edit::Profile::Matrix => "Profile Matrix",
+    if let Some(p) = pick {
+        use shoebox_develop::edit::Profile;
+        let label = match &p {
+            ProfilePick::Matrix => "Profile Matrix".to_owned(),
+            ProfilePick::CameraMatch => "Profile Camera match".to_owned(),
+            ProfilePick::Dcp(r) => format!("Profile {}", r.name),
         };
-        edit(app, "profile", label.into(), |s| {
-            s.modules.input_colour.profile = p;
+        edit(app, "profile", label, |s| {
+            let ic = &mut s.modules.input_colour;
+            match p {
+                ProfilePick::Matrix => {
+                    ic.profile = Profile::Matrix;
+                    ic.dcp = None;
+                }
+                ProfilePick::CameraMatch => {
+                    ic.profile = Profile::CameraMatch;
+                    ic.dcp = None;
+                }
+                ProfilePick::Dcp(r) => {
+                    ic.profile = Profile::Dcp;
+                    ic.dcp = Some(r);
+                }
+            }
         });
     }
+    dcp_extras(app, ui);
     let st = &app.develop;
     let (Some(doc), Some(ready)) = (&st.doc, &st.ready) else {
         return;
@@ -2100,7 +2239,7 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                             let (t, n, _) = shoebox_develop::wb::relative(wb);
                             (t, n)
                         } else {
-                            let r = shoebox_develop::wb::resolve(&meta, wb);
+                            let r = shoebox_develop::wb::resolve_for(&meta, &s);
                             (r.temp, r.tint)
                         };
                         let modes = [

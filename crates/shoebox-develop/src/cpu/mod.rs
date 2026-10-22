@@ -567,6 +567,9 @@ pub struct Frame {
     /// Source (camera RGB balanced at as shot) → linear Rec.2020, with the
     /// white balance change, exposure and calibration folded in.
     pub colour: [[f32; 3]; 3],
+    /// A DNG camera profile's tables, right after the colour matrix (see
+    /// [`crate::dcp::Stage`]).
+    pub dcp: Option<crate::dcp::Stage>,
     /// Lens corrections: where each channel comes from, and the
     /// vignetting gain (see [`crate::lens`]).
     pub lens: Option<std::sync::Arc<crate::lens::Grid>>,
@@ -608,6 +611,9 @@ pub struct Display {
     pub tone: Option<std::sync::Arc<[f32]>>,
     /// A camera match profile's look (see [`crate::profile`]).
     pub look: Option<std::sync::Arc<crate::profile::Lut3>>,
+    /// A DNG camera profile's tone curve in place of the scene curve (see
+    /// [`crate::dcp::Tone`]).
+    pub dcp_tone: Option<crate::dcp::Tone>,
     /// Soft proofing: colours limited to an export space's before the
     /// output space.
     pub proof: Option<Proof>,
@@ -693,6 +699,7 @@ impl Display {
             referred: None,
             tone: None,
             look: None,
+            dcp_tone: None,
             proof: None,
             target,
         }
@@ -912,34 +919,64 @@ pub const BASELINE_EV: f64 = 0.75;
 pub fn frame(raw: &RawImage, src: &Demosaiced, s: &Settings, o: &Options) -> Frame {
     let e = &s.modules.exposure;
     let slider = if e.enabled { e.ev } else { 0.0 };
-    let (m, ev, display) = match src.referred {
+    let ic = &s.modules.input_colour;
+    // A DNG camera profile (raw photos; while it's missing, the matrix).
+    let dcp = match src.referred {
+        Referred::Scene => crate::dcp::chosen(s),
+        Referred::Display => None,
+    };
+    let (m, ev, display, temp) = match src.referred {
         Referred::Scene => {
-            let w = wb::resolve(raw, &s.modules.white_balance);
+            let w = match &dcp {
+                Some(d) => wb::resolve_with(&d.camera(), raw.as_shot, &s.modules.white_balance),
+                None => wb::resolve(raw, &s.modules.white_balance),
+            };
             // From as-shot-balanced to this white balance, per channel.
             let ratio = [0, 1, 2].map(|c| f64::from(w.multipliers[c]) / f64::from(src.as_shot[c]));
             (
                 colour::mul(&w.cam_to_rec2020, &colour::diag(ratio)),
-                BASELINE_EV + slider,
+                BASELINE_EV + slider + dcp.as_ref().map_or(0.0, |d| d.exposure_offset),
                 Display::new(&s.modules.display_transform, o.target),
+                w.temp,
             )
         }
         Referred::Display => (
             wb::relative(&s.modules.white_balance).2,
             slider,
             Display::for_display_referred(&s.modules.display_transform, o.target),
+            6504.0,
         ),
     };
     let gain = 2f64.powf(ev);
     let m = colour::mul(&look::calibration_matrix(&s.modules.calibration), &m);
     let colour = f32m(&m.map(|r| r.map(|v| v * gain)));
+    // The profile's tone curve replaces the scene curve, and the AgX inset
+    // with it: the profile's look was made for its own curve.
+    let dcp_tone = dcp
+        .as_ref()
+        .filter(|_| ic.dcp_tone_curve)
+        .and_then(|d| d.tone.clone())
+        .map(crate::dcp::Tone::new);
     let display = Display {
         tone: look::curve_table(&s.modules.tone_curve),
-        look: match s.modules.input_colour.profile {
+        look: match ic.profile {
             crate::edit::Profile::CameraMatch => crate::profile::find(&raw.model),
-            crate::edit::Profile::Matrix => None,
+            crate::edit::Profile::Matrix | crate::edit::Profile::Dcp => None,
         },
+        inset: if dcp_tone.is_some() {
+            f32m(&colour::IDENTITY)
+        } else {
+            display.inset
+        },
+        outset: if dcp_tone.is_some() {
+            f32m(&colour::IDENTITY)
+        } else {
+            display.outset
+        },
+        dcp_tone,
         ..display
     };
+    let dcp = dcp.and_then(|d| crate::dcp::Stage::new(d, temp, gain));
     let (mut map, width, height) =
         geometry_map(src.rgb.width, src.rgb.height, o.orientation, &s.geometry);
     // Lens corrections, on the frame's own aspect; their zoom keeps the
@@ -980,6 +1017,7 @@ pub fn frame(raw: &RawImage, src: &Demosaiced, s: &Settings, o: &Options) -> Fra
             compose_orientation(o.orientation, s.geometry.quarter, s.geometry.flip),
         ),
         colour,
+        dcp,
         look: look::Look::new(
             &s.modules.colour,
             &s.modules.calibration,
@@ -1091,7 +1129,7 @@ fn sample_in<T: Texels>(img: &T, x: f32, y: f32) -> [f32; 3] {
     out
 }
 
-pub(crate) fn mul3(m: &[[f32; 3]; 3], p: [f32; 3]) -> [f32; 3] {
+pub fn mul3(m: &[[f32; 3]; 3], p: [f32; 3]) -> [f32; 3] {
     [
         m[0][0] * p[0] + m[0][1] * p[1] + m[0][2] * p[2],
         m[1][0] * p[0] + m[1][1] * p[1] + m[1][2] * p[2],
@@ -1171,6 +1209,9 @@ fn before_display(
 fn colour_input(src: &Source, f: &Frame, mx: f32, my: f32) -> ([f32; 3], f32, f32) {
     let (rgb, sx, sy) = lens_sample_in(src, f.lens.as_deref(), mx, my);
     let mut lin = mul3(&f.colour, rgb);
+    if let Some(d) = &f.dcp {
+        lin = d.apply(lin);
+    }
     if f.look.fringe {
         let y = |dx: f32, dy: f32| {
             let p = mul3(&f.colour, sample_in(src, sx + dx, sy + dy));
@@ -1301,6 +1342,7 @@ fn resample(img: &Rgb, map: [[f64; 3]; 3], w: usize, h: usize) -> Rgb {
         map: map.map(|r| r.map(|v| v as f32)),
         lens: None,
         colour: f32m(&colour::IDENTITY),
+        dcp: None,
         local: maps::Local::none(),
         layers: Default::default(),
         look: look::Look::new(
@@ -1480,6 +1522,8 @@ pub fn shape(d: &Display, p: [f32; 3]) -> [f32; 3] {
         } else {
             v.map(|c| l.apply(c))
         }
+    } else if let Some(t) = &d.dcp_tone {
+        t.apply(v)
     } else if d.preserve_hue {
         // Tone-map the brightest channel and scale the others with it, so
         // hues hold; blend to the per-channel result as it nears white so

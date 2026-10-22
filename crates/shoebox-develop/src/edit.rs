@@ -157,12 +157,19 @@ pub enum WbMode {
 #[serde(default)]
 pub struct InputColour {
     pub profile: Profile,
+    /// The DNG camera profile, for [`Profile::Dcp`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dcp: Option<DcpRef>,
+    /// The DCP's own tone curve in place of the display transform's.
+    pub dcp_tone_curve: bool,
 }
 
 impl Default for InputColour {
     fn default() -> Self {
         Self {
             profile: Profile::Matrix,
+            dcp: None,
+            dcp_tone_curve: false,
         }
     }
 }
@@ -175,7 +182,22 @@ pub enum Profile {
     /// The matrices, then a look fitted to the camera's own JPEGs (see
     /// `profile`); the matrix alone when there's no profile for the camera.
     CameraMatch,
+    /// A DNG camera profile (`.dcp`, see `dcp`): its matrices and tables;
+    /// the matrix alone while it's missing.
+    Dcp,
 }
+
+/// A file the edit uses from the person's own folders (a DNG camera
+/// profile, a look): its name, and a BLAKE3 of its contents, so one
+/// that's gone or changed shows instead of rendering differently.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileRef {
+    pub name: String,
+    pub blake3: String,
+}
+
+/// A DNG camera profile, by name and contents.
+pub type DcpRef = FileRef;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]

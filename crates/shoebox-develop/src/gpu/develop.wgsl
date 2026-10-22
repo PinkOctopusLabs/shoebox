@@ -1,7 +1,8 @@
 // The live pipe for one output pixel (see `cpu::apply` and
 // `cpu::display_pixel`, which this follows operation for operation):
 // geometry map → lens grid (each channel from where the lens put it, times
-// the vignetting gain: `cpu::lens_sample`) → bilinear sample → colour matrix → local (dehaze,
+// the vignetting gain: `cpu::lens_sample`) → bilinear sample → colour matrix
+// → DNG profile tables (`dcp::Stage`) → local (dehaze,
 // highlights and shadows, clarity: `cpu::maps`) → local adjustments
 // (`cpu::layers`, masks from `mask`) → look (colour, black and
 // white: `cpu::look`) → display transform → tone curve → soft proof (into
@@ -67,6 +68,16 @@ struct Params {
     fx2: vec4<f32>,       // the whole frame's size, this render's offset in it
     srcmix: vec4<f32>,    // images beside the source the layers use (array layer + 1; 0: none): AI strength 1, 0, sharpening, softening
     srcg: vec4<f32>,      // the AI strength and the sharpening amount the source has
+    dcp: vec4<f32>,       // DNG profile: tables on (0/1), the cooler HueSatMap's weight, back to before exposure, tone curve on (0/1)
+    hsm: vec4<f32>,       // HueSatMap tables (offset + 1; 0: none): cooler, warmer; hues, saturations
+    hsm2: vec4<f32>,      // HueSatMap values, sRGB-encoded (0/1); LookTable, tone curve (offset + 1; 0: none)
+    lkt: vec4<f32>,       // LookTable: hues, saturations, values, sRGB-encoded (0/1)
+    pp0: vec4<f32>,       // linear Rec.2020 → linear ProPhoto
+    pp1: vec4<f32>,
+    pp2: vec4<f32>,
+    unpp0: vec4<f32>,     // and back
+    unpp1: vec4<f32>,
+    unpp2: vec4<f32>,
 };
 
 const GAMUT_SLACK: f32 = 2e-3;
@@ -86,13 +97,19 @@ const STRIDE: u32 = 8u;
 @group(0) @binding(5) var<storage, read> grid: array<f32>;
 const GRID: u32 = 7u;
 
-// The camera match look (see `profile::Lut3`): size³ RGB entries, red fastest.
-@group(0) @binding(6) var<storage, read> lut3: array<f32>;
+// The colour tables (see `gpu::Tables`), each at an offset given in the
+// params (+1): the camera match look (see `profile::Lut3`: size³ RGB
+// entries, red fastest), a DNG profile's HueSatMap tables, LookTable and
+// tone curve (see `dcp`).
+@group(0) @binding(6) var<storage, read> tables: array<f32>;
+
+fn tab3(i: u32) -> vec3<f32> {
+    return vec3<f32>(tables[i], tables[i + 1u], tables[i + 2u]);
+}
 
 fn lut_at(r: u32, g: u32, b: u32) -> vec3<f32> {
     let n = u32(p.look3.y);
-    let i = ((b * n + g) * n + r) * 3u;
-    return vec3<f32>(lut3[i], lut3[i + 1u], lut3[i + 2u]);
+    return tab3(u32(p.look3.z) - 1u + ((b * n + g) * n + r) * 3u);
 }
 
 fn camera_look(px: vec3<f32>) -> vec3<f32> {
@@ -194,6 +211,168 @@ fn oetf(v: f32) -> f32 {
         return 12.92 * v;
     }
     return 1.055 * pow(v, 1.0 / 2.4) - 0.055;
+}
+
+fn eotf(v: f32) -> f32 {
+    if (v <= 0.04045) {
+        return v / 12.92;
+    }
+    return pow((v + 0.055) / 1.055, 2.4);
+}
+
+// The DNG SDK's HSV (see `dcp::hsv`): hue 0–6, saturation, value.
+fn dcp_hsv(c: vec3<f32>) -> vec3<f32> {
+    let v = max(max(c.x, c.y), c.z);
+    let gap = v - min(min(c.x, c.y), c.z);
+    if (gap <= 0.0 || v <= 0.0) {
+        return vec3<f32>(0.0, 0.0, v);
+    }
+    var h: f32;
+    if (c.x == v) {
+        h = (c.y - c.z) / gap;
+    } else if (c.y == v) {
+        h = 2.0 + (c.z - c.x) / gap;
+    } else {
+        h = 4.0 + (c.x - c.y) / gap;
+    }
+    if (h < 0.0) {
+        h += 6.0;
+    }
+    return vec3<f32>(h, gap / v, v);
+}
+
+// And back (see `dcp::rgb`).
+fn dcp_rgb(hsv: vec3<f32>) -> vec3<f32> {
+    var h = hsv.x;
+    let s = hsv.y;
+    let v = hsv.z;
+    if (s <= 0.0) {
+        return vec3<f32>(v);
+    }
+    h -= 6.0 * floor(h / 6.0);
+    let i = min(u32(floor(h)), 5u);
+    let f = h - f32(i);
+    let pp = v * (1.0 - s);
+    let q = v * (1.0 - s * f);
+    let t = v * (1.0 - s * (1.0 - f));
+    switch i {
+        case 0u: { return vec3<f32>(v, t, pp); }
+        case 1u: { return vec3<f32>(q, v, pp); }
+        case 2u: { return vec3<f32>(pp, v, t); }
+        case 3u: { return vec3<f32>(pp, q, v); }
+        case 4u: { return vec3<f32>(t, pp, v); }
+        default: { return vec3<f32>(v, pp, q); }
+    }
+}
+
+// A DNG profile's table: offsets (+1; b 0: one table), b's share 1 − w.
+struct Tab { a: u32, b: u32, w: f32, hues: u32, sats: u32, vals: u32, srgb: bool };
+
+fn tab_entry(t: Tab, i: u32) -> vec3<f32> {
+    let x = tab3(t.a - 1u + i * 3u);
+    if (t.b > 0u) {
+        let y = tab3(t.b - 1u + i * 3u);
+        return t.w * x + (1.0 - t.w) * y;
+    }
+    return x;
+}
+
+fn lerp3(x: vec3<f32>, y: vec3<f32>, t: f32) -> vec3<f32> {
+    return x + (y - x) * t;
+}
+
+fn tab_plane(t: Tab, vi: u32, h0: u32, h1: u32, hf: f32, s0: u32, sf: f32) -> vec3<f32> {
+    let row = vi * t.hues;
+    let a = lerp3(tab_entry(t, (row + h0) * t.sats + s0), tab_entry(t, (row + h1) * t.sats + s0), hf);
+    let b = lerp3(
+        tab_entry(t, (row + h0) * t.sats + s0 + 1u),
+        tab_entry(t, (row + h1) * t.sats + s0 + 1u),
+        hf,
+    );
+    return lerp3(a, b, sf);
+}
+
+// The table's change at (h, s, v) (see `dcp::lookup`).
+fn tab_lookup(t: Tab, h: f32, s: f32, v: f32) -> vec3<f32> {
+    var hs = 0.0;
+    if (t.hues >= 2u) {
+        hs = h * f32(t.hues) / 6.0;
+    }
+    var h0 = u32(floor(max(hs, 0.0)));
+    var h1 = h0 + 1u;
+    if (h0 >= t.hues - 1u) {
+        h0 = t.hues - 1u;
+        h1 = 0u;
+    }
+    let hf = hs - f32(h0);
+    let ss = clamp(s, 0.0, 1.0) * f32(t.sats - 1u);
+    let s0 = min(u32(floor(ss)), t.sats - 2u);
+    let sf = ss - f32(s0);
+    if (t.vals < 2u) {
+        return tab_plane(t, 0u, h0, h1, hf, s0, sf);
+    }
+    let vs = clamp(v, 0.0, 1.0) * f32(t.vals - 1u);
+    let v0 = min(u32(floor(vs)), t.vals - 2u);
+    let vf = vs - f32(v0);
+    return lerp3(tab_plane(t, v0, h0, h1, hf, s0, sf), tab_plane(t, v0 + 1u, h0, h1, hf, s0, sf), vf);
+}
+
+// One table on a linear ProPhoto pixel (see `dcp::hsv_table`).
+fn hsv_table(t: Tab, c: vec3<f32>, pre: f32) -> vec3<f32> {
+    let hsv = dcp_hsv(c);
+    if (hsv.z <= 0.0) {
+        return c;
+    }
+    let at = hsv.z * pre;
+    var enc = at;
+    if (t.srgb) {
+        enc = oetf(at);
+    }
+    let d = tab_lookup(t, hsv.x, hsv.y, enc);
+    let s2 = max(min(hsv.y * d.y, max(hsv.y, 1.0)), 0.0);
+    var v2 = hsv.z * d.z;
+    if (t.srgb) {
+        v2 = eotf(enc * d.z) / pre;
+    }
+    return dcp_rgb(vec3<f32>(hsv.x + d.x * (6.0 / 360.0), s2, v2));
+}
+
+// A DNG profile's tables on linear Rec.2020 (see `dcp::Stage::apply`).
+fn dcp_stage(px: vec3<f32>) -> vec3<f32> {
+    var q = mul3(p.pp0, p.pp1, p.pp2, px);
+    if (p.hsm.x > 0.5) {
+        let t = Tab(u32(p.hsm.x), u32(p.hsm.y), p.dcp.y, u32(p.hsm.z), u32(p.hsm.w), u32(p.hsm2.x), p.hsm2.y > 0.5);
+        q = hsv_table(t, q, p.dcp.z);
+    }
+    if (p.hsm2.z > 0.5) {
+        let t = Tab(u32(p.hsm2.z), 0u, 1.0, u32(p.lkt.x), u32(p.lkt.y), u32(p.lkt.z), p.lkt.w > 0.5);
+        q = hsv_table(t, q, 1.0);
+    }
+    return mul3(p.unpp0, p.unpp1, p.unpp2, q);
+}
+
+const DCP_TONE: u32 = 1024u;
+
+fn dcp_tone_at(v: f32) -> f32 {
+    let x = pow(clamp(v, 0.0, 1.0), 1.0 / 2.2) * f32(DCP_TONE - 1u);
+    let i = min(u32(floor(x)), DCP_TONE - 2u);
+    let f = x - f32(i);
+    let o = u32(p.hsm2.w) - 1u + i;
+    return tables[o] + (tables[o + 1u] - tables[o]) * f;
+}
+
+// A DNG profile's tone curve, hue kept (see `dcp::Tone::apply`).
+fn dcp_tone(px: vec3<f32>) -> vec3<f32> {
+    let q = clamp(mul3(p.pp0, p.pp1, p.pp2, px), vec3<f32>(0.0), vec3<f32>(1.0));
+    let hi = max(max(q.x, q.y), q.z);
+    let lo = min(min(q.x, q.y), q.z);
+    let th = dcp_tone_at(hi);
+    let tl = dcp_tone_at(lo);
+    var out = vec3<f32>(th);
+    if (hi - lo > 0.0) {
+        out = vec3<f32>(tl) + (th - tl) * (q - vec3<f32>(lo)) / (hi - lo);
+    }
+    return mul3(p.unpp0, p.unpp1, p.unpp2, out);
 }
 
 // A finished image's tone (see `cpu::Levels`).
@@ -700,6 +879,8 @@ fn display(px: vec3<f32>) -> vec4<f32> {
         } else {
             shaped = vec3<f32>(levels(v.x), levels(v.y), levels(v.z));
         }
+    } else if (p.dcp.w > 0.5) {
+        shaped = dcp_tone(v);
     } else if (p.misc.z > 0.5) {
         let norm = max(max(max(v.x, v.y), v.z), 1e-10);
         let n = lin(curve(norm));
@@ -821,6 +1002,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         raw = bilinear(sx, sy);
     }
     var px = mul3(p.colour0, p.colour1, p.colour2, raw);
+    if (p.dcp.x > 0.5) {
+        px = dcp_stage(px);
+    }
     if (p.fringe.x > 0.5) {
         px = defringe(px, sx, sy);
     }

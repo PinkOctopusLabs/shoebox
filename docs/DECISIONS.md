@@ -2619,3 +2619,76 @@ Face parts, Object), from EDITING-SPEC's "Rendering masks".
   --test scene -- --ignored`): sky 1.00 above, 0.00 below, the grass all
   Vegetation. `examples/scene_probe.rs` writes each part of real photos
   as PNGs. Real skies: `docs/MANUAL-CHECKS.md`.
+
+## Colour: DCP profiles, calibration and looks (2026-10-22)
+
+### DNG camera profiles
+
+- **What's read** (`dcp`, written from the DNG specification 1.6,
+  chapter 6, with the SDK's reference code's behaviour; nothing ported):
+  ColorMatrix1/2 and ForwardMatrix1/2 by CalibrationIlluminant1/2,
+  ProfileHueSatMapDims/Data1/2, ProfileLookTableDims/Data, the two
+  encoding tags, ProfileToneCurve, BaselineExposureOffset,
+  DefaultBlackRender, ProfileName and UniqueCameraModel. "IIRC"/"MMCR"
+  files (plain TIFF headers too), bounds-checked; a file that doesn't
+  parse is skipped with a warning.
+- **Matrices.** A profile's colour matrices (and forward matrices, when
+  it has a pair) stand in for the raw file's everywhere: white balance,
+  the as-shot white's temperature and tint, the eyedropper and the camera
+  → Rec.2020 matrix (`wb::camera_for`, `wb::resolve_with`). They're
+  normalised as the SDK does (a colour matrix's white peaks at 1; a
+  forward matrix takes camera white to D50 exactly), and the brightness
+  rule stays: the white's neutral, normalised to Y = 1 by the colour
+  matrix, comes out at Y = 1, so moving between Matrix and a profile with
+  the same matrices changes nothing.
+- **Where the tables run.** Per pixel, right after the colour matrix and
+  before defringe and the local tone maps: linear Rec.2020 → linear
+  ProPhoto (Bradford to D50), HueSatMap, LookTable, back. HueSatMap is
+  looked up at the scene's value before exposure (the colour matrix's
+  gain undone), as the DNG pipe has it before its exposure ramp;
+  LookTable after all of it (Shoebox's +0.75 baseline, the profile's
+  offset and the slider). Two HueSatMaps are blended by inverse
+  temperature of the white, as the matrices are. The local tone maps are
+  worked out from the colour matrix alone (their guide is a small copy);
+  with a profile that moves value a lot their gains are a little off, as
+  with any stage before them.
+- **Deviations from the SDK**, for a scene-referred pipe: values aren't
+  pinned to 1 (it pins), and saturation is kept from going past the
+  gamut's edge (`min(s·scale, max(s, 1))`) rather than pinned at 1, so a
+  colour already outside isn't dragged in. An sRGB-encoded table scales
+  the encoded value for 2.5D tables too (the SDK encodes only for 3D
+  lookups). ProfileToneCurve is linear between its points (profiles'
+  curves are dense; the SDK fits a spline). An unknown illuminant counts
+  as D50.
+- **The tone curve** is off by default ("Profile's tone curve" under the
+  profile menu, `input_colour.dcp_tone_curve`): Shoebox's display
+  transform stays in charge as it does for every other profile, and Auto
+  and the baseline exposure are tuned to it. On, it replaces the scene
+  curve and the AgX inset (Adobe's hue-keeping RGB tone on ProPhoto,
+  values clipped to 0–1 as the profile's pipe clips them); Contrast,
+  Whites and Blacks then do nothing. DefaultBlackRender is read, but
+  Shoebox never adds an automatic black, so both values render alike.
+- **The edit** stores `input_colour.profile: "dcp"` and
+  `input_colour.dcp: {name, blake3}`. Profiles are found by contents, so
+  one that's gone or changed renders as the matrix and Develop says so,
+  offering a profile of the same name "as it is now" (a step). The
+  render hash covers the reference, so previews follow. They travel in
+  presets' Colour part with the rest of `input_colour`; Auto leaves a
+  chosen profile alone.
+- **The folder** is `<data>/profiles/` (beside the camera match
+  profiles, `*.dcp`), read when the develop thread starts and again from
+  the menu ("Read profiles again"); "Show profiles folder" makes it if
+  it isn't there and opens it. Shoebox never writes into it. Only
+  profiles whose UniqueCameraModel is the photo's model (or make and
+  model) are offered.
+- **GPU.** A stage may bind eight storage buffers and seven were used,
+  so all colour tables share binding 6 (camera match look, HueSatMaps,
+  LookTable, tone curve; offsets in the params), uploaded once and kept
+  while the tables are the same ones. Checked against the CPU within
+  1e-4 with two blended 2.5D tables, a 3D sRGB LookTable, forward
+  matrices and the tone curve. The test tables keep greys' entries alike
+  across hues, as real profiles do: a grey's hue is noise, and a table
+  that changed greys by hue would turn rounding into visible steps.
+- **Process version untouched:** the profile choice is new and off by
+  default, so old edits render as before (the synthetic goldens are
+  unchanged).

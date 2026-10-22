@@ -208,3 +208,25 @@ together at the end, before the release.
   Buildings taking indoor walls is a nuisance); a photo with no sky gets
   an empty Sky mask; a photo turned 90° works. Note the time to the
   first part on a new photo, and that a second part of it is immediate.
+
+## Colour: DCP profiles, calibration and looks (from 2026-10-22)
+
+- [ ] **A ColorChecker DCP with dcamprof, mean ΔE2000 ≤ 3** (the spec's
+  target with a custom DCP is ≤ 1.5). Shoot the chart as in the Phase 1
+  check (daylight and tungsten, Lossless, base ISO, white patch not
+  clipped). Convert both NEFs to DNG (Adobe DNG Converter), then follow
+  dcamprof's documentation: `make-target` from each shot's measured
+  patches, `make-profile` for each, and `make-dcp` with both (daylight
+  and tungsten, so the tables blend by temperature), naming the camera
+  as its raw files do (`-n "Nikon Z f"`) and without a tone curve, so
+  Shoebox's tone stays. Put the `.dcp` in the folder Develop's profile
+  menu → "Show profiles folder" opens, choose "Read profiles again",
+  pick it on the chart photo, and measure ΔE2000 (the measuring tool
+  isn't built yet). The tungsten shot with As shot should come out
+  neutral too.
+- [ ] **An Adobe profile** (Adobe Standard or Camera Standard for the
+  Z f, from Adobe DNG Converter's profiles folder, copied into the
+  profiles folder): with and without "Profile's tone curve", beside the
+  camera JPEG: plausible, no hue jumps in skies or skin, no banding in
+  smooth gradients; a missing profile (move the file out, read again)
+  shows the warning and renders as the matrix.

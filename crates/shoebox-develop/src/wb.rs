@@ -26,14 +26,18 @@ pub fn preset(mode: WbMode) -> Option<(f64, f64)> {
     })
 }
 
-/// A camera's calibration: its matrices by temperature.
+/// A camera's calibration: its matrices by temperature, and (from a DNG
+/// camera profile) forward matrices.
 pub struct Camera {
     matrices: Vec<(f64, M3)>,
+    /// White-balanced camera RGB → XYZ (D50), by temperature; empty: the
+    /// colour matrices' inverse is used.
+    forward: Vec<(f64, M3)>,
 }
 
 impl Camera {
     pub fn new(matrices: &[ColorMatrix]) -> Self {
-        let mut m: Vec<(f64, M3)> = matrices
+        let m: Vec<(f64, M3)> = matrices
             .iter()
             .map(|c| {
                 let mut a = [[0.0; 3]; 3];
@@ -45,39 +49,70 @@ impl Camera {
                 (f64::from(c.temperature), a)
             })
             .collect();
-        m.sort_by(|a, b| a.0.total_cmp(&b.0));
-        Self { matrices: m }
+        Self::with_forward(m, Vec::new())
+    }
+
+    /// A calibration from its parts: XYZ → camera matrices and forward
+    /// matrices, each with its illuminant's temperature.
+    pub fn with_forward(mut matrices: Vec<(f64, M3)>, mut forward: Vec<(f64, M3)>) -> Self {
+        matrices.sort_by(|a, b| a.0.total_cmp(&b.0));
+        forward.sort_by(|a, b| a.0.total_cmp(&b.0));
+        Self { matrices, forward }
     }
 
     /// XYZ → camera for a white at `temp` K: the two calibrations either
     /// side, blended by inverse temperature (the nearest one outside them).
     pub fn xyz_to_cam(&self, temp: f64) -> M3 {
-        let m = &self.matrices;
-        match m.len() {
-            0 => colour::IDENTITY,
-            1 => m[0].1,
-            _ => {
-                let (lo, hi) = (m[0], m[m.len() - 1]);
-                if temp <= lo.0 {
-                    return lo.1;
-                }
-                if temp >= hi.0 {
-                    return hi.1;
-                }
-                let i = m.iter().position(|(t, _)| *t >= temp).unwrap_or(1).max(1);
-                let (a, b) = (m[i - 1], m[i]);
-                let g = ((1.0 / temp - 1.0 / b.0) / (1.0 / a.0 - 1.0 / b.0)).clamp(0.0, 1.0);
-                let mut out = [[0.0; 3]; 3];
-                for r in 0..3 {
-                    for c in 0..3 {
-                        out[r][c] = g * a.1[r][c] + (1.0 - g) * b.1[r][c];
-                    }
-                }
-                out
-            }
-        }
+        blend(&self.matrices, temp)
     }
 
+    /// The forward matrix for a white at `temp` K (None: there's none).
+    pub fn forward(&self, temp: f64) -> Option<M3> {
+        (!self.forward.is_empty()).then(|| blend(&self.forward, temp))
+    }
+}
+
+/// How much of the cooler of two calibrations (temperatures `lo` < `hi`)
+/// a white at `temp` K takes: by inverse temperature, as the DNG
+/// specification blends its matrices and tables.
+pub fn weight(lo: f64, hi: f64, temp: f64) -> f64 {
+    if temp <= lo {
+        return 1.0;
+    }
+    if temp >= hi {
+        return 0.0;
+    }
+    ((1.0 / temp - 1.0 / hi) / (1.0 / lo - 1.0 / hi)).clamp(0.0, 1.0)
+}
+
+/// Matrices by temperature (sorted), blended for `temp`.
+fn blend(m: &[(f64, M3)], temp: f64) -> M3 {
+    match m.len() {
+        0 => colour::IDENTITY,
+        1 => m[0].1,
+        _ => {
+            let (lo, hi) = (m[0], m[m.len() - 1]);
+            if temp <= lo.0 {
+                return lo.1;
+            }
+            if temp >= hi.0 {
+                return hi.1;
+            }
+            let i = m.iter().position(|(t, _)| *t >= temp).unwrap_or(1).max(1);
+            let (a, b) = (m[i - 1], m[i]);
+            let g = ((1.0 / temp - 1.0 / b.0) / (1.0 / a.0 - 1.0 / b.0)).clamp(0.0, 1.0);
+            let mut out = [[0.0; 3]; 3];
+            for r in 0..3 {
+                for c in 0..3 {
+                    out[r][c] = g * a.1[r][c] + (1.0 - g) * b.1[r][c];
+                }
+            }
+            out
+        }
+    }
+}
+
+impl Camera {
     /// The camera RGB of a white with this chromaticity (Y = 1).
     pub fn neutral_of(&self, xy: Xy) -> [f64; 3] {
         let (t, _) = colour::xy_to_temp_tint(xy);
@@ -133,12 +168,17 @@ pub fn relative(wb: &WhiteBalance) -> (f64, f64, M3) {
 /// mean around the point clicked: for a raw, camera RGB balanced at
 /// `as_shot`; for a finished image, linear Rec.2020.
 pub fn neutral_at(raw: &RawImage, src: &crate::cpu::Demosaiced, patch: [f64; 3]) -> (f64, f64) {
+    neutral_with(&Camera::new(&raw.matrices), src, patch)
+}
+
+/// [`neutral_at`] through another calibration (see [`camera_for`]).
+pub fn neutral_with(cam: &Camera, src: &crate::cpu::Demosaiced, patch: [f64; 3]) -> (f64, f64) {
     let xy = match src.referred {
         crate::cpu::Referred::Scene => {
             // Undo the as-shot balance: the patch's raw camera RGB is the
             // white's neutral.
             let n = [0, 1, 2].map(|c| patch[c].max(1e-9) / f64::from(src.as_shot[c]));
-            Camera::new(&raw.matrices).xy_of(n)
+            cam.xy_of(n)
         }
         crate::cpu::Referred::Display => colour::xyz_to_xy(colour::mulv(
             &colour::rgb_to_xyz(&colour::REC2020, colour::D65),
@@ -161,16 +201,36 @@ pub struct Resolved {
     pub cam_to_rec2020: M3,
 }
 
+/// The calibration a raw photo renders with under these settings: the DNG
+/// camera profile's when one is chosen and there, else the file's own.
+pub fn camera_for(raw: &RawImage, s: &crate::edit::Settings) -> Camera {
+    match crate::dcp::chosen(s) {
+        Some(d) => d.camera(),
+        None => Camera::new(&raw.matrices),
+    }
+}
+
+/// The white balance of these settings, against [`camera_for`]'s
+/// calibration.
+pub fn resolve_for(raw: &RawImage, s: &crate::edit::Settings) -> Resolved {
+    resolve_with(&camera_for(raw, s), raw.as_shot, &s.modules.white_balance)
+}
+
 /// Resolve a white balance setting against the photo's calibration.
 pub fn resolve(raw: &RawImage, wb: &WhiteBalance) -> Resolved {
-    let cam = Camera::new(&raw.matrices);
+    resolve_with(&Camera::new(&raw.matrices), raw.as_shot, wb)
+}
+
+/// [`resolve`] against another calibration (a DNG camera profile's), with
+/// the photo's as-shot multipliers.
+pub fn resolve_with(cam: &Camera, as_shot: Option<[f32; 3]>, wb: &WhiteBalance) -> Resolved {
     let fallback = || {
         let n = cam.neutral_of(colour::D65);
         let xy = colour::D65;
         (xy, n)
     };
     let (xy, neutral) = match wb.mode {
-        WbMode::AsShot => match raw.as_shot {
+        WbMode::AsShot => match as_shot {
             Some(m) => {
                 let n = [1.0 / f64::from(m[0]), 1.0, 1.0 / f64::from(m[2])];
                 (cam.xy_of(n), n)
@@ -206,11 +266,25 @@ pub fn resolve(raw: &RawImage, wb: &WhiteBalance) -> Resolved {
     // so changing white balance never changes brightness. (DNG matrices are
     // normalised so a white's camera neutral peaks near 1, so white-balanced
     // (1, 1, 1), the green clip, sits near Y = 1.)
-    let undo = colour::diag([neutral[0] / neutral[1], 1.0, neutral[2] / neutral[1]]);
-    let to_xyz = colour::mul(&cam_to_xyz, &undo);
-    let adapt = colour::bradford(xy, colour::D65);
     let to_2020 = colour::xyz_to_rgb(&colour::REC2020, colour::D65);
-    let cam_to_rec2020 = colour::mul(&to_2020, &colour::mul(&adapt, &to_xyz));
+    let cam_to_rec2020 = match cam.forward(temp) {
+        // A forward matrix takes white-balanced camera RGB straight to XYZ
+        // (D50), white to white; scaled as below, (1, 1, 1) at Y = 1 /
+        // green neutral.
+        Some(fm) => colour::mul(
+            &to_2020,
+            &colour::mul(
+                &colour::bradford(colour::D50, colour::D65),
+                &fm.map(|r| r.map(|v| v / neutral[1])),
+            ),
+        ),
+        None => {
+            let undo = colour::diag([neutral[0] / neutral[1], 1.0, neutral[2] / neutral[1]]);
+            let to_xyz = colour::mul(&cam_to_xyz, &undo);
+            let adapt = colour::bradford(xy, colour::D65);
+            colour::mul(&to_2020, &colour::mul(&adapt, &to_xyz))
+        }
+    };
     Resolved {
         multipliers,
         temp,
