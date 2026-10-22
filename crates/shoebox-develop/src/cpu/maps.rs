@@ -31,8 +31,8 @@ use crate::edit::Settings;
 /// The analysis copy's long edge.
 pub const SMALL: usize = 512;
 /// Floats per map pixel: highlights and shadows `(a, b)`, clarity `(a, b)`,
-/// dehaze transmission `(a, b)`.
-pub const STRIDE: usize = 6;
+/// dehaze transmission `(a, b)`, Smart Lighting's gain `(a, b)`.
+pub const STRIDE: usize = 8;
 
 /// Guided filter radii (fractions of the long edge) and regularisation.
 const HS_RADIUS: f32 = 0.025;
@@ -44,6 +44,9 @@ const HAZE_RADIUS: f32 = 0.04;
 const HAZE_EPS: f32 = 1e-3;
 const HAZE_OMEGA: f32 = 0.95;
 const HAZE_FLOOR: f32 = 0.1;
+/// Smart Lighting's gain map, fitted to log luminance for the full image.
+const SMART_RADIUS: f32 = 0.02;
+const SMART_EPS: f32 = 0.05;
 
 fn same(a: Option<&Arc<Rgb>>, b: Option<&Arc<Rgb>>) -> bool {
     match (a, b) {
@@ -277,6 +280,9 @@ pub struct Local {
     pub highlights: f32,
     pub clarity: f32,
     pub dehaze: f32,
+    /// Smart Lighting: 0 to 1, and its bias −1 to 1.
+    pub smart: f32,
+    pub smart_bias: f32,
     /// None: nothing to do.
     pub maps: Option<Arc<Maps>>,
     /// Source pixels → map pixels.
@@ -292,6 +298,8 @@ impl Local {
             highlights: 0.0,
             clarity: 0.0,
             dehaze: 0.0,
+            smart: 0.0,
+            smart_bias: 0.0,
             maps: None,
             scale: [1.0; 2],
             luma: luma(),
@@ -312,6 +320,8 @@ pub fn local(src: &Demosaiced, colour: &[[f32; 3]; 3], s: &Settings) -> Local {
         highlights: unit(m.highlights_shadows.highlights),
         clarity: unit(m.clarity.amount),
         dehaze: unit(m.dehaze.amount),
+        smart: unit(m.smart_lighting.strength).clamp(0.0, 1.0),
+        smart_bias: unit(m.smart_lighting.bias).clamp(-1.0, 1.0),
         ..Local::none()
     };
     // Local adjustments use the same maps.
@@ -326,9 +336,10 @@ pub fn local(src: &Demosaiced, colour: &[[f32; 3]; 3], s: &Settings) -> Local {
         tones: tones || l.shadows != 0.0 || l.highlights != 0.0,
         clarity: clarity || l.clarity != 0.0,
         haze: haze || l.dehaze != 0.0,
+        smart: l.smart != 0.0,
         dehaze: l.dehaze,
     };
-    if !need.tones && !need.clarity && !need.haze {
+    if !need.tones && !need.clarity && !need.haze && !need.smart {
         return l;
     }
     let key = {
@@ -339,7 +350,14 @@ pub fn local(src: &Demosaiced, colour: &[[f32; 3]; 3], s: &Settings) -> Local {
                 v.to_bits().hash(&mut h);
             }
         }
-        (need.tones, need.clarity, need.haze, need.dehaze.to_bits()).hash(&mut h);
+        (
+            need.tones,
+            need.clarity,
+            need.haze,
+            need.smart,
+            need.dehaze.to_bits(),
+        )
+            .hash(&mut h);
         h.finish()
     };
     let mut cache = src.cache.lock();
@@ -368,6 +386,8 @@ struct Need {
     clarity: bool,
     /// The transmission map (for the global dehaze or a layer's).
     haze: bool,
+    /// Smart Lighting's gain map (at full strength: the slider scales it).
+    smart: bool,
     /// The global dehaze, applied before the tone maps are analysed.
     dehaze: f32,
 }
@@ -520,6 +540,14 @@ fn analyse(small: &Rgb, colour: &[[f32; 3]; 3], need: &Need) -> Maps {
             });
         }
     }
+    if need.smart {
+        let g = super::smart::gain(&l, w, h);
+        let (a, b) = guided(&l, &g, w, h, radius(SMART_RADIUS), SMART_EPS);
+        data.par_chunks_mut(STRIDE).enumerate().for_each(|(i, d)| {
+            d[6] = a[i];
+            d[7] = b[i];
+        });
+    }
     Maps {
         width: w,
         height: h,
@@ -669,18 +697,25 @@ pub fn local_pixel(l: &Local, p: [f32; 3], sx: f32, sy: f32) -> [f32; 3] {
     if l.dehaze != 0.0 {
         p = dehaze_at(maps, &m, p, l.luma, l.dehaze);
     }
-    let gain = tone_gain(
-        &m,
-        stops(dot(l.luma, p)),
-        l.shadows,
-        l.highlights,
-        l.clarity,
-    );
+    let s = stops(dot(l.luma, p));
+    let mut gain = tone_gain(&m, s, l.shadows, l.highlights, l.clarity);
+    if l.smart != 0.0 {
+        gain += smart_gain(&m, s, l.smart, l.smart_bias);
+    }
     if gain == 0.0 {
         return p;
     }
     let k = gain.exp2();
     p.map(|v| v * k)
+}
+
+/// Smart Lighting's gain in stops for a pixel `s` stops from mid grey with
+/// maps `m` there: the full-strength gain scaled, lifts by `1 + bias` and
+/// cuts by `1 − bias`.
+pub fn smart_gain(m: &[f32; STRIDE], s: f32, strength: f32, bias: f32) -> f32 {
+    let g = m[6] * s + m[7];
+    let k = if g > 0.0 { 1.0 + bias } else { 1.0 - bias };
+    strength * g * k
 }
 
 /// Highlights, shadows and clarity as a gain in stops, for a pixel `s`

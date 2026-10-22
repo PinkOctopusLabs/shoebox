@@ -129,3 +129,7 @@ together at the end, before the release.
   reduction, detail (hair, foliage, text) kept, colours unchanged, no
   tile seams; look at bright lights in night shots for coloured edges;
   note the time per photo. Export one and check it matches Develop.
+- [ ] **Smart Lighting** on backlit portraits, interiors with windows
+  and landscapes with bright skies: shadows open up and skies hold,
+  without halos at the horizon or round people; Auto's slight setting
+  shouldn't look processed.

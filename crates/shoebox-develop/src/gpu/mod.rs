@@ -706,11 +706,11 @@ impl Histogram {
     }
 }
 
-/// The uniform block (`Params` in the shader), as 51 vec4s.
+/// The uniform block (`Params` in the shader), as 52 vec4s.
 fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
     let row = |r: [f32; 3]| [r[0], r[1], r[2], 0.0];
     let d = &f.display;
-    let mut v = Vec::with_capacity(51 * 4);
+    let mut v = Vec::with_capacity(52 * 4);
     v.extend([
         f.map[0][0],
         f.map[0][1],
@@ -810,6 +810,7 @@ fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
     v.extend([ls.scale[0], ls.scale[1], only, 0.0]);
     let shown_point = f.point_view.map_or(0.0, |k| (k + 1) as f32);
     v.extend([l.point_count as f32, shown_point, 0.0, 0.0]);
+    v.extend([lc.smart, lc.smart_bias, 0.0, 0.0]);
     v
 }
 

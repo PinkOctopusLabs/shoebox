@@ -191,6 +191,15 @@ fn gpu_matches_the_cpu_reference() {
             ..o
         },
     ));
+    // Smart Lighting, with a bias each way, and with the other maps.
+    let mut s = base.clone();
+    s.modules.smart_lighting.strength = 70.0;
+    s.modules.smart_lighting.bias = 40.0;
+    cases.push(("smart lighting", s.clone(), o));
+    s.modules.smart_lighting.bias = -60.0;
+    s.modules.highlights_shadows.shadows = 30.0;
+    s.modules.dehaze.amount = 25.0;
+    cases.push(("smart lighting with the other maps", s, o));
     // Point Color: an orange and a blue, with a grey's for good measure.
     let mut s = base.clone();
     let point = |lightness, chroma, hue, hue_shift, saturation, luminance| {

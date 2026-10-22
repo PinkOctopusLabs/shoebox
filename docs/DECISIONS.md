@@ -2125,3 +2125,23 @@ stay. To come back to with Linux:
   spec's "AI denoise per mask".
 - UI tests now run at most half the cores' worth of apps at once: as the
   suite grew, whichever was slowest missed its settle timeout.
+
+## Smart Lighting (2026-10-22)
+
+- **Module 6, local tone:** a local Laplacian filter on log luminance
+  (Paris, Hasinoff and Kautz; Aubry et al.'s fast form: twelve reference
+  levels, pyramids down to a pixel or two so whole regions are
+  compressed, not only edges). Differences up to a stop are detail and
+  kept; larger ones keep 35% at full strength.
+- **How it runs:** on the maps' 512 px copy, once per source and colour
+  matrix, at full strength; the gain it makes (stops) is fitted to log
+  luminance by a guided filter and stored as two more map slots (now
+  eight), so the live pipe evaluates it per pixel at any size like the
+  other maps. Strength scales the gain (dragging it doesn't redo the
+  analysis); Bias weights lifts by 1 + b and cuts by 1 − b. About 15 ms
+  on a 1200 px proxy of the Z f's frame; no halos round the roses at
+  full strength.
+- **Auto** now sets it as the spec asks (slight, uniform): 25, or 40 when
+  over 30% of the frame is four stops under mid grey. That replaces the
+  Shadows +15 it stood in with.
+- Not yet: the spot-weighted mode (a box or a detected face).

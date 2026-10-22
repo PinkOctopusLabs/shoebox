@@ -87,6 +87,7 @@ impl Part {
             Part::Tone => &[
                 &["modules", "display_transform"],
                 &["modules", "highlights_shadows"],
+                &["modules", "smart_lighting"],
             ],
             Part::Presence => &[&["modules", "clarity"], &["modules", "dehaze"]],
             Part::ToneCurve => &[&["modules", "tone_curve"]],

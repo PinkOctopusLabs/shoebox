@@ -119,7 +119,7 @@ pub fn measure(
 }
 
 /// `base` with Auto's settings: exposure, noise reduction, sharpening,
-/// dehaze, shadows and (with `lens`) lens corrections.
+/// dehaze, Smart Lighting and (with `lens`) lens corrections.
 pub fn settings(base: &Settings, s: &Stats, iso: Option<u32>, lens: bool) -> Settings {
     let mut out = base.clone();
     let mut ev = s.highlights_ev.clamp(-2.0, 2.0);
@@ -135,9 +135,9 @@ pub fn settings(base: &Settings, s: &Stats, iso: Option<u32>, lens: bool) -> Set
     out.modules.sharpening.amount = 30.0;
     out.modules.sharpening.masking = 20.0;
     out.modules.dehaze.amount = round(f64::from(((s.haze - 0.25) * 100.0).clamp(0.0, 30.0)), 1.0);
-    if s.deep_shadows > 0.3 {
-        out.modules.highlights_shadows.shadows = 15.0;
-    }
+    // Smart Lighting, slight and uniform (as DxO's default); a little more
+    // where much of the frame is in deep shadow.
+    out.modules.smart_lighting.strength = if s.deep_shadows > 0.3 { 40.0 } else { 25.0 };
     out.modules.lens.enabled = lens;
     out
 }

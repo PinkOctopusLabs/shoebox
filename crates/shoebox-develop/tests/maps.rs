@@ -240,3 +240,33 @@ fn maps_are_reused_and_the_proxy_agrees() {
     let gs = green_mean(&small, 50..150, 50..150);
     assert!((g / gs - 1.0).abs() < 0.05, "{g} {gs}");
 }
+
+#[test]
+fn smart_lighting_lifts_shadows_and_tames_highlights() {
+    let d = src(halves(256, 192));
+    let plain = render(&d, &Settings::default());
+    let mut s = Settings::default();
+    s.modules.smart_lighting.strength = 100.0;
+    let lit = render(&d, &s);
+    let (dark, bright) = ((10..100, 20..170), (160..250, 20..170));
+    let ratio = |a: &Rgb, b: &Rgb, (xs, ys): &(std::ops::Range<usize>, std::ops::Range<usize>)| {
+        green_mean(a, xs.clone(), ys.clone()) / green_mean(b, xs.clone(), ys.clone())
+    };
+    let (up, down) = (ratio(&lit, &plain, &dark), ratio(&lit, &plain, &bright));
+    assert!(up > 1.3, "shadows lifted: ×{up}");
+    assert!(down < 0.85, "highlights tamed: ×{down}");
+    // Bias towards the shadows lifts them more and tames less.
+    s.modules.smart_lighting.bias = 80.0;
+    let biased = render(&d, &s);
+    assert!(ratio(&biased, &plain, &dark) > up);
+    assert!(ratio(&biased, &plain, &bright) > down);
+    // The slider only scales: the maps are made once.
+    s.modules.smart_lighting.strength = 40.0;
+    let a = cpu::frame(&zf(), &d, &s, &Options::default());
+    s.modules.smart_lighting.strength = 60.0;
+    let b = cpu::frame(&zf(), &d, &s, &Options::default());
+    assert!(std::sync::Arc::ptr_eq(
+        a.local.maps.as_ref().unwrap(),
+        b.local.maps.as_ref().unwrap()
+    ));
+}

@@ -22,7 +22,7 @@ fn the_rules() {
     assert_eq!(s.modules.noise_reduction.luminance, 0.0);
     assert_eq!(s.modules.noise_reduction.chroma, 20.0);
     assert_eq!(s.modules.dehaze.amount, 0.0);
-    assert_eq!(s.modules.highlights_shadows.shadows, 0.0);
+    assert_eq!(s.modules.smart_lighting.strength, 25.0);
     assert!(!s.modules.lens.enabled);
     // Halfway to the camera JPEG; more noise reduction at high ISO; haze
     // and deep shadows; a lens profile.
@@ -37,7 +37,8 @@ fn the_rules() {
     assert_eq!(s.modules.noise_reduction.luminance, 40.0);
     assert!(s.modules.noise_reduction.chroma > 40.0);
     assert_eq!(s.modules.dehaze.amount, 15.0);
-    assert_eq!(s.modules.highlights_shadows.shadows, 15.0);
+    assert_eq!(s.modules.smart_lighting.strength, 40.0);
+    assert_eq!(s.modules.highlights_shadows.shadows, 0.0);
     assert!(s.modules.lens.enabled);
     // It keeps what it doesn't set.
     let mut base = Settings::default();

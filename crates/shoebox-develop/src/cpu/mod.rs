@@ -26,6 +26,7 @@ pub mod layers;
 pub mod look;
 pub mod maps;
 pub mod raw;
+pub mod smart;
 
 use rayon::prelude::*;
 use shoebox_decode::raw::RawImage;

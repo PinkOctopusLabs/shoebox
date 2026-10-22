@@ -59,6 +59,7 @@ struct Params {
     layers: vec4<f32>,    // local adjustments: count, mask width, mask height, mask shown (index + 1; 0: none)
     mscale: vec4<f32>,    // source → mask pixels (x, y); z: the mask alone (0/1)
     points: vec4<f32>,    // Point Color: count, point shown (index + 1; 0: none)
+    smart: vec4<f32>,     // Smart Lighting: strength (0–1), bias (−1..1)
 };
 
 const GAMUT_SLACK: f32 = 2e-3;
@@ -72,7 +73,7 @@ const GAMUT_SLACK: f32 = 2e-3;
 // The local maps (see `cpu::maps`): STRIDE floats per map pixel.
 @group(0) @binding(4) var<storage, read> maps: array<f32>;
 
-const STRIDE: u32 = 6u;
+const STRIDE: u32 = 8u;
 
 // The lens grid (see `lens::Grid`): GRID floats per node.
 @group(0) @binding(5) var<storage, read> grid: array<f32>;
@@ -314,7 +315,7 @@ fn map_at(x: u32, y: u32, k: u32) -> f32 {
     return maps[(y * u32(p.maps.y) + x) * STRIDE + k];
 }
 
-struct Coeffs { hs: vec2<f32>, cl: vec2<f32>, dz: vec2<f32> };
+struct Coeffs { hs: vec2<f32>, cl: vec2<f32>, dz: vec2<f32>, sl: vec2<f32> };
 
 // The maps at a source position (bilinear, clamped: `cpu::maps::sample`).
 fn coeffs(sx: f32, sy: f32) -> Coeffs {
@@ -328,7 +329,7 @@ fn coeffs(sx: f32, sy: f32) -> Coeffs {
     let y1 = min(y0 + 1u, u32(h) - 1u);
     let fx = x - f32(x0);
     let fy = y - f32(y0);
-    var v: array<f32, 6>;
+    var v: array<f32, 8>;
     for (var k = 0u; k < STRIDE; k++) {
         let a = map_at(x0, y0, k);
         let b = map_at(x1, y0, k);
@@ -338,7 +339,12 @@ fn coeffs(sx: f32, sy: f32) -> Coeffs {
         let bot = c + (d - c) * fx;
         v[k] = top + (bot - top) * fy;
     }
-    return Coeffs(vec2<f32>(v[0], v[1]), vec2<f32>(v[2], v[3]), vec2<f32>(v[4], v[5]));
+    return Coeffs(
+        vec2<f32>(v[0], v[1]),
+        vec2<f32>(v[2], v[3]),
+        vec2<f32>(v[4], v[5]),
+        vec2<f32>(v[6], v[7]),
+    );
 }
 
 fn stops(y: f32) -> f32 {
@@ -385,7 +391,14 @@ fn local_px(px0: vec3<f32>, sx: f32, sy: f32) -> vec3<f32> {
     if (p.local.w != 0.0) {
         px = dehaze_at(m, px, p.local.w);
     }
-    let gain = tone_gain(m, stops(dot(p.luma.xyz, px)), p.local.x, p.local.y, p.local.z);
+    let s = stops(dot(p.luma.xyz, px));
+    var gain = tone_gain(m, s, p.local.x, p.local.y, p.local.z);
+    if (p.smart.x != 0.0) {
+        // Smart Lighting (see `cpu::maps::smart_gain`).
+        let g = m.sl.x * s + m.sl.y;
+        let k = select(1.0 - p.smart.y, 1.0 + p.smart.y, g > 0.0);
+        gain += p.smart.x * g * k;
+    }
     if (gain == 0.0) {
         return px;
     }
@@ -430,7 +443,7 @@ fn layers_px(px0: vec3<f32>, mx: f32, my: f32, sx: f32, sy: f32) -> vec3<f32> {
     let gx = (mx + 0.5) * p.mscale.x - 0.5;
     let gy = (my + 0.5) * p.mscale.y - 0.5;
     let has_maps = p.maps.x > 0.5;
-    var m = Coeffs(vec2<f32>(0.0), vec2<f32>(0.0), vec2<f32>(0.0));
+    var m = Coeffs(vec2<f32>(0.0), vec2<f32>(0.0), vec2<f32>(0.0), vec2<f32>(0.0));
     if (has_maps) {
         m = coeffs(sx, sy);
     }

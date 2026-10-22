@@ -265,6 +265,15 @@ pub struct HighlightsShadows {
     pub shadows: f64,
 }
 
+/// Smart Lighting (module 6): local tone compression, 0–100, and a bias
+/// from −100 (tame highlights more) to +100 (lift shadows more).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SmartLighting {
+    pub strength: f64,
+    pub bias: f64,
+}
+
 /// Clarity and texture (module 8): local contrast at a coarse scale
 /// (midtones) and a fine one, −100 to +100.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -552,6 +561,7 @@ pub struct Modules {
     pub sharpening: Sharpening,
     pub dehaze: Dehaze,
     pub highlights_shadows: HighlightsShadows,
+    pub smart_lighting: SmartLighting,
     pub clarity: Clarity,
     pub calibration: Calibration,
     pub colour: Colour,

@@ -2151,8 +2151,10 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 // Tone (the display transform).
                 let t = &s.modules.display_transform;
                 let hs = &s.modules.highlights_shadows;
+                let sl = &s.modules.smart_lighting;
                 let toned = *t != defaults.modules.display_transform
-                    || *hs != defaults.modules.highlights_shadows;
+                    || *hs != defaults.modules.highlights_shadows
+                    || *sl != defaults.modules.smart_lighting;
                 let reset = super::look::section(ui, "Tone", toned, true, |ui| {
                     egui::Grid::new("tone-grid").num_columns(2).show(ui, |ui| {
                         if let Some(v) = slider(ui, "Contrast", t.contrast, -100.0..=100.0, 0.0, 0)
@@ -2183,6 +2185,26 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                                 s.modules.display_transform.black_ev = v;
                             });
                         }
+                        // Smart Lighting: local tone, from the photo.
+                        if let Some(v) =
+                            slider(ui, "Smart Lighting", sl.strength, 0.0..=100.0, 0.0, 0)
+                        {
+                            edit(app, "smart", format!("Smart Lighting {v:.0}"), |s| {
+                                s.modules.smart_lighting.strength = v;
+                            });
+                        }
+                        if sl.strength > 0.0
+                            && let Some(v) = slider(ui, "Bias", sl.bias, -100.0..=100.0, 0.0, 0)
+                        {
+                            edit(
+                                app,
+                                "smart-bias",
+                                format!("Smart Lighting bias {v:+.0}"),
+                                |s| {
+                                    s.modules.smart_lighting.bias = v;
+                                },
+                            );
+                        }
                     });
                     let mut hue = t.preserve_hue;
                     if ui.checkbox(&mut hue, "Preserve hue").changed() {
@@ -2200,6 +2222,7 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                     edit(app, "tone", "Reset tone".into(), |s| {
                         s.modules.display_transform = Default::default();
                         s.modules.highlights_shadows = Default::default();
+                        s.modules.smart_lighting = Default::default();
                     });
                 }
 
