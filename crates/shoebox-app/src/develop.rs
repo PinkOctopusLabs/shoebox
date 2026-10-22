@@ -1139,6 +1139,14 @@ fn destination(
     seq: usize,
 ) -> Result<(PathBuf, String), String> {
     use shoebox_develop::export::Destination;
+    // The library doesn't read AVIF or DNG yet: such files stay outside it.
+    let outside_only = !preset.format.into_library();
+    if outside_only && preset.destination == Destination::Library {
+        return Err(format!(
+            "{} files go to a folder outside the library, which doesn't show them yet",
+            preset.format.label()
+        ));
+    }
     let folder = match preset.destination {
         // Beside the original.
         Destination::Library => item
@@ -1161,10 +1169,18 @@ fn destination(
         ));
     }
     if preset.destination == Destination::Folder && in_library(job, &folder) {
-        return Err(format!(
-            "{} is in the library: to export into it, set the preset to go beside the original",
-            folder.display()
-        ));
+        return Err(if outside_only {
+            format!(
+                "{} is in the library, which doesn't show {} files yet: choose a folder outside it",
+                folder.display(),
+                preset.format.label()
+            )
+        } else {
+            format!(
+                "{} is in the library: to export into it, set the preset to go beside the original",
+                folder.display()
+            )
+        });
     }
     let mut name = item
         .path
@@ -1369,10 +1385,20 @@ fn export_item(
                         orientation: if ready.upright { 1 } else { item.orientation },
                         target: preset.space.target(),
                     };
-                    let frame = cpu::frame(&ready.meta, &ready.src, &item.settings, &o);
-                    let img = cpu::apply_from(&ready.src, &item.settings, &frame, true);
-                    let img = shoebox_develop::export::finish(&img, preset, watermark_font())?;
-                    let bytes = shoebox_develop::export::encode(&img, preset)?;
+                    let bytes = if preset.format == shoebox_develop::export::FileFormat::LinearDng {
+                        // The source itself, not a render of the edit.
+                        shoebox_develop::export::linear_dng(
+                            &ready.meta,
+                            &ready.src,
+                            &item.settings,
+                            o.orientation,
+                        )?
+                    } else {
+                        let frame = cpu::frame(&ready.meta, &ready.src, &item.settings, &o);
+                        let img = cpu::apply_from(&ready.src, &item.settings, &frame, true);
+                        let img = shoebox_develop::export::finish(&img, preset, watermark_font())?;
+                        shoebox_develop::export::encode(&img, preset)?
+                    };
                     let ext = preset.format.extension();
                     let stem = file.strip_suffix(&format!(".{ext}")).unwrap_or(&file);
                     if in_library(job, &folder) {
@@ -1686,6 +1712,124 @@ mod tests {
                 .values()
                 .all(|r| r.as_ref().is_err_and(|e| e.contains("reference folder")))
         );
+    }
+
+    /// AVIF and linear DNG exports: written outside the library under
+    /// names that never replace a file, refused beside the original (the
+    /// library doesn't show them yet), and a DNG only from a raw photo.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn avif_and_dng_exports() {
+        use shoebox_develop::export::{Destination, FileFormat};
+        let t = tempfile::tempdir().unwrap();
+        let item = |id: u64, path: PathBuf, format| ExportItem {
+            id,
+            path,
+            format,
+            orientation: 1,
+            settings: Default::default(),
+            edit_key: None,
+            date: None,
+            sidecar: None,
+            lens: None,
+            copy_name: None,
+            copy: shoebox_core::edits::MAIN.to_owned(),
+            replaces: None,
+        };
+        let lib = t.path().join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        let jpeg = lib.join("one.jpg");
+        let img = shoebox_fixtures::scene(1, 96, 64);
+        std::fs::write(&jpeg, shoebox_fixtures::jpeg(&img, 90).unwrap()).unwrap();
+        // A raw photo (a DNG under a NEF's name goes the same way).
+        let raw = lib.join("two.nef");
+        let dng = shoebox_fixtures::Dng::new(96, 64);
+        std::fs::write(&raw, dng.write(|x, y| 2000 + ((x + y) % 7) as u16 * 300)).unwrap();
+        let out = t.path().join("out");
+        let preset = |format| Preset {
+            name: "p".into(),
+            format,
+            folder: Some(out.clone()),
+            naming: "{name}".into(),
+            metadata: shoebox_develop::export::Metadata::CopyrightOnly,
+            ..shoebox_develop::export::starters()[0].clone()
+        };
+        let avif = preset(FileFormat::Avif {
+            quality: 80,
+            ten_bit: true,
+            speed: 10,
+        });
+        let job = ExportJob {
+            items: vec![
+                item(0, jpeg.clone(), shoebox_decode::Format::Jpeg),
+                item(1, raw.clone(), shoebox_decode::Format::Nef),
+            ],
+            presets: vec![avif.clone(), preset(FileFormat::LinearDng)],
+            roots: vec![lib.clone()],
+            reference: Vec::new(),
+            on_clash: Some(Clash::NewFile),
+        };
+        let dngs = DngCache::new(&t.path().join("cache"), 1 << 30);
+        let run = |job: &ExportJob| {
+            let events = Mutex::new(Vec::new());
+            run_export(job, None, &dngs, &t.path().join("staging"), &|e| {
+                events.lock().unwrap().push(e)
+            });
+            match events.into_inner().unwrap().pop() {
+                Some(Event::ExportDone {
+                    written, errors, ..
+                }) => (written, errors),
+                _ => panic!("no ExportDone"),
+            }
+        };
+        let (written, errors) = run(&job);
+        let names: Vec<_> = written
+            .iter()
+            .map(|w| w.file.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["one.avif", "two.avif", "two.dng"]);
+        // A JPEG has no raw data to archive.
+        assert!(
+            errors.len() == 1 && errors[0].contains("raw photo"),
+            "{errors:?}"
+        );
+        assert_eq!(
+            &std::fs::read(out.join("one.avif")).unwrap()[4..12],
+            b"ftypavif"
+        );
+        assert_eq!(&std::fs::read(out.join("two.dng")).unwrap()[..4], b"II*\0");
+        // Again: new names, nothing replaced.
+        let before = std::fs::read(out.join("two.dng")).unwrap();
+        let (written, _) = run(&job);
+        let names: Vec<_> = written
+            .iter()
+            .map(|w| w.file.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["one-1.avif", "two-1.avif", "two-1.dng"]);
+        assert_eq!(std::fs::read(out.join("two.dng")).unwrap(), before);
+        // Beside the original, or a folder in the library: refused.
+        for p in [
+            Preset {
+                destination: Destination::Library,
+                ..avif.clone()
+            },
+            Preset {
+                folder: Some(lib.join("exports")),
+                ..preset(FileFormat::LinearDng)
+            },
+        ] {
+            let refused = ExportJob {
+                presets: vec![p],
+                ..job.clone()
+            };
+            assert!(
+                plan_names(&refused)
+                    .values()
+                    .all(|r| r.as_ref().is_err_and(|e| e.contains("library"))),
+                "{:?}",
+                plan_names(&refused)
+            );
+        }
     }
 
     /// "All but location" leaves nothing that says where: coordinates or

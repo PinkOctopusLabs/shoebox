@@ -11,6 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+avif-serialize = "0.8.9"
 blake3 = { version = "1.8.7", features = ["rayon"] }
 half = "2.7.1"
 jiff = "0.2.38"
@@ -19,6 +20,8 @@ lensfun = "0.7.0"
 png = "0.18.1"
 json-patch = "4.2.0"
 moxcms = "0.9.1"
+rav1e = { version = "0.8.1", default-features = false, features = ["threading"] }
+rawler = { version = "0.8.0", default-features = false }
 rayon = "1.12.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
@@ -30,6 +33,12 @@ tiff = "0.11.3"
 tiny-skia = { version = "0.11.4", default-features = false, features = ["std", "simd"] }
 tracing.workspace = true
 wgpu = "30.0.1"
+
+# rav1e's NEON assembly, built by the C compiler (no NASM; x86 would need
+# it, so only here): AVIF encodes 2.5–3.5× faster (DECISIONS, "AVIF and
+# linear DNG export").
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+rav1e = { version = "0.8.1", default-features = false, features = ["asm"] }
 
 [dev-dependencies]
 criterion = "0.8.2"

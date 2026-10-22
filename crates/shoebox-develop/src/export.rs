@@ -1,6 +1,7 @@
 //! Export (`docs/EDITING-SPEC.md`, Export): presets, resizing, encoding and
 //! writing new files. Rendering is the CPU pipe at full resolution; this
-//! module takes it from there.
+//! module takes it from there. A linear DNG ([`linear_dng`]) is written
+//! from the source instead, not a render.
 //!
 //! A name that's taken gets `-1`, `-2`, unless the person chose to
 //! replace it ([`write_replacing`]): exports only, outside the library.
@@ -11,8 +12,11 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::cpu::{Rgb, Target, to_u16};
-use crate::encode::{Jpeg, icc, jpeg};
+use shoebox_decode::raw::RawImage;
+
+use crate::cpu::{self, Demosaiced, Referred, Rgb, Target, to_u8, to_u16};
+use crate::edit::Settings;
+use crate::encode::{Avif, Jpeg, LinearDng, avif, icc, jpeg, linear_dng as linear_dng_bytes};
 use crate::overlay::{self, Border, Watermark};
 
 /// A named set of export settings.
@@ -75,10 +79,27 @@ pub enum FileFormat {
     Tiff { compression: TiffCompression },
     /// 16 bits a channel.
     Png,
+    /// sRGB or Display P3 only (AVIF describes colour by CICP).
+    Avif {
+        quality: u8,
+        #[serde(default = "yes")]
+        ten_bit: bool,
+        /// rav1e's speed, 1 (slow, smaller) to 10.
+        #[serde(default = "avif_speed")]
+        speed: u8,
+    },
+    /// The source, demosaiced and AI-denoised as the edit has it, as
+    /// camera-native linear RGB (see [`linear_dng`]): nothing else of the
+    /// edit, so no size, space, border or watermark. Raw photos only.
+    LinearDng,
 }
 
 fn yes() -> bool {
     true
+}
+
+fn avif_speed() -> u8 {
+    crate::encode::AVIF_SPEED
 }
 
 impl FileFormat {
@@ -87,6 +108,8 @@ impl FileFormat {
             FileFormat::Jpeg { .. } => "jpg",
             FileFormat::Tiff { .. } => "tif",
             FileFormat::Png => "png",
+            FileFormat::Avif { .. } => "avif",
+            FileFormat::LinearDng => "dng",
         }
     }
 
@@ -95,7 +118,31 @@ impl FileFormat {
             FileFormat::Jpeg { .. } => "JPEG",
             FileFormat::Tiff { .. } => "TIFF (16-bit)",
             FileFormat::Png => "PNG (16-bit)",
+            FileFormat::Avif { .. } => "AVIF",
+            FileFormat::LinearDng => "Linear DNG",
         }
+    }
+
+    /// The colour spaces the format holds.
+    pub fn spaces(self) -> &'static [Space] {
+        match self {
+            FileFormat::Avif { .. } => &[Space::Srgb, Space::DisplayP3],
+            // Camera-native: no output space.
+            FileFormat::LinearDng => &[],
+            _ => &[
+                Space::Srgb,
+                Space::DisplayP3,
+                Space::AdobeRgb,
+                Space::ProPhoto,
+            ],
+        }
+    }
+
+    /// Whether files in this format can go beside the original. The
+    /// library doesn't read AVIF or DNG yet, so such a file there would be
+    /// one Shoebox doesn't show (DECISIONS, "AVIF and linear DNG export").
+    pub fn into_library(self) -> bool {
+        !matches!(self, FileFormat::Avif { .. } | FileFormat::LinearDng)
     }
 }
 
@@ -343,6 +390,101 @@ pub fn encode(img: &Rgb, preset: &Preset) -> Result<Vec<u8>, String> {
         ),
         FileFormat::Tiff { compression } => tiff16(img, target, compression),
         FileFormat::Png => png16(img, target),
+        FileFormat::Avif {
+            quality,
+            ten_bit,
+            speed,
+        } => avif(
+            img,
+            target,
+            Avif {
+                quality,
+                ten_bit,
+                speed,
+            },
+        ),
+        FileFormat::LinearDng => {
+            Err("a linear DNG is written from the source, not a render".into())
+        }
+    }
+}
+
+/// A linear DNG of a raw photo, for archiving it AI-denoised (EDITING-SPEC,
+/// Export): the source as the pipe starts from it (the edit's raw settings:
+/// black and white points, hot pixels, highlights and demosaic), blended
+/// with the AI-denoised source at the edit's Strength, as camera-native
+/// linear RGB with its matrices and as-shot white, so another raw editor
+/// renders it from scratch. Nothing after that is baked in: no detail
+/// stage, spots, lens corrections, geometry or look (DECISIONS, "AVIF and
+/// linear DNG export"). Turned upright (Orientation 1), as every export is;
+/// clipped at the sensor's white.
+pub fn linear_dng(
+    meta: &RawImage,
+    src: &Demosaiced,
+    s: &Settings,
+    orientation: u16,
+) -> Result<Vec<u8>, String> {
+    if src.referred != Referred::Scene {
+        return Err("a linear DNG is made from a raw photo".into());
+    }
+    let ai = &s.modules.denoise_ai;
+    if ai.enabled && src.ai_ready().is_none() {
+        return Err("AI denoise hasn't run on this photo (is its model downloaded?)".into());
+    }
+    let base = src.base(s);
+    let img = base.as_deref().unwrap_or(&src.rgb);
+    let mult = src.as_shot;
+    // As-shot balance undone, upright, as 16 bits: in one pass, without
+    // another float copy of a 24 MP image.
+    let (w, h) = cpu::upright(img.width, img.height, orientation);
+    let data: Vec<u16> = (0..h)
+        .into_par_iter()
+        .flat_map_iter(|y| {
+            (0..w).flat_map(move |x| {
+                let (sx, sy) = stored_at(img.width, img.height, orientation, x, y);
+                let p = img.px(sx, sy);
+                [0, 1, 2]
+                    .map(|c| ((p[c] / mult[c].max(1e-6)).clamp(0.0, 1.0) * 65535.0 + 0.5) as u16)
+            })
+        })
+        .collect();
+    // A preview at the code defaults, as a raw file's would be.
+    let small = Demosaiced::new(cpu::downscale(img, 256), mult, Referred::Scene);
+    let o = cpu::Options {
+        long_edge: None,
+        orientation,
+        target: Target::Srgb,
+    };
+    let preview = cpu::render_from(meta, &small, &Settings::default(), &o, true);
+    let thumb = to_u8(&preview);
+    linear_dng_bytes(&LinearDng {
+        width: w,
+        height: h,
+        data: &data,
+        make: &meta.make,
+        model: &meta.model,
+        neutral: mult.map(|m| 1.0 / m.max(1e-6)),
+        matrices: &meta.matrices,
+        noise_reduction: match src.ai_strength(s) {
+            Some(k) if ai.enabled => k,
+            _ => 0.0,
+        },
+        thumbnail: Some((preview.width, preview.height, &thumb)),
+    })
+}
+
+/// The stored pixel (of a `w`×`h` image with EXIF `orientation`) shown at
+/// `(x, y)` once it's upright.
+pub fn stored_at(w: usize, h: usize, orientation: u16, x: usize, y: usize) -> (usize, usize) {
+    match orientation {
+        2 => (w - 1 - x, y),
+        3 => (w - 1 - x, h - 1 - y),
+        4 => (x, h - 1 - y),
+        5 => (y, x),
+        6 => (y, h - 1 - x),
+        7 => (w - 1 - y, h - 1 - x),
+        8 => (w - 1 - y, x),
+        _ => (x, y),
     }
 }
 

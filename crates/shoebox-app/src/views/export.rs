@@ -250,12 +250,20 @@ fn summary(p: &Preset) -> String {
         FileFormat::Jpeg { quality, .. } => format!("JPEG {quality}"),
         FileFormat::Tiff { .. } => "TIFF 16-bit".to_owned(),
         FileFormat::Png => "PNG 16-bit".to_owned(),
+        FileFormat::Avif {
+            quality, ten_bit, ..
+        } => format!("AVIF {quality}{}", if ten_bit { "" } else { " 8-bit" }),
+        FileFormat::LinearDng => "Linear DNG".to_owned(),
     };
     let size = match p.size {
         OutputSize::Full => "full size".to_owned(),
         OutputSize::LongEdge { px } => format!("{px} px"),
         OutputSize::Megapixels { mp } => format!("{mp} MP"),
     };
+    if p.format == FileFormat::LinearDng {
+        // The source as it is: no space, size or overlays.
+        return format!("{format} · camera colour · full size");
+    }
     let mut out = format!("{format} · {} · {size}", p.space.label());
     if p.destination == Destination::Library {
         out.push_str(" · in library");
@@ -505,10 +513,27 @@ fn editor(ui: &mut egui::Ui, p: &mut Preset) {
                             compression: TiffCompression::Zip,
                         },
                         FileFormat::Png,
+                        {
+                            let a = shoebox_develop::encode::Avif::default();
+                            FileFormat::Avif {
+                                quality: a.quality,
+                                ten_bit: a.ten_bit,
+                                speed: a.speed,
+                            }
+                        },
+                        FileFormat::LinearDng,
                     ] {
                         let on = std::mem::discriminant(&f) == std::mem::discriminant(&p.format);
                         if ui.selectable_label(on, f.label()).clicked() && !on {
                             p.format = f;
+                            // What the new format can't hold.
+                            let spaces = f.spaces();
+                            if !spaces.is_empty() && !spaces.contains(&p.space) {
+                                p.space = Space::Srgb;
+                            }
+                            if !f.into_library() {
+                                p.destination = Destination::Folder;
+                            }
                         }
                     }
                 });
@@ -538,59 +563,52 @@ fn editor(ui: &mut egui::Ui, p: &mut Preset) {
                     ui.end_row();
                 }
                 FileFormat::Png => {}
+                FileFormat::Avif {
+                    quality,
+                    ten_bit,
+                    speed,
+                } => {
+                    ui.label("Quality");
+                    ui.add(egui::Slider::new(quality, 50..=100));
+                    ui.end_row();
+                    ui.label("Speed");
+                    ui.add(egui::Slider::new(speed, 1..=10)).on_hover_text(format!(
+                        "Slower makes slightly smaller files; {} is the usual",
+                        shoebox_develop::encode::AVIF_SPEED
+                    ));
+                    ui.end_row();
+                    ui.label("");
+                    ui.checkbox(ten_bit, "10 bits a channel");
+                    ui.end_row();
+                }
+                FileFormat::LinearDng => {
+                    ui.label("");
+                    ui.weak(
+                        "The raw photo demosaiced, with AI denoise as the edit has it, for \
+                         other raw editors: nothing else of the edit. Raw photos only.",
+                    );
+                    ui.end_row();
+                }
             }
 
-            ui.label("Colour space");
-            egui::ComboBox::from_id_salt("export-space")
-                .selected_text(p.space.label())
-                .show_ui(ui, |ui| {
-                    for s in [
-                        Space::Srgb,
-                        Space::DisplayP3,
-                        Space::AdobeRgb,
-                        Space::ProPhoto,
-                    ] {
-                        ui.selectable_value(&mut p.space, s, s.label());
-                    }
-                });
-            ui.end_row();
-
-            ui.label("Size");
-            ui.horizontal(|ui| {
-                let kind = match p.size {
-                    OutputSize::Full => 0,
-                    OutputSize::LongEdge { .. } => 1,
-                    OutputSize::Megapixels { .. } => 2,
-                };
-                egui::ComboBox::from_id_salt("export-size")
-                    .selected_text(["Full size", "Long edge", "Megapixels"][kind])
+            let spaces = p.format.spaces();
+            if !spaces.is_empty() {
+                ui.label("Colour space");
+                egui::ComboBox::from_id_salt("export-space")
+                    .selected_text(p.space.label())
                     .show_ui(ui, |ui| {
-                        if ui.selectable_label(kind == 0, "Full size").clicked() {
-                            p.size = OutputSize::Full;
-                        }
-                        if ui.selectable_label(kind == 1, "Long edge").clicked() && kind != 1 {
-                            p.size = OutputSize::LongEdge { px: 2048 };
-                        }
-                        if ui.selectable_label(kind == 2, "Megapixels").clicked() && kind != 2 {
-                            p.size = OutputSize::Megapixels { mp: 12.0 };
+                        for &s in spaces {
+                            ui.selectable_value(&mut p.space, s, s.label());
                         }
                     });
-                match &mut p.size {
-                    OutputSize::LongEdge { px } => {
-                        ui.add(egui::DragValue::new(px).range(64..=20000).suffix(" px"));
-                    }
-                    OutputSize::Megapixels { mp } => {
-                        ui.add(
-                            egui::DragValue::new(mp)
-                                .range(0.1..=200.0)
-                                .speed(0.1)
-                                .suffix(" MP"),
-                        );
-                    }
-                    OutputSize::Full => {}
-                }
-            });
-            ui.end_row();
+                ui.end_row();
+            }
+            // A linear DNG is the source as it is: no size, border or
+            // watermark.
+            let rendered = p.format != FileFormat::LinearDng;
+            if rendered {
+                size(ui, p);
+            }
 
             ui.label("Metadata");
             egui::ComboBox::from_id_salt("export-metadata")
@@ -615,15 +633,21 @@ fn editor(ui: &mut egui::Ui, p: &mut Preset) {
                 .selected_text(destination_label(p.destination))
                 .show_ui(ui, |ui| {
                     for d in [Destination::Folder, Destination::Library] {
-                        ui.selectable_value(&mut p.destination, d, destination_label(d))
-                            .on_hover_text(match d {
-                                Destination::Folder => {
-                                    "Files for elsewhere; Shoebox doesn't keep track of them"
-                                }
-                                Destination::Library => {
-                                    "An edited version in the photo's stack, flagged when the edit changes and re-exported in place"
-                                }
-                            });
+                        let allowed = d == Destination::Folder || p.format.into_library();
+                        ui.add_enabled_ui(allowed, |ui| {
+                            ui.selectable_value(&mut p.destination, d, destination_label(d))
+                                .on_hover_text(match d {
+                                    Destination::Folder => {
+                                        "Files for elsewhere; Shoebox doesn't keep track of them"
+                                    }
+                                    Destination::Library => {
+                                        "An edited version in the photo's stack, flagged when the edit changes and re-exported in place"
+                                    }
+                                })
+                                .on_disabled_hover_text(
+                                    "The library doesn't show AVIF or DNG files yet",
+                                );
+                        });
                     }
                 });
             ui.end_row();
@@ -657,9 +681,51 @@ fn editor(ui: &mut egui::Ui, p: &mut Preset) {
                 );
             ui.end_row();
 
-            border(ui, p);
-            watermark(ui, p);
+            if rendered {
+                border(ui, p);
+                watermark(ui, p);
+            }
         });
+}
+
+/// The size row of the preset editor.
+fn size(ui: &mut egui::Ui, p: &mut Preset) {
+    ui.label("Size");
+    ui.horizontal(|ui| {
+        let kind = match p.size {
+            OutputSize::Full => 0,
+            OutputSize::LongEdge { .. } => 1,
+            OutputSize::Megapixels { .. } => 2,
+        };
+        egui::ComboBox::from_id_salt("export-size")
+            .selected_text(["Full size", "Long edge", "Megapixels"][kind])
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(kind == 0, "Full size").clicked() {
+                    p.size = OutputSize::Full;
+                }
+                if ui.selectable_label(kind == 1, "Long edge").clicked() && kind != 1 {
+                    p.size = OutputSize::LongEdge { px: 2048 };
+                }
+                if ui.selectable_label(kind == 2, "Megapixels").clicked() && kind != 2 {
+                    p.size = OutputSize::Megapixels { mp: 12.0 };
+                }
+            });
+        match &mut p.size {
+            OutputSize::LongEdge { px } => {
+                ui.add(egui::DragValue::new(px).range(64..=20000).suffix(" px"));
+            }
+            OutputSize::Megapixels { mp } => {
+                ui.add(
+                    egui::DragValue::new(mp)
+                        .range(0.1..=200.0)
+                        .speed(0.1)
+                        .suffix(" MP"),
+                );
+            }
+            OutputSize::Full => {}
+        }
+    });
+    ui.end_row();
 }
 
 /// A path typed in, None when empty.

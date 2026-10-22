@@ -2766,3 +2766,144 @@ Face parts, Object), from EDITING-SPEC's "Rendering masks".
   table is 3.3 MB, uploaded once and kept while it's the same look);
   checked within 1e-4 at 70, 100 and 150% on a raw and a finished image
   with an unusual domain.
+
+## AVIF and linear DNG export (2026-10-22)
+
+**AVIF.**
+
+- Encoded with `rav1e` and `avif-serialize`, the two crates `ravif` is
+  made from, not with `ravif` itself: `ravif` 0.13 writes every file as
+  sRGB (BT.709 primaries in both the AV1 header and the `colr` box) and
+  takes 8-bit pixels, so a Display P3 export would be mislabelled and
+  "10-bit" would be 8 bits padded out. `encode::avif` does its part:
+  4:4:4 YCbCr (BT.601 coefficients, full range) from the render's float
+  values at 10 or 8 bits; CICP in the sequence header and the `colr` box
+  (sRGB 1/13/6, which is AVIF's default, so no box is written; Display
+  P3 12/13/6); `ravif`'s quality scale and still-picture speed settings,
+  credited in the code. Licences: `rav1e` BSD-2-Clause (with the
+  royalty-free AOMedia Patent License 1.0), `avif-serialize`
+  BSD-3-Clause, and what they bring in MIT, Apache-2.0 or BSD-2-Clause
+  (`av1-grain`, `v_frame`, `av-scenechange`, `maybe-rayon`, …). `ravif`
+  (BSD-3-Clause) isn't a dependency.
+- sRGB or Display P3 only: AVIF describes colour by CICP, which has no
+  code for Adobe RGB or ProPhoto (an ICC `colr` box would need a writer
+  `avif-serialize` hasn't got). The dialog offers just those two.
+- rav1e's NEON assembly is switched on for aarch64 only (a
+  target-specific feature). The C compiler assembles it (the app already
+  builds C, for `aws-lc-sys`); NASM is only needed on x86, where it stays
+  off. Pure Rust, AVIF took 2.5–3.5× as long.
+- Timings: a 24 MP Z f photo (a night scene), M2 Max with 12 cores. They
+  were taken while other builds loaded the machine, so they're CPU seconds
+  for the encode alone; on an idle machine wall time is roughly a tenth.
+
+  | Quality | Speed 6 | Speed 8 | Speed 10 | Size | PSNR |
+  | --- | --- | --- | --- | --- | --- |
+  | 80 | 14 s (33 s pure Rust) | 13 s (32 s) | 3 s | 0.7 MB | 37.7 dB |
+  | 85 | 17 s | 15 s (38 s) | 3 s (11.5 s) | 1.5 MB | 38.7 dB |
+  | 90 | 21.5 s (48 s) | 23 s (45 s) | 5 s | 3.4 MB | 40.7 dB |
+
+  For comparison, JPEG 92 (4:4:4) is 7.0 MB at 40.7 dB and takes about
+  0.3 s. PSNR is measured against the render, as macOS reads the file
+  back. Speed 10 gave the same PSNR with files about 10% larger. With
+  `ravif`'s settings, speeds 6 and 8 cost about the same and make the
+  same size.
+- **Defaults: quality 85, 10-bit, speed 6** (libavif's default speed
+  too). That's about 1.5–2 s for 24 MP on an idle machine, plus the
+  render: inside the spec's 3 s for a full-size export. Speed (1–10) is a
+  preset setting.
+- Checked by: a test of the boxes (`ftyp`, `ispe`, `pixi`, `colr`), and
+  by macOS's own decoder, ImageIO (what Preview and Photos use). It reads
+  both spaces back within 4/255, and reads the P3 file as P3: its
+  saturated red, seen in sRGB, loses its green. On the real exports,
+  `sips` reports 10 bits and Display P3.
+- Metadata: exiftool writes EXIF and XMP into AVIF, so the preset's
+  metadata choice works as it does for the other formats. That was
+  checked on a real file (camera, lens, exposure, date). `avif-serialize`
+  could embed EXIF itself, but it isn't used: exiftool copies metadata
+  for every format.
+
+**Linear DNG.**
+
+- **What's in it:** the source as the pipe starts from it. That is the
+  edit's raw settings (black and white points, hot pixels, highlight
+  handling, demosaic) and the AI denoise at the edit's Strength. It's in
+  camera-native linear RGB (the as-shot balance undone), with the raw
+  file's two ColorMatrix tags (each with its CalibrationIlluminant) and
+  AsShotNeutral, so another raw editor renders it from scratch, as it
+  would the NEF. NoiseReductionApplied records how much AI denoise is in
+  it (0 for none, 1 at full Strength); Adobe's readers use it to ease off
+  their own noise reduction.
+- **Left out, decided:**
+  - The detail stage (classic noise reduction, sharpening, texture),
+    spot removal, geometry (crop, rotation, upright) and the whole look:
+    any raw editor redoes these.
+  - Lens corrections: baking them in would see them applied twice by
+    editors that apply a profile from the lens in EXIF. Lightroom's own
+    Enhance DNGs leave them out too.
+
+  The file is there for the AI denoise, which nothing else reproduces.
+  The only thing applied is the EXIF orientation: the pixels are upright
+  with Orientation 1, as in every export. The edit's own quarter turns
+  aren't applied.
+- **No ForwardMatrix:** the NEF has none (rawler gives the two
+  ColorMatrix tags). Without one, the DNG spec inverts ColorMatrix and
+  adapts to D50 with Bradford, which is what a ForwardMatrix worked out
+  from them would say anyway.
+- **Storage: 16-bit unsigned LinearRaw**, lossless JPEG in 256 px
+  tiles, in a sub-IFD, through rawler's writer. That's how Adobe DNG
+  Converter writes linear DNGs, and every raw reader takes it.
+  - Half floats with deflate were considered. They would keep
+    reconstructed highlights above white and finer shadow steps, but
+    rawler's writer doesn't write them and readers support them less
+    well. 16 bits is already finer than the 14-bit sensor everywhere.
+  - Values clip at the sensor's white, so Shoebox's reconstructed
+    highlights aren't carried over: the other editor does its own
+    highlight recovery, as with Adobe's linear DNGs.
+  - BaselineExposure isn't written (it isn't known for the camera), so
+    another editor's default brightness may differ slightly from the
+    NEF's.
+- **Previews and tags:** IFD 0 holds a preview of at most 256 px in sRGB
+  at the code defaults, for Finder and Quick Look. Make, Model and
+  UniqueCameraModel come from the raw decoder. exiftool then copies EXIF
+  (camera, lens, exposure, dates) from the NEF, as for the other formats,
+  and other editors need that to find lens profiles. Without exiftool,
+  the DNG has no lens data.
+- **Size and time:** a 24 MP Z f photo makes 67–78 MB, written in
+  0.2–0.35 s once the source is ready (no render is needed).
+  - With AI denoise off in the edit, the DNG is just the RCD demosaic.
+  - With AI denoise on but its result missing (the model isn't
+    downloaded), the export fails rather than archive a file that isn't
+    denoised.
+  - A finished image (JPEG, TIFF and so on) is refused: it has no raw
+    data.
+- **Checked by:**
+  - rawler reads the file back (size, three samples, LinearRaw, white
+    level, matrices, neutral, values, NoiseReductionApplied, orientation).
+  - macOS ImageIO renders it from the raw data (at full size, not from
+    the preview), with a grey card coming out grey.
+  - For the two real Z f files (one turned 90°), Preview's rendering
+    matches Shoebox's colours (`sips`), and exiftool's metadata copy
+    leaves the DNG readable by both.
+  - Opening it in a third-party raw editor is a manual check.
+- **Should Shoebox treat its own DNG exports as editable sources?** Yes,
+  in time. rawler decodes them (LinearRaw, three samples), and Develop
+  would open one as a raw without demosaic or AI denoise, since those are
+  done and NoiseReductionApplied says so. It would start from default
+  settings, like a merge result. But the library doesn't read DNG or AVIF
+  files yet: `shoebox_decode::Format` has neither, so such a file in the
+  library would be one Shoebox doesn't show. So for now:
+  - Both formats export only to folders outside the library.
+  - "Beside the original" is disabled for them in the dialog, and the
+    export thread refuses it.
+  - A folder inside the library is refused, as it is for every format.
+
+  The follow-up that lifts this adds both formats to the library. DNG
+  would go through rawler, both CFA DNGs and linear ones (skipping
+  demosaic), with ImageIO for thumbnails. AVIF would go through ImageIO,
+  as HEIC does.
+
+**Presets.** `FileFormat::Avif { quality, ten_bit, speed }` and
+`FileFormat::LinearDng` are stored as `{"kind":"avif",…}` and
+`{"kind":"linear_dng"}`. `ten_bit` and `speed` take their defaults when
+missing, and older presets load unchanged. There are no new starter
+presets.

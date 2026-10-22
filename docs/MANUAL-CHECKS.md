@@ -209,7 +209,7 @@ together at the end, before the release.
   an empty Sky mask; a photo turned 90° works. Note the time to the
   first part on a new photo, and that a second part of it is immediate.
 
-## Colour: DCP profiles, calibration and looks (from 2026-10-22)
+### Colour: DCP profiles, calibration and looks
 
 - [ ] **A ColorChecker DCP with dcamprof, mean ΔE2000 ≤ 3** (the spec's
   target with a custom DCP is ≤ 1.5). Shoot the chart as in the Phase 1
@@ -243,3 +243,30 @@ together at the end, before the release.
   folder: each reads (nothing in the log), looks as it does in the
   app it came from on the same JPEG, Amount at 50% and 150% behave, a
   smooth sky shows no banding, and a full-size export matches Develop.
+
+### AVIF and linear DNG export
+
+- [ ] **AVIF exports** (from 2026-10-22). Export a saturated photo (flowers,
+  a sunset) as Display P3 and as sRGB AVIF at the defaults (quality 85,
+  10-bit, speed 6):
+  - Both open in Preview and Photos with Develop's colours, matching a P3
+    JPEG of the same edit.
+  - At 100%, skies show no banding and detail holds up close to JPEG 92.
+  - Note the time per 24 MP photo on an idle Mac (expected 2–3 s with the
+    render).
+  - With "All" metadata, Finder's Get Info shows the camera, lens and
+    date.
+- [ ] **Linear DNG exports** (from 2026-10-22). Export a high-ISO NEF
+  twice, once with AI denoise at Strength 100 and once without it.
+  Open both in Preview and in darktable or RawTherapee (never Lightroom or
+  PhotoLab). Check that:
+  - white balance and colours look like that editor's rendering of the
+    NEF itself;
+  - the AI one is clean at 100%, with no smearing or colour blotches;
+  - the editor finds the lens from EXIF (darktable's lens correction
+    module);
+  - a photo shot in portrait orientation comes out upright;
+  - Finder shows a thumbnail.
+
+  Note the file size, and how bright it looks next to the NEF in each
+  editor (no BaselineExposure is written).
