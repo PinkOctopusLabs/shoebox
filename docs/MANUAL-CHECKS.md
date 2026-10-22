@@ -24,7 +24,7 @@ they're run now, together, before the release. This file is the runbook.
   references. darktable, RawTherapee, Preview, Photos and Finder are fine
   where a check asks whether a file opens elsewhere.
 
-**61 checks** (58 carried over, 2 gate verdicts added, 1 for iCloud Photos), plus one already
+**62 checks** (58 carried over, 2 gate verdicts added, 2 for iCloud Photos), plus one already
 done:
 
 | Area | Checks |
@@ -39,7 +39,7 @@ done:
 | [8. Merges](#8-merges) | 10 |
 | [9. Export](#9-export) | 7 |
 | [10. Last: the gate verdicts and goldens](#10-last-the-gate-verdicts-and-goldens) | 3 |
-| [11. iCloud Photos (a test macOS account)](#11-icloud-photos-a-test-macos-account) | 1 |
+| [11. iCloud Photos (a test macOS account)](#11-icloud-photos-a-test-macos-account) | 2 |
 
 ## The gates
 
@@ -695,3 +695,14 @@ library is a test library (CLAUDE.md, safety rule 9), never in yours.
   it, the favourites rated ★5 and the album photos in its event (open the
   folder in Shoebox in the test account to see). Copy `report.txt` into
   DECISIONS ("iCloud Photos: PhotoKit").
+- [ ] **Import from iCloud Photos in the app** (PHOTOS-SPEC Phase 4; added
+  2026-10-23), in the test account, after the probe. Open
+  `/Users/Shared/Shoebox.app` with `SHOEBOX_DATA_DIR` pointing at a scratch
+  folder, add an empty library folder, then Tasks › Import › iCloud
+  Photos › Find photos. Passes: the counts match the probe's plan; the
+  album table shows the albums with their folders; Import copies them with
+  progress and a speed; Stop part-way keeps what's copied and the next
+  Find photos offers only the rest; quitting mid-copy asks first; the Info
+  panel says "From iCloud Photos" on a copy; favourites have ★5, the
+  album's photos are in its event; History's Undo takes the copies back.
+

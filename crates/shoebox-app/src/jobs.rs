@@ -409,6 +409,8 @@ pub enum LibraryCommand {
     RecordExports(Vec<shoebox_core::cache::ExportRow>),
     /// A photo's exports (answered by `Exports`).
     LoadExports(PathBuf),
+    /// Whether a file came from iCloud Photos (answered by `FromPhotos`).
+    LoadFromPhotos(PathBuf),
     /// Copy exports rendered into the cache into the library beside their
     /// photos and join each to its photo's stack, as one journaled batch
     /// (replacing only the earlier exports they redo, which go to the
@@ -667,6 +669,9 @@ pub enum LibraryEvent {
     /// A photo's exports, newest first, each with whether its file is still
     /// there.
     Exports(PathBuf, Vec<(shoebox_core::cache::ExportRow, bool)>),
+    /// Whether a file came from iCloud Photos: what it was there and when
+    /// it was synced (ms).
+    FromPhotos(PathBuf, Option<(shoebox_core::photos::ResourceKind, i64)>),
     /// Edit files whose photo wasn't found after a scan (kept, never
     /// deleted; listed in Settings).
     Unattached(Vec<PathBuf>),
@@ -923,6 +928,9 @@ fn library_worker(
     // The last import plan, run as planned when confirmed, and the scan it
     // came from (with where to and how named), for planning again.
     let mut import_plan: Option<shoebox_core::import::Plan> = None;
+    // Library files iCloud Photos syncs recorded, read when first asked
+    // for and dropped when a command could change the records.
+    let mut from_photos: Option<HashMap<PathBuf, (shoebox_core::photos::ResourceKind, i64)>> = None;
     let mut import_scan: Option<(
         shoebox_core::import::Scan,
         PathBuf,
@@ -1029,6 +1037,17 @@ fn library_worker(
             }
         };
         let _working = Working::start();
+        if !matches!(
+            cmd,
+            LibraryCommand::LoadFromPhotos(_)
+                | LibraryCommand::LoadExports(_)
+                | LibraryCommand::SetMarks { .. }
+                | LibraryCommand::MarkSeen(_)
+                | LibraryCommand::PutEdit { .. }
+                | LibraryCommand::LoadEdit { .. }
+        ) {
+            from_photos = None;
+        }
         let (settings_changed, rescan) = match cmd {
             LibraryCommand::Open => {
                 // Edits kept but not yet written (the app quit first).
@@ -1740,6 +1759,16 @@ fn library_worker(
                 }
                 batches(&fileops);
                 (false, true)
+            }
+            LibraryCommand::LoadFromPhotos(photo) => {
+                let index = from_photos.get_or_insert_with(|| {
+                    let roots: Vec<PathBuf> =
+                        settings.roots.iter().map(|r| r.path.clone()).collect();
+                    shoebox_core::photos::ledger::Ledgers::load(&roots).files(&roots)
+                });
+                let found = index.get(&photo).copied();
+                emit(LibraryEvent::FromPhotos(photo, found));
+                (false, false)
             }
             LibraryCommand::LoadExports(photo) => {
                 let rows = photo

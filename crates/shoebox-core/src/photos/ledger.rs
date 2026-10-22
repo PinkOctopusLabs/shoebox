@@ -193,6 +193,26 @@ impl Ledgers {
         self.entries.is_empty()
     }
 
+    /// Every library file a sync copied or found, by its path: what it is
+    /// and when it was recorded (ms). `roots` as given to [`Ledgers::load`].
+    pub fn files(&self, roots: &[PathBuf]) -> HashMap<PathBuf, (ResourceKind, i64)> {
+        let mut out = HashMap::new();
+        for (r, e) in self.entries.values() {
+            for f in &e.files {
+                let p = Path::new(&f.rel);
+                let path = if p.is_absolute() {
+                    p.to_path_buf()
+                } else if let Some(root) = roots.get(*r) {
+                    root.join(p)
+                } else {
+                    continue;
+                };
+                out.insert(path, (f.kind, e.updated));
+            }
+        }
+        out
+    }
+
     /// Every record: (key, root index, entry).
     pub fn iter(&self) -> impl Iterator<Item = (&str, usize, &Entry)> {
         self.entries.iter().map(|(k, (r, e))| (k.as_str(), *r, e))

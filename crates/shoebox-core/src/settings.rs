@@ -21,6 +21,9 @@ pub struct RootSetting {
 pub struct Settings {
     #[serde(default)]
     pub roots: Vec<RootSetting>,
+    /// iCloud Photos sync choices (PHOTOS-SPEC).
+    #[serde(default)]
+    pub photos: crate::photos::plan::Options,
     /// Marks set on a stack go to every member's sidecar, not just the
     /// primary's (so tools looking at the JPEG or TIFF see them too).
     #[serde(default)]

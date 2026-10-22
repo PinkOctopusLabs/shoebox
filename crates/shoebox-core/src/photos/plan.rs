@@ -8,7 +8,8 @@ use super::ledger::{AlbumChoice, AlbumUse, Ledgers};
 use super::model::{Asset, Library, ResourceKind};
 
 /// What a favourite in Photos becomes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Favourite {
     /// This rating (1–5).
     Rating(u8),
@@ -20,7 +21,8 @@ pub enum Favourite {
 }
 
 /// The person's choices for a sync (Settings › iCloud Photos).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Options {
     /// Copy Live Photos' movies.
     pub live_videos: bool,

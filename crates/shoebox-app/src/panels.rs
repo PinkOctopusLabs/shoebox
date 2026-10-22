@@ -397,7 +397,11 @@ fn zoom_menu(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
 /// Background work (laid out right to left).
 fn work(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     let busy = app.loader.busy();
-    if let Some(c) = &app.import.copying {
+    if let Some((p, _)) = &app.icloud.running {
+        ui.label(format!("Copying from iCloud Photos {}/{}", p.done, p.total))
+            .on_hover_text("Tasks › Import shows more, and can stop it");
+        ui.add(egui::Spinner::new());
+    } else if let Some(c) = &app.import.copying {
         let mut text = format!("Importing {}/{}", c.done, c.files);
         if let Some(rate) = c.rate() {
             text.push_str(&format!(" · {}/s", human_size(rate as u64)));
@@ -1802,6 +1806,7 @@ fn details(app: &mut ShoeboxApp, ui: &mut egui::Ui, id: crate::jobs::PhotoId, id
     }
     let path = photo.path.clone();
     crate::views::merge::info_section(app, ui, &path);
+    crate::views::icloud::info_row(app, ui, &path);
     crate::views::export::info_section(app, ui, id, &path);
     let change = app
         .current

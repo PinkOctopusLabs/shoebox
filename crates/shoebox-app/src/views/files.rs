@@ -302,10 +302,18 @@ fn quit_dialog(app: &mut ShoeboxApp, ctx: &egui::Context) {
         ui.set_width(460.0);
         ui.heading("An import is still copying");
         ui.add_space(4.0);
-        ui.label(format!(
-            "{done} of {files} files are copied. Stopping now keeps those (undo them from \
-             History) and leaves the rest uncopied; finding photos again finishes the job."
-        ));
+        if let Some((p, _)) = &app.icloud.running {
+            ui.label(format!(
+                "{} of {} photos from iCloud Photos are done. Stopping now keeps what's \
+                 copied (undo it from History); the next import from iCloud Photos carries on.",
+                p.done, p.total
+            ));
+        } else {
+            ui.label(format!(
+                "{done} of {files} files are copied. Stopping now keeps those (undo them from \
+                 History) and leaves the rest uncopied; finding photos again finishes the job."
+            ));
+        }
         if let Some(name) = app.import.volume.as_deref().and_then(Path::file_name) {
             ui.label(format!(
                 "Keep {} connected until Shoebox has quit.",
@@ -365,6 +373,18 @@ fn shown_photos(app: &mut ShoeboxApp, plan: &Arc<Plan>) -> Option<(PathBuf, Arc<
 /// Tasks → Import.
 pub fn import(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     ui.heading("Import");
+    let busy = app.import.running || app.import.copying.is_some() || app.icloud.busy();
+    ui.add_enabled_ui(!busy, |ui| {
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut app.icloud.on, false, "A card or folder");
+            ui.selectable_value(&mut app.icloud.on, true, "iCloud Photos");
+        });
+    });
+    ui.add_space(4.0);
+    if app.icloud.on {
+        crate::views::icloud::import(app, ui);
+        return;
+    }
     ui.weak("Copies photos from a card or folder into the library. The source is never changed; every copy is checked byte for byte.");
     ui.add_space(6.0);
     if app.import.template.is_empty() {

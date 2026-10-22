@@ -17,6 +17,7 @@ pub enum Tab {
     Appearance,
     Sidecars,
     Naming,
+    Photos,
     Search,
     People,
     Map,
@@ -26,11 +27,12 @@ pub enum Tab {
 }
 
 impl Tab {
-    const ALL: [Tab; 10] = [
+    const ALL: [Tab; 11] = [
         Tab::Library,
         Tab::Appearance,
         Tab::Sidecars,
         Tab::Naming,
+        Tab::Photos,
         Tab::Search,
         Tab::People,
         Tab::Map,
@@ -45,6 +47,7 @@ impl Tab {
             Tab::Appearance => "Appearance",
             Tab::Sidecars => "Sidecars",
             Tab::Naming => "Naming",
+            Tab::Photos => "iCloud Photos",
             Tab::Search => "Search",
             Tab::People => "People",
             Tab::Map => "Map",
@@ -100,6 +103,7 @@ pub fn show(app: &mut ShoeboxApp, ctx: &egui::Context) {
                 Tab::Appearance => appearance(ui, &mut s),
                 Tab::Sidecars => sidecars(ui, &mut s),
                 Tab::Naming => naming(app, ui, &mut s),
+                Tab::Photos => crate::views::icloud::settings(ui, &mut s),
                 Tab::Search => search(app, ui, &mut s),
                 Tab::People => people(app, ui, &mut s),
                 Tab::Map => map(ui, &mut s),

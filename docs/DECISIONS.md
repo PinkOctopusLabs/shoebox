@@ -4082,3 +4082,40 @@ test account (MANUAL-CHECKS 11); until then this is the code's design.
   (FakeSource through the real library worker: one batch, done, nothing
   new on a second plan); `shoebox-photos` units (kinds, dates, never
   asking unbundled).
+
+## iCloud Photos: the Import screen (2026-10-23)
+PHOTOS-SPEC Phase 4, against the fake library (`views/icloud.rs`).
+- **Import has two sources**, "A card or folder" and "iCloud Photos", above
+  the form; switching is off while either is busy. iCloud Photos shares
+  the card import's Into root and Names template (as decided 2026-10-20).
+  Find photos asks for access (a note for Denied, pointing at System
+  Settings, and for Limited), lists Photos and shows: photos to copy, then
+  copied before, edited again in Photos, added to albums or favourited
+  since, hidden and untouched burst frames left out, and how many left
+  albums (nothing changes for those). The album table edits each album's
+  name and Event / Keyword / Nothing; the choices go with the run and are
+  remembered for next time. The button says "Bring photos up to date" when
+  only marks or newer edits are left.
+- **No previews before copying:** nothing is downloaded until the person
+  confirms, so the plan is counts and albums, not thumbnails.
+- **Progress** on the screen (assets done of all, bytes downloaded, speed,
+  time left, the file) and in the status bar; Stop; quitting asks first,
+  as for a card import, and Stop and Quit waits for the step in flight.
+  The report lists copies, files already in the library, Photos' dates,
+  marks given, why it stopped, and failures with Try again.
+- **Settings › iCloud Photos** holds the sync options (`Settings.photos`,
+  `plan::Options` now serde): Live Photos' movies, Photos' edits, every
+  burst frame, hidden photos, and what a favourite becomes (★5 by default,
+  ★4, ★3, a keyword, a pick, nothing).
+- **Info panel:** "From iCloud Photos" (or "Photos' edit, from iCloud
+  Photos") with when it was synced; the library worker answers from the
+  records, read once and dropped when a command could change them.
+- **Not built:** Re-import missing (needs every library file hashed to tell
+  moved from gone) and Rebuild sync record (a sync after the records are
+  lost already finds every file by its bytes and records it, copying
+  nothing that's there; a button that downloads without copying would only
+  save the copy step). Both in OPEN-ITEMS.
+- **Test** (`import_from_icloud_photos`): plan with the hidden one left
+  out, an album made a keyword, nothing downloaded before confirming, the
+  copies named by the template with ★5 and the album keyword, the Info
+  row, nothing new the second time, Settings' tab, undo from History.

@@ -81,6 +81,9 @@ fn paths(tmp: &Path, roots: &[PathBuf]) -> AppPaths {
         people: tmp.join("data/people.json"),
         raw_cache: tmp.join("cache"),
         export_presets: tmp.join("data/export-presets.json"),
+        // A fake Photos library: tests never touch PhotoKit.
+        photos: std::sync::Arc::new(shoebox_core::photos::fake::FakeSource::new()),
+        photos_staging: tmp.join("cache/photos-staging"),
     }
 }
 
@@ -6525,4 +6528,159 @@ fn panorama_from_the_photo_menu() {
     for (p, bytes) in &originals {
         assert_eq!(&std::fs::read(p).unwrap(), bytes);
     }
+}
+
+/// PHOTOS-SPEC Phase 4: iCloud Photos as Import's source, against a fake
+/// Photos library: the plan (hidden left out), an album made a keyword,
+/// the copies with ★5 for the favourite, the Info panel's row, nothing new
+/// the second time, Settings' tab, and undo from History.
+#[test]
+fn import_from_icloud_photos() {
+    use shoebox_core::photos::fake::FakeSource;
+    use shoebox_core::photos::{Access, Album, Asset, AssetId, Media, Resource, ResourceKind};
+    let t = tempfile::tempdir().unwrap();
+    let base = t.path().canonicalize().unwrap();
+    let lib = base.join("library");
+    std::fs::create_dir_all(&lib).unwrap();
+    let img = |n: u64, when: &'static str| {
+        let shot = shoebox_fixtures::Shot {
+            datetime: when,
+            subsec: "",
+            orientation: 1,
+            serial: "1",
+        };
+        let j = shoebox_fixtures::jpeg(&shoebox_fixtures::scene(n, 320, 240), 85).unwrap();
+        shoebox_fixtures::with_exif(&j, &shot)
+    };
+    // A photo so the library isn't empty.
+    std::fs::write(lib.join("old.jpg"), img(9, "2020:01:01 10:00:00")).unwrap();
+    let fake = std::sync::Arc::new(FakeSource::new());
+    fake.answer(Access::Full);
+    // The fixtures' EXIF says +09:00: Photos' UTC dates agree 9 hours earlier.
+    for (n, when, utc) in [
+        (1u32, "2024:06:03 14:15:02", "2024-06-03T05:15:02Z"),
+        (2, "2024:06:04 09:00:00", "2024-06-04T00:00:00Z"),
+        (3, "2024:06:05 09:00:00", "2024-06-05T00:00:00Z"),
+        (4, "2024:06:06 09:00:00", "2024-06-06T00:00:00Z"),
+    ] {
+        let bytes = img(u64::from(n), when);
+        fake.add(
+            Asset {
+                id: AssetId {
+                    cloud: Some(format!("C{n}")),
+                    local: format!("L{n}"),
+                },
+                media: Media::Photo,
+                created: Some(utc.parse().unwrap()),
+                modified: None,
+                location: None,
+                favourite: n == 1,
+                hidden: n == 4,
+                burst: None,
+                width: 320,
+                height: 240,
+                resources: vec![Resource {
+                    kind: ResourceKind::Original,
+                    file_name: format!("IMG_000{n}.JPG"),
+                    size: Some(bytes.len() as u64),
+                }],
+                albums: if n == 2 { vec!["A1".into()] } else { vec![] },
+                edited: None,
+            },
+            vec![bytes],
+        );
+    }
+    fake.add_album(Album {
+        id: "A1".into(),
+        name: "Japan".into(),
+        folders: vec!["Trips".into()],
+    });
+    let mut p = paths(&base, std::slice::from_ref(&lib));
+    p.photos = fake.clone();
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+
+    h.get_by_label("Import…").click();
+    h.run_steps(2);
+    h.get_by_label("iCloud Photos").click();
+    h.run_steps(2);
+    h.get_by_label("Find photos").click();
+    wait_for(&mut h, Duration::from_secs(30), "iCloud plan", |a| {
+        a.icloud_counts().is_some()
+    });
+    assert_eq!(
+        h.state().icloud_counts(),
+        Some((3, 0)),
+        "the hidden one left out"
+    );
+    h.run_steps(2);
+    assert!(
+        h.query_by_label_contains("hidden in Photos, left out")
+            .is_some()
+    );
+    h.get_by_label("Trips › Japan: Keyword").click();
+    h.run_steps(2);
+    snapshot(&mut h, "icloud-1-plan");
+    assert_eq!(fake.downloads(), 0, "nothing downloaded before confirming");
+    h.get_by_label("Import 3 photos").click();
+    wait_for(&mut h, Duration::from_secs(30), "iCloud import", |a| {
+        a.icloud_report().is_some()
+    });
+    assert_eq!(h.state().icloud_report(), Some((3, 0)));
+    let d = lib.join("2024/2024-06-03");
+    let fav = d.join("20240603-141502.jpg");
+    assert!(fav.exists());
+    let side = |p: &Path| std::fs::read_to_string(shoebox_core::sidecar::per_file(p)).unwrap();
+    assert!(side(&fav).contains("Rating"), "★5 for the favourite");
+    let album = lib.join("2024/2024-06-04/20240604-090000.jpg");
+    assert!(
+        side(&album).contains("Albums|Trips|Japan"),
+        "the album as a keyword"
+    );
+    wait_for(&mut h, Duration::from_secs(30), "catalog", |a| {
+        a.photo_count() == 4
+    });
+    snapshot(&mut h, "icloud-2-done");
+
+    // The Info panel says where it came from.
+    h.get_by_label("Grid").click();
+    h.run_steps(2);
+    h.get_by_label("20240603-141502.jpg").click();
+    wait_for(&mut h, Duration::from_secs(10), "info row", |_| true);
+    let start = Instant::now();
+    while h.query_by_label("From iCloud Photos").is_none() {
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "no From iCloud Photos row"
+        );
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // Again: nothing new, nothing downloaded.
+    let downloads = fake.downloads();
+    h.get_by_label("Import…").click();
+    h.run_steps(2);
+    h.get_by_label("Find photos").click();
+    wait_for(&mut h, Duration::from_secs(30), "re-plan", |a| {
+        a.icloud_counts() == Some((0, 3))
+    });
+    assert_eq!(fake.downloads(), downloads);
+
+    h.state_mut().open_icloud_settings();
+    h.run_steps(3);
+    assert!(h.query_by_label("Copy Live Photos' movies").is_some());
+    snapshot(&mut h, "icloud-3-settings");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+
+    // Undo from History: the copies go to the (test) trash.
+    h.get_by_label("History").click();
+    wait_for(&mut h, Duration::from_secs(10), "history", |a| {
+        !a.batches().is_empty()
+    });
+    h.run_steps(2);
+    h.get_all_by_label("Undo").last().unwrap().click();
+    wait_for(&mut h, Duration::from_secs(30), "undo", |_| !fav.exists());
+    assert!(!album.exists());
 }

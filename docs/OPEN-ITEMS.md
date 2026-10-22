@@ -226,6 +226,13 @@ Defaults that are guesses so far.
 
 ### Library
 
+- [ ] **iCloud Photos: Re-import missing.** PHOTOS-SPEC's Settings button
+  to copy again photos whose copies are gone from the library (not just
+  moved). Needs the library's files hashed to tell. M. Source: DECISIONS
+  "iCloud Photos: the Import screen".
+- [ ] **iCloud Photos: Rebuild sync record** as its own button (a sync
+  already rebuilds lost records by hash, but downloads to do it). S–M.
+  Source: same.
 - [ ] **iCloud Photos: quick re-sync by change token.** Every sync lists
   every asset now; `fetchPersistentChangesSinceToken` would list only
   what changed. M. Source: DECISIONS "iCloud Photos: PhotoKit".

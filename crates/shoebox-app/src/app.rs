@@ -275,6 +275,10 @@ pub struct AppPaths {
     pub raw_cache: PathBuf,
     /// Export presets (JSON).
     pub export_presets: PathBuf,
+    /// iCloud Photos: PhotoKit, or a fake library in tests.
+    pub photos: Arc<dyn shoebox_core::photos::PhotoSource>,
+    /// Where iCloud Photos downloads go before they're copied in.
+    pub photos_staging: PathBuf,
 }
 
 impl AppPaths {
@@ -332,6 +336,8 @@ impl AppPaths {
             people: shoebox_core::paths::people_file(&data),
             raw_cache: cache.clone(),
             export_presets: data.join("export-presets.json"),
+            photos: Arc::new(shoebox_photos::PhotoKitSource::new()),
+            photos_staging: cache.join("photos-staging"),
         })
     }
 }
@@ -558,6 +564,8 @@ pub struct ShoeboxApp {
     pub(crate) sem: crate::semantic::SearchState,
     people: crate::people::PeopleWorker,
     pub(crate) ppl: crate::people::PeopleState,
+    pub(crate) photos: crate::photos::Photos,
+    pub(crate) icloud: views::icloud::State,
 }
 
 impl ShoeboxApp {
@@ -605,6 +613,13 @@ impl ShoeboxApp {
             crate::semantic::Semantic::new(paths.model, paths.embeddings_db, move || {
                 c3.request_repaint()
             });
+        let c6 = ctx.clone();
+        let photos = crate::photos::Photos::new(
+            paths.photos,
+            library.sender(),
+            paths.photos_staging,
+            move || c6.request_repaint(),
+        );
         let c5 = ctx.clone();
         let developer =
             crate::develop::Develop::new(paths.raw_cache, paths.export_presets, move || {
@@ -720,6 +735,8 @@ impl ShoeboxApp {
             sem: Default::default(),
             people,
             ppl: Default::default(),
+            photos,
+            icloud: Default::default(),
         }
     }
 
@@ -1307,6 +1324,9 @@ impl ShoeboxApp {
             match ev {
                 LibraryEvent::Edits(list) => self.note_edits(list),
                 LibraryEvent::Exports(photo, rows) => views::export::loaded(self, photo, rows),
+                LibraryEvent::FromPhotos(photo, found) => {
+                    views::icloud::loaded(self, photo, found);
+                }
                 LibraryEvent::Unattached(paths) => self.unattached = paths,
                 LibraryEvent::EditLoaded {
                     root,
@@ -3781,7 +3801,7 @@ impl ShoeboxApp {
     fn tick_quit(&mut self, ctx: &egui::Context) {
         let menu_quit = crate::menu::take_quit() || std::mem::take(&mut self.quit_asked);
         let closing = ctx.input(|i| i.viewport().close_requested());
-        if self.import.copying.is_some() {
+        if self.import.copying.is_some() || self.icloud.running.is_some() {
             if closing {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             }
@@ -3809,6 +3829,7 @@ impl ShoeboxApp {
         self.confirm_quit = false;
         self.quit_when_stopped = true;
         self.cancel_import();
+        views::icloud::cancel(self);
     }
 
     /// Eject the card or disk the last import came from.
@@ -4368,6 +4389,7 @@ impl eframe::App for ShoeboxApp {
         crate::theme::apply(&ctx, self.settings.text_size);
         self.apply_events(&ctx);
         self.tick_semantic(&ctx);
+        views::icloud::tick(self);
         if let Some(id) = self.show_in_all_request.take() {
             self.start_show_in_all(id);
         }
