@@ -87,7 +87,11 @@ impl Part {
             ],
             Part::Presence => &[&["modules", "clarity"], &["modules", "dehaze"]],
             Part::ToneCurve => &[&["modules", "tone_curve"]],
-            Part::Colour => &[&["modules", "colour"], &["modules", "input_colour"]],
+            Part::Colour => &[
+                &["modules", "colour"],
+                &["modules", "point_colour"],
+                &["modules", "input_colour"],
+            ],
             Part::BlackAndWhite => &[&["modules", "black_and_white"]],
             Part::Calibration => &[&["modules", "calibration"]],
             Part::Detail => &[&["modules", "sharpening"], &["modules", "noise_reduction"]],

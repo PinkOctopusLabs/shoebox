@@ -58,6 +58,7 @@ struct Params {
     unproof2: vec4<f32>,
     layers: vec4<f32>,    // local adjustments: count, mask width, mask height, mask shown (index + 1; 0: none)
     mscale: vec4<f32>,    // source → mask pixels (x, y); z: the mask alone (0/1)
+    points: vec4<f32>,    // Point Color: count, point shown (index + 1; 0: none)
 };
 
 const GAMUT_SLACK: f32 = 2e-3;
@@ -215,8 +216,9 @@ fn rem360(h: f32) -> f32 {
     return h - 360.0 * floor(h / 360.0);
 }
 
-// The colour stage (see `cpu::look::look_pixel`).
-fn look(px: vec3<f32>) -> vec3<f32> {
+// The colour stage (see `cpu::look::look_point`); w: how much the Point
+// Color point shown applied.
+fn look(px: vec3<f32>) -> vec4<f32> {
     let lms = mul3(p.lms0, p.lms1, p.lms2, px);
     let l3 = vec3<f32>(cbrt(lms.x), cbrt(lms.y), cbrt(lms.z));
     let lum0 = 0.21045426 * l3.x + 0.7936178 * l3.y - 0.004072047 * l3.z;
@@ -226,14 +228,37 @@ fn look(px: vec3<f32>) -> vec3<f32> {
     a += p.look.y * 0.04 * shade * shade * max(lum0, 0.0);
     var c = length(vec2<f32>(a, b));
     var h = rem360(degrees(atan2(b, a)));
+    let c0 = c;
+    let h0 = h;
     let at = bands(h);
     let rel = c / max(lum0, 1e-4);
     let coloured = smooth01(0.0, 0.08, rel);
     h += band(p.hue, at) * coloured;
     c *= max(1.0 + band(p.sat, at) * coloured, 0.0);
     let k = cbrt(exp2(band(p.lum, at) * coloured));
-    let lum = lum0 * k;
+    var lum = lum0 * k;
     c *= k;
+    var seen = 0.0;
+    let np = u32(p.points.x);
+    if (np > 0u) {
+        var dh = 0.0;
+        var ks = 1.0;
+        var stops = 0.0;
+        for (var i = 0u; i < np; i++) {
+            let w = point_weight(i, lum0, c0, h0);
+            if (u32(p.points.y) == i + 1u) {
+                seen = w;
+            }
+            dh += w * points[i * POINT + 3u];
+            ks *= max(1.0 + w * points[i * POINT + 4u], 0.0);
+            stops += w * points[i * POINT + 5u];
+        }
+        h += dh;
+        c *= ks;
+        let kk = cbrt(exp2(stops));
+        lum *= kk;
+        c *= kk;
+    }
     var skin = 0.0;
     if (at.i == 1u) {
         skin = 1.0 - at.t;
@@ -258,7 +283,7 @@ fn look(px: vec3<f32>) -> vec3<f32> {
         let mixv = band(p.mix, bands(rem360(h)));
         out = vec3<f32>(y * exp2(mixv * 1.5 * smooth01(0.0, 0.15, r)));
     }
-    return out;
+    return vec4<f32>(out, seen);
 }
 
 // Local adjustment masks (see `mask::Masks`): one byte per pixel, four to
@@ -267,6 +292,23 @@ fn look(px: vec3<f32>) -> vec3<f32> {
 // Their layers (see `cpu::layers::Layer`): LAYER floats each.
 @group(0) @binding(8) var<storage, read> layer: array<f32>;
 const LAYER: u32 = 20u;
+
+// Point Color's points (see `cpu::look::Point`): POINT floats each.
+@group(0) @binding(9) var<storage, read> points: array<f32>;
+const POINT: u32 = 12u;
+
+// How much point i applies to a colour (see `cpu::look::Point::weight`).
+fn point_weight(i: u32, lum: f32, c: f32, h: f32) -> f32 {
+    let b = i * POINT;
+    let d = rem360(h - points[b + 2u]);
+    let dh = min(d, 360.0 - d);
+    var wh = 1.0 - smooth01(points[b + 6u], 2.0 * points[b + 6u], dh);
+    let hued = smooth01(0.0, 0.04, min(c, points[b + 1u]));
+    wh = 1.0 + (wh - 1.0) * hued;
+    let wc = 1.0 - smooth01(points[b + 7u], 2.0 * points[b + 7u], abs(c - points[b + 1u]));
+    let wl = 1.0 - smooth01(points[b + 8u], 2.0 * points[b + 8u], abs(lum - points[b]));
+    return wh * wc * wl;
+}
 
 fn map_at(x: u32, y: u32, k: u32) -> f32 {
     return maps[(y * u32(p.maps.y) + x) * STRIDE + k];
@@ -597,8 +639,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (p.layers.x > 0.5) {
         px = layers_px(px, mx, my, sx, sy);
     }
+    var seen = 0.0;
     if (p.look.x > 0.5) {
-        px = look(px);
+        let lk = look(px);
+        px = lk.xyz;
+        seen = lk.w;
     }
     if (p.misc.w > 0.5) {
         let d = display(px);
@@ -613,6 +658,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             } else if (hi <= 0.001) {
                 px = vec3<f32>(0.1, 0.3, 1.0);
             }
+        }
+        // A Point Color point's reach (see `cpu::greyed`).
+        if (p.points.y > 0.5) {
+            let g = 0.2126 * px.x + 0.7152 * px.y + 0.0722 * px.z;
+            px = vec3<f32>(g) + (px - vec3<f32>(g)) * seen;
         }
         // A layer's mask shown (see `cpu::layers::mask_shown`).
         if (p.layers.w > 0.5 && u32(p.layers.w) <= u32(p.layers.x)) {

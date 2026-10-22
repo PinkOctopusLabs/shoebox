@@ -110,6 +110,8 @@ pub struct Overlays {
     /// A local adjustment's mask shown (O): its place in the settings'
     /// `locals`, and whether alone.
     pub mask: Option<(usize, bool)>,
+    /// A Point Color point's reach shown (its index).
+    pub point: Option<usize>,
 }
 
 impl Overlays {
@@ -121,6 +123,7 @@ impl Overlays {
             let at = f.layers.from.iter().position(|&j| j == k)?;
             Some((at, only))
         });
+        f.point_view = self.point.filter(|&k| k < f.look.point_count);
     }
 
     /// Keys renders made with them.

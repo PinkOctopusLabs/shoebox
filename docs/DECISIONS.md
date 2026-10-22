@@ -1893,3 +1893,20 @@ masks; AI raw denoise (RawNIND); Smart-light tone; finer AI masks.
   red, "Mask only" alone; Escape puts the mask down before leaving
   Develop. New gradients start in place rather than being drawn; drag
   their handles.
+
+## Point Color (2026-10-22)
+
+- `modules.point_colour.points`: up to eight colours picked on the photo,
+  each stored as Oklab lightness, chroma and hue with its hue shift (up to
+  30° either way), saturation and luminance (±1 stop at ±100), and hue,
+  saturation and luminance ranges (0–100).
+- **In the colour stage**, after HSL and before vibrance. Each point is
+  weighed on the colour as it came in (before HSL), full within its range
+  and fading to nothing at twice as far, in hue, chroma and lightness
+  multiplied together; hue counts less where either colour is nearly
+  grey. The shifts of all points add up, so their order doesn't matter.
+- **Picking** reads what the colour stage sees there (after local
+  adjustments), averaged over 3×3 output pixels.
+- **Show affected** greys whatever the selected point doesn't reach, in
+  both pipes, so the GPU check covers it. Point Color travels with the
+  Colour part of presets and copied settings.

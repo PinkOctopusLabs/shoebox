@@ -185,3 +185,65 @@ fn tone_curves() {
         .collect();
     assert!(all.windows(2).all(|w| w[1] >= w[0]));
 }
+
+#[test]
+fn point_colour_moves_the_picked_colour_only() {
+    use shoebox_develop::cpu::look::{look_point, oklch};
+    use shoebox_develop::edit::{ColourPoint, PointColour};
+    let plain = look(Colour::default());
+    let [l, c, h] = oklch(&plain, RED);
+    let pick =
+        |p: ColourPoint| look(Colour::default()).with_points(&PointColour { points: vec![p] });
+    let point = ColourPoint {
+        lightness: f64::from(l),
+        chroma: f64::from(c),
+        hue: f64::from(h),
+        hue_shift: 50.0,
+        saturation: -50.0,
+        ..Default::default()
+    };
+    let lk = pick(point.clone());
+    assert!(lk.active);
+    let (red, w) = look_point(&lk, RED, Some(0));
+    assert!((w - 1.0).abs() < 1e-6, "full on the picked colour: {w}");
+    let [_, c2, h2] = oklch(&plain, red);
+    assert!((h2 - h - 15.0).abs() < 0.5, "hue turned 15°: {h} → {h2}");
+    assert!((c2 / c - 0.5).abs() < 0.02, "half the chroma: {c} → {c2}");
+    // A blue and a grey are left as they were.
+    for other in [BLUE, GREY] {
+        let (out, w) = look_point(&lk, other, Some(0));
+        assert_eq!(w, 0.0);
+        assert!(close(out, other, 1e-5), "{other:?} → {out:?}");
+    }
+    // A narrow hue range leaves a red 25° away alone; a wide one doesn't.
+    let near = {
+        let hr = (h + 25.0).to_radians();
+        let lab = [l, c * hr.cos(), c * hr.sin()];
+        let lms = colour::mulv(
+            &shoebox_develop::cpu::look::LAB_TO_LMS.map(|r| r.map(f64::from)),
+            lab.map(f64::from),
+        )
+        .map(|v| (v * v * v) as f32);
+        let from = plain.from_lms;
+        [0, 1, 2].map(|r| from[r][0] * lms[0] + from[r][1] * lms[1] + from[r][2] * lms[2])
+    };
+    let narrow = pick(ColourPoint {
+        hue_range: 0.0,
+        ..point.clone()
+    });
+    assert_eq!(look_point(&narrow, near, Some(0)).1, 0.0);
+    let wide = pick(ColourPoint {
+        hue_range: 100.0,
+        ..point
+    });
+    assert!(look_point(&wide, near, Some(0)).1 > 0.99);
+}
+
+#[test]
+fn point_colour_view_greys_what_it_misses() {
+    use shoebox_develop::cpu::greyed;
+    let d = [0.8, 0.4, 0.2];
+    assert!(close(greyed(d, 1.0), d, 1e-6));
+    let g = greyed(d, 0.0);
+    assert!((g[0] - g[1]).abs() < 1e-6 && (g[1] - g[2]).abs() < 1e-6);
+}

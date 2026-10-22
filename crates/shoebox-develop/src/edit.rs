@@ -356,6 +356,54 @@ pub struct Colour {
     pub luminance: [f64; 8],
 }
 
+/// Point Color (Tools beyond PhotoLab): colours picked on the photo, each
+/// with its hue, saturation and luminance shifted wherever that colour is.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PointColour {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub points: Vec<ColourPoint>,
+}
+
+/// The most points Point Color takes.
+pub const COLOUR_POINTS: usize = 8;
+
+/// One picked colour and what's done to it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ColourPoint {
+    /// The colour picked, in Oklab: lightness, chroma, hue (degrees).
+    pub lightness: f64,
+    pub chroma: f64,
+    pub hue: f64,
+    /// Hue (−100 to +100: up to 30° either way), saturation and luminance
+    /// (−100 to +100).
+    pub hue_shift: f64,
+    pub saturation: f64,
+    pub luminance: f64,
+    /// How far from the picked colour it reaches in hue, saturation and
+    /// luminance, 0–100.
+    pub hue_range: f64,
+    pub saturation_range: f64,
+    pub luminance_range: f64,
+}
+
+impl Default for ColourPoint {
+    fn default() -> Self {
+        Self {
+            lightness: 0.5,
+            chroma: 0.1,
+            hue: 30.0,
+            hue_shift: 0.0,
+            saturation: 0.0,
+            luminance: 0.0,
+            hue_range: 50.0,
+            saturation_range: 50.0,
+            luminance_range: 50.0,
+        }
+    }
+}
+
 /// A monochrome treatment: how bright each hue band ([`HUES`]) turns out,
 /// −100 to +100.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -426,6 +474,7 @@ pub struct Modules {
     pub clarity: Clarity,
     pub calibration: Calibration,
     pub colour: Colour,
+    pub point_colour: PointColour,
     pub black_and_white: BlackAndWhite,
     pub tone_curve: ToneCurve,
     pub display_transform: DisplayTransform,

@@ -191,6 +191,26 @@ fn gpu_matches_the_cpu_reference() {
             ..o
         },
     ));
+    // Point Color: an orange and a blue, with a grey's for good measure.
+    let mut s = base.clone();
+    let point = |lightness, chroma, hue, hue_shift, saturation, luminance| {
+        shoebox_develop::edit::ColourPoint {
+            lightness,
+            chroma,
+            hue,
+            hue_shift,
+            saturation,
+            luminance,
+            ..Default::default()
+        }
+    };
+    s.modules.point_colour.points = vec![
+        point(0.7, 0.15, 45.0, 40.0, 50.0, -30.0),
+        point(0.4, 0.12, 260.0, -60.0, -80.0, 40.0),
+        point(0.6, 0.0, 0.0, 0.0, 0.0, 50.0),
+    ];
+    cases.push(("point colour", s.clone(), o));
+    cases.push(("point colour, shown", s, o));
     // A camera match look for this camera (the test raw's model, "Z f").
     let mut table = shoebox_develop::profile::Lut3::identity(shoebox_develop::profile::SIZE);
     for c in &mut table.data {
@@ -238,6 +258,9 @@ fn gpu_matches_the_cpu_reference() {
             f.mask_view = Some((1, false));
         } else if name.ends_with("mask alone") {
             f.mask_view = Some((0, true));
+        }
+        if name.ends_with("colour, shown") {
+            f.point_view = Some(0);
         }
         if name.starts_with("local") {
             assert_eq!(f.layers.list.len(), 2, "{name}");

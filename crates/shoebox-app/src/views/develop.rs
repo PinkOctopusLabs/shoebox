@@ -132,6 +132,8 @@ pub struct State {
     pub(super) curve_drag: Option<usize>,
     /// Local adjustments: the mask selected, its tool and handles.
     pub local: super::local::Tool,
+    /// Point Color: picking, the point selected, its reach shown.
+    pub points: super::point_colour::Tool,
     /// The frame the edit was last rendered with (handles are placed
     /// through it).
     pub(super) frame: Option<Frame>,
@@ -183,6 +185,7 @@ impl State {
             proof: self.proof.then_some(self.proof_space),
             gamut: self.gamut_warning,
             mask,
+            point: self.points.selected.filter(|_| self.points.show),
         }
     }
 
@@ -1240,9 +1243,10 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
     if zoom.is_some() && compare == Compare::Edited {
         zoomed_region(app, &ctx, &painter, target, area, full_size, ppp);
     }
-    // The selected mask's handles.
+    // The selected mask's handles; Point Color's picker.
     if app.develop.crop.is_none() && compare != Compare::Original && edited.is_some() {
         super::local::on_photo(app, ui, &resp, &painter, target);
+        super::point_colour::on_photo(app, ui, &resp, target);
     }
     // Cropping: the crop over the whole frame, its aspect and Done above.
     if let (Some(_), Some((_, s))) = (&app.develop.crop, edited) {

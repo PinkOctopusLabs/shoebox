@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use crate::colour::{self, M3};
-use crate::edit::{BlackAndWhite, Calibration, Colour, ToneCurve};
+use crate::edit::{BlackAndWhite, COLOUR_POINTS, Calibration, Colour, ToneCurve};
 
 /// Oklab's LMS from linear sRGB (Björn Ottosson, 2020).
 const SRGB_TO_LMS: M3 = [
@@ -69,6 +69,82 @@ pub struct Look {
     pub fringe: bool,
     pub purple: f32,
     pub green: f32,
+    /// Point Color: the first `point_count` of `points`.
+    pub points: [Point; COLOUR_POINTS],
+    pub point_count: usize,
+}
+
+/// One Point Color point's numbers, in Oklab.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Point {
+    pub lightness: f32,
+    pub chroma: f32,
+    pub hue: f32,
+    /// Degrees; −1 to 1; stops.
+    pub hue_shift: f32,
+    pub saturation: f32,
+    pub luminance: f32,
+    /// Full effect within these of the picked colour, fading to none at
+    /// twice as far: degrees of hue, chroma, lightness.
+    pub hue_width: f32,
+    pub chroma_width: f32,
+    pub lightness_width: f32,
+}
+
+impl Point {
+    pub fn new(p: &crate::edit::ColourPoint) -> Self {
+        let r = |v: f64| (v.clamp(0.0, 100.0) / 100.0) as f32;
+        Self {
+            lightness: p.lightness as f32,
+            chroma: p.chroma as f32,
+            hue: p.hue as f32,
+            hue_shift: (p.hue_shift / 100.0 * 30.0) as f32,
+            saturation: (p.saturation / 100.0) as f32,
+            luminance: (p.luminance / 100.0) as f32,
+            hue_width: 4.0 + 36.0 * r(p.hue_range),
+            chroma_width: 0.01 + 0.15 * r(p.saturation_range),
+            lightness_width: 0.03 + 0.4 * r(p.luminance_range),
+        }
+    }
+
+    /// How much of it applies to a colour (Oklab lightness, chroma, hue).
+    /// Hue counts less where either colour is nearly grey (its hue means
+    /// little there).
+    pub fn weight(&self, lum: f32, c: f32, h: f32) -> f32 {
+        let d = (h - self.hue).rem_euclid(360.0);
+        let dh = d.min(360.0 - d);
+        let wh = 1.0 - smoothstep(self.hue_width, 2.0 * self.hue_width, dh);
+        let hued = smoothstep(0.0, 0.04, c.min(self.chroma));
+        let wh = 1.0 + (wh - 1.0) * hued;
+        let wc = 1.0
+            - smoothstep(
+                self.chroma_width,
+                2.0 * self.chroma_width,
+                (c - self.chroma).abs(),
+            );
+        let wl = 1.0
+            - smoothstep(
+                self.lightness_width,
+                2.0 * self.lightness_width,
+                (lum - self.lightness).abs(),
+            );
+        wh * wc * wl
+    }
+}
+
+/// Oklab lightness, chroma and hue (degrees) as linear Rec.2020.
+pub fn from_oklch(l: &Look, lch: [f32; 3]) -> [f32; 3] {
+    let hr = lch[2].to_radians();
+    let lab = [lch[0], lch[1] * hr.cos(), lch[1] * hr.sin()];
+    let lms = mul3(&LAB_TO_LMS, lab).map(|v| v * v * v);
+    mul3(&l.from_lms, lms)
+}
+
+/// A linear Rec.2020 colour in Oklab: lightness, chroma, hue (degrees).
+pub fn oklch(l: &Look, p: [f32; 3]) -> [f32; 3] {
+    let lms = mul3(&l.to_lms, p).map(cbrt);
+    let [lum, a, b] = mul3(&LMS_TO_LAB, lms);
+    [lum, a.hypot(b), b.atan2(a).to_degrees().rem_euclid(360.0)]
 }
 
 /// Linear Rec.2020 ↔ Oklab's LMS.
@@ -113,7 +189,19 @@ impl Look {
             fringe: false,
             purple: 0.0,
             green: 0.0,
+            points: [Point::default(); COLOUR_POINTS],
+            point_count: 0,
         }
+    }
+
+    pub fn with_points(mut self, pc: &crate::edit::PointColour) -> Self {
+        let n = pc.points.len().min(COLOUR_POINTS);
+        for (o, p) in self.points.iter_mut().zip(&pc.points[..n]) {
+            *o = Point::new(p);
+        }
+        self.point_count = n;
+        self.active |= n > 0;
+        self
     }
 
     pub fn with_defringe(mut self, d: &crate::edit::Defringe) -> Self {
@@ -205,8 +293,14 @@ fn band(values: &[f32; 8], (i, j, t): (usize, usize, f32)) -> f32 {
 
 /// The colour stage for one linear Rec.2020 pixel.
 pub fn look_pixel(l: &Look, p: [f32; 3]) -> [f32; 3] {
+    look_point(l, p, None).0
+}
+
+/// [`look_pixel`], and how much Point Color's point `shown` applied there
+/// (0 when none is asked for).
+pub fn look_point(l: &Look, p: [f32; 3], shown: Option<usize>) -> ([f32; 3], f32) {
     if !l.active {
-        return p;
+        return (p, 0.0);
     }
     let lms = mul3(&l.to_lms, p).map(cbrt);
     let [lum, mut a, b] = mul3(&LMS_TO_LAB, lms);
@@ -215,6 +309,7 @@ pub fn look_pixel(l: &Look, p: [f32; 3]) -> [f32; 3] {
     a += l.shadows_tint * 0.04 * shade * shade * lum.max(0.0);
     let mut c = a.hypot(b);
     let mut h = b.atan2(a).to_degrees().rem_euclid(360.0);
+    let (c0, h0) = (c, h);
     let at = bands(h);
     // How coloured: chroma relative to lightness (greys are left alone).
     let rel = c / lum.max(1e-4);
@@ -223,8 +318,30 @@ pub fn look_pixel(l: &Look, p: [f32; 3]) -> [f32; 3] {
     c *= (1.0 + band(&l.sat, at) * coloured).max(0.0);
     let gain = (band(&l.lum, at) * coloured).exp2();
     let k = cbrt(gain);
+    let lum0 = lum;
     let lum = lum * k;
     c *= k;
+    // Point Color: each point weighed on the colour as it came in (before
+    // HSL), the shifts added up.
+    let mut seen = 0.0;
+    let (mut lum, mut c) = (lum, c);
+    if l.point_count > 0 {
+        let (mut dh, mut ks, mut stops) = (0.0, 1.0, 0.0);
+        for (i, pt) in l.points[..l.point_count].iter().enumerate() {
+            let w = pt.weight(lum0, c0, h0);
+            if shown == Some(i) {
+                seen = w;
+            }
+            dh += w * pt.hue_shift;
+            ks *= (1.0 + w * pt.saturation).max(0.0);
+            stops += w * pt.luminance;
+        }
+        h += dh;
+        c *= ks;
+        let k = cbrt(stops.exp2());
+        lum *= k;
+        c *= k;
+    }
     // Vibrance: muted colours more than vivid ones, skin (orange) less.
     let skin = match at {
         (1, _, t) => 1.0 - t,
@@ -244,7 +361,7 @@ pub fn look_pixel(l: &Look, p: [f32; 3]) -> [f32; 3] {
         let mix = band(&l.mix, bands(h.rem_euclid(360.0)));
         out = [y * (mix * 1.5 * smoothstep(0.0, 0.15, rel)).exp2(); 3];
     }
-    out
+    (out, seen)
 }
 
 /// Calibration's matrix on linear Rec.2020: each primary's hue turned (up

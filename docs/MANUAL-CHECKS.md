@@ -96,3 +96,7 @@ together at the end, before the release.
   after rotating 90°, cropping and with lens corrections on; the
   exported JPEG matches Develop; brush strokes feel responsive with a
   large brush; O shows the mask where expected.
+- [ ] **Point Color** on a few real photos (a sky, skin, foliage): a
+  picked colour shifts smoothly with no hard edges or speckle where it
+  fades out, Show affected matches what changes, and skin picked with a
+  narrow range leaves similar backgrounds alone.

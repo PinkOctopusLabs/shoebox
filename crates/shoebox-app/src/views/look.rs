@@ -55,6 +55,7 @@ pub fn modules(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &Settings) {
     presence(app, ui, s);
     tone_curve(app, ui, &s.modules.tone_curve);
     colour(app, ui, &s.modules.colour);
+    super::point_colour::section(app, ui, &s.modules.point_colour);
     detail(app, ui, s);
     lens(app, ui, &s.modules.lens);
     defringe(app, ui, &s.modules.defringe);

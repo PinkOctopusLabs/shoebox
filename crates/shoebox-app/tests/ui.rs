@@ -4498,3 +4498,88 @@ fn develop_local_adjustments() {
     assert_eq!(h.state().develop_local().0, None);
     assert_eq!(h.state().view_name(), shoebox_app::app::View::Develop);
 }
+
+/// Point Color: pick a colour on the photo (a point with that colour),
+/// widen its range, show what it reaches; Reset takes the points away.
+#[test]
+fn develop_point_colour() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(&root).unwrap();
+    let img = shoebox_fixtures::scene(6, 800, 600);
+    std::fs::write(
+        root.join("colour.jpg"),
+        shoebox_fixtures::jpeg(&img, 92).unwrap(),
+    )
+    .unwrap();
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let mut h = harness(p, egui::vec2(1400.0, 2600.0));
+    settle(&mut h, Duration::from_secs(60));
+    h.get_by_label("colour.jpg").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(30), "develop", |a| {
+        a.develop_ready()
+    });
+    wait_for(&mut h, Duration::from_secs(30), "histogram", |a| {
+        a.develop_histogram().0.is_some()
+    });
+    h.run_steps(3);
+    let points = |h: &Harness<'_, ShoeboxApp>| {
+        h.state()
+            .develop_doc()
+            .unwrap()
+            .settings()
+            .modules
+            .point_colour
+            .points
+            .clone()
+    };
+    // The section starts closed; its title opens it.
+    h.get_by_label("Point colour").click();
+    h.run_steps(2);
+    h.get_by_label("Pick colour").click();
+    h.run_steps(2);
+    let photo = h.state().develop_photo_rect().unwrap();
+    let at = photo.center() + egui::vec2(-100.0, -60.0);
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.event(egui::Event::PointerMoved(at));
+    h.run_steps(1);
+    h.event(button(at, true));
+    h.event(button(at, false));
+    h.run_steps(3);
+    let p = points(&h);
+    assert_eq!(p.len(), 1);
+    assert!(p[0].chroma > 0.0 && p[0].lightness > 0.0, "{:?}", p[0]);
+    assert_eq!(
+        h.state()
+            .develop_doc()
+            .unwrap()
+            .history()
+            .last()
+            .unwrap()
+            .label,
+        "Colour picked"
+    );
+    // Its saturation, from the slider's rail.
+    let row = h.get_by_label("Saturation range").rect();
+    let rail = egui::pos2(row.right() + 30.0, row.center().y);
+    h.event(egui::Event::PointerMoved(rail));
+    h.run_steps(1);
+    h.event(button(rail, true));
+    h.event(button(rail, false));
+    h.run_steps(3);
+    assert_ne!(points(&h)[0].saturation_range, 50.0, "{:?}", points(&h)[0]);
+    h.get_by_label("Show affected").click();
+    h.run_steps(3);
+    assert_eq!(h.state().develop_overlays().point, Some(0));
+    snapshot(&mut h, "develop-point-colour");
+    h.get_by_label("Remove colour").click();
+    h.run_steps(3);
+    assert!(points(&h).is_empty());
+}

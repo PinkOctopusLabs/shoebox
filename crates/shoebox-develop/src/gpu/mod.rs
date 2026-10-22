@@ -147,6 +147,7 @@ impl Pipe {
                 storage(6),
                 storage(7),
                 storage(8),
+                storage(9),
             ],
         });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -326,6 +327,28 @@ impl Pipe {
             .flat_map(f32::to_le_bytes)
             .collect();
         let layers = storage_buffer(device, "local layers", &layers);
+        let lk = &frame.look;
+        let points: Vec<u8> = lk.points[..lk.point_count]
+            .iter()
+            .flat_map(|p| {
+                [
+                    p.lightness,
+                    p.chroma,
+                    p.hue,
+                    p.hue_shift,
+                    p.saturation,
+                    p.luminance,
+                    p.hue_width,
+                    p.chroma_width,
+                    p.lightness_width,
+                    0.0,
+                    0.0,
+                    0.0,
+                ]
+            })
+            .flat_map(f32::to_le_bytes)
+            .collect();
+        let points = storage_buffer(device, "colour points", &points);
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("develop"),
             layout: &self.layout,
@@ -337,6 +360,10 @@ impl Pipe {
                 wgpu::BindGroupEntry {
                     binding: 8,
                     resource: layers.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: points.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 6,
@@ -679,11 +706,11 @@ impl Histogram {
     }
 }
 
-/// The uniform block (`Params` in the shader), as 50 vec4s.
+/// The uniform block (`Params` in the shader), as 51 vec4s.
 fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
     let row = |r: [f32; 3]| [r[0], r[1], r[2], 0.0];
     let d = &f.display;
-    let mut v = Vec::with_capacity(50 * 4);
+    let mut v = Vec::with_capacity(51 * 4);
     v.extend([
         f.map[0][0],
         f.map[0][1],
@@ -781,6 +808,8 @@ fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
         .map_or((0.0, 0.0), |(k, o)| ((k + 1) as f32, flag(o)));
     v.extend([ls.list.len() as f32, lw, lh, shown]);
     v.extend([ls.scale[0], ls.scale[1], only, 0.0]);
+    let shown_point = f.point_view.map_or(0.0, |k| (k + 1) as f32);
+    v.extend([l.point_count as f32, shown_point, 0.0, 0.0]);
     v
 }
 

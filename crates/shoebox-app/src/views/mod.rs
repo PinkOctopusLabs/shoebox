@@ -13,6 +13,7 @@ pub mod look;
 pub mod loupe;
 pub mod map;
 pub mod masonry;
+pub mod point_colour;
 pub mod presets;
 pub mod settings;
 pub mod survey;

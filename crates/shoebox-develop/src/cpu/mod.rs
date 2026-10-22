@@ -348,6 +348,8 @@ pub struct Frame {
     /// A local adjustment's mask shown (O): its index in `layers`, and
     /// whether alone (else as a red tint).
     pub mask_view: Option<(usize, bool)>,
+    /// Point Color's point shown: what it reaches in colour, the rest grey.
+    pub point_view: Option<usize>,
 }
 
 /// The display transform's numbers.
@@ -731,11 +733,13 @@ pub fn frame(raw: &RawImage, src: &Demosaiced, s: &Settings, o: &Options) -> Fra
             &s.modules.calibration,
             &s.modules.black_and_white,
         )
-        .with_defringe(&s.modules.defringe),
+        .with_defringe(&s.modules.defringe)
+        .with_points(&s.modules.point_colour),
         display,
         warnings: false,
         gamut_warning: false,
         mask_view: None,
+        point_view: None,
     }
 }
 
@@ -840,25 +844,15 @@ pub fn apply(src: &Rgb, f: &Frame, display: bool) -> Rgb {
         .enumerate()
         .for_each(|(y, line)| {
             for x in 0..f.width {
-                let (xf, yf) = (x as f32, y as f32);
-                let (mx, my) = f.source_at(xf, yf);
-                let (rgb, sx, sy) = lens_sample(src, f.lens.as_deref(), mx, my);
-                let mut lin = mul3(&f.colour, rgb);
-                if f.look.fringe {
-                    let y = |dx: f32, dy: f32| {
-                        let p = mul3(&f.colour, sample(src, sx + dx, sy + dy));
-                        f.look.luma[0] * p[0] + f.look.luma[1] * p[1] + f.look.luma[2] * p[2]
-                    };
-                    let e = look::edge(y(-1.0, 0.0), y(1.0, 0.0), y(0.0, -1.0), y(0.0, 1.0));
-                    lin = look::defringe_pixel(&f.look, lin, e);
-                }
-                let lin = maps::local_pixel(&f.local, lin, sx, sy);
-                let lin = layers::layers_pixel(&f.layers, &f.local, lin, mx, my, sx, sy);
-                let lin = look::look_pixel(&f.look, lin);
+                let (lin, mx, my, seen) = before_display(src, f, x as f32, y as f32);
                 let px = if display {
                     let (d, out) = display_out(&f.display, lin);
                     let d = if f.gamut_warning && out { GAMUT } else { d };
                     let d = if f.warnings { warn(d) } else { d };
+                    let d = match f.point_view {
+                        Some(_) => greyed(d, seen),
+                        None => d,
+                    };
                     match f.mask_view {
                         Some((k, only)) => layers::mask_shown(&f.layers, k, only, d, mx, my),
                         None => d,
@@ -870,6 +864,54 @@ pub fn apply(src: &Rgb, f: &Frame, display: bool) -> Rgb {
             }
         });
     out
+}
+
+/// Display values greyed where `w` is 0, as they are where it's 1 (Point
+/// Color's view of what a point reaches).
+pub fn greyed(d: [f32; 3], w: f32) -> [f32; 3] {
+    let y = 0.2126 * d[0] + 0.7152 * d[1] + 0.0722 * d[2];
+    d.map(|v| y + (v - y) * w)
+}
+
+/// Output pixel `(x, y)` up to the display transform: linear Rec.2020,
+/// its source position before lens corrections, and how much the Point
+/// Color point shown applied.
+fn before_display(src: &Rgb, f: &Frame, x: f32, y: f32) -> ([f32; 3], f32, f32, f32) {
+    let (lin, mx, my) = look_input_at(src, f, x, y);
+    let (lin, seen) = look::look_point(&f.look, lin, f.point_view);
+    (lin, mx, my, seen)
+}
+
+/// Output pixel `(x, y)` through geometry, lens corrections, the colour
+/// matrix and defringe; with its source positions before and after lens
+/// corrections.
+fn colour_input(src: &Rgb, f: &Frame, x: f32, y: f32) -> ([f32; 3], f32, f32, f32, f32) {
+    let (mx, my) = f.source_at(x, y);
+    let (rgb, sx, sy) = lens_sample(src, f.lens.as_deref(), mx, my);
+    let mut lin = mul3(&f.colour, rgb);
+    if f.look.fringe {
+        let y = |dx: f32, dy: f32| {
+            let p = mul3(&f.colour, sample(src, sx + dx, sy + dy));
+            f.look.luma[0] * p[0] + f.look.luma[1] * p[1] + f.look.luma[2] * p[2]
+        };
+        let e = look::edge(y(-1.0, 0.0), y(1.0, 0.0), y(0.0, -1.0), y(0.0, 1.0));
+        lin = look::defringe_pixel(&f.look, lin, e);
+    }
+    (lin, mx, my, sx, sy)
+}
+
+/// What the colour stage sees at output pixel `(x, y)`: linear Rec.2020
+/// after the local tone maps and local adjustments (Point Color picks it).
+pub fn look_input(src: &Rgb, f: &Frame, x: f32, y: f32) -> [f32; 3] {
+    look_input_at(src, f, x, y).0
+}
+
+/// [`look_input`], and the source position before lens corrections.
+fn look_input_at(src: &Rgb, f: &Frame, x: f32, y: f32) -> ([f32; 3], f32, f32) {
+    let (lin, mx, my, sx, sy) = colour_input(src, f, x, y);
+    let lin = maps::local_pixel(&f.local, lin, sx, sy);
+    let lin = layers::layers_pixel(&f.layers, &f.local, lin, mx, my, sx, sy);
+    (lin, mx, my)
 }
 
 /// Sample the source at corrected position `(sx, sy)` through the lens
@@ -969,6 +1011,7 @@ fn resample(img: &Rgb, map: [[f64; 3]; 3], w: usize, h: usize) -> Rgb {
         warnings: false,
         gamut_warning: false,
         mask_view: None,
+        point_view: None,
     };
     apply(img, &f, false)
 }
