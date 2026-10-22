@@ -409,6 +409,7 @@ As built (2026-10-22, DECISIONS): layers run after the global dehaze, highlights
 | AI subject / person | Apple Vision foreground-instance and person-segmentation requests via `objc2-vision`; on-device and fast | 3 |
 | AI object (click) | SAM 2.1 Tiny from Meta's own weights, ported to candle (Task 0.3), instead of `ort`; click to add, Alt-click to subtract | 3 |
 | AI sky | SegFormer trained on ADE20K (which has a sky class), using candle-transformers' own SegFormer; check the weights' licence | 4 |
+| Portable subject / person | For Linux (deferred, 2026-10-22): an open model on candle in place of Vision, such as BiRefNet (MIT) or U²-Net (Apache-2.0) for subjects and MODNet (Apache-2.0) for people | With Linux |
 
 **Control points (Phase 4):** PhotoLab's U Point-style control point is a radial part intersected with a colour and luminance range sampled where you click. Offer it as a one-click tool that builds that mask, so it needs no new mask machinery.
 

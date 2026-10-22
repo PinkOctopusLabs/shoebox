@@ -749,7 +749,13 @@ pub fn frame(raw: &RawImage, src: &Demosaiced, s: &Settings, o: &Options) -> Fra
         map: map.map(|r| r.map(|v| v as f32)),
         lens,
         local: maps::local(src, &colour, s),
-        layers: layers::layers(src, &colour, &display, s),
+        layers: layers::layers(
+            src,
+            &colour,
+            &display,
+            s,
+            compose_orientation(o.orientation, s.geometry.quarter, s.geometry.flip),
+        ),
         colour,
         look: look::Look::new(
             &s.modules.colour,

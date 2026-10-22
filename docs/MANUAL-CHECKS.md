@@ -116,3 +116,7 @@ together at the end, before the release.
   manual with changing light: matched photos look equally bright beside
   the one matched to. **Reference view**: edit one photo beside another
   from the same shoot and check the two halves don't flicker or lag.
+- [ ] **Subject and People masks** on real photos (a portrait, a pet, a
+  group, a busy street, a landscape with no subject): the mask follows
+  the subject's outline (hair is the hard part), arrives within a second
+  or so, stays right after rotating 90°, and the export matches Develop.

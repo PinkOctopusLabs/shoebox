@@ -427,6 +427,17 @@ fn worker(
         }
     }
     let previews = cache_dir.join("edited");
+    // Subject and person masks come from Apple's Vision (macOS only; a
+    // portable model is a later phase).
+    shoebox_develop::mask::register_finder(Box::new(|rgb, w, h, what| {
+        let find = match what {
+            shoebox_develop::mask::Find::Subject => shoebox_ml::vision::Find::Subject,
+            shoebox_develop::mask::Find::Person => shoebox_ml::vision::Find::Person,
+        };
+        shoebox_ml::vision::segment(rgb, w, h, find)
+            .map(|c| c.data)
+            .map_err(|e| e.to_string())
+    }));
     // Camera match profiles (`<data>/profiles/*.json`).
     let n = shoebox_develop::profile::load_dir(&presets_file.with_file_name("profiles"));
     if n > 0 {

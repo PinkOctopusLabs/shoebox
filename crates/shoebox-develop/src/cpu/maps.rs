@@ -69,6 +69,24 @@ struct Inner {
     /// The healed source: what it was made from, the spots' key, and it.
     healed: Option<(Option<Arc<Rgb>>, u64, Arc<Rgb>)>,
     mask_source: Option<Arc<Rgb>>,
+    /// Subjects and people found (see `layers`), by what, orientation and
+    /// grid size; bumped whenever one arrives.
+    found: std::collections::HashMap<FoundKey, Found>,
+    found_generation: u64,
+    /// Find them on a thread of their own (the live view) rather than
+    /// waiting (exports, 100% regions).
+    background: bool,
+}
+
+/// What was found, the orientation it was found in, and the grid size.
+pub type FoundKey = (crate::mask::Find, u16, usize, usize);
+
+/// A subject or person search.
+#[derive(Debug, Clone)]
+pub enum Found {
+    Pending,
+    Done(Arc<Vec<u8>>),
+    Failed(String),
 }
 
 impl Cache {
@@ -82,6 +100,42 @@ impl Cache {
             .lock()
             .noise
             .get_or_insert_with(|| super::detail::estimate(img))
+    }
+
+    /// Find subjects and people on a thread of their own (for the live
+    /// view, which mustn't wait), redrawing when they arrive.
+    pub fn set_background(&self, on: bool) {
+        self.lock().background = on;
+    }
+
+    pub fn background(&self) -> bool {
+        self.lock().background
+    }
+
+    pub fn found(&self, key: &FoundKey) -> Option<Found> {
+        self.lock().found.get(key).cloned()
+    }
+
+    pub fn set_found(&self, key: FoundKey, f: Found) {
+        let mut inner = self.lock();
+        inner.found.insert(key, f);
+        inner.found_generation += 1;
+    }
+
+    /// Changes whenever a search finishes (renders key on it).
+    pub fn found_generation(&self) -> u64 {
+        self.lock().found_generation
+    }
+
+    /// A search still running, and the last one that failed (why).
+    pub fn finding(&self) -> (bool, Option<String>) {
+        let inner = self.lock();
+        let pending = inner.found.values().any(|f| matches!(f, Found::Pending));
+        let failed = inner.found.values().find_map(|f| match f {
+            Found::Failed(e) => Some(e.clone()),
+            _ => None,
+        });
+        (pending, failed)
     }
 
     /// The local adjustments' masks for `key` (`make` runs on a miss).

@@ -197,6 +197,13 @@ impl State {
         }
     }
 
+    /// Layer `k`'s mask in the last render (tests).
+    pub fn layers_mask(&self, k: usize) -> Option<&[u8]> {
+        let m = self.frame.as_ref()?.layers.masks.as_ref()?;
+        let n = m.width * m.height;
+        m.data.get(k * n..(k + 1) * n)
+    }
+
     /// The local adjustment layers in the last render (tests).
     pub fn layers_rendered(&self) -> usize {
         self.frame.as_ref().map_or(0, |f| f.layers.list.len())
@@ -708,6 +715,9 @@ pub fn poll(app: &mut ShoeboxApp) {
         let st = &mut app.develop;
         match ev {
             Event::Ready(r) if Some(r.id) == st.photo => {
+                // The live view never waits for a subject or person to be
+                // found: it redraws when they are.
+                r.src.cache.set_background(true);
                 st.ready = Some(r);
                 st.status = Status::Ready;
             }
@@ -902,7 +912,20 @@ fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_w
     let mut frame = cpu::frame(&ready.meta, &ready.src, &settings, &o);
     overlays.apply(&mut frame);
     st.frame = Some(frame.clone());
-    let key = (ready.id, EditDoc::settings_hash(&settings), overlays.key());
+    // A subject or person found since redraws it; check back while a
+    // search runs.
+    if ready.src.cache.finding().0 {
+        ctx.request_repaint_after(Duration::from_millis(100));
+    }
+    let key = (
+        ready.id,
+        format!(
+            "{} {}",
+            EditDoc::settings_hash(&settings),
+            ready.src.cache.found_generation()
+        ),
+        overlays.key(),
+    );
     if st.edited.as_ref().is_none_or(|v| v.key != key) {
         let h = render_into(
             &mut st.edited,

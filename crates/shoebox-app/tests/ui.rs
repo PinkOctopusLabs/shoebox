@@ -4835,3 +4835,50 @@ fn develop_reference_and_matched_exposures() {
         shoebox_app::views::develop::Compare::Edited
     );
 }
+
+/// A Subject mask: Vision finds the ball in the background, the photo
+/// redraws with it, and the mask covers the ball, not the whole frame.
+#[cfg(target_os = "macos")]
+#[test]
+fn develop_subject_mask() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(&root).unwrap();
+    let (w, h) = (640u32, 480u32);
+    let img = image::RgbImage::from_fn(w, h, |x, y| {
+        let (dx, dy) = (x as f32 - 320.0, y as f32 - 264.0);
+        let r = (dx * dx + dy * dy).sqrt() / 134.0;
+        if r < 1.0 {
+            let s = 1.0 - 0.5 * r * r;
+            image::Rgb([(240.0 * s) as u8, (120.0 * s) as u8, (30.0 * s) as u8])
+        } else {
+            image::Rgb([120, 130, 140])
+        }
+    });
+    std::fs::write(
+        root.join("ball.jpg"),
+        shoebox_fixtures::jpeg(&img, 92).unwrap(),
+    )
+    .unwrap();
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let mut h = harness(p, egui::vec2(1400.0, 2600.0));
+    settle(&mut h, Duration::from_secs(60));
+    h.get_by_label("ball.jpg").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(30), "develop", |a| {
+        a.develop_ready()
+    });
+    h.run_steps(3);
+    h.get_by_label("New mask").click();
+    h.run_steps(2);
+    h.get_by_label("Subject").click();
+    h.run_steps(2);
+    wait_for(&mut h, Duration::from_secs(30), "subject found", |a| {
+        let (cover, finding) = a.develop_mask_coverage();
+        !finding && cover > 0.0
+    });
+    let (cover, _) = h.state().develop_mask_coverage();
+    // The ball is about a fifth of the frame.
+    assert!(cover > 0.08 && cover < 0.4, "{cover}");
+}

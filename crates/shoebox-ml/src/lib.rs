@@ -14,6 +14,7 @@ pub mod download;
 mod encoder;
 pub mod faces;
 pub mod onnx;
+pub mod vision;
 
 use std::path::PathBuf;
 
@@ -45,6 +46,8 @@ pub enum MlError {
     Cancelled,
     #[error("model: {0}")]
     Model(#[from] candle_core::Error),
+    #[error("Vision: {0}")]
+    Vision(String),
     #[error("tokenizer: {0}")]
     Tokenizer(String),
     #[error("{0}")]

@@ -2009,3 +2009,42 @@ masks; AI raw denoise (RawNIND); Smart-light tone; finer AI masks.
   Photos without the EXIF, reference photos and movies are left alone and
   counted in the notice. For a virtual copy's tile, the current photo's
   Exposure is its master's.
+
+## Subject and person masks (Apple Vision) (2026-10-22)
+
+- Two mask parts, Subject (`VNGenerateForegroundInstanceMaskRequest`, all
+  instances) and People (`VNGeneratePersonSegmentationRequest`, accurate,
+  8-bit), through `objc2-vision` 0.3.2 with `objc2-core-video` and
+  `objc2-core-graphics` (Zlib/Apache/MIT, the objc2 project's bindings the
+  app already uses). The FFI is `shoebox-ml::vision`.
+- `shoebox-develop` doesn't depend on `shoebox-ml` for it: the app
+  registers a finder (`mask::register_finder`), as camera match profiles
+  are registered. Without one, the parts cover nothing.
+- **Found once per source**, on the masks' grid (at most 2560 px), on the
+  picture as the frame shows it, turned upright (the file's orientation,
+  then the edit's turns and mirror) so Vision sees it the right way up;
+  the mask is turned back to the stored image. Cached on the source by
+  what, orientation and size; colour edits don't search again.
+- **The live view never waits:** its source is marked for the background,
+  so a search runs on its own thread and the view redraws when it lands
+  (the render keys on a generation counter; repaints are asked for while
+  a search runs). Exports, 100% regions and previews search on their own
+  threads as they render.
+- The spec's 8-bit PNG cache on disk keyed by file hash isn't built yet:
+  opening a photo searches again (a fraction of a second). Guided-filter
+  upsampling of AI masks for full-size exports also waits (they're read
+  from the 2560 px grid, like other masks).
+
+## Linux deferred (2026-10-22)
+
+The user's call: Shoebox is built for macOS only for now. New work needs
+no Linux branch, there's no local Docker check before commits, and the
+CI Linux job is left running but isn't a blocker. Existing Linux branches
+stay. To come back to with Linux:
+
+- **Portable subject and person masks.** Vision is Apple's. Open models
+  that could run on candle like SAM: BiRefNet (MIT) or U²-Net / IS-Net
+  (Apache-2.0) for subjects, MODNet (Apache-2.0) or a SegFormer /
+  Mask2Former person class for people. SAM 2.1 (next) is portable and can
+  make a subject mask from a click meanwhile.
+- The local Docker check (in CLAUDE.md) and CI's Linux job as a gate.

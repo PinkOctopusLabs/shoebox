@@ -47,6 +47,54 @@ pub struct Tones {
     pub chroma: Vec<f32>,
 }
 
+/// What an AI part finds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Find {
+    Subject,
+    Person,
+}
+
+/// Finds a [`Find`] in an upright 8-bit sRGB image (`rgb`, width, height):
+/// a coverage byte per pixel, or why it couldn't.
+pub type Finder = dyn Fn(&[u8], usize, usize, Find) -> Result<Vec<u8>, String> + Send + Sync;
+
+static FINDER: std::sync::OnceLock<Box<Finder>> = std::sync::OnceLock::new();
+
+/// Give the masks a way to find subjects and people (the app registers
+/// Apple's Vision; `shoebox-develop` doesn't depend on it). Once.
+pub fn register_finder(f: Box<Finder>) {
+    let _ = FINDER.set(f);
+}
+
+/// Find `what` with the registered finder.
+pub fn find(rgb: &[u8], w: usize, h: usize, what: Find) -> Result<Vec<u8>, String> {
+    match FINDER.get() {
+        Some(f) => f(rgb, w, h, what),
+        None => Err("no subject finder in this build".into()),
+    }
+}
+
+/// The AI parts these layers have.
+pub fn finds(locals: &[&Local]) -> Vec<Find> {
+    let mut out = Vec::new();
+    for l in locals {
+        for p in &l.mask.parts {
+            let f = match p {
+                Part::Known(m) => match m.shape {
+                    Shape::Subject => Find::Subject,
+                    Shape::Person => Find::Person,
+                    _ => continue,
+                },
+                Part::Other(_) => continue,
+            };
+            if !out.contains(&f) {
+                out.push(f);
+            }
+        }
+    }
+    out
+}
+
 /// Whether any of these layers has a part that reads the picture.
 pub fn needs_tones(locals: &[&Local]) -> bool {
     locals.iter().any(|l| {
@@ -77,13 +125,39 @@ pub fn rasterise(
     units: [f64; 2],
     tones: Option<&Tones>,
 ) -> Masks {
+    rasterise_with(locals, width, height, units, tones, &|_| None)
+}
+
+/// [`rasterise`], with AI parts' coverage on the grid from `found` (None:
+/// not found yet, so they cover nothing).
+pub fn rasterise_with(
+    locals: &[&Local],
+    width: usize,
+    height: usize,
+    units: [f64; 2],
+    tones: Option<&Tones>,
+    found: &dyn Fn(Find) -> Option<std::sync::Arc<Vec<u8>>>,
+) -> Masks {
     let n = width * height;
     let mut data = vec![0u8; n * locals.len()];
     for (plane, l) in data.chunks_mut(n.max(1)).zip(locals) {
         let mut m = vec![0f32; n];
         for part in &l.mask.parts {
             let Part::Known(p) = part else { continue };
-            let v = shape(&p.shape, width, height, units, tones);
+            let v = match p.shape {
+                Shape::Subject | Shape::Person => {
+                    let f = if p.shape == Shape::Subject {
+                        Find::Subject
+                    } else {
+                        Find::Person
+                    };
+                    match found(f).filter(|c| c.len() == n) {
+                        Some(c) => c.iter().map(|&b| f32::from(b) / 255.0).collect(),
+                        None => vec![0.0; n],
+                    }
+                }
+                _ => shape(&p.shape, width, height, units, tones),
+            };
             m.par_iter_mut().zip(&v).for_each(|(m, &v)| {
                 let v = if p.invert { 1.0 - v } else { v };
                 *m = match p.op {
@@ -187,6 +261,8 @@ fn shape(s: &Shape, w: usize, h: usize, units: [f64; 2], tones: Option<&Tones>) 
                     * smoothstep(0.02, 0.08, f64::from(t.chroma[i]))
             })
         }
+        // Read from what was found (see `rasterise_with`).
+        Shape::Subject | Shape::Person => vec![0.0; w * h],
     }
 }
 

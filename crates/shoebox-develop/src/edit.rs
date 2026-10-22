@@ -781,6 +781,10 @@ pub enum Shape {
         #[serde(default = "twenty")]
         width: f64,
     },
+    /// The photo's subject (foreground objects), found by Apple's Vision.
+    Subject,
+    /// People (with hair and clothes), found by Apple's Vision.
+    Person,
 }
 
 fn half() -> f64 {

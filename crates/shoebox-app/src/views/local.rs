@@ -61,6 +61,8 @@ pub(super) enum Handle {
 /// The kinds of part, as the menus offer them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
+    Subject,
+    Person,
     Linear,
     Radial,
     Brush,
@@ -69,7 +71,9 @@ pub enum Kind {
 }
 
 impl Kind {
-    pub const ALL: [Kind; 5] = [
+    pub const ALL: [Kind; 7] = [
+        Kind::Subject,
+        Kind::Person,
         Kind::Linear,
         Kind::Radial,
         Kind::Brush,
@@ -84,6 +88,8 @@ impl Kind {
             Kind::Brush => "Brush",
             Kind::Luminance => "Luminance range",
             Kind::Colour => "Colour range",
+            Kind::Subject => "Subject",
+            Kind::Person => "People",
         }
     }
 
@@ -112,6 +118,8 @@ impl Kind {
                 hue: 30.0,
                 width: 20.0,
             },
+            Kind::Subject => Shape::Subject,
+            Kind::Person => Shape::Person,
         }
     }
 }
@@ -123,6 +131,8 @@ fn kind_of(s: &Shape) -> Kind {
         Shape::Brush { .. } => Kind::Brush,
         Shape::Luminance { .. } => Kind::Luminance,
         Shape::Colour { .. } => Kind::Colour,
+        Shape::Subject => Kind::Subject,
+        Shape::Person => Kind::Person,
     }
 }
 
@@ -569,6 +579,21 @@ fn part_controls(app: &mut ShoeboxApp, ui: &mut egui::Ui, id: &str, i: usize, p:
             }
             Shape::Linear { .. } => {
                 ui.weak("Drag the lines on the photo.");
+                ui.end_row();
+            }
+            Shape::Subject | Shape::Person => {
+                let (finding, failed) = app
+                    .develop
+                    .ready
+                    .as_ref()
+                    .map_or((false, None), |r| r.src.cache.finding());
+                if finding {
+                    ui.weak("Finding it…");
+                } else if let Some(e) = failed {
+                    ui.weak(format!("Couldn't: {e}"));
+                } else {
+                    ui.weak("Found by Apple's Vision.");
+                }
                 ui.end_row();
             }
         });

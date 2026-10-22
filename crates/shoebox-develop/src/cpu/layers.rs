@@ -63,7 +63,15 @@ fn active(s: &Settings) -> (Vec<&Local>, Vec<usize>) {
 }
 
 /// The layers for `src` under the frame's colour matrix and display.
-pub fn layers(src: &Demosaiced, colour: &[[f32; 3]; 3], display: &Display, s: &Settings) -> Layers {
+/// `orientation`: the frame's orientation (the file's, then the edit's
+/// turns and mirror), so subjects and people are found upright.
+pub fn layers(
+    src: &Demosaiced,
+    colour: &[[f32; 3]; 3],
+    display: &Display,
+    s: &Settings,
+    orientation: u16,
+) -> Layers {
     let (locals, from) = active(s);
     if locals.is_empty() {
         return Layers::default();
@@ -73,6 +81,11 @@ pub fn layers(src: &Demosaiced, colour: &[[f32; 3]; 3], display: &Display, s: &S
     let long = sw.max(sh).max(1) as f64;
     let units = [sw as f64 / long, sh as f64 / long];
     let tones = mask::needs_tones(&locals);
+    let finds = mask::finds(&locals);
+    let found: Vec<(mask::Find, Arc<Vec<u8>>)> = finds
+        .iter()
+        .filter_map(|&f| Some((f, found(src, colour, display, f, orientation, gw, gh)?)))
+        .collect();
     let key = {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -82,6 +95,9 @@ pub fn layers(src: &Demosaiced, colour: &[[f32; 3]; 3], display: &Display, s: &S
                 .hash(&mut h);
         }
         (gw, gh).hash(&mut h);
+        if !finds.is_empty() {
+            (orientation, src.cache.found_generation()).hash(&mut h);
+        }
         if tones {
             // Ranges read the picture as the frame shows it.
             for v in colour.iter().flatten() {
@@ -96,7 +112,8 @@ pub fn layers(src: &Demosaiced, colour: &[[f32; 3]; 3], display: &Display, s: &S
             let small = src.cache.mask_source(&src.rgb, gw, gh);
             tones_of(&small, colour, display)
         });
-        mask::rasterise(&locals, gw, gh, units, t.as_ref())
+        let lookup = |f: mask::Find| found.iter().find(|x| x.0 == f).map(|x| x.1.clone());
+        mask::rasterise_with(&locals, gw, gh, units, t.as_ref(), &lookup)
     });
     Layers {
         list: locals.iter().map(|l| layer(l)).collect(),
@@ -104,6 +121,83 @@ pub fn layers(src: &Demosaiced, colour: &[[f32; 3]; 3], display: &Display, s: &S
         from,
         masks: Some(masks),
         scale: [gw as f32 / sw as f32, gh as f32 / sh as f32],
+    }
+}
+
+/// A subject or person on the masks' grid, in the stored image's
+/// orientation, once found. The search runs once per source (and
+/// orientation): on its own thread for the live view, which redraws when
+/// it's done; otherwise here.
+fn found(
+    src: &Demosaiced,
+    colour: &[[f32; 3]; 3],
+    display: &Display,
+    what: mask::Find,
+    orientation: u16,
+    gw: usize,
+    gh: usize,
+) -> Option<Arc<Vec<u8>>> {
+    let key = (what, orientation, gw, gh);
+    match src.cache.found(&key) {
+        Some(maps::Found::Done(m)) => return Some(m),
+        Some(_) => return None,
+        None => {}
+    }
+    // The picture as shown, upright, in 8 bits.
+    let small = src.cache.mask_source(&src.rgb, gw, gh);
+    let mut shown = Rgb::new(gw, gh);
+    shown
+        .data
+        .as_chunks_mut::<3>()
+        .0
+        .par_iter_mut()
+        .zip(small.data.as_chunks::<3>().0.par_iter())
+        .for_each(|(o, p)| *o = super::display_pixel(display, super::mul3(colour, *p)));
+    let upright = super::orient(&shown, orientation);
+    let bytes: Vec<u8> = super::to_u8(&upright);
+    let (uw, uh) = (upright.width, upright.height);
+    let work = move || -> maps::Found {
+        match mask::find(&bytes, uw, uh, what) {
+            Ok(m) if m.len() == uw * uh => {
+                // Back to the stored image's orientation.
+                let mut img = Rgb::new(uw, uh);
+                for (i, v) in m.iter().enumerate() {
+                    img.data[i * 3] = f32::from(*v);
+                }
+                let back = super::orient(&img, undo_orientation(orientation));
+                let data: Vec<u8> = back
+                    .data
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .map(|p| p[0].round().clamp(0.0, 255.0) as u8)
+                    .collect();
+                maps::Found::Done(Arc::new(data))
+            }
+            Ok(_) => maps::Found::Failed("the mask came back the wrong size".into()),
+            Err(e) => maps::Found::Failed(e),
+        }
+    };
+    if src.cache.background() {
+        src.cache.set_found(key, maps::Found::Pending);
+        let cache = src.cache.clone();
+        std::thread::spawn(move || cache.set_found(key, work()));
+        return None;
+    }
+    let f = work();
+    src.cache.set_found(key, f.clone());
+    match f {
+        maps::Found::Done(m) => Some(m),
+        _ => None,
+    }
+}
+
+/// The orientation that turns an image in orientation `o` back.
+fn undo_orientation(o: u16) -> u16 {
+    match o {
+        6 => 8,
+        8 => 6,
+        o => o,
     }
 }
 
