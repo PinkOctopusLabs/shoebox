@@ -2039,8 +2039,8 @@ masks; AI raw denoise (RawNIND); Smart-light tone; finer AI masks.
 
 The user's call: Shoebox is built for macOS only for now. New work needs
 no Linux branch, there's no local Docker check before commits, and the
-CI Linux job is left running but isn't a blocker. Existing Linux branches
-stay. To come back to with Linux:
+CI Linux job was left running but wasn't a blocker (later disabled;
+below). Existing Linux branches stay. To come back to with Linux:
 
 - **Portable subject and person masks.** Vision is Apple's. Open models
   that could run on candle like SAM: BiRefNet (MIT) or U²-Net / IS-Net
@@ -2048,6 +2048,9 @@ stay. To come back to with Linux:
   Mask2Former person class for people. SAM 2.1 (next) is portable and can
   make a subject mask from a click meanwhile.
 - The local Docker check (in CLAUDE.md) and CI's Linux job as a gate.
+- 2026-10-22: CI's Linux job is disabled (it kept failing): `if: false`
+  on the `linux` job in `.github/workflows/ci.yml`. Delete that line to
+  re-enable it.
 
 ## Object masks: SAM 2.1 on candle (2026-10-22)
 

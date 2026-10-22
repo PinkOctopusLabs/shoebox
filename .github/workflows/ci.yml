@@ -31,6 +31,9 @@ jobs:
           cargo test -p shoebox-app --lib --test glyphs
 
   linux:
+    # Disabled: Linux is deferred (docs/DECISIONS.md, "Linux deferred").
+    # Delete this `if:` to bring the job back.
+    if: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

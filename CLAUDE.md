@@ -56,10 +56,9 @@ A Rust + egui photo library app for macOS. **`docs/SPEC.md` is the source of tru
 - **macOS only for now; Linux is deferred** (decided 2026-10-22). Build,
   test and design for macOS; new work needs no Linux branch, and there's no
   local Linux check before commits. Existing `cfg` Linux branches stay, and
-  CI (GitHub Actions, public repo PinkOctopusLabs/shoebox) still runs a
-  Linux job without the GPU-only UI tests; a red Linux job is noted, not a
-  blocker. When Linux comes back (DECISIONS, "Linux deferred"), the
-  Docker check was:
+  CI's Linux job (GitHub Actions, public repo PinkOctopusLabs/shoebox) is
+  disabled (`if: false`) until Linux comes back. When it does (DECISIONS,
+  "Linux deferred"), the Docker check was:
   `docker run --rm -v "$PWD":/src:ro -v shoebox-linux-target:/target -e CARGO_TARGET_DIR=/target -w /src rust:1.99-bookworm bash -c 'cargo test --workspace --exclude shoebox-app -j 2 && cargo test -p shoebox-app --lib --test glyphs -j 2'`
   Prefer pure-Rust crates still.
 - Licence is GPL-3.0-or-later. Code ported from darktable, RawTherapee or
