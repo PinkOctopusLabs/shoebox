@@ -1,6 +1,6 @@
 //! Photo merges (EDITING-SPEC, Phase 4 additions; SPEC, Merges): Merge to
-//! HDR… (⌃H) and Merge to Focus Stack… in the photo menu open a dialog
-//! (one for every kind, its options by kind) listing the photos chosen,
+//! HDR… (⌃H), Merge to Focus Stack… and Merge to Panorama… (⌃M) in the photo
+//! menu open a dialog (one for every kind, its options by kind) listing the photos chosen,
 //! with what's wrong if they can't be merged, the options, and what will
 //! be written where (rule 6's dry run: one new file, from these photos,
 //! which are only read). Merge runs on the develop thread's merge thread,
@@ -16,6 +16,7 @@ use eframe::egui::{self, RichText};
 use shoebox_core::merges::Kind;
 use shoebox_develop::merge::focus;
 use shoebox_develop::merge::hdr::{self, Deghost};
+use shoebox_develop::merge::pano::{self, Projection};
 
 use crate::app::ShoeboxApp;
 
@@ -27,6 +28,10 @@ pub struct State {
     pub kind: Kind,
     /// A focus stack's method.
     pub method: focus::Method,
+    /// A panorama's projection, crop and lens corrections.
+    pub projection: Projection,
+    pub crop: Option<bool>,
+    pub lens: Option<bool>,
     /// The kind of the merge running (for its messages).
     ran: Kind,
     pub align: Option<bool>,
@@ -117,6 +122,14 @@ fn refusal(app: &ShoeboxApp, photos: &[PathBuf], kind: Kind) -> Option<String> {
             ));
         }
         Kind::Focus => {}
+        Kind::Panorama if !(pano::MIN_FRAMES..=pano::MAX_FRAMES).contains(&photos.len()) => {
+            return Some(format!(
+                "Choose {} to {} overlapping photos.",
+                pano::MIN_FRAMES,
+                pano::MAX_FRAMES
+            ));
+        }
+        Kind::Panorama => {}
         _ if !(hdr::MIN_FRAMES..=hdr::MAX_FRAMES).contains(&photos.len()) => {
             return Some(format!(
                 "Choose {} to {} bracketed photos.",
@@ -152,7 +165,13 @@ fn refusal(app: &ShoeboxApp, photos: &[PathBuf], kind: Kind) -> Option<String> {
                 name(p)
             ));
         }
-        let s = (photo.meta.width, photo.meta.height);
+        let (w, h) = (photo.meta.width, photo.meta.height);
+        // A panorama's frames may be turned either way.
+        let s = if kind == Kind::Panorama {
+            (w.min(h), w.max(h))
+        } else {
+            (w, h)
+        };
         if *size.get_or_insert(s) != s {
             return Some("The photos aren't all the same size.".into());
         }
@@ -226,6 +245,10 @@ pub fn dialog(app: &mut ShoeboxApp, ctx: &egui::Context) {
                      sharp throughout:",
                     rows.len()
                 ),
+                Kind::Panorama => format!(
+                    "{} overlapping photos, stitched into one raw photo:",
+                    rows.len()
+                ),
                 _ => format!(
                     "{} bracketed photos, merged into one raw photo with the range of all of them:",
                     rows.len()
@@ -241,6 +264,7 @@ pub fn dialog(app: &mut ShoeboxApp, ctx: &egui::Context) {
                         ui.label(n);
                         ui.weak(e);
                         let rel = match (stops, base) {
+                            _ if kind == Kind::Panorama => String::new(),
                             _ if i == reference => "reference".to_owned(),
                             _ if kind == Kind::Focus => String::new(),
                             (Some(s), Some(b)) => format!("{:+.1} EV", s - b),
@@ -253,7 +277,8 @@ pub fn dialog(app: &mut ShoeboxApp, ctx: &egui::Context) {
             ui.add_space(6.0);
             match kind {
                 Kind::Focus => focus_options(ui, &mut app.merge),
-                _ => hdr_options(ui, &mut app.merge, &rows, auto),
+                Kind::Panorama => panorama_options(ui, &mut app.merge),
+                Kind::Hdr => hdr_options(ui, &mut app.merge, &rows, auto),
             }
             ui.add_space(6.0);
             if let Some(first) = photos.first() {
@@ -326,6 +351,11 @@ pub fn dialog(app: &mut ShoeboxApp, ctx: &egui::Context) {
             focus: focus::Options {
                 method: st.method,
                 align: st.align.unwrap_or(true),
+            },
+            pano: pano::Options {
+                projection: st.projection,
+                crop: st.crop.unwrap_or(true),
+                lens: st.lens.unwrap_or(true),
             },
             roots: app.catalog.roots.clone(),
             cancel: flag.clone(),
@@ -413,6 +443,47 @@ fn focus_options(ui: &mut egui::Ui, st: &mut State) {
         .changed()
     {
         st.align = Some(align);
+    }
+}
+
+/// A panorama's options: the projection, the crop, lens corrections.
+fn panorama_options(ui: &mut egui::Ui, st: &mut State) {
+    ui.horizontal(|ui| {
+        ui.label("Projection");
+        egui::ComboBox::from_id_salt("merge-projection")
+            .selected_text(st.projection.label())
+            .show_ui(ui, |ui| {
+                for p in Projection::ALL {
+                    ui.selectable_value(&mut st.projection, p, p.label());
+                }
+            })
+            .response
+            .on_hover_text(
+                "Spherical shows any field (to 360°); Cylindrical keeps a row's verticals \
+                 straight; Perspective keeps every straight line straight, to 120° across. \
+                 Auto chooses by how much the photos cover.",
+            );
+    });
+    let mut crop = st.crop.unwrap_or(true);
+    if ui
+        .checkbox(&mut crop, "Crop to the largest rectangle")
+        .on_hover_text(
+            "Off: the whole boundary, the empty corners black (a DNG has no transparency)",
+        )
+        .changed()
+    {
+        st.crop = Some(crop);
+    }
+    let mut lens = st.lens.unwrap_or(true);
+    if ui
+        .checkbox(&mut lens, "Correct each photo's lens first")
+        .on_hover_text(
+            "Distortion, vignetting and colour fringes, from the camera's own data and \
+             Lensfun, so the seams line up and the corners don't band",
+        )
+        .changed()
+    {
+        st.lens = Some(lens);
     }
 }
 

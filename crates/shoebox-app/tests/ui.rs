@@ -6437,3 +6437,92 @@ fn focus_stack_from_the_photo_menu() {
         assert_eq!(&std::fs::read(p).unwrap(), bytes);
     }
 }
+
+/// Merge to Panorama (⌃M): the dialog lists the frames with the projection
+/// and crop; Merge stitches them in the background, the DNG lands beside
+/// the first as `-Pano`, wider than any frame, the new photo is selected,
+/// a photo of its own whose Info panel names its sources; it opens in
+/// Develop as a linear raw; ⌘Z sends it to the Trash. The sources are never
+/// written.
+#[test]
+fn panorama_from_the_photo_menu() {
+    use shoebox_fixtures::pano::{pano_light, ray, rotation};
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(&root).unwrap();
+    let (w, h) = (600u32, 400u32);
+    let focal = 40.0 / 36f64.hypot(24.0) * f64::from(w).hypot(f64::from(h));
+    let mut originals = Vec::new();
+    for (i, yaw) in [-28.0, 0.0, 28.0].into_iter().enumerate() {
+        let r = rotation(yaw, 0.5 * i as f64, 0.0);
+        let f = shoebox_fixtures::PanoFrame {
+            seed: i as u64 + 1,
+            subsec: ["10", "30", "50"][i],
+            ..shoebox_fixtures::PanoFrame::new(w, h)
+        };
+        let p = root.join(format!("DSC_02{:02}.dng", i + 1));
+        let bytes = f.write(|x, y| pano_light(ray(&r, focal, w, h, x, y)));
+        std::fs::write(&p, &bytes).unwrap();
+        originals.push((p, bytes));
+    }
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+    h.state_mut()
+        .select_names(&["DSC_0201.dng", "DSC_0202.dng", "DSC_0203.dng"]);
+    h.run_steps(2);
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::M);
+    h.run_steps(3);
+    assert_eq!(h.state().merge_state(), (true, false, 0));
+    assert!(h.query_by_label("Merge to Panorama").is_some());
+    assert!(h.query_by_label("Projection").is_some());
+    assert!(h.query_by_label("Crop to the largest rectangle").is_some());
+    assert!(h.get_all_by_label("DSC_0203.dng").count() >= 2);
+    snapshot(&mut h, "merge-pano-dialog");
+    h.get_by_label("Merge").click();
+    h.run_steps(2);
+    let merged = root.join("DSC_0201-Pano.dng");
+    wait_for(&mut h, Duration::from_secs(120), "the panorama", |a| {
+        assert_eq!(a.error_message(), None);
+        merged.exists()
+    });
+    wait_for(&mut h, Duration::from_secs(30), "selected", |a| {
+        a.photo_count() == 4 && a.current_name().as_deref() == Some("DSC_0201-Pano.dng")
+    });
+    let (open, running, merges) = h.state().merge_state();
+    assert!(!open && !running && merges == 1);
+    assert_eq!(h.state().shown_count(), 4);
+    h.run_steps(3);
+    assert!(h.query_by_label("PANORAMA OF").is_some());
+    snapshot(&mut h, "merge-pano-done");
+    for (p, bytes) in &originals {
+        assert_eq!(&std::fs::read(p).unwrap(), bytes, "{}", p.display());
+    }
+    let back = shoebox_decode::raw::decode(&std::fs::read(&merged).unwrap()).unwrap();
+    assert!(back.linear.is_some());
+    assert!(
+        back.width > w as usize * 3 / 2,
+        "{}×{} from {w}-pixel frames",
+        back.width,
+        back.height
+    );
+
+    // In Develop: a linear raw, starting from the defaults.
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(30), "develop", |a| {
+        a.develop_ready()
+    });
+    assert!(h.state().develop_linear().is_some());
+    h.key_press(egui::Key::G);
+    h.run_steps(2);
+
+    // ⌘Z: to the Trash.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    wait_for(&mut h, Duration::from_secs(30), "undone", |a| {
+        !merged.exists() && a.photo_count() == 3
+    });
+    assert!(t.path().join("trash/DSC_0201-Pano.dng").is_file());
+    for (p, bytes) in &originals {
+        assert_eq!(&std::fs::read(p).unwrap(), bytes);
+    }
+}

@@ -528,6 +528,18 @@ pub fn photo_menu(app: &mut ShoeboxApp, resp: &egui::Response, pos: usize) {
         }
         if n > 1
             && ui
+                .button("Merge to Panorama…  (Ctrl-M)")
+                .on_hover_text(
+                    "Stitch overlapping raw photos into one wide raw photo, written beside \
+                     them as a new DNG",
+                )
+                .clicked()
+        {
+            merge::open_as(app, shoebox_core::merges::Kind::Panorama);
+            ui.close();
+        }
+        if n > 1
+            && ui
                 .button("Match Total Exposures")
                 .on_hover_text(
                     "Set the others' Exposure so they come out as bright as this photo \

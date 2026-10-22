@@ -15,7 +15,7 @@ use shoebox_core::fileops::PlannedCopy;
 use shoebox_core::merges::{self, Kind};
 use shoebox_core::scan::Root;
 use shoebox_develop::dng::{Converter, DngCache};
-use shoebox_develop::merge::{self as dm, MergeError, focus, hdr};
+use shoebox_develop::merge::{self as dm, focus, hdr, pano};
 
 use crate::develop::Event;
 
@@ -29,6 +29,8 @@ pub struct Job {
     pub options: hdr::Options,
     /// A focus stack's options.
     pub focus: focus::Options,
+    /// A panorama's.
+    pub pano: pano::Options,
     /// The library's folders.
     pub roots: Vec<Root>,
     pub cancel: Arc<AtomicBool>,
@@ -75,24 +77,35 @@ fn merge(
         });
     }
     let progress = |f: f32| emit(Event::MergeProgress(0.05 + 0.85 * f));
-    // The result, and why each frame fell short (None: fine).
-    let (merged, failed): (dm::Merged, Vec<Option<&str>>) = match job.kind {
-        Kind::Hdr => hdr::merge(&inputs, &job.options, &progress, &job.cancel)
-            .map(|o| (o.merged, o.frames.iter().map(|f| f.align_failed).collect())),
-        Kind::Focus => focus::merge(&inputs, &job.focus, &progress, &job.cancel)
-            .map(|o| (o.merged, o.frames.iter().map(|f| f.align_failed).collect())),
-        Kind::Panorama => Err(MergeError::Refused(format!(
-            "{} isn't built yet",
-            job.kind.label()
-        ))),
-    }
-    .map_err(|e| e.to_string())?;
-    let mut notes = Vec::new();
-    for (f, (p, _)) in failed.iter().zip(&job.sources) {
-        if let Some(why) = f {
-            notes.push(format!("{} {why}", name(p)));
+    let (merged, notes) = match job.kind {
+        Kind::Hdr => {
+            let out = hdr::merge(&inputs, &job.options, &progress, &job.cancel)
+                .map_err(|e| e.to_string())?;
+            let notes = out
+                .frames
+                .iter()
+                .zip(&job.sources)
+                .filter_map(|(f, (p, _))| f.align_failed.map(|why| format!("{} {why}", name(p))))
+                .collect();
+            (out.merged, notes)
         }
-    }
+        Kind::Panorama => {
+            let out = pano::merge(&inputs, &job.pano, &progress, &job.cancel)
+                .map_err(|e| e.to_string())?;
+            (out.merged, out.notes)
+        }
+        Kind::Focus => {
+            let out = focus::merge(&inputs, &job.focus, &progress, &job.cancel)
+                .map_err(|e| e.to_string())?;
+            let notes = out
+                .frames
+                .iter()
+                .zip(&job.sources)
+                .filter_map(|(f, (p, _))| f.align_failed.map(|why| format!("{} {why}", name(p))))
+                .collect();
+            (out.merged, notes)
+        }
+    };
     let record = dm::Record {
         kind: job.kind.key().to_owned(),
         sources: plan

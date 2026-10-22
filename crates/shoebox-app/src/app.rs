@@ -4034,6 +4034,11 @@ impl ShoeboxApp {
             views::merge::open(self);
             return;
         }
+        // ⌃M: Merge to Panorama (Lightroom's key).
+        if m.ctrl && !m.mac_cmd && pressed(egui::Key::M) {
+            views::merge::open_as(self, shoebox_core::merges::Kind::Panorama);
+            return;
+        }
         if m.command && m.shift && pressed(egui::Key::E) {
             if m.alt {
                 views::export::repeat(self);

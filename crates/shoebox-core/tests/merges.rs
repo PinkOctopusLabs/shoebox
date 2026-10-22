@@ -205,6 +205,46 @@ fn a_focus_stack_is_added_as_its_own_kind_and_undone() {
 }
 
 #[test]
+fn a_panorama_is_added_as_pano_beside_its_first_source_and_undone() {
+    let l = lib();
+    let before: Vec<[u8; 32]> = l.sources.iter().map(|p| b3(p)).collect();
+    let plan = merges::plan(&l.roots, Kind::Panorama, &l.sources).unwrap();
+    let dir = l.sources[0].parent().unwrap();
+    assert_eq!(plan.dst, dir.join("DSC_0041-Pano.dng"));
+    let copy = PlannedCopy {
+        dst: plan.dst.clone(),
+        ..l.result()
+    };
+    let writes = merges::plan_save(std::slice::from_ref(&l.lib), &[plan.record()]).unwrap();
+    let batch = l
+        .fileops
+        .add_merge("panorama", &copy, &plan.sources, writes)
+        .unwrap();
+    let b = l.fileops.journal().batch(batch).unwrap().unwrap();
+    assert_eq!((b.kind.as_str(), b.status.as_str()), ("merge", "done"));
+    assert!(plan.dst.is_file());
+    let after: Vec<[u8; 32]> = l.sources.iter().map(|p| b3(p)).collect();
+    assert_eq!(before, after);
+    // A photo of its own, recorded as a panorama of its sources.
+    let mut cache = Cache::open(&l.cache.join("cache.sqlite")).unwrap();
+    let (c, _) = Catalog::refresh(&mut cache, l.roots.clone(), &|_, _| {}).unwrap();
+    let at = |p: &Path| c.photos.iter().position(|x| x.path == p).unwrap();
+    let m = at(&plan.dst);
+    assert!(l.sources.iter().all(|s| c.stack_of[m] != c.stack_of[at(s)]));
+    let rec = merges::of_file(&c.merges, &plan.dst).unwrap();
+    assert_eq!(rec.kind, Kind::Panorama);
+    assert_eq!(rec.sources.len(), 3);
+    // A second panorama of the same photos never replaces the first.
+    let again = merges::plan(&l.roots, Kind::Panorama, &l.sources).unwrap();
+    assert_eq!(again.dst, dir.join("DSC_0041-Pano-1.dng"));
+    // Undo: to the Trash.
+    l.fileops.undo(batch).unwrap();
+    assert!(!plan.dst.exists());
+    assert!(l.trash.join("DSC_0041-Pano.dng").is_file());
+    assert!(merges::load(std::slice::from_ref(&l.lib)).is_empty());
+}
+
+#[test]
 fn merges_read_their_sources_only_and_never_in_reference_folders() {
     let l = lib();
     // A source in a reference folder.
