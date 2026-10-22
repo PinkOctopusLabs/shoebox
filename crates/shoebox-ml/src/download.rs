@@ -181,6 +181,23 @@ pub const INPAINT: Spec = Spec {
     convert: false,
 };
 
+/// Depth Anything V2 Small (Apache 2.0; the larger ones are CC BY-NC and
+/// never fetched): Lens Blur's depth maps. The authors' own checkpoint
+/// from their Hugging Face repository.
+pub const DEPTH: Spec = Spec {
+    id: crate::depth::MODEL_ID,
+    files: &[Remote {
+        repo: "depth-anything/Depth-Anything-V2-Small",
+        revision: "03876f8651c73a60fe4c2c48294e09fcb6838fcf",
+        name: crate::depth::FILE,
+        size: 99_218_434,
+        sha256: "715fade13be8f229f8a70cc02066f656f2423a59effd0579197bbf57860e1378",
+        direct: None,
+    }],
+    ready: &[crate::depth::FILE],
+    convert: false,
+};
+
 impl Spec {
     /// Bytes to download.
     pub fn bytes(&self) -> u64 {

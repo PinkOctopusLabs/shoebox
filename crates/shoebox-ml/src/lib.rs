@@ -10,6 +10,7 @@
 //! hand over pixels.
 
 pub mod convert;
+pub mod depth;
 pub mod download;
 mod encoder;
 pub mod faces;
