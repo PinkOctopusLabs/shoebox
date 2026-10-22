@@ -299,6 +299,7 @@ Shortcuts follow Lightroom wherever one exists, so existing muscle memory carrie
 | R | In Develop: crop (Enter applies, Escape cancels) |
 | J | In Develop: show clipping |
 | W | In Develop: pick a neutral for white balance |
+| K | In Develop: place a control point (a click on the photo) |
 | Z or Space | In Develop: fit / 100% (drag or scroll to pan; double-click zooms there) |
 | Cmd+[ / Cmd+] | In Develop: rotate left / right |
 | Shift+Cmd+E / Opt+Shift+Cmd+E | Export… / export again with the last presets |

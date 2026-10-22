@@ -185,3 +185,14 @@ together at the end, before the release.
   masks, close the app, open it again: the masks are there at once
   ("Finding it…" no more than flickers), and `<cache>/ai-masks` holds a PNG per mask. After a
   macOS update, Subject and People are found again (once).
+
+
+## Phase 4 (as features land)
+
+- [ ] **Control points** (K) on landscapes and portraits: a point on a
+  blue sky darkens the sky round it without reaching into trees, roofs
+  or a face of a similar brightness; a point on a face warms the skin
+  without the background; a point on a white wall or grey cloud (no
+  colour part) still takes it. The default size and softness feel like
+  PhotoLab's U Point (or say which way they should go), and the edge of
+  the effect isn't visible as a circle.

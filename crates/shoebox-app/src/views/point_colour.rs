@@ -44,6 +44,9 @@ pub fn section(app: &mut ShoeboxApp, ui: &mut egui::Ui, pc: &PointColour) {
             {
                 picking = !picking;
                 app.develop.points.picking = picking;
+                if picking {
+                    app.develop.local.placing = false;
+                }
             }
             let mut show = app.develop.points.show;
             if ui

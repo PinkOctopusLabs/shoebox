@@ -4770,6 +4770,157 @@ fn develop_point_colour() {
     assert!(points(&h).is_empty());
 }
 
+/// Control points: K, a click on the red half makes a mask of a circle
+/// there intersected with red and its brightness (one step, selected);
+/// its circle's handle sizes it; ⌘Z takes both back. The panel's button
+/// does the same, and Escape stops it without placing one.
+#[test]
+fn develop_control_point() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(&root).unwrap();
+    let img = image::RgbImage::from_fn(800, 600, |x, _| {
+        image::Rgb(if x < 400 {
+            [200, 50, 40]
+        } else {
+            [40, 60, 200]
+        })
+    });
+    std::fs::write(
+        root.join("point.jpg"),
+        shoebox_fixtures::jpeg(&img, 92).unwrap(),
+    )
+    .unwrap();
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let mut h = harness(p, egui::vec2(1400.0, 2600.0));
+    settle(&mut h, Duration::from_secs(60));
+    h.get_by_label("point.jpg").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(30), "develop", |a| {
+        a.develop_ready()
+    });
+    wait_for(&mut h, Duration::from_secs(30), "histogram", |a| {
+        a.develop_histogram().0.is_some()
+    });
+    h.run_steps(3);
+    use shoebox_develop::edit::{MaskPart, Op, Part, Shape};
+    let locals =
+        |h: &Harness<'_, ShoeboxApp>| h.state().develop_doc().unwrap().settings().locals.clone();
+    let last = |h: &Harness<'_, ShoeboxApp>| {
+        let doc = h.state().develop_doc().unwrap();
+        doc.history().last().unwrap().label.clone()
+    };
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let click = |h: &mut Harness<'_, ShoeboxApp>, at: egui::Pos2| {
+        h.event(egui::Event::PointerMoved(at));
+        h.run_steps(1);
+        h.event(button(at, true));
+        h.event(button(at, false));
+        h.run_steps(3);
+    };
+    let photo = h.state().develop_photo_rect().unwrap();
+    let at = photo.center() + egui::vec2(-photo.width() / 4.0, 0.0);
+    h.key_press(egui::Key::K);
+    h.run_steps(2);
+    click(&mut h, at);
+    let l = locals(&h);
+    assert_eq!(l.len(), 1);
+    assert_eq!(l[0].name, "Control point 1");
+    assert_eq!(last(&h), "New control point");
+    assert_eq!(h.state().develop_local().0.as_deref(), Some("l1"));
+    assert_eq!(h.state().develop_local().1, 0, "the circle's handles");
+    let parts: Vec<&MaskPart> = l[0]
+        .mask
+        .parts
+        .iter()
+        .map(|p| match p {
+            Part::Known(p) => p,
+            Part::Other(v) => panic!("{v}"),
+        })
+        .collect();
+    assert_eq!(parts.len(), 3, "{parts:?}");
+    let Shape::Radial { centre, radii, .. } = parts[0].shape else {
+        panic!("{:?}", parts[0].shape)
+    };
+    assert_eq!(parts[0].op, Op::Add);
+    assert!(
+        (centre[0] - 0.25).abs() < 0.01 && (centre[1] - 0.375).abs() < 0.01,
+        "{centre:?}"
+    );
+    match parts[1].shape {
+        // Red's Oklab hue.
+        Shape::Colour { hue, .. } => assert!((0.0..60.0).contains(&hue), "{hue}"),
+        ref s => panic!("{s:?}"),
+    }
+    assert_eq!(parts[1].op, Op::Intersect);
+    assert!(matches!(parts[2].shape, Shape::Luminance { .. }));
+    assert_eq!(parts[2].op, Op::Intersect);
+    wait_for(&mut h, Duration::from_secs(30), "rendered", |a| {
+        a.develop_local().2 == 1
+    });
+
+    // The circle's handle on its right sizes it: one step.
+    let handle = at + egui::vec2(radii[0] as f32 * photo.width(), 0.0);
+    h.event(egui::Event::PointerMoved(handle));
+    h.run_steps(1);
+    h.event(button(handle, true));
+    h.run_steps(1);
+    for k in 1..=6 {
+        h.event(egui::Event::PointerMoved(
+            handle + egui::vec2(10.0 * k as f32, 0.0),
+        ));
+        h.run_steps(1);
+    }
+    h.event(button(handle + egui::vec2(60.0, 0.0), false));
+    h.run_steps(3);
+    let grown = match &locals(&h)[0].mask.parts[0] {
+        Part::Known(MaskPart {
+            shape: Shape::Radial { radii, .. },
+            ..
+        }) => *radii,
+        other => panic!("{other:?}"),
+    };
+    assert!(grown[0] > radii[0] + 0.03, "{grown:?}");
+    assert_eq!(last(&h), "Move radial gradient");
+    snapshot(&mut h, "develop-control-point");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(3);
+    assert!(locals(&h).is_empty());
+
+    // The panel's button; Escape stops it, so a click places nothing.
+    h.get_by_label("Control point").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    click(&mut h, at);
+    assert!(locals(&h).is_empty());
+    assert_eq!(h.state().view_name(), View::Develop);
+    // Pressed again, a click on the blue half takes blue.
+    h.get_by_label("Control point").click();
+    h.run_steps(2);
+    click(
+        &mut h,
+        photo.center() + egui::vec2(photo.width() / 4.0, 0.0),
+    );
+    let l = locals(&h);
+    assert_eq!(l.len(), 1);
+    match &l[0].mask.parts[1] {
+        Part::Known(MaskPart {
+            shape: Shape::Colour { hue, .. },
+            ..
+        }) => assert!((220.0..300.0).contains(hue), "{hue}"),
+        other => panic!("{other:?}"),
+    }
+}
+
 /// Spot removal: Q, a click heals a spot there from a source found
 /// nearby; dragging the spot moves it (one step); Backspace removes it; a
 /// red eye has no source; Escape puts the tool down without leaving

@@ -3961,7 +3961,7 @@ impl ShoeboxApp {
             if pressed(egui::Key::E) {
                 self.new_event_from_selection(None);
             }
-            if pressed(egui::Key::K) {
+            if pressed(egui::Key::K) && self.develop.crop.is_none() {
                 self.focus_keywords = true;
                 self.right_open = true;
             }
@@ -4093,6 +4093,10 @@ impl ShoeboxApp {
             {
                 views::guided::remove(self, i);
             }
+            if pressed(egui::Key::K) {
+                let on = !self.develop.local.placing;
+                views::local::set_placing(self, on);
+            }
             if pressed(egui::Key::O) && self.develop.local.selected.is_some() {
                 let t = &mut self.develop.local;
                 t.show_mask = !t.show_mask;
@@ -4131,6 +4135,12 @@ impl ShoeboxApp {
                 {
                     views::guided::set_active(self, false);
                 }
+            } else if pressed(egui::Key::Escape)
+                && self.develop.local.placing
+                && !ctx.any_popup_open()
+            {
+                // Escape stops placing a control point first.
+                self.develop.local.placing = false;
             } else if pressed(egui::Key::Escape)
                 && self.develop.spots.active
                 && !ctx.any_popup_open()

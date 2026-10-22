@@ -411,7 +411,7 @@ As built (2026-10-22, DECISIONS): layers run after the global dehaze, highlights
 | AI sky | SegFormer trained on ADE20K (which has a sky class), using candle-transformers' own SegFormer; check the weights' licence | 4 |
 | Portable subject / person | For Linux (deferred, 2026-10-22): an open model on candle in place of Vision, such as BiRefNet (MIT) or U²-Net (Apache-2.0) for subjects and MODNet (Apache-2.0) for people | With Linux |
 
-**Control points (Phase 4):** PhotoLab's U Point-style control point is a radial part intersected with a colour and luminance range sampled where you click. Offer it as a one-click tool that builds that mask, so it needs no new mask machinery.
+**Control points (Phase 4):** PhotoLab's U Point-style control point is a radial part intersected with a colour and luminance range sampled where you click. Offer it as a one-click tool that builds that mask, so it needs no new mask machinery. As built (2026-10-22, DECISIONS "Control points"): K or the panel's Control point button, then a click; a near-grey click takes no colour part.
 
 **Rendering masks**
 

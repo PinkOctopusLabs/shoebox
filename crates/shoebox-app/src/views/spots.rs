@@ -192,6 +192,7 @@ pub fn set_active(app: &mut ShoeboxApp, on: bool) {
         // One tool on the photo at a time.
         app.develop.local.selected = None;
         app.develop.points.picking = false;
+        app.develop.local.placing = false;
         app.develop.picking = false;
         app.develop.guided = Default::default();
     }

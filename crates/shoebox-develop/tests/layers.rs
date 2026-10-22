@@ -233,6 +233,94 @@ fn a_layer_changes_only_what_its_mask_covers() {
     assert_eq!(cpu::render_from(&raw, &src, &s, &o, false).data, plain.data);
 }
 
+/// A control point picks the colour and brightness where it's clicked:
+/// inside its circle that colour at that brightness changes, a different
+/// colour or a darker shade of it doesn't, nor does the same colour
+/// outside the circle.
+#[test]
+fn a_control_point_picks_the_colour_and_brightness_where_its_clicked() {
+    let raw = shoebox_decode::raw::RawImage {
+        width: 0,
+        height: 0,
+        cfa: [[0, 1], [1, 2]],
+        data: Vec::new(),
+        as_shot: None,
+        matrices: Vec::new(),
+        make: String::new(),
+        model: String::new(),
+    };
+    // Bright red, with dark red below it and a blue band to its right,
+    // then bright red again far away.
+    let (red, dark, blue) = ([0.6, 0.15, 0.1], [0.12, 0.03, 0.02], [0.1, 0.2, 0.6]);
+    let mut img = Rgb::new(120, 80);
+    for y in 0..80 {
+        for x in 0..120 {
+            let p = match (x, y) {
+                (36..60, _) => blue,
+                (..36, 30..) => dark,
+                _ => red,
+            };
+            let i = (y * 120 + x) * 3;
+            img.data[i..i + 3].copy_from_slice(&p);
+        }
+    }
+    let src = Demosaiced::new(img, [1.0; 3], Referred::Display);
+    let o = Options::default();
+    let f = cpu::frame(&raw, &src, &Settings::default(), &o);
+    let units = |x: usize, y: usize| [(x as f64 + 0.5) / 120.0, (y as f64 + 0.5) / 120.0];
+    let at = units(28, 22);
+    let tone = mask::tone_at(&src.rgb, &f, at).unwrap();
+    let m = mask::control_point(at, tone);
+    // The circle, then the ranges intersected with it.
+    let ops: Vec<Op> = m
+        .parts
+        .iter()
+        .map(|p| match p {
+            Part::Known(p) => p.op,
+            Part::Other(_) => panic!(),
+        })
+        .collect();
+    assert_eq!(ops, [Op::Add, Op::Intersect, Op::Intersect]);
+    let plain = cpu::render_from(&raw, &src, &Settings::default(), &o, false);
+    let s = Settings {
+        locals: vec![Local {
+            id: "l1".into(),
+            mask: m,
+            adjust: LocalAdjust {
+                exposure: 1.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let edited = cpu::render_from(&raw, &src, &s, &o, false);
+    let gain = |x: usize, y: usize| edited.px(x, y)[0] / plain.px(x, y)[0];
+    assert!(
+        (gain(28, 22) - 2.0).abs() < 0.02,
+        "clicked: {}",
+        gain(28, 22)
+    );
+    assert!(gain(24, 18) > 1.8, "near it: {}", gain(24, 18));
+    // Blue 10 px away and dark red 9 px away, both well inside the circle
+    // (14 px).
+    assert!((gain(38, 22) - 1.0).abs() < 0.01, "blue: {}", gain(38, 22));
+    assert!((gain(28, 31) - 1.0).abs() < 0.01, "dark: {}", gain(28, 31));
+    assert!((gain(90, 22) - 1.0).abs() < 1e-3, "far: {}", gain(90, 22));
+
+    // A grey has no colour part: the circle and its brightness.
+    let grey = mask::control_point(at, [0.5, 0.0, 0.0]);
+    assert_eq!(grey.parts.len(), 2);
+    assert!(matches!(
+        &grey.parts[1],
+        Part::Known(MaskPart {
+            op: Op::Intersect,
+            shape: Shape::Luminance { .. },
+            ..
+        })
+    ));
+}
+
 #[test]
 fn layers_round_trip_and_keep_parts_from_newer_builds() {
     let mut s = Settings::default();

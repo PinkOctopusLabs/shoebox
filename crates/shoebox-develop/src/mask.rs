@@ -499,6 +499,94 @@ fn segment_distance(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
     (p[0] - a[0] - t * dx).hypot(p[1] - a[1] - t * dy)
 }
 
+/// How far either side of a picked brightness a picked luminance range
+/// reaches at full effect.
+pub const PICK_BAND: f64 = 0.1;
+
+/// A control point's circle: its radius (long edges) and feather.
+pub const POINT_RADIUS: f64 = 0.12;
+pub const POINT_FEATHER: f64 = 0.75;
+
+/// Below this relative chroma a pick counts as grey: a colour range part
+/// would pass nothing there (see [`shape_rows`]).
+const GREY: f32 = 0.05;
+
+/// What range parts read at `at` (long edges) in the source `img` under
+/// frame `f`, as [`Tones`] has it: brightness as shown, hue and chroma of a
+/// 5×5 patch's average, as the pickers take them. None off the image.
+pub fn tone_at(img: &crate::cpu::Rgb, f: &crate::cpu::Frame, at: [f64; 2]) -> Option<[f32; 3]> {
+    let long = img.width.max(img.height) as f64;
+    let (cx, cy) = (
+        (at[0] * long - 0.5).round() as i64,
+        (at[1] * long - 0.5).round() as i64,
+    );
+    let mut sum = [0.0f32; 3];
+    let mut n = 0.0;
+    for y in cy - 2..=cy + 2 {
+        for x in cx - 2..=cx + 2 {
+            if x >= 0 && y >= 0 && (x as usize) < img.width && (y as usize) < img.height {
+                let p = img.px(x as usize, y as usize);
+                for c in 0..3 {
+                    sum[c] += p[c];
+                }
+                n += 1.0;
+            }
+        }
+    }
+    if n == 0.0 {
+        return None;
+    }
+    let (shown, hue, chroma) =
+        crate::cpu::layers::tone_of(sum.map(|v| v / n), &f.colour, &f.display);
+    Some([shown, hue, chroma])
+}
+
+/// A luminance range around a picked brightness (`shown`, 0–1).
+pub fn picked_luminance(shown: f32, smooth: f64) -> Shape {
+    let v = f64::from(shown);
+    Shape::Luminance {
+        range: [(v - PICK_BAND).max(0.0), (v + PICK_BAND).min(1.0)],
+        smooth,
+    }
+}
+
+/// A control point (PhotoLab's U Point; EDITING-SPEC, Local adjustments):
+/// a feathered circle at `at` (long edges), intersected with a colour
+/// range and a luminance range around `tone` (from [`tone_at`] there).
+/// The circle comes first and adds, so the ranges only narrow it: circle ∩
+/// colour ∩ brightness. A grey pick has no colour part (it would pass no
+/// greys), so it's the circle ∩ brightness.
+pub fn control_point(at: [f64; 2], tone: [f32; 3]) -> crate::edit::Mask {
+    let [shown, hue, chroma] = tone;
+    let part = |op, shape| {
+        Part::Known(MaskPart {
+            op,
+            invert: false,
+            shape,
+        })
+    };
+    let mut parts = vec![part(
+        Op::Add,
+        Shape::Radial {
+            centre: at,
+            radii: [POINT_RADIUS; 2],
+            angle: 0.0,
+            feather: POINT_FEATHER,
+        },
+    )];
+    if chroma >= GREY {
+        parts.push(part(
+            Op::Intersect,
+            Shape::Colour {
+                hue: f64::from(hue).round(),
+                width: 20.0,
+            },
+        ));
+    }
+    parts.push(part(Op::Intersect, picked_luminance(shown, 0.1)));
+    crate::edit::Mask { parts }
+}
+
 /// Layer `layer`'s mask at grid position `(x, y)` (bilinear, clamped to
 /// the edges), 0–1.
 pub fn sample(m: &Masks, layer: usize, x: f32, y: f32) -> f32 {

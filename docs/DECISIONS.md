@@ -2492,3 +2492,40 @@ Face parts, Object), from EDITING-SPEC's "Rendering masks".
   hundred Shoebox edits first), body masks (hair, clothes, skin: no
   openly licensed human-parsing model chosen yet; revisit after the
   landscape model).
+
+
+## Control points (2026-10-22)
+
+- **What one is:** PhotoLab's U Point as the spec has it, built from
+  parts that were already there; no new part kind, so edit files and the
+  GPU pipe are unchanged. `mask::control_point` makes the recipe: a
+  Radial part (Add) at the click, then a Colour range (Intersect) and a
+  Luminance range (Intersect) around what's there. Parts combine in
+  order from nothing (Add takes the max, Intersect multiplies), so the
+  circle comes first and the ranges only narrow it: circle ∩ colour ∩
+  brightness, the same in any order of the two ranges.
+- **Sampling:** `mask::tone_at`, the range pickers' own 5×5 patch of the
+  source read under the frame's colour and display (what `Tones` holds),
+  now shared with them; `mask::picked_luminance` is the pickers' band too
+  (±0.1 at full effect, smoothness 0.1). The colour range is 20° either
+  side, the Colour part's default.
+- **Greys:** a colour range passes no greys (chroma below 0.02–0.08), so a
+  control point on something near-grey (relative chroma under 0.05) has
+  no colour part: it's the circle ∩ brightness. Without that a click on a
+  white wall or a grey sky would select nothing.
+- **Size:** a circle of 0.12 long edges, feather 0.75: soft from about a
+  quarter of the radius out, as a U Point's falloff from its centre
+  rather than a flat disc. Sized afterwards with the ellipse's own
+  handles (the right-hand one sizes and turns it, the lower one makes it
+  an ellipse); the ranges are ordinary parts with their sliders and Pick.
+- **Interaction:** the Local adjustments panel's **Control point** button
+  or **K**; the next click on the photo makes the layer ("Control point
+  n", history "New control point", one step), selects it with its circle
+  in hand, and puts the tool down. Escape puts it down without placing
+  one; it's one tool on the photo at a time with spots, guides, Point
+  Color's and white balance's pickers. One click, one point (not
+  PhotoLab's stay-on tool), so a click meant for a handle can't make a
+  stray point.
+- **K:** free in Develop (⌘K is keywords). Lightroom has no control
+  points; its K is the adjustment brush, which Shoebox has no key for. If
+  the brush gets a key it should be something else, or K moves.

@@ -1,7 +1,8 @@
 //! Develop's local adjustments (EDITING-SPEC, Local adjustments): the
 //! panel's list of masks and the selected one's parts and sliders, and the
 //! handles drawn over the photo (gradients, ellipses, the brush, range
-//! pickers). Positions are kept as the edit stores them: in the stored
+//! pickers), and control points (K: one click makes a mask of a circle and
+//! the colour and brightness there, `mask::control_point`). Positions are kept as the edit stores them: in the stored
 //! image, in units of its long edge; the render's frame maps them to the
 //! screen and back.
 
@@ -28,6 +29,8 @@ pub struct Tool {
     /// The next click on the photo picks a range part's colour or
     /// brightness.
     pub picking: bool,
+    /// The next click on the photo places a control point (K).
+    pub placing: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -225,17 +228,23 @@ fn edit_layer(
     });
 }
 
-/// A new mask with one part of `kind`, selected.
-pub fn new_mask(app: &mut ShoeboxApp, kind: Kind) {
-    let Some(doc) = &app.develop.doc else { return };
-    let locals = &doc.settings().locals;
-    let n = locals
+/// The next mask's number and id ("l1", "l2", …).
+fn next_id(app: &ShoeboxApp) -> Option<(u32, String)> {
+    let doc = app.develop.doc.as_ref()?;
+    let n = doc
+        .settings()
+        .locals
         .iter()
         .filter_map(|l| l.id.strip_prefix('l')?.parse::<u32>().ok())
         .max()
         .unwrap_or(0)
         + 1;
-    let id = format!("l{n}");
+    Some((n, format!("l{n}")))
+}
+
+/// A new mask with one part of `kind`, selected.
+pub fn new_mask(app: &mut ShoeboxApp, kind: Kind) {
+    let Some((n, id)) = next_id(app) else { return };
     let shape = kind.shape(units(app));
     let layer = Local {
         id: id.clone(),
@@ -266,6 +275,49 @@ pub fn new_mask(app: &mut ShoeboxApp, kind: Kind) {
     t.selected = Some(id);
     t.part = 0;
     t.picking = kind == Kind::Colour;
+    t.placing = false;
+}
+
+/// Wait for a click on the photo to place a control point (K), or stop.
+pub fn set_placing(app: &mut ShoeboxApp, on: bool) {
+    app.develop.local.placing = on && !app.develop.read_only;
+    if app.develop.local.placing {
+        // One tool on the photo at a time.
+        super::spots::set_active(app, false);
+        app.develop.local.picking = false;
+        app.develop.points.picking = false;
+        app.develop.picking = false;
+        app.develop.guided = Default::default();
+    }
+}
+
+/// A control point at `pos`: a new mask of a circle there, intersected
+/// with the colour and brightness there; selected with its circle's
+/// handles, to size it.
+fn place_point(app: &mut ShoeboxApp, map: &Mapping<'_>, pos: Pos2) {
+    app.develop.local.placing = false;
+    let Some(ready) = &app.develop.ready else {
+        return;
+    };
+    let u = map.to_units(pos);
+    let Some(tone) = shoebox_develop::mask::tone_at(&ready.src.rgb, map.frame, u) else {
+        return;
+    };
+    let Some((n, id)) = next_id(app) else { return };
+    let layer = Local {
+        id: id.clone(),
+        name: format!("Control point {n}"),
+        mask: shoebox_develop::mask::control_point(u, tone),
+        ..Default::default()
+    };
+    app.develop.last_step_done();
+    edit(app, "mask-new", "New control point".into(), |s| {
+        s.locals.push(layer)
+    });
+    let t = &mut app.develop.local;
+    t.selected = Some(id);
+    t.part = 0;
+    t.picking = false;
 }
 
 /// Add a part of `kind` to the selected mask with `op`.
@@ -301,6 +353,20 @@ pub fn section(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &Settings) {
                     new_mask(app, k);
                 }
             });
+            let placing = app.develop.local.placing;
+            if ui
+                .add_enabled(
+                    !app.develop.read_only,
+                    egui::Button::selectable(placing, "Control point"),
+                )
+                .on_hover_text(
+                    "Click the photo to place a control point: a circle that takes the \
+                     colour and brightness there (K)",
+                )
+                .clicked()
+            {
+                set_placing(app, !placing);
+            }
             let sel = selected(app, s).is_some();
             let mut show = app.develop.local.show_mask;
             if ui
@@ -346,6 +412,7 @@ pub fn section(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &Settings) {
             t.selected = sel;
             t.part = 0;
             t.picking = false;
+            t.placing = false;
             app.develop.last_step_done();
         }
         if let Some((id, on)) = toggle {
@@ -820,6 +887,21 @@ pub fn on_photo(
     if app.develop.spots.active {
         return;
     }
+    if app.develop.local.placing {
+        if photo.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+        }
+        if photo.clicked()
+            && let Some(pos) = photo.interact_pointer_pos()
+            && target.contains(pos)
+            && let (Some(frame), Some(ready)) = (app.develop.frame.clone(), &app.develop.ready)
+            && let Some(map) =
+                Mapping::new(&frame, target, (ready.src.rgb.width, ready.src.rgb.height))
+        {
+            place_point(app, &map, pos);
+        }
+        return;
+    }
     let Some(doc) = &app.develop.doc else { return };
     let s = doc.settings().clone();
     let Some((_, layer)) = selected(app, &s) else {
@@ -1143,38 +1225,10 @@ fn brush(
 /// brightness around the one there.
 fn pick(app: &ShoeboxApp, map: &Mapping<'_>, pos: Pos2, s: &Shape) -> Option<Shape> {
     let ready = app.develop.ready.as_ref()?;
-    let f = map.frame;
-    let u = map.to_units(pos);
-    let img = &ready.src.rgb;
-    let (cx, cy) = (
-        (u[0] * map.long - 0.5).round() as i64,
-        (u[1] * map.long - 0.5).round() as i64,
-    );
-    let mut sum = [0.0f32; 3];
-    let mut n = 0.0;
-    for y in cy - 2..=cy + 2 {
-        for x in cx - 2..=cx + 2 {
-            if x >= 0 && y >= 0 && (x as usize) < img.width && (y as usize) < img.height {
-                let p = img.px(x as usize, y as usize);
-                for c in 0..3 {
-                    sum[c] += p[c];
-                }
-                n += 1.0;
-            }
-        }
-    }
-    if n == 0.0 {
-        return None;
-    }
-    let (shown, hue, _) = cpu::layers::tone_of(sum.map(|v| v / n), &f.colour, &f.display);
+    let [shown, hue, _] =
+        shoebox_develop::mask::tone_at(&ready.src.rgb, map.frame, map.to_units(pos))?;
     Some(match s {
-        Shape::Luminance { smooth, .. } => {
-            let v = f64::from(shown);
-            Shape::Luminance {
-                range: [(v - 0.1).max(0.0), (v + 0.1).min(1.0)],
-                smooth: *smooth,
-            }
-        }
+        Shape::Luminance { smooth, .. } => shoebox_develop::mask::picked_luminance(shown, *smooth),
         Shape::Colour { width, .. } => Shape::Colour {
             hue: f64::from(hue).round(),
             width: *width,

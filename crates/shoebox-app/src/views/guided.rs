@@ -41,6 +41,7 @@ pub fn set_active(app: &mut ShoeboxApp, on: bool) {
         super::spots::set_active(app, false);
         let st = &mut app.develop;
         st.local.selected = None;
+        st.local.placing = false;
         st.points.picking = false;
         st.picking = false;
         st.zoom = None;
