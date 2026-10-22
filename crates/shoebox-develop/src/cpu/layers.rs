@@ -8,9 +8,11 @@
 //! highlights, shadows and clarity through the global maps' base layers.
 //! The shader (`develop.wgsl`) follows these operation for operation.
 //!
-//! AI denoise strength acts earlier, on the source itself: where a layer
-//! changes it, the source is read mixed with images made beside it (see
-//! [`Wants`], [`mix_at`] and `cpu::Aux`).
+//! AI denoise strength and sharpness act earlier, on the source itself:
+//! where a layer changes them, the source is read mixed with images made
+//! beside it (see [`Wants`], [`mix_at`] and `cpu::Aux`): the source at
+//! another AI strength, sharpening's change as the detail stage makes it,
+//! softening's.
 
 use std::sync::Arc;
 
@@ -51,22 +53,29 @@ pub struct Wants {
     /// The global sharpening amount (0–1.5).
     pub sharpen: f32,
     /// A layer raises the AI strength (the source at full strength is
-    /// needed), lowers it (at none).
+    /// needed), lowers it (at none), sharpens, softens.
     pub more_ai: bool,
     pub less_ai: bool,
+    pub sharpens: bool,
+    pub softens: bool,
 }
 
 impl Wants {
     pub fn any(&self) -> bool {
-        self.more_ai || self.less_ai
+        self.more_ai || self.less_ai || self.sharpens || self.softens
     }
 }
+
+/// The most sharpening a layer reaches, as the global module's amount
+/// (its slider's 150).
+pub const MAX_SHARPEN: f32 = 1.5;
 
 /// What the layers of `s` want from `src`'s source stage.
 pub fn wants(src: &Demosaiced, s: &Settings) -> Wants {
     let ai = src.ai_strength(s);
     let mut w = Wants {
         ai: ai.unwrap_or(0.0),
+        sharpen: ((s.modules.sharpening.amount / 100.0) as f32).clamp(0.0, MAX_SHARPEN),
         ..Default::default()
     };
     for l in active(s).0.iter().map(|l| layer(l)).filter(|l| l.active) {
@@ -75,6 +84,8 @@ pub fn wants(src: &Demosaiced, s: &Settings) -> Wants {
             w.more_ai |= l.denoise_ai > 0.0 && w.ai < 1.0;
             w.less_ai |= l.denoise_ai < 0.0 && w.ai > 0.0;
         }
+        w.sharpens |= l.sharpness > 0.0 && w.sharpen < MAX_SHARPEN;
+        w.softens |= l.sharpness < 0.0;
     }
     w
 }
@@ -90,17 +101,23 @@ pub fn wants_ai(s: &Settings) -> bool {
 }
 
 /// How the source is read at one pixel: towards the AI-denoised source
-/// (`more`, 0–1) or RCD's (`less`) from what the source has.
+/// (`more`, 0–1) or RCD's (`less`) from what the source has, with
+/// sharpening (an extra amount, 1 being the global module's 100) and
+/// softening (0–1) added.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Mix {
     pub more: f32,
     pub less: f32,
+    pub sharpen: f32,
+    pub soften: f32,
 }
 
 /// The source's mix at source position `(mx, my)` (before lens
 /// corrections, where masks are read). Layers apply in order, each
 /// blending towards its target by its mask: the AI strength so far plus
-/// the layer's, kept to 0–1.
+/// the layer's (kept to 0–1), the sharpening amount so far plus the
+/// layer's (up to [`MAX_SHARPEN`]), the softening so far plus the
+/// layer's (up to 1).
 pub fn mix_at(ls: &Layers, mx: f32, my: f32) -> Mix {
     let w = &ls.wants;
     let Some(masks) = ls.masks.as_ref().filter(|_| w.any()) else {
@@ -110,17 +127,26 @@ pub fn mix_at(ls: &Layers, mx: f32, my: f32) -> Mix {
         (mx + 0.5) * ls.scale[0] - 0.5,
         (my + 0.5) * ls.scale[1] - 0.5,
     );
-    let mut k = w.ai;
+    let (mut k, mut a, mut soft) = (w.ai, w.sharpen, 0f32);
     for (i, l) in ls.list.iter().enumerate() {
-        if !l.active || l.denoise_ai == 0.0 {
+        if !l.active || (l.denoise_ai == 0.0 && l.sharpness == 0.0) {
             continue;
         }
         let m = mask::sample(masks, i, gx, gy);
         if m <= 0.0 {
             continue;
         }
-        let t = (k + l.denoise_ai).clamp(0.0, 1.0);
-        k += (t - k) * m;
+        if l.denoise_ai != 0.0 {
+            let t = (k + l.denoise_ai).clamp(0.0, 1.0);
+            k += (t - k) * m;
+        }
+        if l.sharpness > 0.0 {
+            let t = (a + l.sharpness).min(MAX_SHARPEN).max(a);
+            a += (t - a) * m;
+        } else if l.sharpness < 0.0 {
+            let t = (soft - l.sharpness).min(1.0);
+            soft += (t - soft) * m;
+        }
     }
     Mix {
         more: if k > w.ai {
@@ -129,6 +155,8 @@ pub fn mix_at(ls: &Layers, mx: f32, my: f32) -> Mix {
             0.0
         },
         less: if k < w.ai { (w.ai - k) / w.ai } else { 0.0 },
+        sharpen: a - w.sharpen,
+        soften: soft,
     }
 }
 
@@ -144,9 +172,6 @@ pub struct Layers {
     pub masks: Option<Arc<Masks>>,
     /// Source pixels → mask pixels.
     pub scale: [f32; 2],
-    /// A layer sharpens or softens: the pipe works out each pixel's fine
-    /// detail.
-    pub detail: bool,
     /// What the layers want from the source stage.
     pub wants: Wants,
 }
@@ -241,7 +266,6 @@ pub fn layers(
     });
     let list: Vec<Layer> = locals.iter().map(|l| layer(l)).collect();
     Layers {
-        detail: list.iter().any(|l| l.active && l.sharpness != 0.0),
         wants: wants(src, s),
         list,
         ids: locals.iter().map(|l| l.id.clone()).collect(),
@@ -493,15 +517,12 @@ fn tone_with(
 
 /// The local adjustments for one linear Rec.2020 pixel: masks read at
 /// source position `(mx, my)` (before lens corrections, where they were
-/// drawn), the global maps at `(sx, sy)`.
-/// `detail`: the pixel less the mean of its four neighbours (when
-/// `ls.detail`; else zeros).
-#[allow(clippy::too_many_arguments)]
+/// drawn), the global maps at `(sx, sy)`. (Sharpness and AI strength
+/// were applied to the source as it was read: see [`mix_at`].)
 pub fn layers_pixel(
     ls: &Layers,
     local: &maps::Local,
     p: [f32; 3],
-    detail: [f32; 3],
     mx: f32,
     my: f32,
     sx: f32,
@@ -523,33 +544,19 @@ pub fn layers_pixel(
         if w <= 0.0 {
             continue;
         }
-        let q = adjust(l, local, p, detail, sx, sy);
+        let q = adjust(l, local, p, sx, sy);
         p = [0, 1, 2].map(|c| p[c] + (q[c] - p[c]) * w);
     }
     p
 }
 
 /// One layer's sliders on a pixel.
-fn adjust(
-    l: &Layer,
-    local: &maps::Local,
-    p: [f32; 3],
-    detail: [f32; 3],
-    sx: f32,
-    sy: f32,
-) -> [f32; 3] {
+fn adjust(l: &Layer, local: &maps::Local, p: [f32; 3], sx: f32, sy: f32) -> [f32; 3] {
     let m = local
         .maps
         .as_ref()
         .map(|maps| (maps, maps::at_source(local, maps, sx, sy)));
-    // Sharpness first: at −1 the pixel is averaged with its neighbours'
-    // mean.
-    let mut q = if l.sharpness != 0.0 {
-        let k = if l.sharpness > 0.0 { 1.5 } else { 0.5 } * l.sharpness;
-        [0, 1, 2].map(|c| (p[c] + k * detail[c]).max(0.0))
-    } else {
-        p
-    };
+    let mut q = p;
     if l.dehaze != 0.0
         && let Some((maps, m)) = &m
     {

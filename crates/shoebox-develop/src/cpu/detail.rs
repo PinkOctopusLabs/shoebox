@@ -244,6 +244,98 @@ pub fn process(img: &Rgb, d: &Detail) -> Rgb {
     out
 }
 
+/// Where the stage is run to fit [`Sharpen`]: this much extra amount, and
+/// 1 (100).
+pub const FIT_AT: f32 = 0.25;
+
+/// Sharpening's change to an image for an extra amount `e` (1 is the
+/// global module's 100), per pixel: `alpha·e / (1 + beta·e)`. The halo
+/// limit makes the stage's push saturate (`push / (1 + |push| / limit)`),
+/// so a straight line through one run is up to half out at small
+/// amounts; this curve, through the stage's own results at
+/// [`FIT_AT`] and 1, follows it to about 2% (see DECISIONS, "Local AI
+/// denoise strength and sharpening"). `beta` is per pixel (the limit acts
+/// on luma, shared by the channels), `alpha` per channel.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Sharpen {
+    pub alpha: Rgb,
+    pub beta: Vec<f32>,
+}
+
+impl Sharpen {
+    /// The fit through `quarter` and `full`, the stage's results with
+    /// [`FIT_AT`] and 1 more sharpening than `main`'s.
+    pub fn fit(main: &Rgb, quarter: &Rgb, full: &Rgb) -> Self {
+        let mut alpha = Rgb::new(main.width, main.height);
+        let beta: Vec<f32> = alpha
+            .data
+            .as_chunks_mut::<3>()
+            .0
+            .par_iter_mut()
+            .zip(main.data.as_chunks::<3>().0.par_iter())
+            .zip(quarter.data.as_chunks::<3>().0.par_iter())
+            .zip(full.data.as_chunks::<3>().0.par_iter())
+            .map(|(((a, m), q), f)| {
+                let dq: [f32; 3] = std::array::from_fn(|c| q[c] - m[c]);
+                let d1: [f32; 3] = std::array::from_fn(|c| f[c] - m[c]);
+                let (sq, s1) = (dq[0] + dq[1] + dq[2], d1[0] + d1[1] + d1[2]);
+                // r = d(¼)/d(1) = (1 + β)/(4 + β), from ¼ (straight) up.
+                let r = if s1.abs() > 1e-9 {
+                    (sq / s1).clamp(FIT_AT, 0.95)
+                } else {
+                    FIT_AT
+                };
+                let b = (r / FIT_AT - 1.0) / (1.0 - r);
+                *a = d1.map(|v| v * (1.0 + b));
+                b
+            })
+            .collect();
+        Self { alpha, beta }
+    }
+
+    /// The change at pixel `(x, y)` for extra amount `e`.
+    #[inline]
+    pub fn at(&self, x: usize, y: usize, e: f32) -> [f32; 3] {
+        let k = e / (1.0 + self.beta[y * self.alpha.width + x] * e);
+        self.alpha.px(x, y).map(|a| a * k)
+    }
+}
+
+/// How much of each band softening takes away at full strength: all
+/// detail up to about two of the original's pixels, fading out by eight
+/// (`scale`: source pixels per original pixel, so the proxy matches).
+pub fn soften_weights(scale: f32) -> [f32; SCALES] {
+    std::array::from_fn(|b| 1.0 - smoothstep(1.0, 3.0, b as f32 - scale.max(1e-3).log2()))
+}
+
+/// Softening's change to `img` at full strength: less its finest bands
+/// (see [`soften_weights`]), on linear values.
+pub fn soften(img: &Rgb, scale: f32) -> Rgb {
+    let (w, h) = (img.width, img.height);
+    let weights = soften_weights(scale);
+    let mut c: Vec<[f32; 3]> = img.data.as_chunks::<3>().0.to_vec();
+    let mut out = vec![[0f32; 3]; w * h];
+    for (s, k) in weights.iter().enumerate() {
+        if *k <= 0.0 {
+            break;
+        }
+        let next = blur(&blur(&c, w, h, 1 << s, true), w, h, 1 << s, false);
+        out.par_iter_mut()
+            .zip(c.par_iter().zip(&next))
+            .for_each(|(o, (cur, nxt))| {
+                for i in 0..3 {
+                    o[i] -= k * (cur[i] - nxt[i]);
+                }
+            });
+        c = next;
+    }
+    Rgb {
+        width: w,
+        height: h,
+        data: out.into_flattened(),
+    }
+}
+
 /// Least squares `y = slope·x + icept` (slope and intercept kept positive).
 fn fit(pts: &[(f64, f64)]) -> Option<(f64, f64)> {
     if pts.len() < 2 {

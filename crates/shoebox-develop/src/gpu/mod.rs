@@ -100,11 +100,17 @@ pub struct Source {
 struct AuxLayers {
     more_ai: u32,
     less_ai: u32,
+    sharpen: u32,
+    soften: u32,
 }
 
+/// An image to upload, and what goes in its texels' alpha (1 if None).
+type Plane<'a> = (&'a Rgb, Option<&'a [f32]>);
+
 /// [`Aux`]'s images in the order they're stacked, and where each went.
-fn aux_images(aux: &Aux) -> (Vec<&Rgb>, AuxLayers) {
-    fn at<'a>(list: &mut Vec<&'a Rgb>, img: Option<&'a Rgb>) -> u32 {
+/// Sharpening's fit is one: its alpha in RGB, its beta in A.
+fn aux_images(aux: &Aux) -> (Vec<Plane<'_>>, AuxLayers) {
+    fn at<'a>(list: &mut Vec<Plane<'a>>, img: Option<Plane<'a>>) -> u32 {
         match img {
             Some(i) => {
                 list.push(i);
@@ -115,8 +121,15 @@ fn aux_images(aux: &Aux) -> (Vec<&Rgb>, AuxLayers) {
     }
     let mut list = Vec::new();
     let layers = AuxLayers {
-        more_ai: at(&mut list, aux.more_ai.as_deref()),
-        less_ai: at(&mut list, aux.less_ai.as_deref()),
+        more_ai: at(&mut list, aux.more_ai.as_deref().map(|i| (i, None))),
+        less_ai: at(&mut list, aux.less_ai.as_deref().map(|i| (i, None))),
+        sharpen: at(
+            &mut list,
+            aux.sharpen
+                .as_ref()
+                .map(|s| (&s.alpha, Some(s.beta.as_slice()))),
+        ),
+        soften: at(&mut list, aux.soften.as_ref().map(|i| (i, None))),
     };
     (list, layers)
 }
@@ -138,11 +151,11 @@ fn texture_of(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     label: &str,
-    imgs: &[&Rgb],
+    imgs: &[Plane],
 ) -> wgpu::Texture {
     let (width, height) = imgs
         .first()
-        .map_or((1, 1), |i| (i.width as u32, i.height as u32));
+        .map_or((1, 1), |(i, _)| (i.width as u32, i.height as u32));
     let size = |layers: usize| wgpu::Extent3d {
         width,
         height,
@@ -158,7 +171,7 @@ fn texture_of(
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    for (layer, img) in imgs.iter().enumerate() {
+    for (layer, (img, alpha)) in imgs.iter().enumerate() {
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,
@@ -170,7 +183,7 @@ fn texture_of(
                 },
                 aspect: wgpu::TextureAspect::All,
             },
-            &rgba_bytes(img, None),
+            &rgba_bytes(img, *alpha),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(width * 16),
@@ -313,14 +326,14 @@ impl Pipe {
         aux: Option<&Aux>,
     ) -> Source {
         let (width, height) = (img.width as u32, img.height as u32);
-        let texture = texture_of(device, queue, "demosaiced", &[img]);
+        let texture = texture_of(device, queue, "demosaiced", &[(img, None)]);
         let view = texture.create_view(&Default::default());
         let (aux, aux_layers) = match aux.map(aux_images) {
             Some((list, at))
                 if !list.is_empty()
                     && list
                         .iter()
-                        .all(|i| (i.width, i.height) == (img.width, img.height)) =>
+                        .all(|(i, _)| (i.width, i.height) == (img.width, img.height)) =>
             {
                 let t = texture_of(device, queue, "beside the source", &list);
                 let v = t.create_view(&wgpu::TextureViewDescriptor {
@@ -936,7 +949,7 @@ fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
         .mask_view
         .map_or((0.0, 0.0), |(k, o)| ((k + 1) as f32, flag(o)));
     v.extend([ls.list.len() as f32, lw, lh, shown]);
-    v.extend([ls.scale[0], ls.scale[1], only, flag(ls.detail)]);
+    v.extend([ls.scale[0], ls.scale[1], only, 0.0]);
     let shown_point = f.point_view.map_or(0.0, |k| (k + 1) as f32);
     v.extend([l.point_count as f32, shown_point, 0.0, 0.0]);
     v.extend([lc.smart, lc.smart_bias, 0.0, 0.0]);
@@ -950,12 +963,17 @@ fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
     v.extend([e.highlights, e.grain, e.cell, e.rough]);
     v.extend([e.full[0], e.full[1], e.offset[0], e.offset[1]]);
     // The images beside the source the layers use (layer + 1; 0: none),
-    // and the AI strength the source has.
+    // and the AI strength and sharpening amount the source has.
     let w = &ls.wants;
     let at = |want: bool, layer: u32| if want { layer as f32 } else { 0.0 };
     let a = &src.aux_layers;
-    v.extend([at(w.more_ai, a.more_ai), at(w.less_ai, a.less_ai), 0.0, 0.0]);
-    v.extend([w.ai, 0.0, 0.0, 0.0]);
+    v.extend([
+        at(w.more_ai, a.more_ai),
+        at(w.less_ai, a.less_ai),
+        at(w.sharpens, a.sharpen),
+        at(w.softens, a.soften),
+    ]);
+    v.extend([w.ai, w.sharpen, 0.0, 0.0]);
     v
 }
 

@@ -338,8 +338,9 @@ fn gpu_matches_the_cpu_reference() {
     }
 }
 
-/// Layers that change the source stage (AI strength up and down) read the
-/// images beside the source the same way in both pipes.
+/// Layers that change the source stage (AI strength up and down,
+/// sharpening, softening) read the images beside the source the same way
+/// in both pipes.
 #[test]
 fn layers_on_the_source_stage_match_the_cpu() {
     let Some((device, queue)) = headless() else {
@@ -381,6 +382,23 @@ fn layers_on_the_source_stage_match_the_cpu() {
     };
     s.locals[0].adjust.denoise_ai = 100.0;
     cases.push(("AI from a layer alone", s));
+    // Sharpening on top of the global module's, softening, a spot, and
+    // the photo turned (sample positions between source pixels).
+    let mut s = Settings {
+        locals: local_layers(),
+        ..Default::default()
+    };
+    s.locals[0].adjust.denoise_ai = 0.0;
+    s.modules.sharpening.amount = 40.0;
+    s.modules.heal.spots = vec![shoebox_develop::edit::Spot {
+        dest: [0.5, 0.3],
+        source: [0.3, 0.3],
+        radius: 0.05,
+        ..Default::default()
+    }];
+    cases.push(("sharpening and softening", s.clone()));
+    s.geometry.rotate = 2.5;
+    cases.push(("sharpening and softening, turned", s));
 
     for (name, s) in &cases {
         let main = src.prepared(s);
@@ -388,6 +406,10 @@ fn layers_on_the_source_stage_match_the_cpu() {
         let aux = src
             .aux(s)
             .expect("a layer wants an image beside the source");
+        if name.starts_with("sharpening") {
+            assert!(aux.more_ai.is_none() && aux.less_ai.is_none(), "{name}");
+        }
+        assert!(aux.sharpen.is_some() && aux.soften.is_some(), "{name}");
         if name.starts_with("AI up and down") {
             assert!(aux.more_ai.is_some() && aux.less_ai.is_some(), "{name}");
         }
@@ -405,8 +427,11 @@ fn layers_on_the_source_stage_match_the_cpu() {
             } else {
                 want.data.iter().fold(1.0f32, |m, v| m.max(v.abs()))
             };
+            // As in `gpu_matches_the_cpu_reference`: a rotated sample
+            // position differs by float rounding.
+            let tolerance = if s.geometry.rotate != 0.0 { 1e-3 } else { 1e-4 };
             assert!(
-                d / scale <= 1e-4,
+                d / scale <= tolerance,
                 "{name} (display {display}): differs by {d} at pixel {at}: cpu {:?} gpu {:?}",
                 want.px(at % want.width, at / want.width),
                 got.px(at % got.width, at / got.width)

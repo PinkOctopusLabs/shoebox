@@ -140,6 +140,14 @@ together at the end, before the release.
   at −100 over a face brings back RCD's grain there and nowhere else;
   with a spot healed inside the mask, the spot still looks healed; the
   100% view and a full-size export match Develop.
+- [ ] **Sharpness per mask** on a few real photos (eyes in a portrait,
+  foliage, a building): a mask at +60 looks like the global Sharpening
+  at 60 inside it (compare with the mask off and the global at 60), at
+  the fitted view, at 100% and in a full-size export alike, with no halo
+  or step along a feathered edge; −100 over skin softens it about as
+  much in all three without smearing larger features; the global
+  Sharpening's radius, detail and masking change the mask's sharpening
+  too.
 - [ ] **AI denoise in Auto** (Settings → Raw, "AI denoise in Auto from
   ISO"): pick the ISO where the classic noise reduction stops being
   enough on the Z f's files; on an APFS clone, opening a NEF above it

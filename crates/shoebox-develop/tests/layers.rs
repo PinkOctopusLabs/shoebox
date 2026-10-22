@@ -556,3 +556,108 @@ fn a_layers_ai_strength_denoises_inside_its_mask() {
     assert_eq!(aux.more_ai.as_ref().unwrap().data, want.data);
     assert!(aux.less_ai.is_none(), "only what a layer needs");
 }
+
+/// Texture, edges and noise (a display-referred source, so the detail
+/// stage sees it as it is).
+fn textured(scale: f32) -> Demosaiced {
+    let (w, h) = (128, 96);
+    let mut img = Rgb::new(w, h);
+    let mut seed = 12345u32;
+    for y in 0..h {
+        for x in 0..w {
+            let u = x as f32 / w as f32;
+            let base = 0.03 + 0.5 * u * u;
+            let tex = 0.04 * ((x as f32 * 0.9).sin() * (y as f32 * 0.7).cos());
+            let edge = if (x / 13 + y / 17) % 2 == 0 {
+                0.12
+            } else {
+                0.0
+            };
+            for c in 0..3 {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                let noise = (seed as f32 / u32::MAX as f32 - 0.5) * 0.06 * (base + 0.01).sqrt();
+                img.data[(y * w + x) * 3 + c] = (base + tex + edge + noise) * [1.0, 0.9, 0.7][c];
+            }
+        }
+    }
+    Demosaiced::new(img, [1.0; 3], Referred::Display).with_scale(scale)
+}
+
+#[test]
+fn a_layers_sharpening_matches_the_global_modules() {
+    let raw = shoebox_decode::raw::RawImage {
+        width: 0,
+        height: 0,
+        cfa: [[0, 1], [1, 2]],
+        data: Vec::new(),
+        as_shot: None,
+        matrices: Vec::new(),
+        make: String::new(),
+        model: String::new(),
+    };
+    let o = Options::default();
+    // The left half (the photo is 1 × 3/4 long edges), hard-edged.
+    let left = |sharpness| {
+        let mut l = layer(vec![part(
+            Op::Add,
+            Shape::Brush {
+                strokes: vec![Stroke {
+                    points: vec![[0.25, 0.0], [0.25, 0.75]],
+                    radius: 0.25,
+                    feather: 0.0,
+                    flow: 1.0,
+                    erase: false,
+                }],
+            },
+        )]);
+        l.adjust = LocalAdjust {
+            sharpness,
+            ..Default::default()
+        };
+        l
+    };
+    // Full size and a proxy's scale; a layer alone, and on top of the
+    // global module's 40.
+    for scale in [1.0, 0.42] {
+        let src = textured(scale);
+        for (global, layer) in [(0.0, 25.0), (0.0, 60.0), (0.0, 100.0), (40.0, 60.0)] {
+            let mut s = Settings {
+                locals: vec![left(layer)],
+                ..Default::default()
+            };
+            s.modules.sharpening.amount = global;
+            let mut alone = s.clone();
+            alone.locals.clear();
+            let mut want = alone.clone();
+            want.modules.sharpening.amount = global + layer;
+            let before = cpu::render_from(&raw, &src, &alone, &o, false);
+            let want = cpu::render_from(&raw, &src, &want, &o, false);
+            let got = cpu::render_from(&raw, &src, &s, &o, false);
+            // Inside, clear of the mask's edge (x = 64) and the frame's.
+            let (mut worst, mut err, mut effect) = (0f32, 0f64, 0f64);
+            for y in 4..92 {
+                for x in 4..58 {
+                    let (g, w, b) = (got.px(x, y), want.px(x, y), before.px(x, y));
+                    for c in 0..3 {
+                        worst = worst.max((g[c] - w[c]).abs());
+                        err += f64::from(g[c] - w[c]).powi(2);
+                        effect += f64::from(w[c] - b[c]).powi(2);
+                    }
+                }
+                // Outside, as it was.
+                for x in 70..124 {
+                    assert_eq!(got.px(x, y), before.px(x, y), "outside at ({x}, {y})");
+                }
+            }
+            let rel = (err / effect).sqrt();
+            eprintln!(
+                "scale {scale}, global {global} + layer {layer}: max error {worst:.5}, rms error {:.1}% of the effect",
+                rel * 100.0
+            );
+            assert!(effect > 0.0 && rel < 0.03, "{rel}");
+            assert!(worst < 0.0025, "{worst}");
+        }
+    }
+}

@@ -57,7 +57,7 @@ struct Params {
     unproof1: vec4<f32>,
     unproof2: vec4<f32>,
     layers: vec4<f32>,    // local adjustments: count, mask width, mask height, mask shown (index + 1; 0: none)
-    mscale: vec4<f32>,    // source → mask pixels (x, y); z: the mask alone (0/1); w: a layer sharpens (0/1)
+    mscale: vec4<f32>,    // source → mask pixels (x, y); z: the mask alone (0/1); w: unused
     points: vec4<f32>,    // Point Color: count, point shown (index + 1; 0: none)
     smart: vec4<f32>,     // Smart Lighting: strength (0–1), bias (−1..1)
     grade: vec4<f32>,     // colour grading: on (0/1), pivot, power
@@ -65,8 +65,8 @@ struct Params {
     fx0: vec4<f32>,       // vignette: amount, midpoint, round, feather
     fx1: vec4<f32>,       // vignette highlights; grain: amount, cell, roughness
     fx2: vec4<f32>,       // the whole frame's size, this render's offset in it
-    srcmix: vec4<f32>,    // images beside the source the layers use (array layer + 1; 0: none): AI strength 1, 0
-    srcg: vec4<f32>,      // x: the AI strength the source has
+    srcmix: vec4<f32>,    // images beside the source the layers use (array layer + 1; 0: none): AI strength 1, 0, sharpening, softening
+    srcg: vec4<f32>,      // the AI strength and the sharpening amount the source has
 };
 
 const GAMUT_SLACK: f32 = 2e-3;
@@ -127,6 +127,8 @@ fn mul3(r0: vec4<f32>, r1: vec4<f32>, r2: vec4<f32>, v: vec3<f32>) -> vec3<f32> 
 // How this pixel mixes them in (see `cpu::layers::Mix`).
 var<private> mix_more: f32 = 0.0;
 var<private> mix_less: f32 = 0.0;
+var<private> mix_sharpen: f32 = 0.0;
+var<private> mix_soften: f32 = 0.0;
 
 // The source as this pixel reads it (see `cpu::Source`).
 fn texel(x: f32, y: f32) -> vec3<f32> {
@@ -140,6 +142,14 @@ fn texel(x: f32, y: f32) -> vec3<f32> {
     }
     if (mix_less > 0.0) {
         v = v + mix_less * (textureLoad(aux, at, i32(p.srcmix.y) - 1, 0).xyz - v);
+    }
+    if (mix_sharpen > 0.0) {
+        // Sharpening's fit (see `cpu::detail::Sharpen::at`): alpha, beta.
+        let s = textureLoad(aux, at, i32(p.srcmix.z) - 1, 0);
+        v = v + s.xyz * (mix_sharpen / (1.0 + s.w * mix_sharpen));
+    }
+    if (mix_soften > 0.0) {
+        v = v + mix_soften * textureLoad(aux, at, i32(p.srcmix.w) - 1, 0).xyz;
     }
     return v;
 }
@@ -492,7 +502,7 @@ fn layer_row(k: u32, r: u32) -> vec3<f32> {
 
 // The local adjustments (see `cpu::layers::layers_pixel`): masks read at
 // (mx, my), before lens corrections; the maps at (sx, sy).
-fn layers_px(px0: vec3<f32>, detail: vec3<f32>, mx: f32, my: f32, sx: f32, sy: f32) -> vec3<f32> {
+fn layers_px(px0: vec3<f32>, mx: f32, my: f32, sx: f32, sy: f32) -> vec3<f32> {
     let gx = (mx + 0.5) * p.mscale.x - 0.5;
     let gy = (my + 0.5) * p.mscale.y - 0.5;
     let has_maps = p.maps.x > 0.5;
@@ -512,13 +522,8 @@ fn layers_px(px0: vec3<f32>, detail: vec3<f32>, mx: f32, my: f32, sx: f32, sy: f
         }
         let contrast = layer[i + 12u];
         let dz = layer[i + 16u];
-        // Sharpness first (see `cpu::layers::adjust`).
+        // (Sharpness was applied to the source as it was read.)
         var q = px;
-        let sharp = layer[i + 18u];
-        if (sharp != 0.0) {
-            let k = select(0.5, 1.5, sharp > 0.0) * sharp;
-            q = max(px + k * detail, vec3<f32>(0.0));
-        }
         if (dz != 0.0 && has_maps) {
             q = dehaze_at(m, q, dz);
         }
@@ -542,18 +547,30 @@ fn source_mix(mx: f32, my: f32) {
     let gy = (my + 0.5) * p.mscale.y - 0.5;
     let g = p.srcg.x;
     var k = g;
+    var a = p.srcg.y;
+    var soft = 0.0;
     for (var i = 0u; i < u32(p.layers.x); i++) {
         let b = i * LAYER;
         let ai = layer[b + 19u];
-        if (layer[b + 17u] < 0.5 || ai == 0.0) {
+        let sharp = layer[b + 18u];
+        if (layer[b + 17u] < 0.5 || (ai == 0.0 && sharp == 0.0)) {
             continue;
         }
         let m = mask_at(i, gx, gy);
         if (m <= 0.0) {
             continue;
         }
-        let t = clamp(k + ai, 0.0, 1.0);
-        k += (t - k) * m;
+        if (ai != 0.0) {
+            let t = clamp(k + ai, 0.0, 1.0);
+            k += (t - k) * m;
+        }
+        if (sharp > 0.0) {
+            let t = max(min(a + sharp, MAX_SHARPEN), a);
+            a += (t - a) * m;
+        } else if (sharp < 0.0) {
+            let t = min(soft - sharp, 1.0);
+            soft += (t - soft) * m;
+        }
     }
     if (k > g && p.srcmix.x > 0.5) {
         mix_more = (k - g) / (1.0 - g);
@@ -561,7 +578,16 @@ fn source_mix(mx: f32, my: f32) {
     if (k < g && p.srcmix.y > 0.5) {
         mix_less = (g - k) / g;
     }
+    if (p.srcmix.z > 0.5) {
+        mix_sharpen = a - p.srcg.y;
+    }
+    if (p.srcmix.w > 0.5) {
+        mix_soften = soft;
+    }
 }
+
+// The most sharpening a layer reaches (see `cpu::layers::MAX_SHARPEN`).
+const MAX_SHARPEN: f32 = 1.5;
 
 fn grid_at(x: u32, y: u32, k: u32) -> f32 {
     return grid[(y * u32(p.lens.y) + x) * GRID + k];
@@ -782,7 +808,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     var sy = (p.map1.x * x + p.map1.y * y + p.map1.z) / pw;
     let mx = sx;
     let my = sy;
-    if (p.layers.x > 0.5 && (p.srcmix.x > 0.5 || p.srcmix.y > 0.5)) {
+    if (p.layers.x > 0.5 && dot(p.srcmix, vec4<f32>(1.0)) > 0.5) {
         source_mix(mx, my);
     }
     var raw: vec3<f32>;
@@ -798,22 +824,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (p.fringe.x > 0.5) {
         px = defringe(px, sx, sy);
     }
-    let pre = px;
     if (p.maps.x > 0.5) {
         px = local_px(px, sx, sy);
     }
     if (p.layers.x > 0.5) {
-        var detail = vec3<f32>(0.0);
-        if (p.mscale.w > 0.5) {
-            // The pixel less its neighbours' mean (see `cpu::look_input_at`);
-            // `pre` is the pixel before the local maps.
-            let a = mul3(p.colour0, p.colour1, p.colour2, bilinear(sx - 1.0, sy));
-            let b = mul3(p.colour0, p.colour1, p.colour2, bilinear(sx + 1.0, sy));
-            let c = mul3(p.colour0, p.colour1, p.colour2, bilinear(sx, sy - 1.0));
-            let d = mul3(p.colour0, p.colour1, p.colour2, bilinear(sx, sy + 1.0));
-            detail = pre - 0.25 * (a + b + c + d);
-        }
-        px = layers_px(px, detail, mx, my, sx, sy);
+        px = layers_px(px, mx, my, sx, sy);
     }
     var seen = 0.0;
     if (p.look.x > 0.5) {

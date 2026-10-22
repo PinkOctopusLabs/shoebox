@@ -1000,7 +1000,8 @@ pub struct LocalAdjust {
     pub saturation: f64,
     pub clarity: f64,
     pub dehaze: f64,
-    /// Sharpening (+) or softening (−) of fine detail.
+    /// Sharpening (+, added to the Sharpening module's amount inside the
+    /// mask) or softening (−) of fine detail.
     pub sharpness: f64,
     /// AI denoise strength added to the global Strength inside the mask
     /// (the sum kept to 0–100); raw photos only.

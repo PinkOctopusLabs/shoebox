@@ -225,7 +225,7 @@ impl Demosaiced {
         let spots = &s.modules.heal.spots;
         let key = {
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            format!("{w:?} {d:?}").hash(&mut h);
+            format!("{w:?} {d:?} {:?}", s.modules.sharpening).hash(&mut h);
             serde_json::to_string(spots)
                 .unwrap_or_default()
                 .hash(&mut h);
@@ -237,22 +237,41 @@ impl Demosaiced {
         };
         let keep: Vec<_> = main.iter().chain(&ai).cloned().collect();
         Some(self.cache.aux(key, keep, || {
+            let heal = |img: Rgb| {
+                if spots.is_empty() {
+                    img
+                } else {
+                    crate::heal::heal(&img, spots)
+                }
+            };
             // The source at another AI strength, as the detail stage and
             // spot removal make it.
             let through = |from: &std::sync::Arc<Rgb>| -> std::sync::Arc<Rgb> {
                 if d.is_none() && spots.is_empty() {
                     return from.clone();
                 }
-                let img = match &d {
+                std::sync::Arc::new(heal(match &d {
                     Some(d) => detail::process(from, d),
                     None => (**from).clone(),
-                };
-                std::sync::Arc::new(if spots.is_empty() {
-                    img
-                } else {
-                    crate::heal::heal(&img, spots)
-                })
+                }))
             };
+            let main = main.as_deref().unwrap_or(&self.rgb);
+            // Sharpening's change: the detail stage (and spots) run again
+            // with more sharpening, fitted per pixel.
+            let sharpen = w.sharpens.then(|| {
+                let base = self.base(s);
+                let from = base.as_deref().unwrap_or(&self.rgb);
+                let more = |extra: f32| {
+                    let mut more = s.clone();
+                    more.modules.sharpening.amount =
+                        s.modules.sharpening.amount.max(0.0) + f64::from(extra) * 100.0;
+                    heal(match self.detail(&more) {
+                        Some(d) => detail::process(from, &d),
+                        None => from.clone(),
+                    })
+                };
+                detail::Sharpen::fit(main, &more(detail::FIT_AT), &more(1.0))
+            });
             Aux {
                 more_ai: if w.more_ai {
                     ai.as_ref().map(through)
@@ -262,6 +281,8 @@ impl Demosaiced {
                 less_ai: w
                     .less_ai
                     .then(|| through(&std::sync::Arc::new(self.rgb.clone()))),
+                sharpen,
+                soften: w.softens.then(|| detail::soften(main, self.scale)),
             }
         }))
     }
@@ -316,6 +337,11 @@ pub struct Aux {
     /// strength, each pixel mixes towards one.
     pub more_ai: Option<std::sync::Arc<Rgb>>,
     pub less_ai: Option<std::sync::Arc<Rgb>>,
+    /// Sharpening's change for an extra amount, from the detail stage
+    /// itself (through spot removal too), for layers that sharpen.
+    pub sharpen: Option<detail::Sharpen>,
+    /// Softening's change at full strength, for layers that soften.
+    pub soften: Option<Rgb>,
 }
 
 /// What source sampling reads from: one image, or the source mixed with
@@ -363,6 +389,18 @@ impl Texels for Source<'_> {
                 let o = img.px(x, y);
                 v = [0, 1, 2].map(|c| v[c] + t * (o[c] - v[c]));
             }
+        }
+        if let Some(sh) = &aux.sharpen
+            && m.sharpen > 0.0
+        {
+            let d = sh.at(x, y, m.sharpen);
+            v = [0, 1, 2].map(|c| v[c] + d[c]);
+        }
+        if let Some(soft) = &aux.soften
+            && m.soften > 0.0
+        {
+            let d = soft.px(x, y);
+            v = [0, 1, 2].map(|c| v[c] + m.soften * d[c]);
         }
         v
     }
@@ -1160,17 +1198,8 @@ fn look_input_at(main: &Rgb, aux: Option<&Aux>, f: &Frame, x: f32, y: f32) -> ([
     };
     let src = &Source { main, aux, mix };
     let (lin, sx, sy) = colour_input(src, f, mx, my);
-    // Fine detail for local sharpness: the pixel less its neighbours'
-    // mean (one source pixel away, before the local tone maps).
-    let detail = if f.layers.detail {
-        let n = |dx: f32, dy: f32| mul3(&f.colour, sample_in(src, sx + dx, sy + dy));
-        let (a, b, c, d) = (n(-1.0, 0.0), n(1.0, 0.0), n(0.0, -1.0), n(0.0, 1.0));
-        [0, 1, 2].map(|k| lin[k] - 0.25 * (a[k] + b[k] + c[k] + d[k]))
-    } else {
-        [0.0; 3]
-    };
     let lin = maps::local_pixel(&f.local, lin, sx, sy);
-    let lin = layers::layers_pixel(&f.layers, &f.local, lin, detail, mx, my, sx, sy);
+    let lin = layers::layers_pixel(&f.layers, &f.local, lin, mx, my, sx, sy);
     (lin, mx, my)
 }
 

@@ -2216,9 +2216,10 @@ below). Existing Linux branches stay. To come back to with Linux:
   neighbours). Worked out per pixel in both pipes only when a layer uses
   it; no extra images kept.
 - Its reach is a source pixel, so on the proxy it's coarser than at
-  100%; the spec's per-layer sharpening on the detail stage itself is
-  still to come. Per-layer AI denoise strength came with "Local AI
-  denoise strength and sharpening (2026-10-22)".
+  100%. Replaced the same day by sharpening on the detail stage itself
+  (and softening sized in the original's pixels), with per-layer AI
+  denoise strength: "Local AI denoise strength and sharpening
+  (2026-10-22)".
 
 ## Auto: AI denoise from an ISO (2026-10-22)
 
@@ -2428,3 +2429,42 @@ Face parts, Object), from EDITING-SPEC's "Rendering masks".
 - **Everywhere:** the live view uploads them with the source
   (`Pipe::upload_with`); the CPU fallback, 100% regions, previews and
   exports use `cpu::apply_from`, which makes them at their size.
+- **Sharpening per layer, on the detail stage** (`LocalAdjust.sharpness`
+  keeps its field and range; +100 is now the global Sharpening module's
+  amount 100, with its radius, detail and masking): inside the mask, the
+  amount so far plus the layer's (up to the module's 150), on top of the
+  global amount. It replaces the one-source-pixel neighbour difference,
+  so a layer's sharpening looks like the global module's, sized in the
+  original's pixels: the same on the proxy, at 100% and in exports.
+- **How, without running the stage per pixel:** the stage's sharpening
+  isn't linear in its amount (the halo limit, `push / (1 + |push| /
+  limit)`, saturates), so one delta image scaled by the amount was up to
+  30–50% out (rms of the change) at small amounts on a test of texture,
+  edges and noise. Instead the stage runs twice more beside the source,
+  with ¼ and 1 more amount (then spots, as the source has), and each
+  pixel's change is fitted as `alpha·e / (1 + beta·e)` for an extra
+  amount `e` (alpha per channel, beta shared, as the limit acts on luma):
+  one RGBA image (`detail::Sharpen`, a layer of the GPU's array). Against
+  the global module at the same amount it's within 0.7–1.5% (rms of the
+  change; at most 0.0012 in linear values) at full size and at a proxy's
+  scale, alone or on top of a global 40, and exact at +100
+  (`tests/layers.rs`). Both runs take about 110 ms on a 2560 px proxy,
+  once per change to the detail stage, spots or AI (not per drag of a
+  layer's slider or mask).
+- **Softening** (negative values) the same way, with a blur:
+  `detail::soften`, the source less its finest à-trous bands on linear
+  values, everything up to about two of the original's pixels and fading
+  out by eight (the bands placed by `scale`, so the proxy matches), as
+  one more image at full strength scaled by the layer (linear, so no
+  fit; about 17 ms on the proxy). At −100 a one-pixel checker loses over
+  80% of its contrast, as before, but now the same at 100% as on the
+  proxy. Softening isn't held back by the halo limit, as negative
+  sharpening through the stage would be.
+- **Process version:** not bumped. Local Sharpness came earlier the same
+  day and no release has had it (Develop isn't released: 0.2.3 predates
+  it), so the only edits using it were made with today's builds, and they
+  still look sensible (more or less of the same kind of sharpening). As
+  with the proxy scale for finished images (Effects), the render hash
+  stays, so a preview made before shows the old look until the edit
+  changes.
+
