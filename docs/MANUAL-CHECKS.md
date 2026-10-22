@@ -417,3 +417,47 @@ clone of the library, never the library itself.
     whether either editor clips values above 1.0 before its own highlight
     tools (darktable's highlight reconstruction should be off for it).
   - `exiftool -XMP-shoebox:all` lists the sources and their BLAKE3s.
+
+### Focus stacking
+
+Shoot these for it (the library has no focus brackets yet). Work in an
+APFS clone of the library, never the library itself.
+
+- [ ] **A macro stack of 10–30 frames** (from 2026-10-22): a flower or an
+  insect at close range on a tripod, focus shift shooting (or focusing by
+  hand) from the nearest point to the farthest, wide open or near it. Select them all, Merge to Focus Stack…, Pyramid, Align on;
+  then again with Depth map.
+  - The dialog lists them with the middle one as the reference and names
+    `<first>-Focus.dng` beside the first.
+  - Time from Merge to the new photo selected (expected about 0.8 s a
+    frame for 24 MP on an idle M2 Max, so 10–25 s; note it) and the app's
+    memory in Activity Monitor (expected to level off near 8 GB, not to
+    grow with the frame count).
+  - At 100%: sharp from the nearest petal to the farthest, no double
+    edges anywhere (alignment through the breathing; check the corners);
+    no bright or dark rims along edges between near and far (petal
+    against background: the halos focus stacks are known for); no
+    flicker of noise in the out-of-focus background (it should be as
+    clean as a single frame's, or cleaner); fine hairs or bristles
+    crossing something farther (Pyramid should keep them, Depth map may
+    lose or ghost them: note which).
+  - Pyramid against Depth map: colour and contrast of large smooth areas
+    (Depth map should match a frame's exactly; note any shift with
+    Pyramid), and which looks better where hairs overlap.
+  - The edges: the result is a little smaller than a frame (cut to what
+    every frame covers): note how much against the breathing between the
+    first and last frames.
+  - The frames are unchanged and not stacked with the DNG; Info lists
+    them; ⌘Z sends it to the Trash.
+- [ ] **A landscape with near and far** (from 2026-10-22): 3–5 frames
+  hand-held or on a tripod, focused on a foreground rock or flowers, the
+  middle distance and the horizon, at f/8–f/11.
+  - Merged with defaults: the foreground and the horizon both sharp; the
+    sky smooth (no noise added, no blotches where frames hand over); the
+    edge of the foreground against the distance without a halo.
+  - Hand-held: no doubled detail at the corners; a frame that couldn't be
+    aligned is named in the notice.
+  - A frame that's mostly sharp (the reference sharp nearly everywhere)
+    shouldn't make the stack softer than it: compare the stack with the
+    sharpest frame at 100% in the middle distance (the noise estimate
+    comes from the reference; note if fine texture is lost).

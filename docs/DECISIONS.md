@@ -3660,3 +3660,135 @@ is HDR's.
 - **Open choices:** AI denoise of the sources (a dialog option, at the
   cost of minutes); deghosting where the reference clipped (against the
   next shorter frame); a single-float option.
+
+## Focus stacking (2026-10-22)
+
+`shoebox_develop::merge::focus`; Merge to Focus Stack… in the photo menu
+(no key: Lightroom has none), the merge dialog generalised by kind.
+
+- **Two or more raw frames** of one camera and size, no most: they're
+  streamed. Same exposure assumed; small differences (a flickering light,
+  aperture rounding) are divided out by the gain measured against the
+  reference (the median ratio of block means, about 96 blocks across, of
+  blocks that are neither near black nor near white: blur keeps a block's
+  mean). Logged past 0.1 EV.
+- **Reference: the middle frame** of those chosen (capture order; the
+  earlier of the middle two for an even count). Its colour, EXIF and
+  pixel grid become the result's; the chains to it are half as long as
+  from the first; the crop is about even on both sides. The file still
+  goes beside the first frame and is named after it (`-Focus`). The
+  dialog shows which; it can't be changed (unlike HDR's: nothing depends
+  on it but the grid).
+- **Alignment** (on by default; off for frames that neither move nor
+  change size): each frame to its **neighbour towards the reference**,
+  `align::align` with `Model::Similarity` (focus breathing scales; a
+  hand-held frame shifts and turns), composed along the chain
+  (`H_ref→k = H_neighbour→k · H_ref→neighbour`). Neighbours differ least
+  in focus, so share the most sharp detail; frames from the two ends of a
+  macro stack may share none. Chaining's error grows as a random walk
+  (hundredths of a pixel a link). If a link fails the frame takes its
+  neighbour's transform and the notice names it. Frames are aligned on
+  **linear** luminance, not HDR's square root: with one exposure there's
+  nothing to equalise, and a curve makes blurred texture darker on
+  average than sharp (Jensen's inequality), which refinement partly
+  explains by moving: on the synthetic stack the far frames' error
+  halved (0.43 → 0.19 px at the worst corner). What's left there is the
+  scene itself: a blurred convex shape looks smaller, by about σ²/2r
+  (0.2 px for a 50 px disc blurred by 4.5 px), so frames with different
+  blur don't match exactly. Pre-blurring both frames made it worse
+  (tried, 1–3 px).
+- **Combining,** streamed: each frame is loaded, aligned, warped, added
+  and dropped; the sums are fixed in size. Both methods weight each
+  frame by the energy of its luminance detail against the **noise
+  there**: the HDR noise model (shot and read, by ISO) at the local
+  brightness, scaled per level by the band's response to white noise or,
+  if smaller, the median the reference shows (demosaic smooths noise; the
+  median of a mostly out-of-focus frame is noise). Weights are
+  `(1 + max(E/noise − 2.5, 0))^8`, kept as a streamed soft maximum (a
+  running mean with weights relative to the largest so far, so no
+  overflow and no second pass): where one frame is clearly sharper it
+  alone counts; where none has more than 2.5 times the noise's energy
+  they **average evenly**, so noise falls by the frame count (8 frames of
+  flat grey: 0.36 of one frame's noise; PMax's maximum would keep the
+  noisiest). Colour follows luminance's weights (no channel mixing).
+  - **Pyramid (default):** Burt and Adelson's Laplacian pyramid (5-tap
+    binomial, down to 64 px), each level's coefficients by the weights
+    of their energy smoothed over 5×5 at that level, the top level a plain
+    mean; collapsed. This is enfuse's contrast weighting with a hard mask
+    and Zerene's PMax, between them: per level and per pixel, so fine
+    hairs crossing a blurred background keep their own frame at the fine
+    levels while the coarse levels blend. **Halo control:** each pixel is
+    then held within the least and most its channels were in any frame
+    covering it (a coefficient mix can overshoot every frame at a hard
+    edge; nothing a frame saw is cut). Costs six floats a pixel.
+  - **Depth map:** whole pixels by the weights of a fine band's energy
+    (luminance less its pyramid's next level) smoothed by three box
+    passes of radius the larger of 2 and 1/1000 of the long edge (σ 2.5
+    to 6.5 px), times a wider look (four times the radius, exponent 4)
+    so flat areas follow
+    the edges near them. Where one frame is clearly sharpest the result
+    is its pixels exactly (truest colour and contrast); boundaries blend
+    over a few pixels. No depth index is kept: the soft maximum is the
+    smoothed choice.
+  - Both, against the synthetic truth (below): detail at least 0.95
+    (Pyramid) and 0.97 (Depth map) of the sharpest frame's in every block
+    away from the depth edge, error to the all-in-focus truth within 9%
+    (Pyramid) and 0.5% (Depth map) of the best single frame's per block;
+    at the depth edge the mean error in rings 2–12 px either side is under
+    0.004 of a 0.25 contrast (the far frames' spill there is ±0.04), so
+    no halos. Depth map is the stronger here because the scene's depth
+    edge is one clean disc; Pyramid stays the default for what real
+    stacks have more of (overlapping fine structure), as in Zerene and
+    Helicon; MANUAL-CHECKS compares them on real ones.
+- **Edges:** after scale alignment a more magnified frame doesn't cover
+  the reference's edges. The result is **cut to the part of the
+  reference every frame covers** (each frame's corners mapped back, the
+  box inside them all), so every pixel saw every focus distance; a frame
+  that falls short is otherwise filled out to its edges by its nearest
+  pixels and left out there (weight zero, coverage shrunk per pyramid
+  level). With ±1.35% breathing over 10 frames the cut is 53 and 26 px a
+  side of 6048×4032 (0.9%). Keeping the full frame, edges from fewer
+  frames, is the open choice.
+- **The result:** a half-float linear DNG as HDR's (`merge::dng`), the
+  cut size, the reference's colour and EXIF (no sub-seconds), record kind
+  `focus`, `<first>-Focus.dng` beside the first frame; `merges::Kind`
+  gains a default (HDR) for the dialog's state. The app's job carries
+  `focus::Options` beside HDR's; the status bar says "Stacking focus".
+- **Timings,** 10 × 24 MP (6048×4032, a synthetic stack from
+  `examples/focus_probe.rs`: near to far, 0.3% breathing a frame, blur up
+  to 3 px), M2 Max, 12 cores, release, the machine otherwise busy (load
+  ~25): load 0.34–0.44 s a frame, alignment 0.25–0.3 s (about 1300 of
+  1350 matches agreeing, refined to an rms of 0.004), warp 0.12 s, the
+  combining about 0.1 s; the whole stack 7.7–8.6 s (Pyramid), 7.4–9.6 s
+  (Depth map), so about 0.8 s a frame; 20 frames 15.8 s; the DNG 0.4 s
+  (93 MB). **Memory** doesn't grow with the frame count: at most two
+  full-size frames at once (one loaded, one warped; `Focus.peak_frames`,
+  tested), the sums about 1.2 GB (Pyramid: 5 floats a pixel over the
+  levels, 6 for the range) or 0.5 GB (Depth map), three luminance
+  pyramids; peak resident 7.4–8.2 GB for 10 frames and 8.2 GB for 20
+  (peak footprint 8.2 and 7.9 GB), 5.5 GB for 3; most of it loading
+  (decode, demosaic) and freed pages macOS keeps.
+- **Checked by:** `tests/focus.rs` (develop, 3) on synthetic stacks
+  (`shoebox_fixtures::FocusFrame`: a textured wall slanting from near to
+  far and a brighter disc near the camera in front of its far side; each
+  frame Gaussian-blurred by its distance from focus, layered so the
+  disc's blur spills over the wall as a lens's does; magnified 0.3% a
+  frame and shifted; ISO 400 noise; the truth rendered all in focus):
+  six frames, both methods: breathing recovered to 0.1% in scale and
+  0.25 px at the worst corner, gains within 0.5%, the cut, detail and
+  truth as above, halos, two frames held; a rail stack without alignment
+  (full size, one frame held, the DNG read back with its record); the
+  refusals and Stop. Unit tests (4): one frame back exactly, flat noise
+  averaged, smoothing, coverage. Core (`tests/merges.rs`): a focus stack
+  planned as `-Focus`, beside an HDR of the same photos, journaled, its
+  record's kind, never overwriting, refused from a reference folder,
+  undone to the Trash. UI (`focus_stack_from_the_photo_menu`): the menu
+  item, the dialog (reference, Method, Align), the stack selected, Info's
+  sources, its cut size, ⌘Z. Real stacks: MANUAL-CHECKS, "Focus
+  stacking".
+- **Open choices:** keeping the full frame (edges from fewer frames)
+  instead of cutting; choosing the reference; a depth index map kept for
+  retouching from one frame (Zerene's), which needs a second pass; the
+  noise floor (2.5) and steepness (8) on real stacks; half-float range
+  bounds (a third less of the Pyramid's memory) if 45 MP stacks press on
+  16 GB Macs.
