@@ -5102,3 +5102,51 @@ fn develop_colour_grading_wheel() {
     assert!(w.hue < 40.0 || w.hue > 320.0, "{w:?}");
     assert!(doc.history().last().unwrap().label.starts_with("Shadows"));
 }
+
+/// Effects: the section opens and its sliders change the vignette.
+#[test]
+fn develop_effects() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(&root).unwrap();
+    let img = shoebox_fixtures::scene(9, 800, 600);
+    std::fs::write(
+        root.join("fx.jpg"),
+        shoebox_fixtures::jpeg(&img, 92).unwrap(),
+    )
+    .unwrap();
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let mut h = harness(p, egui::vec2(1400.0, 2600.0));
+    settle(&mut h, Duration::from_secs(60));
+    h.get_by_label("fx.jpg").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(30), "develop", |a| {
+        a.develop_ready()
+    });
+    h.run_steps(3);
+    h.get_by_label("Effects").click();
+    h.run_steps(2);
+    let row = h.get_by_label("Roundness").rect();
+    let rail = egui::pos2(row.right() + 30.0, row.center().y);
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.event(egui::Event::PointerMoved(rail));
+    h.run_steps(1);
+    h.event(button(rail, true));
+    h.event(button(rail, false));
+    h.run_steps(3);
+    let doc = h.state().develop_doc().unwrap();
+    assert_ne!(doc.settings().modules.effects.vignette.roundness, 0.0);
+    assert!(
+        doc.history()
+            .last()
+            .unwrap()
+            .label
+            .starts_with("Vignette roundness")
+    );
+}

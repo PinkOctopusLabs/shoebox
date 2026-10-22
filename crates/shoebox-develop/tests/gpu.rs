@@ -216,6 +216,20 @@ fn gpu_matches_the_cpu_reference() {
     cases.push(("colour grading", s.clone(), o));
     s.modules.black_and_white.enabled = true;
     cases.push(("colour grading, black and white", s, o));
+    // Effects: a darkening vignette with grain, a lightening round one.
+    let mut s = base.clone();
+    s.modules.effects.vignette.amount = -70.0;
+    s.modules.effects.vignette.highlights = 40.0;
+    s.modules.effects.grain.amount = 60.0;
+    s.modules.effects.grain.size = 10.0;
+    s.modules.effects.grain.roughness = 80.0;
+    cases.push(("vignette and grain", s.clone(), o));
+    cases.push(("vignette and grain, a region", s.clone(), o));
+    s.modules.effects.vignette.amount = 50.0;
+    s.modules.effects.vignette.roundness = 100.0;
+    s.modules.effects.vignette.feather = 20.0;
+    s.modules.effects.grain.amount = 0.0;
+    cases.push(("lighter round vignette", s, o));
     // Point Color: an orange and a blue, with a grey's for good measure.
     let mut s = base.clone();
     let point = |lightness, chroma, hue, hue_shift, saturation, luminance| {
@@ -283,6 +297,9 @@ fn gpu_matches_the_cpu_reference() {
             f.mask_view = Some((1, false));
         } else if name.ends_with("mask alone") {
             f.mask_view = Some((0, true));
+        }
+        if name.ends_with(", a region") {
+            f = f.region([30, 20, 90, 70]);
         }
         if name.ends_with("colour, shown") {
             f.point_view = Some(0);

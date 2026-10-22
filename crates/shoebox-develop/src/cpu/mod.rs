@@ -22,6 +22,7 @@
 #![allow(clippy::needless_range_loop)]
 
 pub mod detail;
+pub mod effects;
 pub mod layers;
 pub mod look;
 pub mod maps;
@@ -408,6 +409,8 @@ pub struct Frame {
     pub mask_view: Option<(usize, bool)>,
     /// Point Color's point shown: what it reaches in colour, the rest grey.
     pub point_view: Option<usize>,
+    /// Vignette and grain (see [`effects`]).
+    pub effects: effects::Effects,
 }
 
 /// The display transform's numbers.
@@ -805,6 +808,11 @@ pub fn frame(raw: &RawImage, src: &Demosaiced, s: &Settings, o: &Options) -> Fra
         gamut_warning: false,
         mask_view: None,
         point_view: None,
+        effects: effects::Effects::new(
+            &s.modules.effects,
+            [width as f32, height as f32],
+            src.scale,
+        ),
     }
 }
 
@@ -858,6 +866,8 @@ impl Frame {
         let mut f = self.clone();
         f.width = r[2].min(self.width - x).max(1);
         f.height = r[3].min(self.height - y).max(1);
+        f.effects.offset[0] += x as f32;
+        f.effects.offset[1] += y as f32;
         for row in 0..3 {
             f.map[row][2] += self.map[row][0] * x as f32 + self.map[row][1] * y as f32;
         }
@@ -912,6 +922,11 @@ pub fn apply(src: &Rgb, f: &Frame, display: bool) -> Rgb {
                 let (lin, mx, my, seen) = before_display(src, f, x as f32, y as f32);
                 let px = if display {
                     let (d, out) = display_out(&f.display, lin);
+                    let d = if f.effects.active() {
+                        effects::apply(&f.effects, d, x as f32, y as f32)
+                    } else {
+                        d
+                    };
                     let d = if f.gamut_warning && out { GAMUT } else { d };
                     let d = if f.warnings { warn(d) } else { d };
                     let d = match f.point_view {
@@ -1077,6 +1092,7 @@ fn resample(img: &Rgb, map: [[f64; 3]; 3], w: usize, h: usize) -> Rgb {
         gamut_warning: false,
         mask_view: None,
         point_view: None,
+        effects: Default::default(),
     };
     apply(img, &f, false)
 }

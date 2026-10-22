@@ -28,10 +28,11 @@ pub enum Part {
     Raw,
     Locals,
     Spots,
+    Effects,
 }
 
 impl Part {
-    pub const ALL: [Part; 15] = [
+    pub const ALL: [Part; 16] = [
         Part::WhiteBalance,
         Part::Exposure,
         Part::Tone,
@@ -47,6 +48,7 @@ impl Part {
         Part::Raw,
         Part::Locals,
         Part::Spots,
+        Part::Effects,
     ];
 
     pub fn label(self) -> &'static str {
@@ -66,6 +68,7 @@ impl Part {
             Part::Raw => "Raw",
             Part::Locals => "Local adjustments",
             Part::Spots => "Spot removal",
+            Part::Effects => "Effects",
         }
     }
 
@@ -116,6 +119,7 @@ impl Part {
             Part::Raw => &[&["modules", "raw"]],
             Part::Locals => &[&["locals"]],
             Part::Spots => &[&["modules", "heal"]],
+            Part::Effects => &[&["modules", "effects"]],
         }
     }
 }

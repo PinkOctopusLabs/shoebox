@@ -136,3 +136,6 @@ together at the end, before the release.
 - [ ] **Colour grading**: a classic teal-shadows/orange-highlights grade
   and a split-toned black and white: smooth, with no banding at the
   ranges' joins, and black stays black.
+- [ ] **Vignette and grain**: a darkening vignette on a cropped photo
+  (it follows the crop), and grain at 100% against a full-size export
+  (the same size and strength), on a sky (no pattern visible).

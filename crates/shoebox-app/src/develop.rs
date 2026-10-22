@@ -949,6 +949,16 @@ fn finished_image(r: &Request, long_edge: Option<u32>) -> Result<Ready, String> 
             )
         }
     };
+    // Prepared smaller than the file (the proxy): detail radii and grain
+    // are in the full image's pixels.
+    let long = src.rgb.width.max(src.rgb.height) as f32;
+    let src = match shoebox_decode::dimensions(r.format, &data) {
+        Ok((w, h)) if w.max(h) > 0 => {
+            let scale = (long / w.max(h) as f32).min(1.0);
+            src.with_scale(scale)
+        }
+        _ => src,
+    };
     Ok(Ready {
         id: r.id,
         raw: r.raw.clone(),

@@ -2162,3 +2162,23 @@ stay. To come back to with Linux:
   Global; a range with something set shows in bold), drawn in Oklab's
   hues as the grading uses them; drag for hue and saturation,
   double-click to clear; sliders for exact values.
+
+## Effects: vignette and grain (2026-10-22)
+
+- **Module 15, on display values** after the display transform, before
+  the clipping and gamut overlays (so they warn about the final picture).
+- **Vignette:** post-crop, placed by the whole frame (a 100% region
+  carries its offset, so it gets its own part). Distance from the middle,
+  1 at the corners; Roundness from the frame's shape (0) to a circle
+  (+100); Midpoint where it's half; Feather its width. Darkening
+  multiplies (Highlights keeps bright edges bright); lightening goes
+  towards white.
+- **Grain:** monochrome value noise from an integer hash (the same u32
+  arithmetic in Rust and WGSL), a second finer octave by Roughness,
+  strongest in the midtones (none on black or white). Sized in the
+  full-size photo's pixels (1–6); where a proxy's pixel spans several
+  grains it's weakened by as much, so the proxy looks like the export.
+- Finished images (JPEG, TIFF, PNG) prepared at the proxy size now carry
+  their scale, as raws did: grain and the detail stage's radii were in
+  the proxy's pixels for them.
+- "Effects" is its own part in presets and copied settings.

@@ -63,6 +63,76 @@ pub fn modules(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &Settings) {
     transform(app, ui, &s.geometry.transform);
     black_and_white(app, ui, &s.modules.black_and_white);
     calibration(app, ui, &s.modules.calibration);
+    effects(app, ui, &s.modules.effects);
+}
+
+/// A post-crop vignette and grain.
+fn effects(app: &mut ShoeboxApp, ui: &mut egui::Ui, e: &shoebox_develop::edit::Effects) {
+    let changed = *e != Default::default();
+    let reset = section(ui, "Effects", changed, false, |ui| {
+        let (v, g) = (&e.vignette, &e.grain);
+        ui.label(RichText::new("Vignette").small().strong());
+        egui::Grid::new("vignette-grid")
+            .num_columns(2)
+            .show(ui, |ui| {
+                type Field = fn(&mut shoebox_develop::edit::Vignette) -> &mut f64;
+                let rows: [(&str, &str, f64, f64, f64, f64, Field); 5] = [
+                    ("Amount", "vg-a", v.amount, -100.0, 100.0, 0.0, |v| {
+                        &mut v.amount
+                    }),
+                    ("Midpoint", "vg-m", v.midpoint, 0.0, 100.0, 50.0, |v| {
+                        &mut v.midpoint
+                    }),
+                    ("Roundness", "vg-r", v.roundness, -100.0, 100.0, 0.0, |v| {
+                        &mut v.roundness
+                    }),
+                    ("Feather", "vg-f", v.feather, 0.0, 100.0, 50.0, |v| {
+                        &mut v.feather
+                    }),
+                    ("Highlights", "vg-h", v.highlights, 0.0, 100.0, 0.0, |v| {
+                        &mut v.highlights
+                    }),
+                ];
+                for (name, key, value, lo, hi, default, field) in rows {
+                    if let Some(x) = slider(ui, name, value, lo..=hi, default, 0) {
+                        edit(
+                            app,
+                            key,
+                            format!("Vignette {} {x:.0}", name.to_lowercase()),
+                            |s| {
+                                *field(&mut s.modules.effects.vignette) = x;
+                            },
+                        );
+                    }
+                }
+            });
+        ui.label(RichText::new("Grain").small().strong());
+        egui::Grid::new("grain-grid").num_columns(2).show(ui, |ui| {
+            type Field = fn(&mut shoebox_develop::edit::Grain) -> &mut f64;
+            let rows: [(&str, &str, f64, f64, Field); 3] = [
+                ("Amount", "gr-a", g.amount, 0.0, |g| &mut g.amount),
+                ("Size", "gr-s", g.size, 25.0, |g| &mut g.size),
+                ("Roughness", "gr-r", g.roughness, 50.0, |g| &mut g.roughness),
+            ];
+            for (name, key, value, default, field) in rows {
+                if let Some(x) = slider(ui, name, value, 0.0..=100.0, default, 0) {
+                    edit(
+                        app,
+                        key,
+                        format!("Grain {} {x:.0}", name.to_lowercase()),
+                        |s| {
+                            *field(&mut s.modules.effects.grain) = x;
+                        },
+                    );
+                }
+            }
+        });
+    });
+    if reset {
+        edit(app, "effects", "Reset effects".into(), |s| {
+            s.modules.effects = Default::default()
+        });
+    }
 }
 
 /// Purple and green fringes along hard edges.

@@ -530,6 +530,61 @@ pub struct Wheel {
     pub luminance: f64,
 }
 
+/// Effects (module 15): a post-crop vignette and film grain, on the
+/// photo as shown.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Effects {
+    pub vignette: Vignette,
+    pub grain: Grain,
+}
+
+/// Amount −100 (darker edges) to +100 (lighter); midpoint (where it's
+/// half, 0–100 from the middle to the corners), roundness (−100 the
+/// frame's shape, +100 a circle), feather (0–100) and highlights (0–100:
+/// how much bright edges keep their brightness when darkened).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Vignette {
+    pub amount: f64,
+    pub midpoint: f64,
+    pub roundness: f64,
+    pub feather: f64,
+    pub highlights: f64,
+}
+
+impl Default for Vignette {
+    fn default() -> Self {
+        Self {
+            amount: 0.0,
+            midpoint: 50.0,
+            roundness: 0.0,
+            feather: 50.0,
+            highlights: 0.0,
+        }
+    }
+}
+
+/// Amount 0–100; size 0–100 (grains from about one to six pixels of the
+/// full-size photo); roughness 0–100 (finer grains mixed in).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Grain {
+    pub amount: f64,
+    pub size: f64,
+    pub roughness: f64,
+}
+
+impl Default for Grain {
+    fn default() -> Self {
+        Self {
+            amount: 0.0,
+            size: 25.0,
+            roughness: 50.0,
+        }
+    }
+}
+
 /// A monochrome treatment: how bright each hue band ([`HUES`]) turns out,
 /// −100 to +100.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -608,6 +663,7 @@ pub struct Modules {
     pub black_and_white: BlackAndWhite,
     pub tone_curve: ToneCurve,
     pub display_transform: DisplayTransform,
+    pub effects: Effects,
     /// Modules from a newer build, kept untouched.
     #[serde(flatten)]
     pub other: BTreeMap<String, Value>,

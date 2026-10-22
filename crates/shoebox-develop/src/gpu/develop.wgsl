@@ -62,6 +62,9 @@ struct Params {
     smart: vec4<f32>,     // Smart Lighting: strength (0–1), bias (−1..1)
     grade: vec4<f32>,     // colour grading: on (0/1), pivot, power
     grade_wheels: array<vec4<f32>, 4>,  // shadows, midtones, highlights, global: a, b, gain
+    fx0: vec4<f32>,       // vignette: amount, midpoint, round, feather
+    fx1: vec4<f32>,       // vignette highlights; grain: amount, cell, roughness
+    fx2: vec4<f32>,       // the whole frame's size, this render's offset in it
 };
 
 const GAMUT_SLACK: f32 = 2e-3;
@@ -653,6 +656,69 @@ fn display(px: vec3<f32>) -> vec4<f32> {
     return vec4<f32>(oetf(c.x), oetf(c.y), oetf(c.z), out);
 }
 
+// The effects' hash (see `cpu::effects::hash`).
+fn fx_hash(x: u32, y: u32) -> f32 {
+    var h = (x * 0x8da6b343u) ^ (y * 0xd8163841u);
+    h = h ^ (h >> 15u);
+    h = h * 0x2c1b3c6du;
+    h = h ^ (h >> 12u);
+    h = h * 0x297a2d39u;
+    h = h ^ (h >> 15u);
+    return f32(h & 0xffffu) / 32767.5 - 1.0;
+}
+
+fn fx_noise(x: f32, y: f32) -> f32 {
+    let x0 = floor(x);
+    let y0 = floor(y);
+    let tx = x - x0;
+    let ty = y - y0;
+    let sx = tx * tx * (3.0 - 2.0 * tx);
+    let sy = ty * ty * (3.0 - 2.0 * ty);
+    let i = u32(x0);
+    let j = u32(y0);
+    let a = fx_hash(i, j);
+    let b = fx_hash(i + 1u, j);
+    let c = fx_hash(i, j + 1u);
+    let d = fx_hash(i + 1u, j + 1u);
+    let top = a + (b - a) * sx;
+    let bot = c + (d - c) * sx;
+    return top + (bot - top) * sy;
+}
+
+// Vignette and grain (see `cpu::effects::apply`).
+fn effects(d0: vec3<f32>, x: f32, y: f32) -> vec3<f32> {
+    let fx = x + p.fx2.z + 0.5;
+    let fy = y + p.fx2.w + 0.5;
+    var d = d0;
+    if (p.fx0.x != 0.0) {
+        let w = max(p.fx2.x, 1.0);
+        let h = max(p.fx2.y, 1.0);
+        let k = pow(w / h, p.fx0.z);
+        let dx = (fx / w - 0.5) * 2.0 * k;
+        let dy = (fy / h - 0.5) * 2.0 / k;
+        let r = sqrt(dx * dx + dy * dy) / 1.4142135;
+        let t = smooth01(p.fx0.y - 0.5 * p.fx0.w, p.fx0.y + 0.5 * p.fx0.w, r);
+        let luma = 0.2126 * d.x + 0.7152 * d.y + 0.0722 * d.z;
+        if (p.fx0.x < 0.0) {
+            let keep = 1.0 - p.fx1.x * smooth01(0.6, 1.0, luma);
+            d = d * (1.0 + p.fx0.x * t * keep);
+        } else {
+            d = d + (vec3<f32>(1.0) - d) * (p.fx0.x * t);
+        }
+    }
+    if (p.fx1.y != 0.0) {
+        let gx = fx / p.fx1.z;
+        let gy = fy / p.fx1.z;
+        var n = fx_noise(gx, gy);
+        n += p.fx1.w * 0.5 * fx_noise(gx * 2.0 + 17.0, gy * 2.0 + 31.0);
+        let even = max(1.0 / p.fx1.z, 1.0);
+        let luma = clamp(0.2126 * d.x + 0.7152 * d.y + 0.0722 * d.z, 0.0, 1.0);
+        let g = p.fx1.y * 0.12 * n * (4.0 * luma * (1.0 - luma)) / even;
+        d = clamp(d + vec3<f32>(g), vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    return d;
+}
+
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (f32(id.x) >= p.size.x || f32(id.y) >= p.size.y) {
@@ -693,6 +759,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (p.misc.w > 0.5) {
         let d = display(px);
         px = d.xyz;
+        if (p.fx0.x != 0.0 || p.fx1.y != 0.0) {
+            px = effects(px, x, y);
+        }
         if (p.unproof0.w > 0.5 && d.w > 0.5) {
             px = vec3<f32>(0.95, 0.2, 0.95);
         }
