@@ -3411,3 +3411,19 @@ Smart Lighting's spot isn't carried), not ticked when copying by default
 **Open:** HEIC portrait depth; refining on the GPU (the refined map is
 re-uploaded per Depth drag: 17 MB at 2560 px, fine so far); focusing on
 Vision's subject by default instead of the nearest tenth.
+
+## Photo merges: rule 3 and the result (2026-10-22)
+
+- **Rule 3 amended** (CLAUDE.md, approved): Shoebox may add photo merges
+  to a library (an HDR, panorama or focus stack the person makes from
+  photos they chose), written beside its sources as a new DNG through
+  `fileops`: journaled, verified, undoable (⌘Z sends it to the Trash),
+  never replacing a file. A merge reads its sources only: it never
+  changes, moves or hides them, and it's refused in reference folders.
+- **The result is a photo of its own**, beside its first source (not
+  stacked with the sources, not a variant of one); it records what it
+  was made from, and the Info panel lists those sources.
+- **Floating-point linear DNG** (half or single floats, DNG 1.4's
+  floating-point sample format), so HDR keeps values past the sensor's
+  white; Shoebox writes it itself rather than through rawler's integer
+  writer. Its edit starts from defaults.
