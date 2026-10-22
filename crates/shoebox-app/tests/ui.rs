@@ -4797,6 +4797,130 @@ fn develop_upright_levels_a_tilted_photo() {
     assert_eq!(doc.history().last().unwrap().label, "Upright: Level");
 }
 
+/// Guided upright: two guides drawn along a turned grid's verticals turn
+/// it level (a step each); an end dragged is one more step; removing a
+/// guide leaves too few, and the correction goes with it.
+#[test]
+fn develop_guided_upright_follows_drawn_lines() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(&root).unwrap();
+    let (w, h) = (900u32, 600u32);
+    let a = 3f64.to_radians();
+    let img = image::RgbImage::from_fn(w, h, |x, y| {
+        let (cx, cy) = (f64::from(x) - 450.0, f64::from(y) - 300.0);
+        let (u, v) = (cx * a.cos() + cy * a.sin(), -cx * a.sin() + cy * a.cos());
+        let on = (u.rem_euclid(90.0) < 4.0 || v.rem_euclid(90.0) < 4.0)
+            && u.abs() < 380.0
+            && v.abs() < 250.0;
+        if on {
+            image::Rgb([30, 30, 35])
+        } else {
+            image::Rgb([200, 195, 185])
+        }
+    });
+    std::fs::write(
+        root.join("guided.jpg"),
+        shoebox_fixtures::jpeg(&img, 92).unwrap(),
+    )
+    .unwrap();
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let mut h = harness(p, egui::vec2(1400.0, 2600.0));
+    settle(&mut h, Duration::from_secs(60));
+    h.get_by_label("guided.jpg").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(30), "develop", |a| {
+        a.develop_ready()
+    });
+    h.run_steps(3);
+    h.get_by_label("Transform").click();
+    h.run_steps(2);
+    h.get_by_label("Guided").click();
+    h.run_steps(3);
+    assert!(h.state().develop_guided().0);
+    let photo = h.state().develop_photo_rect().unwrap();
+    // A point on the turned grid (u across it, v along it), on screen.
+    let at = |u: f64, v: f64| {
+        let (x, y) = (
+            u * a.cos() - v * a.sin() + 450.0,
+            u * a.sin() + v * a.cos() + 300.0,
+        );
+        photo.min
+            + egui::vec2(
+                x as f32 / 900.0 * photo.width(),
+                y as f32 / 600.0 * photo.height(),
+            )
+    };
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let drag = |h: &mut Harness<'_, ShoeboxApp>, from: egui::Pos2, to: egui::Pos2| {
+        h.event(egui::Event::PointerMoved(from));
+        h.run_steps(1);
+        h.event(button(from, true));
+        h.run_steps(1);
+        for k in 1..=5 {
+            h.event(egui::Event::PointerMoved(
+                from + (to - from) * k as f32 / 5.0,
+            ));
+            h.run_steps(1);
+        }
+        h.event(button(to, false));
+        h.run_steps(3);
+    };
+    let steps = h.state().develop_doc().unwrap().history().len();
+    // Two of the grid's verticals (their centres: u = 90k + 2).
+    drag(&mut h, at(-268.0, -200.0), at(-268.0, 200.0));
+    let doc = h.state().develop_doc().unwrap();
+    let g = &doc.settings().geometry;
+    assert_eq!(g.guides.len(), 1);
+    assert_eq!(g.rotate, 0.0, "one guide alone does nothing");
+    drag(&mut h, at(182.0, -220.0), at(182.0, 180.0));
+    let doc = h.state().develop_doc().unwrap();
+    let g = doc.settings().geometry.clone();
+    assert_eq!(g.guides.len(), 2);
+    assert!((g.rotate.abs() - 3.0).abs() < 0.3, "{g:?}");
+    assert!(g.transform.vertical.abs() < 3.0, "{g:?}");
+    assert!(g.crop[0] > 0.0, "cropped to fit: {g:?}");
+    assert_eq!(doc.history().len(), steps + 2);
+    assert_eq!(doc.history().last().unwrap().label, "Draw guide");
+    snapshot(&mut h, "develop-guided");
+
+    // An end moved along its line: one step, the same result.
+    drag(&mut h, at(182.0, 180.0), at(182.0, 230.0));
+    let doc = h.state().develop_doc().unwrap();
+    let moved = &doc.settings().geometry;
+    assert_eq!(doc.history().len(), steps + 3);
+    assert_eq!(doc.history().last().unwrap().label, "Move guide");
+    assert!((moved.rotate - g.rotate).abs() < 0.2, "{moved:?}");
+
+    // Select the first and remove it: too few guides, no correction.
+    let mid = at(-268.0, 0.0);
+    h.event(egui::Event::PointerMoved(mid));
+    h.run_steps(1);
+    h.event(button(mid, true));
+    h.event(button(mid, false));
+    h.run_steps(3);
+    assert_eq!(h.state().develop_guided(), (true, Some(0)));
+    h.key_press(egui::Key::Backspace);
+    h.run_steps(3);
+    let doc = h.state().develop_doc().unwrap();
+    let g = &doc.settings().geometry;
+    assert_eq!(g.guides.len(), 1);
+    assert_eq!((g.rotate, g.transform.vertical), (0.0, 0.0));
+    assert_eq!(doc.history().last().unwrap().label, "Remove guide");
+
+    // Escape leaves Guided, and stays in Develop.
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert!(!h.state().develop_guided().0);
+    assert_eq!(h.state().view_name(), shoebox_app::app::View::Develop);
+}
+
 /// Match Total Exposures and the reference view: a's Exposure raised in
 /// Develop, then matched onto b (taken with the same settings, so it gets
 /// the same Exposure); Shift-R makes a the reference, and moving to b

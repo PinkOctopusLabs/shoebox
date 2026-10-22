@@ -1988,8 +1988,8 @@ masks; AI raw denoise (RawNIND); Smart-light tone; finer AI masks.
 - Tested on lines distorted by a known correction (recovered within 0.5°
   and 4 slider units) and on a drawn grid turned 3°, found, levelled
   (3.0°), and level again after the real render (mean lean under 0.5°).
-- Lightroom's Guided upright (drawing the lines) isn't built; it would
-  feed hand-drawn segments to the same solver.
+- Guided upright (drawing the lines) followed the same day: see
+  "Guided upright (2026-10-22)".
 
 ## Reference view and Match Total Exposures (2026-10-22)
 
@@ -2232,3 +2232,46 @@ below). Existing Linux branches stay. To come back to with Linux:
   as Detail does.
 - The test DNG fixture can now carry an ISO (in an Exif IFD), for the UI
   test.
+
+## Guided upright (2026-10-22)
+
+- **What it does:** the person draws two to four lines along things that
+  should be vertical or level; each is made exactly vertical or level,
+  whichever it's nearer (within 45°). One guide does nothing yet (the
+  spec's two to four, as Lightroom waits for the second).
+- **Solving:** `upright::solve_guided`, Levenberg–Marquardt on the
+  guides' leans (degrees), over the rotation and the camera's tilt and pan
+  (in degrees, ±30° for the sliders' ±100), with a numerical Jacobian.
+  Verticals alone turn and tilt; levels alone turn and pan; both together
+  may use all three. A small cost on the correction itself (10⁻³ per
+  degree) picks the smallest correction when the guides leave a choice
+  (one vertical and one level); four guides are a least-squares fit.
+  Results are rounded to 0.01° and 0.1 slider units, not Auto's 0.1° and
+  whole units, so the guides stay within 0.3° of straight. The person's
+  Aspect is taken as 0 (as Auto does): with Aspect and a rotation, guides
+  lean slightly.
+- **Applied** as Auto-upright is: the rotation with the largest crop that
+  fits, the Transform's vertical and horizontal perspective, Constrain on.
+  Fewer than two guides after a change: the correction goes back to none
+  if the guides had given one, else the photo is left as it was (drawing
+  the first guide doesn't undo an earlier rotation).
+- **Stored** in the edit as `geometry.guides` (ends as fractions of the
+  upright frame before rotation and perspective), so turning Guided on
+  again shows them to move. They're left out of the render hash (only
+  what they did is rendered), and out of presets and copied settings (no
+  part names them). Auto, Level, Vertical, Full and the Transform's Reset
+  clear them.
+- **Drawing:** while Guided is on, the photo shows without rotation,
+  crop or Transform (as cropping shows the whole frame), so the screen
+  maps linearly onto the frame the guides live in, the lens corrections
+  included as Auto's lines are. The corrected photo shows on leaving
+  (Done, Enter or Escape); the sliders and history change as each guide
+  does. A drag draws a guide; an end drags; a click selects one and
+  Backspace (or Remove guide) removes it; Clear removes all. Each guide
+  drawn, moved or removed is one history step (a drag folds into it); a
+  guide under 8 points long when let go is dropped and its step with it.
+- Tested on guides distorted by known corrections (two verticals, two
+  levels, one of each, three, four: all within 0.3° once corrected; four
+  recover the camera within 0.3° and 2 units), and in the app on a grid
+  turned 3°: two guides level it (3.0°), a moved end is one more step,
+  removing one takes the correction away.

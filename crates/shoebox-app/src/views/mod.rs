@@ -9,6 +9,7 @@ pub mod files;
 pub mod filmstrip;
 pub mod grading;
 pub mod grid;
+pub mod guided;
 pub mod local;
 pub mod look;
 pub mod loupe;

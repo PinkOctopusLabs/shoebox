@@ -193,6 +193,7 @@ pub fn set_active(app: &mut ShoeboxApp, on: bool) {
         app.develop.local.selected = None;
         app.develop.points.picking = false;
         app.develop.picking = false;
+        app.develop.guided = Default::default();
     }
 }
 

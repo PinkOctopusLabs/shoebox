@@ -112,6 +112,11 @@ together at the end, before the release.
   strong lines (a portrait, foliage): Auto straightens the first kind
   without looking stretched and leaves the second nearly alone; Level
   levels the horizon.
+- [ ] **Guided upright** on real architecture: two guides along a tall
+  building's edges make them vertical; a third along a roofline or
+  horizon levels it too; the guides land where drawn on a NEF turned 90°
+  and on one with lens corrections on; Escape shows the corrected photo
+  and turning Guided on again shows the guides to move.
 - [ ] **Match Total Exposures** on a bracketed set or a series shot in
   manual with changing light: matched photos look equally bright beside
   the one matched to. **Reference view**: edit one photo beside another

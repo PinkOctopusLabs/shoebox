@@ -1016,6 +1016,11 @@ impl ShoeboxApp {
         (self.develop.zoom, self.develop.zoom_region())
     }
 
+    /// Develop's Guided upright: on, and the guide selected (tests).
+    pub fn develop_guided(&self) -> (bool, Option<usize>) {
+        (self.develop.guided.active, self.develop.guided.selected)
+    }
+
     /// Where Develop drew the photo last frame (tests).
     pub fn develop_photo_rect(&self) -> Option<egui::Rect> {
         self.develop.photo_rect
@@ -4075,11 +4080,20 @@ impl ShoeboxApp {
             {
                 views::spots::remove(self, i);
             }
+            if (pressed(egui::Key::Backspace) || pressed(egui::Key::Delete))
+                && self.develop.guided.active
+                && let Some(i) = self.develop.guided.selected
+            {
+                views::guided::remove(self, i);
+            }
             if pressed(egui::Key::O) && self.develop.local.selected.is_some() {
                 let t = &mut self.develop.local;
                 t.show_mask = !t.show_mask;
             }
-            if (pressed(egui::Key::Z) || pressed(egui::Key::Space)) && self.develop.crop.is_none() {
+            if (pressed(egui::Key::Z) || pressed(egui::Key::Space))
+                && self.develop.crop.is_none()
+                && !self.develop.guided.active
+            {
                 // Fit ↔ 100%, about the centre.
                 self.develop.zoom = match self.develop.zoom {
                     Some(_) => None,
@@ -4102,6 +4116,13 @@ impl ShoeboxApp {
                 }
                 if pressed(egui::Key::Escape) {
                     views::develop::finish_crop(self, false);
+                }
+            } else if self.develop.guided.active {
+                // Guiding takes Enter and Escape: its changes are made.
+                if pressed(egui::Key::Enter)
+                    || (pressed(egui::Key::Escape) && !ctx.any_popup_open())
+                {
+                    views::guided::set_active(self, false);
                 }
             } else if pressed(egui::Key::Escape)
                 && self.develop.spots.active

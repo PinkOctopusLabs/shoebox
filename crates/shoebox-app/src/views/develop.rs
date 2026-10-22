@@ -108,6 +108,9 @@ pub struct State {
     asked_region: Option<(u64, [usize; 4])>,
     /// Drawing a crop (R): the whole frame shows, the crop over it.
     pub crop: Option<super::crop::CropEdit>,
+    /// Guided upright: the photo shows without rotation or perspective,
+    /// the guides over it.
+    pub guided: super::guided::Tool,
     /// The render's histogram (R, G, B, luma).
     pub histogram: Option<Box<[[u32; 256]; 4]>>,
     /// The snapshot being renamed, and its name so far.
@@ -898,6 +901,14 @@ fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_w
     if st.crop.is_some() {
         settings.geometry.crop = [0.0, 0.0, 1.0, 1.0];
     }
+    // While guiding, the upright frame as it is before rotation and
+    // perspective: where the guides are drawn.
+    if st.guided.active {
+        let g = &mut settings.geometry;
+        g.rotate = 0.0;
+        g.crop = [0.0, 0.0, 1.0, 1.0];
+        g.transform = shoebox_develop::edit::Transform::default();
+    }
     // The GPU pipe, with this photo's demosaiced image uploaded (after the
     // detail stage: noise reduction, sharpening, texture; and spot
     // removal).
@@ -992,7 +1003,10 @@ fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_w
             st.histogram = h;
         }
     }
-    if matches!(st.compare, Compare::Original | Compare::Split) && st.crop.is_none() {
+    if matches!(st.compare, Compare::Original | Compare::Split)
+        && st.crop.is_none()
+        && !st.guided.active
+    {
         let s = original_settings(doc);
         let frame = cpu::frame(&ready.meta, &ready.src, &s, &o);
         let key = (
@@ -1140,11 +1154,9 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
     };
     let edited = current(&st.edited);
     let original = current(&st.original).filter(|o| edited.is_some_and(|e| e.1 == o.1));
-    let compare = if st.crop.is_some() {
-        Compare::Edited
-    } else {
-        st.compare
-    };
+    // Cropping or guiding: the whole frame, and nothing else on the photo.
+    let framing = st.crop.is_some() || st.guided.active;
+    let compare = if framing { Compare::Edited } else { st.compare };
     let (tex, size) = match edited {
         Some((t, s)) => (Some(t), [s[0] as f32, s[1] as f32]),
         None => {
@@ -1192,10 +1204,7 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
     // Zoomed to 100%: one full-size pixel per screen pixel, placed by the
     // centre point; the proxy shows enlarged until the sharp part arrives.
     let ppp = ctx.pixels_per_point();
-    let zoom = app
-        .develop
-        .zoom
-        .filter(|_| app.develop.crop.is_none() && edited.is_some());
+    let zoom = app.develop.zoom.filter(|_| !framing && edited.is_some());
     let full_size = match app.develop.full_size {
         Some((pid, (w, h))) if pid == id => (w as f32, h as f32),
         _ => {
@@ -1225,7 +1234,7 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
     let painter = painter.with_clip_rect(area);
     app.develop.photo_rect = Some(target);
     // Double-click toggles fit and 100% at that point; drag or scroll pans.
-    if app.develop.crop.is_none() && edited.is_some() && !app.develop.picking {
+    if !framing && edited.is_some() && !app.develop.picking {
         if resp.double_clicked()
             && let Some(p) = resp.interact_pointer_pos()
         {
@@ -1251,7 +1260,7 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
             }
         }
     }
-    if app.develop.picking && app.develop.crop.is_none() && edited.is_some() {
+    if app.develop.picking && !framing && edited.is_some() {
         if resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
         }
@@ -1355,10 +1364,15 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
         zoomed_region(app, &ctx, &painter, target, area, full_size, ppp);
     }
     // The selected mask's handles; Point Color's picker.
-    if app.develop.crop.is_none() && compare != Compare::Original && edited.is_some() {
+    if !framing && compare != Compare::Original && edited.is_some() {
         super::local::on_photo(app, ui, &resp, &painter, target);
         super::point_colour::on_photo(app, ui, &resp, target);
         super::spots::on_photo(app, ui, &resp, &painter, target);
+    }
+    // Guided upright: the guides over the photo, as it is before rotation
+    // and perspective.
+    if app.develop.guided.active && edited.is_some() {
+        super::guided::on_photo(app, ui, &resp, &painter, target);
     }
     // Cropping: the crop over the whole frame, its aspect and Done above.
     if let (Some(_), Some((_, s))) = (&app.develop.crop, edited) {
@@ -1417,6 +1431,12 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
         if let Some(apply) = done {
             finish_crop(app, apply);
         }
+    } else if app.develop.guided.active && edited.is_some() {
+        let bar = Rect::from_center_size(
+            rect.center_top() + egui::vec2(0.0, 18.0),
+            egui::vec2(380.0, 26.0),
+        );
+        super::guided::bar(app, ui, bar);
     } else if edited.is_some() {
         // Edited / Original / Split, over the top of the photo.
         let bar = Rect::from_center_size(
@@ -1582,6 +1602,10 @@ pub fn start_crop(app: &mut ShoeboxApp) {
     if st.read_only || st.crop.is_some() {
         return;
     }
+    if st.guided.active {
+        super::guided::set_active(app, false);
+    }
+    let st = &mut app.develop;
     if let Some(doc) = &st.doc {
         let g = &doc.settings().geometry;
         st.crop = Some(super::crop::CropEdit::new(g.crop, &g.aspect));

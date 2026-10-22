@@ -163,7 +163,7 @@ fn defringe(app: &mut ShoeboxApp, ui: &mut egui::Ui, d: &Defringe) {
 /// Perspective (vertical, horizontal), aspect, scale and offsets.
 fn transform(app: &mut ShoeboxApp, ui: &mut egui::Ui, t: &Transform) {
     let reset = section(ui, "Transform", *t != Transform::default(), false, |ui| {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Upright");
             for m in shoebox_develop::upright::Mode::ALL {
                 let hint = match m {
@@ -181,6 +181,20 @@ fn transform(app: &mut ShoeboxApp, ui: &mut egui::Ui, t: &Transform) {
                 if ui.button(m.label()).on_hover_text(hint).clicked() {
                     upright(app, m);
                 }
+            }
+            let on = app.develop.guided.active;
+            if ui
+                .add_enabled(
+                    !app.develop.read_only,
+                    egui::Button::selectable(on, "Guided"),
+                )
+                .on_hover_text(
+                    "Draw two to four lines on the photo along things that should be \
+                     vertical or level",
+                )
+                .clicked()
+            {
+                super::guided::set_active(app, !on);
             }
         });
         egui::Grid::new("transform-grid")
@@ -238,6 +252,7 @@ fn transform(app: &mut ShoeboxApp, ui: &mut egui::Ui, t: &Transform) {
     if reset {
         edit(app, "transform", "Reset transform".into(), |s| {
             s.geometry.transform = Transform::default();
+            s.geometry.guides.clear();
         });
     }
 }
@@ -256,10 +271,15 @@ pub fn upright(app: &mut ShoeboxApp, mode: shoebox_develop::upright::Mode) {
     let (w, h) =
         shoebox_develop::cpu::upright(ready.src.rgb.width, ready.src.rgb.height, o.orientation);
     let crop = shoebox_develop::cpu::max_crop(w as f64, h as f64, c.rotate);
+    if app.develop.guided.active {
+        super::guided::set_active(app, false);
+    }
     app.develop.last_step_done();
     edit(app, "upright", format!("Upright: {}", mode.label()), |s| {
         s.geometry.rotate = c.rotate;
         s.geometry.crop = crop;
+        // The photo's own lines decide now, not the guides.
+        s.geometry.guides.clear();
         let t = &mut s.geometry.transform;
         t.vertical = c.vertical;
         t.horizontal = c.horizontal;

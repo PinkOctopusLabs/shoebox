@@ -3,7 +3,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use shoebox_develop::colour;
-use shoebox_develop::upright::{Correction, Lines, Mode, Segment, lines, solve, worst_lean};
+use shoebox_develop::upright::{
+    Correction, Lines, Mode, Segment, guide_leans, lines, solve, solve_guided, worst_lean,
+};
 
 /// The matrix `solve` corrects with, rebuilt here to distort test lines by
 /// its inverse.
@@ -156,4 +158,173 @@ fn nothing_to_go_on_changes_nothing() {
     let l = lines(&flat, 200, 150);
     assert!(l.segments.is_empty());
     assert_eq!(solve(&l, Mode::Auto), Correction::default());
+}
+
+/// A line's two ends.
+type Ends = ([f64; 2], [f64; 2]);
+
+/// Guides drawn along a scene's verticals and levels (`ends`, where they
+/// are once corrected), as a camera turned and tilted by `c` recorded them.
+fn drawn(c: &Correction, ends: &[Ends]) -> Lines {
+    let (w, h) = (1200.0, 800.0);
+    let undo = colour::inv(&forward(c, w, h)).unwrap();
+    let map = |p: [f64; 2]| {
+        let q = colour::mulv(&undo, [p[0], p[1], 1.0]);
+        [q[0] / q[2], q[1] / q[2]]
+    };
+    Lines {
+        segments: ends
+            .iter()
+            .map(|&(a, b)| Segment {
+                a: map(a),
+                b: map(b),
+            })
+            .collect(),
+        width: w,
+        height: h,
+    }
+}
+
+/// The guides' largest lean once corrected (degrees).
+fn worst(l: &Lines, c: &Correction) -> f64 {
+    guide_leans(l, c)
+        .into_iter()
+        .map(f64::abs)
+        .fold(0.0, f64::max)
+}
+
+#[test]
+fn guides_come_out_vertical_and_level() {
+    let left = ([-450.0, -300.0], [-450.0, 320.0]);
+    let right = ([380.0, -280.0], [380.0, 300.0]);
+    let top = ([-400.0, -250.0], [420.0, -250.0]);
+    let bottom = ([-380.0, 260.0], [350.0, 260.0]);
+    let cases: [(Correction, Vec<Ends>); 5] = [
+        // Two verticals: turned and tilted.
+        (
+            Correction {
+                rotate: 2.0,
+                vertical: 30.0,
+                horizontal: 0.0,
+            },
+            vec![left, right],
+        ),
+        // Two levels: turned and panned.
+        (
+            Correction {
+                rotate: -3.0,
+                vertical: 0.0,
+                horizontal: 25.0,
+            },
+            vec![top, bottom],
+        ),
+        // One of each.
+        (
+            Correction {
+                rotate: 4.0,
+                vertical: 15.0,
+                horizontal: 0.0,
+            },
+            vec![left, bottom],
+        ),
+        // Two verticals and a level: all three.
+        (
+            Correction {
+                rotate: 1.5,
+                vertical: 35.0,
+                horizontal: -20.0,
+            },
+            vec![left, right, top],
+        ),
+        // Four.
+        (
+            Correction {
+                rotate: -2.0,
+                vertical: -25.0,
+                horizontal: 15.0,
+            },
+            vec![left, right, top, bottom],
+        ),
+    ];
+    for (truth, ends) in cases {
+        let l = drawn(&truth, &ends);
+        assert!(worst(&l, &Correction::default()) > 1.0, "{truth:?}");
+        let c = solve_guided(&l).unwrap();
+        assert!(
+            worst(&l, &c) < 0.3,
+            "{truth:?} → {c:?}: {:?}",
+            guide_leans(&l, &c)
+        );
+    }
+}
+
+#[test]
+fn guides_recover_the_camera() {
+    // Two verticals and two levels pin all three down.
+    let truth = Correction {
+        rotate: 2.5,
+        vertical: 30.0,
+        horizontal: -15.0,
+    };
+    let l = drawn(
+        &truth,
+        &[
+            ([-450.0, -300.0], [-450.0, 320.0]),
+            ([400.0, -280.0], [400.0, 300.0]),
+            ([-400.0, -250.0], [420.0, -250.0]),
+            ([-380.0, 260.0], [350.0, 260.0]),
+        ],
+    );
+    let c = solve_guided(&l).unwrap();
+    assert!((c.rotate - truth.rotate).abs() < 0.3, "{c:?}");
+    assert!((c.vertical - truth.vertical).abs() < 2.0, "{c:?}");
+    assert!((c.horizontal - truth.horizontal).abs() < 2.0, "{c:?}");
+    // Two verticals that are only turned: turned back, no tilt.
+    let turned = Correction {
+        rotate: -3.0,
+        ..Default::default()
+    };
+    let l = drawn(
+        &turned,
+        &[
+            ([-300.0, -300.0], [-300.0, 300.0]),
+            ([250.0, -300.0], [250.0, 300.0]),
+        ],
+    );
+    let c = solve_guided(&l).unwrap();
+    assert!((c.rotate + 3.0).abs() < 0.05, "{c:?}");
+    assert!(c.vertical.abs() < 0.5 && c.horizontal == 0.0, "{c:?}");
+}
+
+#[test]
+fn fewer_than_two_guides_do_nothing() {
+    let t = Correction {
+        rotate: 3.0,
+        ..Default::default()
+    };
+    let one = drawn(&t, &[([-300.0, -300.0], [-300.0, 300.0])]);
+    assert_eq!(solve_guided(&one), None);
+    // A guide just started (barely a line) doesn't count.
+    let mut l = one.clone();
+    l.segments.push(Segment {
+        a: [10.0, 10.0],
+        b: [12.0, 11.0],
+    });
+    assert_eq!(solve_guided(&l), None);
+    assert_eq!(solve_guided(&Lines::default()), None);
+}
+
+#[test]
+fn guides_are_kept_but_not_rendered() {
+    use shoebox_develop::edit::{EditDoc, Settings};
+    let mut s = Settings::default();
+    s.geometry.guides = vec![[[0.2, 0.1], [0.21, 0.9]], [[0.8, 0.1], [0.79, 0.9]]];
+    // Kept in the edit, so they can be shown and moved again...
+    let back = Settings::from_value(&s.to_value()).unwrap();
+    assert_eq!(back.geometry.guides, s.geometry.guides);
+    // ...but only what they did decides the render.
+    assert_eq!(
+        EditDoc::settings_hash(&s),
+        EditDoc::settings_hash(&Settings::default())
+    );
 }

@@ -686,6 +686,11 @@ pub struct Geometry {
     pub aspect: String,
     /// Perspective and framing, before rotation and crop.
     pub transform: Transform,
+    /// Guided upright's lines (two to four), each end as fractions of the
+    /// upright frame before rotation and perspective: `[[x, y], [x, y]]`.
+    /// Kept so they can be shown and moved again; the rotation and
+    /// perspective they gave are stored as ever.
+    pub guides: Vec<[[f64; 2]; 2]>,
 }
 
 impl Default for Geometry {
@@ -697,6 +702,7 @@ impl Default for Geometry {
             crop: [0.0, 0.0, 1.0, 1.0],
             aspect: "free".into(),
             transform: Transform::default(),
+            guides: Vec::new(),
         }
     }
 }
@@ -1017,6 +1023,23 @@ impl Settings {
     }
 }
 
+/// The settings that decide the rendered image: all but Guided upright's
+/// guides (the rotation and perspective they gave are what's rendered).
+fn rendered(s: &Settings) -> Value {
+    let mut v = s.to_value();
+    let empty = match v.get_mut("geometry") {
+        Some(Value::Object(g)) => {
+            g.remove("guides");
+            g.is_empty()
+        }
+        _ => false,
+    };
+    if empty && let Value::Object(map) = &mut v {
+        map.remove("geometry");
+    }
+    v
+}
+
 /// Remove from `v` whatever equals `default`, recursively; an object left
 /// empty becomes null (and is then removed from its parent).
 fn prune(v: &mut Value, default: &Value) {
@@ -1178,7 +1201,7 @@ impl EditDoc {
     pub fn render_hash(&self) -> String {
         let v = serde_json::json!({
             "process_version": self.process_version,
-            "settings": self.settings.to_value(),
+            "settings": rendered(&self.settings),
         });
         // serde_json's maps are ordered (BTreeMap), so this is canonical.
         let bytes = serde_json::to_vec(&v).unwrap_or_default();
@@ -1189,7 +1212,7 @@ impl EditDoc {
     pub fn settings_hash(s: &Settings) -> String {
         let v = serde_json::json!({
             "process_version": PROCESS_VERSION,
-            "settings": s.to_value(),
+            "settings": rendered(s),
         });
         blake3::hash(&serde_json::to_vec(&v).unwrap_or_default())
             .to_hex()

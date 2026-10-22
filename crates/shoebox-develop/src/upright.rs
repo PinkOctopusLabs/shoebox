@@ -11,6 +11,10 @@
 //!   lean once corrected, each line's error capped so stray lines don't
 //!   dominate. A coarse grid, then a pattern search.
 //!
+//! - [`solve_guided`]: Guided upright. Two to four lines the person drew
+//!   are each made exactly vertical or level (whichever they're nearer),
+//!   by a least-squares fit of the same three parameters.
+//!
 //! Modes: Level (rotation only), Vertical (rotation and vertical
 //! perspective), Full (both perspectives), Auto (Full, held back from
 //! strong corrections).
@@ -311,13 +315,7 @@ fn leans(lines: &Lines, c: &Correction) -> Vec<(Class, f64, f64)> {
         .iter()
         .filter_map(|s| {
             let class = classify(s)?;
-            let (a, b) = (apply(&m, s.a), apply(&m, s.b));
-            let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
-            let lean = match class {
-                Class::Vertical => fold(dx.atan2(dy).to_degrees()),
-                Class::Horizontal => fold(dy.atan2(dx).to_degrees()),
-            };
-            Some((class, lean, s.length()))
+            Some((class, lean(&m, class, s), s.length()))
         })
         .collect()
 }
@@ -442,6 +440,171 @@ pub fn solve(lines: &Lines, mode: Mode) -> Correction {
         vertical: c.vertical.round(),
         horizontal: c.horizontal.round(),
     }
+}
+
+/// Guided upright takes at most this many lines.
+pub const GUIDES: usize = 4;
+
+/// A guide shorter than this (a fraction of the long edge) doesn't count:
+/// one being drawn, before the pointer has moved far.
+const GUIDE_MIN: f64 = 0.01;
+
+/// The guides that count, each vertical or level by whichever it's nearer.
+fn guides(lines: &Lines) -> Vec<(Class, Segment)> {
+    let min = GUIDE_MIN * lines.width.max(lines.height);
+    lines
+        .segments
+        .iter()
+        .filter(|s| s.length() >= min)
+        .take(GUIDES)
+        .map(|s| {
+            let (dx, dy) = (s.b[0] - s.a[0], s.b[1] - s.a[1]);
+            let class = if fold(dx.atan2(dy).to_degrees()).abs() <= 45.0 {
+                Class::Vertical
+            } else {
+                Class::Horizontal
+            };
+            (class, *s)
+        })
+        .collect()
+}
+
+/// How far a segment leans from vertical or level through `m` (degrees).
+fn lean(m: &M3, class: Class, s: &Segment) -> f64 {
+    let (a, b) = (apply(m, s.a), apply(m, s.b));
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    match class {
+        Class::Vertical => fold(dx.atan2(dy).to_degrees()),
+        Class::Horizontal => fold(dy.atan2(dx).to_degrees()),
+    }
+}
+
+/// How far each guide leans from vertical or level once corrected
+/// (degrees; tests, and judging a result).
+pub fn guide_leans(lines: &Lines, c: &Correction) -> Vec<f64> {
+    let m = forward(c, lines.width, lines.height);
+    guides(lines)
+        .iter()
+        .map(|(class, s)| lean(&m, *class, s))
+        .collect()
+}
+
+/// Degrees of camera tilt or pan per perspective slider unit (±100 is
+/// ±30°, as `cpu::transform_inverse` has it).
+const PER_UNIT: f64 = 0.3;
+
+/// How much the correction itself costs, per degree: enough to choose the
+/// smallest of the corrections that straighten the guides when they leave
+/// a choice (one vertical and one level), too little to leave a lean.
+const SMALL: f64 = 1e-3;
+
+/// Guided upright: the rotation and perspective that make each guide
+/// exactly vertical or level, whichever it's nearer. None with fewer than
+/// two guides (the spec's two to four).
+///
+/// Verticals alone turn and tilt; levels alone turn and pan; both together
+/// may use all three. Four lines over-determine three parameters, so then
+/// it's the least-squares fit. Levenberg–Marquardt on the leans (degrees),
+/// the parameters in degrees too.
+pub fn solve_guided(lines: &Lines) -> Option<Correction> {
+    let g = guides(lines);
+    if g.len() < 2 {
+        return None;
+    }
+    let verticals = g.iter().filter(|(c, _)| *c == Class::Vertical).count();
+    let levels = g.len() - verticals;
+    let both = verticals > 0 && levels > 0;
+    let free = [true, verticals >= 2 || both, levels >= 2 || both];
+    let limit = [45.0, 100.0 * PER_UNIT, 100.0 * PER_UNIT];
+    let correction = |x: [f64; 3]| Correction {
+        rotate: x[0],
+        vertical: x[1] / PER_UNIT,
+        horizontal: x[2] / PER_UNIT,
+    };
+    let residuals = |x: [f64; 3]| -> Vec<f64> {
+        let m = forward(&correction(x), lines.width, lines.height);
+        g.iter()
+            .map(|(class, s)| lean(&m, *class, s))
+            .chain(x.iter().map(|v| SMALL * v))
+            .collect()
+    };
+    let sum = |r: &[f64]| r.iter().map(|v| v * v).sum::<f64>();
+    let mut x = [0.0; 3];
+    let mut r = residuals(x);
+    let mut k = sum(&r);
+    let mut damping = 1e-3;
+    for _ in 0..100 {
+        // The Jacobian, by central differences.
+        let d = 1e-5;
+        let mut jac = vec![[0.0; 3]; r.len()];
+        for j in (0..3).filter(|&j| free[j]) {
+            let (mut up, mut down) = (x, x);
+            up[j] += d;
+            down[j] -= d;
+            let (ru, rd) = (residuals(up), residuals(down));
+            for (i, row) in jac.iter_mut().enumerate() {
+                row[j] = (ru[i] - rd[i]) / (2.0 * d);
+            }
+        }
+        let mut a = [[0.0; 3]; 3];
+        let mut b = [0.0; 3];
+        for (row, ri) in jac.iter().zip(&r) {
+            for p in 0..3 {
+                b[p] -= row[p] * ri;
+                for q in 0..3 {
+                    a[p][q] += row[p] * row[q];
+                }
+            }
+        }
+        // Damped steps until one helps.
+        let mut stepped = None;
+        while damping < 1e9 {
+            let mut ad = a;
+            let mut bd = b;
+            for p in 0..3 {
+                if free[p] {
+                    ad[p][p] += damping * a[p][p].max(1e-9);
+                } else {
+                    ad[p] = [0.0; 3];
+                    ad[p][p] = 1.0;
+                    bd[p] = 0.0;
+                }
+            }
+            let Some(inv) = colour::inv(&ad) else {
+                damping *= 4.0;
+                continue;
+            };
+            let step = colour::mulv(&inv, bd);
+            let mut next = x;
+            for p in 0..3 {
+                next[p] = (x[p] + step[p]).clamp(-limit[p], limit[p]);
+            }
+            let rn = residuals(next);
+            let kn = sum(&rn);
+            if kn < k {
+                damping = (damping / 3.0).max(1e-9);
+                stepped = Some((next, rn, kn, step));
+                break;
+            }
+            damping *= 4.0;
+        }
+        let Some((next, rn, kn, step)) = stepped else {
+            break;
+        };
+        (x, r, k) = (next, rn, kn);
+        if step.iter().all(|s| s.abs() < 1e-7) {
+            break;
+        }
+    }
+    let c = correction(x);
+    // Finer than Auto's rounding: these lines are meant to come out
+    // exactly straight. (+ 0.0 makes −0 plain 0.)
+    let round = |v: f64, k: f64| (v * k).round() / k + 0.0;
+    Some(Correction {
+        rotate: round(c.rotate, 100.0),
+        vertical: round(c.vertical, 10.0),
+        horizontal: round(c.horizontal, 10.0),
+    })
 }
 
 /// The largest lean (degrees) of the lines `solve` straightens, once
