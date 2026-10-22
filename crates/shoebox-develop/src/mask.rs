@@ -53,6 +53,7 @@ pub enum Find {
     Subject,
     Person,
     Object(u64),
+    Face(crate::edit::FacePart),
 }
 
 /// Finds the object at clicks in an upright 8-bit sRGB image (`rgb`,
@@ -125,6 +126,7 @@ pub fn finds(locals: &[&Local]) -> Vec<(Find, Vec<crate::edit::ObjectClick>)> {
                 Shape::Object { clicks } if !clicks.is_empty() => {
                     (Find::Object(object_key(clicks)), clicks.clone())
                 }
+                Shape::Face { part } => (Find::Face(*part), Vec::new()),
                 _ => continue,
             };
             if !out.iter().any(|o| o.0 == f.0) {
@@ -185,11 +187,12 @@ pub fn rasterise_with(
         for part in &l.mask.parts {
             let Part::Known(p) = part else { continue };
             let v = match &p.shape {
-                Shape::Subject | Shape::Person | Shape::Object { .. } => {
+                Shape::Subject | Shape::Person | Shape::Object { .. } | Shape::Face { .. } => {
                     let f = match &p.shape {
                         Shape::Subject => Find::Subject,
                         Shape::Person => Find::Person,
                         Shape::Object { clicks } => Find::Object(object_key(clicks)),
+                        Shape::Face { part } => Find::Face(*part),
                         _ => Find::Subject,
                     };
                     match found(f).filter(|c| c.len() == n) {
@@ -303,7 +306,9 @@ fn shape(s: &Shape, w: usize, h: usize, units: [f64; 2], tones: Option<&Tones>) 
             })
         }
         // Read from what was found (see `rasterise_with`).
-        Shape::Subject | Shape::Person | Shape::Object { .. } => vec![0.0; w * h],
+        Shape::Subject | Shape::Person | Shape::Object { .. } | Shape::Face { .. } => {
+            vec![0.0; w * h]
+        }
     }
 }
 

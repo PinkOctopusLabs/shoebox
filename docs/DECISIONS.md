@@ -2182,3 +2182,16 @@ stay. To come back to with Linux:
   their scale, as raws did: grain and the detail stage's radii were in
   the proxy's pixels for them.
 - "Effects" is its own part in presets and copied settings.
+
+## Finer AI masks: background and faces' parts (2026-10-22)
+
+- **Background:** the Subject part inverted (no search of its own).
+- **Faces' parts** from Vision's face landmarks (`VNDetectFaceLandmarksRequest`,
+  every face): Face skin (an oval over the face's box up to the forehead,
+  less the eyes, eyebrows and lips), Eyes, Eyebrows (strokes along their
+  lines), Lips (outer less inner) and Teeth (inside the lips), filled and
+  softened in proportion to the face's size. Found once per source, like
+  Subject and People. Mask menus list them under Face.
+- **Waiting:** hair, clothes and body skin (Lightroom's people masks) and
+  landscape categories need segmentation models of their own; Sky is
+  Phase 4 in the spec (SegFormer), the rest with it.

@@ -139,3 +139,7 @@ together at the end, before the release.
 - [ ] **Vignette and grain**: a darkening vignette on a cropped photo
   (it follows the crop), and grain at 100% against a full-size export
   (the same size and strength), on a sky (no pattern visible).
+- [ ] **Face masks** (Face skin, Eyes, Eyebrows, Lips, Teeth) on
+  portraits, a group and a profile view: each lands on its part, follows
+  a turned photo, and skin smoothing through Face skin leaves the eyes
+  sharp. **Background** is the subject's inverse.

@@ -62,7 +62,9 @@ pub(super) enum Handle {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Subject,
+    Background,
     Person,
+    Face(shoebox_develop::edit::FacePart),
     Object,
     Linear,
     Radial,
@@ -72,9 +74,15 @@ pub enum Kind {
 }
 
 impl Kind {
-    pub const ALL: [Kind; 8] = [
+    pub const ALL: [Kind; 14] = [
         Kind::Subject,
+        Kind::Background,
         Kind::Person,
+        Kind::Face(shoebox_develop::edit::FacePart::Skin),
+        Kind::Face(shoebox_develop::edit::FacePart::Eyes),
+        Kind::Face(shoebox_develop::edit::FacePart::Eyebrows),
+        Kind::Face(shoebox_develop::edit::FacePart::Lips),
+        Kind::Face(shoebox_develop::edit::FacePart::Teeth),
         Kind::Object,
         Kind::Linear,
         Kind::Radial,
@@ -91,7 +99,15 @@ impl Kind {
             Kind::Luminance => "Luminance range",
             Kind::Colour => "Colour range",
             Kind::Subject => "Subject",
+            Kind::Background => "Background",
             Kind::Person => "People",
+            Kind::Face(p) => match p {
+                shoebox_develop::edit::FacePart::Skin => "Face skin",
+                shoebox_develop::edit::FacePart::Eyes => "Eyes",
+                shoebox_develop::edit::FacePart::Eyebrows => "Eyebrows",
+                shoebox_develop::edit::FacePart::Lips => "Lips",
+                shoebox_develop::edit::FacePart::Teeth => "Teeth",
+            },
             Kind::Object => "Object (click)",
         }
     }
@@ -121,11 +137,46 @@ impl Kind {
                 hue: 30.0,
                 width: 20.0,
             },
-            Kind::Subject => Shape::Subject,
+            Kind::Subject | Kind::Background => Shape::Subject,
             Kind::Person => Shape::Person,
+            Kind::Face(part) => Shape::Face { part },
             Kind::Object => Shape::Object { clicks: Vec::new() },
         }
     }
+}
+
+/// The kinds of mask part as a menu: the ones found in the photo first
+/// (faces' parts in a submenu), then the drawn ones. The kind clicked.
+fn kind_menu(ui: &mut egui::Ui) -> Option<Kind> {
+    let mut chosen = None;
+    let mut item = |ui: &mut egui::Ui, k: Kind| {
+        if ui.button(k.label()).clicked() {
+            chosen = Some(k);
+            ui.close();
+        }
+    };
+    for k in [Kind::Subject, Kind::Background, Kind::Person] {
+        item(ui, k);
+    }
+    ui.menu_button("Face", |ui| {
+        for k in Kind::ALL {
+            if matches!(k, Kind::Face(_)) {
+                item(ui, k);
+            }
+        }
+    });
+    item(ui, Kind::Object);
+    ui.separator();
+    for k in [
+        Kind::Linear,
+        Kind::Radial,
+        Kind::Brush,
+        Kind::Luminance,
+        Kind::Colour,
+    ] {
+        item(ui, k);
+    }
+    chosen
 }
 
 fn kind_of(s: &Shape) -> Kind {
@@ -137,6 +188,7 @@ fn kind_of(s: &Shape) -> Kind {
         Shape::Colour { .. } => Kind::Colour,
         Shape::Subject => Kind::Subject,
         Shape::Person => Kind::Person,
+        Shape::Face { part } => Kind::Face(*part),
         Shape::Object { .. } => Kind::Object,
     }
 }
@@ -187,11 +239,17 @@ pub fn new_mask(app: &mut ShoeboxApp, kind: Kind) {
     let shape = kind.shape(units(app));
     let layer = Local {
         id: id.clone(),
-        name: format!("Mask {n}"),
+        name: match kind {
+            Kind::Linear | Kind::Radial | Kind::Brush | Kind::Luminance | Kind::Colour => {
+                format!("Mask {n}")
+            }
+            k => k.label().to_owned(),
+        },
         mask: shoebox_develop::edit::Mask {
             parts: vec![Part::Known(MaskPart {
                 op: Op::Add,
-                invert: false,
+                // The background: everything but the subject.
+                invert: kind == Kind::Background,
                 shape,
             })],
         },
@@ -223,7 +281,7 @@ fn add_part(app: &mut ShoeboxApp, id: &str, kind: Kind, op: Op) {
         |l| {
             l.mask.parts.push(Part::Known(MaskPart {
                 op,
-                invert: false,
+                invert: kind == Kind::Background,
                 shape,
             }));
             at = l.mask.parts.len() - 1;
@@ -239,11 +297,8 @@ pub fn section(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &Settings) {
     let reset = super::look::section(ui, "Local adjustments", any, true, |ui| {
         ui.horizontal(|ui| {
             ui.menu_button("New mask", |ui| {
-                for k in Kind::ALL {
-                    if ui.button(k.label()).clicked() {
-                        new_mask(app, k);
-                        ui.close();
-                    }
+                if let Some(k) = kind_menu(ui) {
+                    new_mask(app, k);
                 }
             });
             let sel = selected(app, s).is_some();
@@ -419,11 +474,8 @@ fn layer_controls(app: &mut ShoeboxApp, ui: &mut egui::Ui, l: &Local) {
     ui.horizontal(|ui| {
         for op in [Op::Add, Op::Subtract, Op::Intersect] {
             ui.menu_button(op_label(op), |ui| {
-                for k in Kind::ALL {
-                    if ui.button(k.label()).clicked() {
-                        add_part(app, &id, k, op);
-                        ui.close();
-                    }
+                if let Some(k) = kind_menu(ui) {
+                    add_part(app, &id, k, op);
                 }
             });
         }
@@ -618,7 +670,7 @@ fn part_controls(app: &mut ShoeboxApp, ui: &mut egui::Ui, id: &str, i: usize, p:
                     ui.end_row();
                 }
             }
-            Shape::Subject | Shape::Person => {
+            Shape::Subject | Shape::Person | Shape::Face { .. } => {
                 let (finding, failed) = app
                     .develop
                     .ready

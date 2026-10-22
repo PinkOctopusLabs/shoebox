@@ -915,6 +915,20 @@ pub enum Shape {
         #[serde(default)]
         clicks: Vec<ObjectClick>,
     },
+    /// A part of every face, from Apple's Vision's face landmarks.
+    Face { part: FacePart },
+}
+
+/// Parts of faces a mask can take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FacePart {
+    /// The face less its eyes, eyebrows and lips.
+    Skin,
+    Eyes,
+    Eyebrows,
+    Lips,
+    Teeth,
 }
 
 /// A click for an object part: where (as other positions) and whether it

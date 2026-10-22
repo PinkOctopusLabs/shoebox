@@ -4934,6 +4934,19 @@ fn develop_subject_mask() {
     let (cover, _) = h.state().develop_mask_coverage();
     // The ball is about a fifth of the frame.
     assert!(cover > 0.08 && cover < 0.4, "{cover}");
+    // Background: everything else (from the subject already found).
+    h.get_by_label("New mask").click();
+    h.run_steps(2);
+    h.get_by_label("Background").click();
+    h.run_steps(3);
+    let (rest, _) = h.state().develop_mask_coverage_of(1);
+    assert!((rest + cover - 1.0).abs() < 0.02, "{rest} + {cover}");
+    // The faces' parts are in their own menu.
+    h.get_by_label("New mask").click();
+    h.run_steps(2);
+    h.get_by_label("Face").click();
+    h.run_steps(2);
+    assert!(h.query_by_label("Eyebrows").is_some());
 }
 
 /// An Object mask: without the model, its part offers the download; with

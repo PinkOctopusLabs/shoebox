@@ -1052,12 +1052,17 @@ impl ShoeboxApp {
     /// How much of the photo the first mask covers in the last render
     /// (0–1), and whether a subject search is still running (tests).
     pub fn develop_mask_coverage(&self) -> (f32, bool) {
+        self.develop_mask_coverage_of(0)
+    }
+
+    /// [`Self::develop_mask_coverage`] of layer `k` (tests).
+    pub fn develop_mask_coverage_of(&self, k: usize) -> (f32, bool) {
         let finding = self
             .develop
             .ready
             .as_ref()
             .is_some_and(|r| r.src.cache.finding().0);
-        let cover = self.develop.layers_mask(0).map_or(0.0, |m| {
+        let cover = self.develop.layers_mask(k).map_or(0.0, |m| {
             m.iter().map(|&v| f32::from(v)).sum::<f32>() / (255.0 * m.len().max(1) as f32)
         });
         (cover, finding)

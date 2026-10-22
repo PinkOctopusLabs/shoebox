@@ -481,11 +481,26 @@ fn worker(
     // Subject and person masks come from Apple's Vision (macOS only; a
     // portable model is a later phase).
     shoebox_develop::mask::register_finder(Box::new(|rgb, w, h, what| {
+        use shoebox_develop::edit::FacePart as P;
+        use shoebox_develop::mask::Find;
+        use shoebox_ml::vision::FacePart as V;
         let find = match what {
-            shoebox_develop::mask::Find::Subject => shoebox_ml::vision::Find::Subject,
-            shoebox_develop::mask::Find::Person => shoebox_ml::vision::Find::Person,
+            Find::Subject => shoebox_ml::vision::Find::Subject,
+            Find::Person => shoebox_ml::vision::Find::Person,
+            Find::Face(part) => {
+                let part = match part {
+                    P::Skin => V::Skin,
+                    P::Eyes => V::Eyes,
+                    P::Eyebrows => V::Eyebrows,
+                    P::Lips => V::Lips,
+                    P::Teeth => V::Teeth,
+                };
+                return shoebox_ml::vision::face_parts(rgb, w, h, part)
+                    .map(|c| c.data)
+                    .map_err(|e| e.to_string());
+            }
             // Objects go to the segmenter (`objects`), not here.
-            shoebox_develop::mask::Find::Object(_) => return Err("not a Vision search".into()),
+            Find::Object(_) => return Err("not a Vision search".into()),
         };
         shoebox_ml::vision::segment(rgb, w, h, find)
             .map(|c| c.data)
