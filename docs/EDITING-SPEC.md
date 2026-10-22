@@ -417,6 +417,7 @@ As built (2026-10-22, DECISIONS): layers run after the global dehaze, highlights
 
 - AI masks are computed once on the proxy and cached as 8-bit PNG keyed by file hash and prompt points.
 - For export, upsample with a guided filter on full-resolution luminance so edges follow hair and branches rather than going blocky.
+- As built (2026-10-22, DECISIONS "AI masks on disk, and finer for export"): the disk key is the picture the finder is given (which covers the file, raw settings, colour and orientation) plus the prompt; the guided filter uses the full-resolution source's colour, not luminance alone, so an edge between two colours of equal brightness stays sharp.
 - Show the mask overlay as a red tint at 50% (O key), and a mask-only view.
 
 **Healing (Phase 3) and object removal (Phase 4)**
