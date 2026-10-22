@@ -247,3 +247,45 @@ fn point_colour_view_greys_what_it_misses() {
     let g = greyed(d, 0.0);
     assert!((g[0] - g[1]).abs() < 1e-6 && (g[1] - g[2]).abs() < 1e-6);
 }
+
+#[test]
+fn colour_grading_tints_by_range_and_leaves_black_black() {
+    use shoebox_develop::cpu::look::oklch;
+    use shoebox_develop::edit::{ColourGrading, Wheel};
+    let plain = look(Colour::default());
+    let graded = |g: ColourGrading| look(Colour::default()).with_grading(&g);
+    assert!(!graded(ColourGrading::default()).active);
+    let blue_shadows = graded(ColourGrading {
+        shadows: Wheel {
+            hue: 264.0,
+            saturation: 80.0,
+            luminance: 0.0,
+        },
+        ..Default::default()
+    });
+    let dark = [0.01f32; 3];
+    let bright = [0.9f32; 3];
+    let hue_chroma = |p| {
+        let [_, c, h] = oklch(&plain, p);
+        (c, h)
+    };
+    let (c, h) = hue_chroma(look_pixel(&blue_shadows, dark));
+    assert!(c > 0.01 && (h - 264.0).abs() < 5.0, "shadows blue: {c} {h}");
+    let (c, _) = hue_chroma(look_pixel(&blue_shadows, bright));
+    assert!(c < 0.01, "highlights left alone: {c}");
+    assert!(
+        close(look_pixel(&blue_shadows, [0.0; 3]), [0.0; 3], 1e-6),
+        "black stays black"
+    );
+    // Highlights' luminance: brighter highlights, shadows much as they were.
+    let lift = graded(ColourGrading {
+        highlights: Wheel {
+            hue: 0.0,
+            saturation: 0.0,
+            luminance: 60.0,
+        },
+        ..Default::default()
+    });
+    assert!(look_pixel(&lift, bright)[1] > bright[1] * 1.3);
+    assert!((look_pixel(&lift, dark)[1] / dark[1] - 1.0).abs() < 0.1);
+}

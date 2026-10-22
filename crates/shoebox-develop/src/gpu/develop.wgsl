@@ -60,6 +60,8 @@ struct Params {
     mscale: vec4<f32>,    // source → mask pixels (x, y); z: the mask alone (0/1)
     points: vec4<f32>,    // Point Color: count, point shown (index + 1; 0: none)
     smart: vec4<f32>,     // Smart Lighting: strength (0–1), bias (−1..1)
+    grade: vec4<f32>,     // colour grading: on (0/1), pivot, power
+    grade_wheels: array<vec4<f32>, 4>,  // shadows, midtones, highlights, global: a, b, gain
 };
 
 const GAMUT_SLACK: f32 = 2e-3;
@@ -284,7 +286,37 @@ fn look(px: vec3<f32>) -> vec4<f32> {
         let mixv = band(p.mix, bands(rem360(h)));
         out = vec3<f32>(y * exp2(mixv * 1.5 * smooth01(0.0, 0.15, r)));
     }
+    if (p.grade.x > 0.5) {
+        out = grade(out);
+    }
     return vec4<f32>(out, seen);
+}
+
+// Colour grading (see `cpu::look::grade`), through Oklab.
+fn grade(px: vec3<f32>) -> vec3<f32> {
+    let lms = mul3(p.lms0, p.lms1, p.lms2, px);
+    let l3 = vec3<f32>(cbrt(lms.x), cbrt(lms.y), cbrt(lms.z));
+    let l = 0.21045426 * l3.x + 0.7936178 * l3.y - 0.004072047 * l3.z;
+    var a = 1.9779985 * l3.x - 2.4285922 * l3.y + 0.4505937 * l3.z;
+    var b = 0.025904037 * l3.x + 0.78277177 * l3.y - 0.80867577 * l3.z;
+    let x = pow(clamp(l, 0.0, 1.0), p.grade.y);
+    let ws = pow(1.0 - x, p.grade.z);
+    let wh = pow(x, p.grade.z);
+    let wm = max(1.0 - ws - wh, 0.0);
+    let w = array<f32, 4>(ws, wm, wh, 1.0);
+    var gain = 0.0;
+    for (var i = 0u; i < 4u; i++) {
+        a += w[i] * p.grade_wheels[i].x * max(l, 0.0);
+        b += w[i] * p.grade_wheels[i].y * max(l, 0.0);
+        gain += w[i] * p.grade_wheels[i].z;
+    }
+    let lum = l * max(1.0 + gain, 0.0);
+    let m3 = vec3<f32>(
+        lum + 0.39633778 * a + 0.21580376 * b,
+        lum - 0.105561346 * a - 0.06385417 * b,
+        lum - 0.08948418 * a - 1.2914855 * b,
+    );
+    return mul3(p.inv0, p.inv1, p.inv2, m3 * m3 * m3);
 }
 
 // Local adjustment masks (see `mask::Masks`): one byte per pixel, four to

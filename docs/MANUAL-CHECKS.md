@@ -133,3 +133,6 @@ together at the end, before the release.
   and landscapes with bright skies: shadows open up and skies hold,
   without halos at the horizon or round people; Auto's slight setting
   shouldn't look processed.
+- [ ] **Colour grading**: a classic teal-shadows/orange-highlights grade
+  and a split-toned black and white: smooth, with no banding at the
+  ranges' joins, and black stays black.

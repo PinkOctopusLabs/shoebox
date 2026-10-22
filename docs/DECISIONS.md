@@ -2145,3 +2145,20 @@ stay. To come back to with Linux:
   over 30% of the frame is four stops under mid grey. That replaces the
   Shadows +15 it stood in with.
 - Not yet: the spot-weighted mode (a box or a detected face).
+
+## Colour grading (2026-10-22)
+
+- **Module 10:** wheels for shadows, midtones, highlights and the whole
+  photo (hue in Oklab's degrees, saturation up to an Oklab chroma of 0.12,
+  luminance ±50% of lightness), Blending and Balance, as Lightroom's
+  Color Grading has them.
+- **In Oklab, after black and white**, so it can split-tone a monochrome
+  photo. Ranges from lightness: x = L^pivot, with the pivot putting
+  Balance's split (lightness 0.3–0.7) at 0.5; shadows (1 − x)^k,
+  highlights x^k, midtones what's left; k from 3 (blending 0) to 1
+  (blending 100). Tints are offsets in a and b scaled by lightness, so
+  black stays black.
+- **Panel:** one large wheel at a time (Shadows, Midtones, Highlights,
+  Global; a range with something set shows in bold), drawn in Oklab's
+  hues as the grading uses them; drag for hue and saturation,
+  double-click to clear; sliders for exact values.

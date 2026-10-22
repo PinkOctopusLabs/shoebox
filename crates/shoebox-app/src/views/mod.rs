@@ -7,6 +7,7 @@ pub mod duplicates;
 pub mod export;
 pub mod files;
 pub mod filmstrip;
+pub mod grading;
 pub mod grid;
 pub mod local;
 pub mod look;

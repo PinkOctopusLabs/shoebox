@@ -492,6 +492,44 @@ impl Default for ColourPoint {
     }
 }
 
+/// Colour grading (module 10): a tint and brightness for the shadows,
+/// midtones, highlights and the whole photo, how far the three ranges
+/// overlap (blending, 0–100) and where they meet (balance, −100 to +100:
+/// towards the shadows or the highlights).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ColourGrading {
+    pub shadows: Wheel,
+    pub midtones: Wheel,
+    pub highlights: Wheel,
+    pub global: Wheel,
+    pub blending: f64,
+    pub balance: f64,
+}
+
+impl Default for ColourGrading {
+    fn default() -> Self {
+        Self {
+            shadows: Wheel::default(),
+            midtones: Wheel::default(),
+            highlights: Wheel::default(),
+            global: Wheel::default(),
+            blending: 50.0,
+            balance: 0.0,
+        }
+    }
+}
+
+/// One colour wheel: hue (degrees, Oklab), saturation (0–100) and
+/// luminance (−100 to +100).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Wheel {
+    pub hue: f64,
+    pub saturation: f64,
+    pub luminance: f64,
+}
+
 /// A monochrome treatment: how bright each hue band ([`HUES`]) turns out,
 /// −100 to +100.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -566,6 +604,7 @@ pub struct Modules {
     pub calibration: Calibration,
     pub colour: Colour,
     pub point_colour: PointColour,
+    pub colour_grading: ColourGrading,
     pub black_and_white: BlackAndWhite,
     pub tone_curve: ToneCurve,
     pub display_transform: DisplayTransform,

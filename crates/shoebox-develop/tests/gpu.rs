@@ -200,6 +200,22 @@ fn gpu_matches_the_cpu_reference() {
     s.modules.highlights_shadows.shadows = 30.0;
     s.modules.dehaze.amount = 25.0;
     cases.push(("smart lighting with the other maps", s, o));
+    // Colour grading, alone and toning black and white.
+    let mut s = base.clone();
+    let wheel = |hue, saturation, luminance| shoebox_develop::edit::Wheel {
+        hue,
+        saturation,
+        luminance,
+    };
+    s.modules.colour_grading.shadows = wheel(250.0, 60.0, -20.0);
+    s.modules.colour_grading.midtones = wheel(120.0, 20.0, 10.0);
+    s.modules.colour_grading.highlights = wheel(60.0, 50.0, 15.0);
+    s.modules.colour_grading.global = wheel(330.0, 10.0, 0.0);
+    s.modules.colour_grading.balance = 30.0;
+    s.modules.colour_grading.blending = 80.0;
+    cases.push(("colour grading", s.clone(), o));
+    s.modules.black_and_white.enabled = true;
+    cases.push(("colour grading, black and white", s, o));
     // Point Color: an orange and a blue, with a grey's for good measure.
     let mut s = base.clone();
     let point = |lightness, chroma, hue, hue_shift, saturation, luminance| {

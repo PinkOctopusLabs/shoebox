@@ -72,6 +72,69 @@ pub struct Look {
     /// Point Color: the first `point_count` of `points`.
     pub points: [Point; COLOUR_POINTS],
     pub point_count: usize,
+    /// Colour grading (see [`Grading`]).
+    pub grading: Grading,
+}
+
+/// Colour grading's numbers: each wheel's Oklab offset (a, b, per unit
+/// of lightness) and lightness gain, for shadows, midtones, highlights and
+/// global; the ranges' split.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Grading {
+    pub on: bool,
+    pub wheels: [[f32; 3]; 4],
+    /// Lightness is raised to this so the balance point lands at 0.5.
+    pub pivot: f32,
+    /// The ranges' falloff power: lower overlaps more.
+    pub power: f32,
+}
+
+impl Grading {
+    pub fn new(g: &crate::edit::ColourGrading) -> Self {
+        let wheel = |w: &crate::edit::Wheel| {
+            let c = (w.saturation.clamp(0.0, 100.0) / 100.0 * 0.12) as f32;
+            let h = (w.hue as f32).to_radians();
+            [
+                c * h.cos(),
+                c * h.sin(),
+                (w.luminance.clamp(-100.0, 100.0) / 100.0 * 0.5) as f32,
+            ]
+        };
+        let wheels = [
+            wheel(&g.shadows),
+            wheel(&g.midtones),
+            wheel(&g.highlights),
+            wheel(&g.global),
+        ];
+        let on = wheels.iter().flatten().any(|&v| v != 0.0);
+        // Balance moves where shadows end and highlights begin (Oklab
+        // lightness 0.3–0.7).
+        let at = (0.5 + 0.2 * (g.balance.clamp(-100.0, 100.0) / 100.0)) as f32;
+        let pivot = 0.5f32.ln() / at.ln();
+        let blending = (g.blending.clamp(0.0, 100.0) / 100.0) as f32;
+        Self {
+            on,
+            wheels,
+            pivot,
+            power: 1.0 + 2.0 * (1.0 - blending),
+        }
+    }
+}
+
+/// Colour grading on Oklab lightness and a, b.
+pub fn grade(g: &Grading, lab: [f32; 3]) -> [f32; 3] {
+    let [l, mut a, mut b] = lab;
+    let x = l.clamp(0.0, 1.0).powf(g.pivot);
+    let ws = (1.0 - x).powf(g.power);
+    let wh = x.powf(g.power);
+    let wm = (1.0 - ws - wh).max(0.0);
+    let mut gain = 0.0;
+    for (w, wheel) in [ws, wm, wh, 1.0].into_iter().zip(&g.wheels) {
+        a += w * wheel[0] * l.max(0.0);
+        b += w * wheel[1] * l.max(0.0);
+        gain += w * wheel[2];
+    }
+    [l * (1.0 + gain).max(0.0), a, b]
 }
 
 /// One Point Color point's numbers, in Oklab.
@@ -191,7 +254,14 @@ impl Look {
             green: 0.0,
             points: [Point::default(); COLOUR_POINTS],
             point_count: 0,
+            grading: Grading::default(),
         }
+    }
+
+    pub fn with_grading(mut self, g: &crate::edit::ColourGrading) -> Self {
+        self.grading = Grading::new(g);
+        self.active |= self.grading.on;
+        self
     }
 
     pub fn with_points(mut self, pc: &crate::edit::PointColour) -> Self {
@@ -360,6 +430,13 @@ pub fn look_point(l: &Look, p: [f32; 3], shown: Option<usize>) -> ([f32; 3], f32
         let rel = c / lum.max(1e-4);
         let mix = band(&l.mix, bands(h.rem_euclid(360.0)));
         out = [y * (mix * 1.5 * smoothstep(0.0, 0.15, rel)).exp2(); 3];
+    }
+    if l.grading.on {
+        // After black and white, so grading can tone a monochrome photo.
+        let lms = mul3(&l.to_lms, out).map(cbrt);
+        let lab = grade(&l.grading, mul3(&LMS_TO_LAB, lms));
+        let lms = mul3(&LAB_TO_LMS, lab).map(|v| v * v * v);
+        out = mul3(&l.from_lms, lms);
     }
     (out, seen)
 }

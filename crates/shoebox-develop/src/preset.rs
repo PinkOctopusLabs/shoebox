@@ -94,6 +94,7 @@ impl Part {
             Part::Colour => &[
                 &["modules", "colour"],
                 &["modules", "point_colour"],
+                &["modules", "colour_grading"],
                 &["modules", "input_colour"],
             ],
             Part::BlackAndWhite => &[&["modules", "black_and_white"]],

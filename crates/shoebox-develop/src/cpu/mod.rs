@@ -798,7 +798,8 @@ pub fn frame(raw: &RawImage, src: &Demosaiced, s: &Settings, o: &Options) -> Fra
             &s.modules.black_and_white,
         )
         .with_defringe(&s.modules.defringe)
-        .with_points(&s.modules.point_colour),
+        .with_points(&s.modules.point_colour)
+        .with_grading(&s.modules.colour_grading),
         display,
         warnings: false,
         gamut_warning: false,

@@ -5047,3 +5047,58 @@ fn develop_ai_denoise() {
         arrived
     });
 }
+
+/// Colour grading: pick Shadows, click right of the wheel's middle: a
+/// red-ish hue (Oklab 0°) at part saturation, one step.
+#[test]
+fn develop_colour_grading_wheel() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(&root).unwrap();
+    let img = shoebox_fixtures::scene(8, 800, 600);
+    std::fs::write(
+        root.join("grade.jpg"),
+        shoebox_fixtures::jpeg(&img, 92).unwrap(),
+    )
+    .unwrap();
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let mut h = harness(p, egui::vec2(1400.0, 2600.0));
+    settle(&mut h, Duration::from_secs(60));
+    h.get_by_label("grade.jpg").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(30), "develop", |a| {
+        a.develop_ready()
+    });
+    h.run_steps(3);
+    h.get_by_label("Colour grading").click();
+    h.run_steps(2);
+    // The grading's Shadows (Tone and the tone curve have one too).
+    h.query_all_by_label("Shadows").last().unwrap().click();
+    h.run_steps(2);
+    // The wheel spans the panel under the range buttons, up to 180 high.
+    let shadows = h.query_all_by_label("Shadows").last().unwrap().rect();
+    let top = shadows.max.y + 4.0;
+    let bottom = h.query_all_by_label("Hue").last().unwrap().rect().min.y - 4.0;
+    // Across the panel, from the buttons' left to the window's right edge
+    // less its margin.
+    let centre = egui::pos2((shadows.min.x + 1400.0 - 12.0) / 2.0, (top + bottom) / 2.0);
+    let at = centre + egui::vec2(35.0, 0.0);
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.event(egui::Event::PointerMoved(at));
+    h.run_steps(1);
+    h.event(button(at, true));
+    h.event(button(at, false));
+    h.run_steps(3);
+    snapshot(&mut h, "develop-grading");
+    let doc = h.state().develop_doc().unwrap();
+    let w = doc.settings().modules.colour_grading.shadows;
+    assert!(w.saturation > 10.0 && w.saturation < 90.0, "{w:?}");
+    assert!(w.hue < 40.0 || w.hue > 320.0, "{w:?}");
+    assert!(doc.history().last().unwrap().label.starts_with("Shadows"));
+}
