@@ -14,6 +14,10 @@ use image::codecs::jpeg::JpegEncoder;
 use image::imageops::{self, FilterType};
 use image::{ExtendedColorType, ImageEncoder, RgbImage};
 
+/// Synthetic panoramas.
+pub mod pano;
+pub use pano::PanoFrame;
+
 /// Small xorshift PRNG so fixtures don't depend on a `rand` version.
 struct Rng(u64);
 

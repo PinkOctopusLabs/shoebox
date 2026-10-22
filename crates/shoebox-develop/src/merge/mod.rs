@@ -24,6 +24,7 @@
 pub mod align;
 pub mod focus;
 pub mod hdr;
+pub mod pano;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
