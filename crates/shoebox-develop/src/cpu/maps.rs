@@ -28,6 +28,7 @@ use rayon::prelude::*;
 use super::{Demosaiced, Rgb};
 use crate::colour;
 use crate::edit::Settings;
+use crate::heal::remove::{self, Fill, Job};
 
 /// The analysis copy's long edge.
 pub const SMALL: usize = 512;
@@ -98,6 +99,23 @@ struct Inner {
     /// The images beside the source for local adjustments (see
     /// `cpu::Aux`): their key, what they were made from, and them.
     aux: Option<(u64, Vec<Arc<Rgb>>, Arc<super::Aux>)>,
+    /// Object removal: fills by their job's key (arriving bumps
+    /// `found_generation`, as searches do), the keys the last healing
+    /// asked for, and the fills it used, by spot.
+    fills: std::collections::HashMap<String, Filled>,
+    fills_wanted: std::collections::HashSet<String>,
+    fills_used: Vec<Option<Arc<Fill>>>,
+    /// Jobs for the fill thread (the live view's), and whether it runs.
+    fill_queue: std::collections::VecDeque<Job>,
+    fill_thread: bool,
+}
+
+/// An object removal's fill.
+#[derive(Debug, Clone)]
+pub enum Filled {
+    Pending,
+    Done(Arc<Fill>),
+    Failed(String),
 }
 
 /// What was found, the orientation it was found in, and the grid size.
@@ -144,12 +162,119 @@ impl Cache {
         inner.found_generation += 1;
     }
 
-    /// Forget searches that failed (a model has arrived since), so they're
-    /// tried again.
+    /// Forget searches and fills that failed (a model has arrived since),
+    /// so they're tried again.
     pub fn forget_failed(&self) {
         let mut inner = self.lock();
         inner.found.retain(|_, f| !matches!(f, Found::Failed(_)));
+        inner.fills.retain(|_, f| !matches!(f, Filled::Failed(_)));
         inner.found_generation += 1;
+    }
+
+    /// An object removal's fill for `job`: kept, or made now (exports,
+    /// 100% regions), or for the live view queued for a thread of its own
+    /// (None until it arrives, when renders redraw). The thread takes the
+    /// newest jobs the last healing still wants, so a slider dragged
+    /// doesn't queue a fill per frame.
+    pub fn fill(&self, job: &Job) -> Option<Arc<Fill>> {
+        let mut inner = self.lock();
+        inner.fills_wanted.insert(job.key.clone());
+        match inner.fills.get(&job.key) {
+            Some(Filled::Done(f)) => return Some(f.clone()),
+            Some(_) => return None,
+            None => {}
+        }
+        if !inner.background {
+            drop(inner);
+            let f = remove::run(job);
+            let mut inner = self.lock();
+            return match f {
+                Ok(f) => {
+                    let f = Arc::new(f);
+                    inner.fills.insert(job.key.clone(), Filled::Done(f.clone()));
+                    Some(f)
+                }
+                Err(e) => {
+                    inner.fills.insert(job.key.clone(), Filled::Failed(e));
+                    None
+                }
+            };
+        }
+        inner.fills.insert(job.key.clone(), Filled::Pending);
+        inner.fill_queue.push_back(job.clone());
+        if !inner.fill_thread {
+            inner.fill_thread = true;
+            let cache = self.clone();
+            let spawned = std::thread::Builder::new()
+                .name("object-removal".into())
+                .spawn(move || cache.fill_thread());
+            if let Err(e) = spawned {
+                inner.fill_thread = false;
+                inner.fill_queue.clear();
+                inner
+                    .fills
+                    .insert(job.key.clone(), Filled::Failed(e.to_string()));
+            }
+        }
+        None
+    }
+
+    fn fill_thread(&self) {
+        loop {
+            let job = {
+                let mut inner = self.lock();
+                let Some(job) = inner.fill_queue.pop_back() else {
+                    inner.fill_thread = false;
+                    return;
+                };
+                if !inner.fills_wanted.contains(&job.key) {
+                    // Superseded: asked again if it's wanted after all.
+                    inner.fills.remove(&job.key);
+                    continue;
+                }
+                job
+            };
+            let f = match remove::run(&job) {
+                Ok(f) => Filled::Done(Arc::new(f)),
+                Err(e) => Filled::Failed(e),
+            };
+            let mut inner = self.lock();
+            inner.fills.insert(job.key, f);
+            inner.found_generation += 1;
+        }
+    }
+
+    /// A healing starts: it says which fills it wants.
+    pub fn begin_fills(&self) {
+        self.lock().fills_wanted.clear();
+    }
+
+    /// A healing is done, with these fills (by spot): others are let go.
+    pub fn end_fills(&self, used: Vec<Option<Arc<Fill>>>) {
+        let mut inner = self.lock();
+        let Inner {
+            fills,
+            fills_wanted,
+            ..
+        } = &mut *inner;
+        fills.retain(|k, f| matches!(f, Filled::Pending) || fills_wanted.contains(k));
+        inner.fills_used = used;
+    }
+
+    /// The fill the last healing used for spot `i`.
+    pub fn fill_used(&self, i: usize) -> Option<Arc<Fill>> {
+        self.lock().fills_used.get(i).cloned().flatten()
+    }
+
+    /// A fill still on its way, and the last that couldn't be made (why).
+    pub fn removing(&self) -> (bool, Option<String>) {
+        let inner = self.lock();
+        let pending = inner.fills.values().any(|f| matches!(f, Filled::Pending));
+        let failed = inner.fills.values().find_map(|f| match f {
+            Filled::Failed(e) => Some(e.clone()),
+            _ => None,
+        });
+        (pending, failed)
     }
 
     /// Changes whenever a search finishes (renders key on it).

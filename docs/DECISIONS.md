@@ -3115,3 +3115,120 @@ beside a NEF and beside a linear DNG, never replacing; a UI test choosing
 AVIF and Beside the original in the dialog, both joining the stack and
 opening in Develop). Real files: MANUAL-CHECKS, "DNG and AVIF in the
 library".
+
+## Object removal (2026-10-22)
+
+- **The model: MI-GAN** (Sargsyan, Navasardyan, Xu and Shi, "MI-GAN: A
+  Simple Baseline for Image Inpainting on Mobile Devices", ICCV 2023;
+  Picsart AI Research), the 512 px model trained on Places2. Convolutions
+  only (depthwise-separable 3×3s, fixed `[1, 3, 3, 1]` resampling
+  filters, skips, fixed noise; no FFT), 7.4 M parameters, f32, 29.6 MB.
+  It was made for this: the authors' own pipeline crops around the hole,
+  resizes to 512 and blends back.
+- **Licence, code and weights:** github.com/Picsart-AI-Research/MI-GAN
+  (commit 2b793c5e) has `LICENSE`, MIT ("Copyright (c) 2024 Picsart AI
+  Research (PAIR)"), and a separate `LICENSE-WEIGHTS`, also MIT, which
+  the README names as the weights' licence ("see LICENSE-WEIGHTS … for
+  the license"). The authors' Hugging Face copy (andraniksargsyan/migan,
+  ONNX only) is tagged `license: mit`. MIT is GPL-3.0-compatible.
+  Places2's research terms bind the dataset, not the weights (as with
+  ADE20K and SA-1B).
+- **Also looked at:** Big-LaMa (Apache 2.0) needs FFT (its fast Fourier
+  convolutions), which candle lacks; MAT's weights are CC BY-NC 4.0
+  (non-commercial, which GPL-3.0 can't carry); Stable Diffusion
+  inpainting is under OpenRAIL-M's use restrictions (incompatible) and
+  far too big; AOT-GAN (Apache 2.0, convolutions only, a Places2 512
+  checkpoint) is the fallback, twice MI-GAN's size and older.
+- **Weights:** the authors' own `migan_512_places2.pt` (a state dict
+  candle reads directly) from their Google Drive, linked from the
+  README, through the same `drive.usercontent.google.com` endpoint as
+  RawNIND, SHA-256 pinned (`download::INPAINT`); downloaded from the
+  Spot removal panel when Remove is first used, into
+  `<models>/migan-512-places2`. If Drive stops serving it, mirroring it
+  on a release (with the user's go-ahead) is the fallback.
+- **The port** (`shoebox-ml::inpaint`, from `migan_inference.py`):
+  channels last; the depthwise 3×3s as shifted multiply-adds (as the
+  scene model's 7×7s), halving as 16 strided taps, doubling (nearest ×2
+  keeping one pixel of four, padded 2/1, the 4×4 filter) as four 2×2
+  phases on the input, the 1×1s as matmuls; LeakyReLU 0.2 × √2 clamped
+  to ±256; the stored noise per level. The noise fixes the size at 512².
+  Tested against direct sums of PyTorch's definitions (no PyTorch here to
+  compare whole outputs); on the real model a 60 px disc cut from a
+  gradient comes back within 0.004 of it, and a 20 px post across 32 px
+  stripes within 0.019 (a flat fill: 0.167). A 40 px post across the same
+  stripes is filled with plausible but not continued stripes: regular
+  structure through a wide hole is the model's weak spot.
+- **In the pipeline:** a removal is a spot (`kind: remove`) holding
+  brush strokes (`strokes`, the mask brush's `Stroke`, in long-edge units
+  of the stored image; `dest` is their middle, for grabbing). Spots run
+  in order on the source after the detail stage, as heal and clone do,
+  so removals are in linear light after denoise and before tone, and
+  the result is what the GPU uploads (`Demosaiced::prepared`); the shader
+  is unchanged.
+- **Feeding it:** a square crop around the strokes, twice their extent
+  and at least 0.2 long edges (a 2560 px proxy's 512), clamped to the
+  photo (the whole photo, stretched, when the strokes are that big, as
+  the authors do), averaged down (or bilinear up) to 512. The hole is
+  everything the strokes reach, feather included, plus half a model
+  pixel. The model was trained on sRGB JPEGs, so the crop is divided by
+  its own bright end (the 99th percentile of the kept pixels' largest
+  channel) and sRGB-encoded; its output is decoded the same way. Raws
+  are fed in camera RGB balanced at as shot (near enough neutral; the
+  model fills from what's around, so the primaries matter little).
+  Clipping at the bright end only touches the fill's neighbours read
+  bilinearly at the hole's edge.
+- **Blending:** the fill (the model's picture in the hole, the input
+  elsewhere) read bilinearly at the source's pixels, mixed in by the
+  strokes' coverage: full within the brush radius, fading over Feather ×
+  radius beyond it (at least a pixel), times Opacity. Erasing strokes
+  take away what earlier strokes painted.
+- **Grain:** an upsampled fill is smoother than the photo (a noisy night
+  shot showed a soft band at 100%). The photo's fine detail around the
+  hole (each pixel less its 3×3 mean) is fitted per channel as `a + b ×
+  value`; what the fill lacks of it is added as noise from an integer
+  hash of the pixel, correlated between channels as the photo's is. A
+  smooth fill in σ 0.02 noise comes out with 0.0189 of detail against
+  the surroundings' 0.0190; on clean photos it adds nothing.
+- **Exports and 100% regions** make their own crop of the full-size
+  source and ask the model again (0.6 s) rather than upsampling the
+  proxy's fill: the crop is in the stored image's units, so the model
+  sees the same part of the photo at the same 512² (only resampling
+  differs), and it fills alike (a test: proxy and full size within 0.02).
+  The fill is then upsampled to the crop's pixels and grained.
+- **Kept:** in memory per source (by a BLAKE3 of exactly what the model
+  sees, its identity and a version), so other sliders, opacity and the
+  images beside the source for local adjustments reuse it; on disk as
+  16-bit RGB PNGs in `<cache>/ai-fills` (256 MB, least recently used
+  removed, through `mask::store`'s store, which now takes 16-bit RGB
+  besides 8-bit masks), so reopening a photo doesn't run the model.
+- **The live view never waits:** fills are made on a thread of their
+  own (`maps::Cache::fill`), the newest first, skipping any the last
+  healing no longer wants (a feather slider dragged doesn't queue one per
+  frame); until one arrives the object stays and the panel says
+  "Removing…". Exports, previews and 100% regions fill inline.
+- **Tool:** Spot removal → Remove (with Q's tool on): a drag paints a
+  stroke (shown red as it goes, from where the button went down), and
+  letting go makes it a removal ("Remove object", one step) and selects
+  it; a click is one dab. Its own Brush size (default 5, i.e. 0.025 long
+  edges: a spot's 2 is too small for objects); Feather and Opacity as
+  spots'. The selected removal shows its strokes; dragging its ring moves
+  them (one step); Option-drag erases from it ("Erase from removal").
+  Size on a selected removal resizes its strokes. No SAM "click an
+  object to remove it" yet: a removal's hole is strokes only.
+- **Bounds:** at most 500 strokes and 20,000 points a removal, finite
+  points, radii at most a quarter of the long edge (as spots).
+- **Measured** (M2 Max, release, Metal): the model 0.6 s a fill (CPU 2.7
+  s), the first in a process about 1 s with Metal's compilation; load
+  0.1 s; making the job 16–35 ms, blending 2–10 ms on a 24 MP frame. On a
+  real night shot (fire dancers on a beach) a speaker on a tripod went,
+  sand and dark sea continued, no seam at fit; at 100% the grained fill
+  is close to the sand around it.
+- **Checks:** unit tests with a stand-in model (`tests/remove.rs`: the
+  object goes and nothing else changes, feather, kept in memory and on
+  disk, the live view's thread, proxy against full size, grain, edit
+  JSON); a headless UI test (paint, the download offered, move, erase;
+  with `SHOEBOX_INPAINT_MODEL` a post filled as the sky beside it); the
+  real model (`SHOEBOX_INPAINT_MODEL=<folder> cargo test -p shoebox-ml
+  --test inpaint -- --ignored`); `examples/remove_probe.rs` times it on a
+  real raw and writes the crop before and after. Real photos:
+  `docs/MANUAL-CHECKS.md`.

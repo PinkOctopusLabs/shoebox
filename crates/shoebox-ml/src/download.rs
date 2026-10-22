@@ -161,6 +161,26 @@ pub const SCENE: Spec = Spec {
     convert: false,
 };
 
+/// MI-GAN 512 trained on Places2 (Picsart AI Research, MIT; weights MIT
+/// by the repo's LICENSE-WEIGHTS): object removal. Only on the authors'
+/// Google Drive (linked from github.com/Picsart-AI-Research/MI-GAN),
+/// checked by its SHA-256.
+pub const INPAINT: Spec = Spec {
+    id: crate::inpaint::MODEL_ID,
+    files: &[Remote {
+        repo: "Picsart-AI-Research/MI-GAN",
+        revision: "2b793c5ece43f4253e32d4afc257120a5deed6f5",
+        name: crate::inpaint::FILE,
+        size: 29_553_256,
+        sha256: "1d6087eee0aac8923ad2606be5d8caeb4824d3e4de331995e420c74e124a466a",
+        direct: Some(
+            "https://drive.usercontent.google.com/download?id=1D_YCuCgo20S2256sqpedsmENNm2WMtVY&export=download&confirm=t",
+        ),
+    }],
+    ready: &[crate::inpaint::FILE],
+    convert: false,
+};
+
 impl Spec {
     /// Bytes to download.
     pub fn bytes(&self) -> u64 {

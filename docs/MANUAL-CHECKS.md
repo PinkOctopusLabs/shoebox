@@ -327,3 +327,25 @@ never the library itself.
     keeps its saturated reds and greens).
   - Info shows the date, camera and size.
   - Develop opens each as a finished image; an export from it matches.
+
+### Object removal
+
+- [ ] **Object removal** (from 2026-10-22; Spot removal → Remove,
+  download the model from the panel once). On real photos, paint over:
+  a person walking across a beach or a square, a power line across a
+  sky (one long stroke, and in several), a sign or bin against a wall or
+  hedge, a dust bunny in a clear sky, and something on a pattern (tiles,
+  a fence, a brick wall). Check that:
+  - the fill continues what's around it without a visible patch at fit,
+    and at 100% the grain matches (a high-ISO raw especially: no smooth
+    band, no speckle that's finer or more colourful than the photo's);
+  - a full-size export matches what the proxy showed (same fill, sharper
+    or not softer than the surroundings);
+  - Feather and Opacity behave; Option-drag erases part of a removal and
+    the rest is filled again; moving a removal moves its strokes;
+  - reopening the photo shows the fills at once (from disk), and dragging
+    other sliders never re-runs the model;
+  - the panel's "Removing…" clears within about a second per removal.
+
+  Note where it fails (regular patterns through wide holes are its weak
+  spot) and how big an object can go before the fill looks smeared.

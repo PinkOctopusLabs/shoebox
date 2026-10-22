@@ -1,6 +1,7 @@
 //! Models Develop downloads when first asked for (the object model, the
-//! landscape model, AI raw denoise): pinned and checked by `shoebox_ml::download`, fetched on a
-//! thread of their own, their progress for the panel.
+//! landscape model, AI raw denoise, object removal): pinned and checked by
+//! `shoebox_ml::download`, fetched on a thread of their own, their
+//! progress for the panel.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -184,6 +185,37 @@ pub fn register_landscape(dir: PathBuf, staging: PathBuf) -> Arc<Model> {
                 height: s.height,
                 data: s.part(part).to_vec(),
             })
+        }),
+    );
+    model
+}
+
+/// Object removal (MI-GAN, `shoebox_ml::inpaint`): its model in `dir`
+/// (downloaded through `staging`), registered as Develop's inpainter and
+/// loaded on first use.
+pub fn register_inpainter(dir: PathBuf, staging: PathBuf) -> Arc<Model> {
+    use shoebox_ml::inpaint::{FILE, Inpainter, MODEL_ID, SIZE};
+    let model = Model::new(&shoebox_ml::download::INPAINT, dir, staging);
+    let net: Mutex<Option<Inpainter>> = Mutex::new(None);
+    let m = model.clone();
+    shoebox_develop::heal::remove::register(
+        MODEL_ID,
+        SIZE,
+        Box::new(move |rgb, known| {
+            if !m.ready() {
+                return Err("the object removal model isn't downloaded yet".into());
+            }
+            let mut net = net.lock().map_err(|e| e.to_string())?;
+            if net.is_none() {
+                *net = Some(
+                    Inpainter::load(&m.dir.join(FILE), &shoebox_ml::device())
+                        .map_err(|e| e.to_string())?,
+                );
+            }
+            let Some(n) = net.as_ref() else {
+                return Err("no object removal model".into());
+            };
+            n.inpaint(rgb, known).map_err(|e| e.to_string())
         }),
     );
     model

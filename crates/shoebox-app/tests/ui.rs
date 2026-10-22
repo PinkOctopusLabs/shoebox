@@ -64,6 +64,13 @@ fn paths(tmp: &Path, roots: &[PathBuf]) -> AppPaths {
                 .map_or_else(|| tmp.join("data/models/scene"), PathBuf::from),
             tmp.join("cache/model-download"),
         ),
+        // The object removal model: a real one when SHOEBOX_INPAINT_MODEL
+        // names it, else an empty folder.
+        inpaint: (
+            std::env::var_os("SHOEBOX_INPAINT_MODEL")
+                .map_or_else(|| tmp.join("data/models/inpaint"), PathBuf::from),
+            tmp.join("cache/model-download"),
+        ),
         people: tmp.join("data/people.json"),
         raw_cache: tmp.join("cache"),
         export_presets: tmp.join("data/export-presets.json"),
@@ -5037,6 +5044,181 @@ fn develop_spot_removal() {
     h.run_steps(2);
     assert!(!h.state().develop_spots().0);
     assert_eq!(h.state().view_name(), shoebox_app::app::View::Develop);
+}
+
+/// Object removal: with the spot tool on Remove, a drag down a post paints
+/// a removal (one step, "Remove object"); without the model the panel
+/// offers it and the fill says why it couldn't; dragging the removal moves
+/// its strokes; ⌥-dragging erases from it. With the model
+/// (`SHOEBOX_INPAINT_MODEL`), the post is filled.
+#[test]
+fn develop_object_removal() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(&root).unwrap();
+    // A sky-like gradient with a dark post standing in it.
+    let img = image::RgbImage::from_fn(640, 480, |x, y| {
+        if (300..330).contains(&x) && (100..380).contains(&y) {
+            return image::Rgb([30, 28, 25]);
+        }
+        let t = y as f32 / 480.0;
+        image::Rgb([
+            (90.0 + 100.0 * t) as u8,
+            (140.0 + 70.0 * t) as u8,
+            (220.0 + 25.0 * t) as u8,
+        ])
+    });
+    std::fs::write(
+        root.join("post.jpg"),
+        shoebox_fixtures::jpeg(&img, 92).unwrap(),
+    )
+    .unwrap();
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let with_model = std::env::var_os("SHOEBOX_INPAINT_MODEL").is_some();
+    let mut h = harness(p, egui::vec2(1400.0, 2600.0));
+    settle(&mut h, Duration::from_secs(60));
+    h.get_by_label("post.jpg").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(30), "develop", |a| {
+        a.develop_ready()
+    });
+    h.run_steps(3);
+    let spots = |h: &Harness<'_, ShoeboxApp>| {
+        h.state()
+            .develop_doc()
+            .unwrap()
+            .settings()
+            .modules
+            .heal
+            .spots
+            .clone()
+    };
+    h.key_press(egui::Key::Q);
+    h.run_steps(2);
+    h.get_by_label("Spot removal").click();
+    h.run_steps(2);
+    h.get_by_label("Remove").click();
+    h.run_steps(2);
+    let photo = h.state().develop_photo_rect().unwrap();
+    // The post's top and bottom on screen.
+    let at = |fx: f32, fy: f32| {
+        egui::pos2(
+            photo.left() + fx * photo.width(),
+            photo.top() + fy * photo.height(),
+        )
+    };
+    let button = |pos, pressed, modifiers| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers,
+    };
+    let drag = |h: &mut Harness<'_, ShoeboxApp>, from: egui::Pos2, to: egui::Pos2, m| {
+        h.event(egui::Event::ModifiersChanged(m));
+        h.event(egui::Event::PointerMoved(from));
+        h.run_steps(1);
+        h.event(button(from, true, m));
+        h.run_steps(1);
+        for k in 1..=8 {
+            h.event(egui::Event::PointerMoved(
+                from + (to - from) * (k as f32 / 8.0),
+            ));
+            h.run_steps(1);
+        }
+        h.event(button(to, false, m));
+        h.run_steps(3);
+        h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    };
+    let steps = h.state().develop_doc().unwrap().history().len();
+    drag(
+        &mut h,
+        at(0.49, 0.22),
+        at(0.49, 0.78),
+        egui::Modifiers::NONE,
+    );
+    let s = spots(&h);
+    assert_eq!(s.len(), 1);
+    assert_eq!(s[0].kind, shoebox_develop::edit::SpotKind::Remove);
+    assert!(s[0].strokes[0].points.len() >= 3, "{:?}", s[0].strokes);
+    assert!(
+        (s[0].dest[1] - 0.5 * 480.0 / 640.0).abs() < 0.03,
+        "{:?}",
+        s[0].dest
+    );
+    let doc = h.state().develop_doc().unwrap();
+    assert_eq!(doc.history().len(), steps + 1);
+    assert_eq!(doc.history().last().unwrap().label, "Remove object");
+    assert_eq!(h.state().develop_spots().1, Some(0));
+
+    if with_model {
+        wait_for(&mut h, Duration::from_secs(120), "the post filled", |a| {
+            let (removing, failed, filled) = a.develop_removing();
+            assert_eq!(failed, None);
+            !removing && filled
+        });
+        // The post's middle is as the sky beside it.
+        let y = 0.5 * 480.0 / 640.0;
+        let post = h.state().develop_source_at([315.0 / 640.0, y]).unwrap();
+        let sky = h.state().develop_source_at([0.4, y]).unwrap();
+        for c in 0..3 {
+            assert!((post[c] - sky[c]).abs() < 0.1 * sky[c], "{post:?} {sky:?}");
+        }
+        snapshot(&mut h, "develop-object-removal");
+    } else {
+        assert!(
+            h.query_by_label_contains("Download the object removal model")
+                .is_some(),
+            "the download is offered"
+        );
+        wait_for(&mut h, Duration::from_secs(30), "the fill tried", |a| {
+            let (removing, failed, _) = a.develop_removing();
+            !removing && failed.is_some()
+        });
+        snapshot(&mut h, "develop-object-removal");
+    }
+
+    // Dragged by its ring: the strokes go with it, one step.
+    let steps = h.state().develop_doc().unwrap().history().len();
+    let before = spots(&h)[0].clone();
+    let grab = photo.left_top()
+        + (photo.size() * egui::vec2(before.dest[0] as f32, before.dest[1] as f32 * 640.0 / 480.0));
+    drag(
+        &mut h,
+        grab,
+        grab + egui::vec2(-60.0, 0.0),
+        egui::Modifiers::NONE,
+    );
+    let moved = spots(&h);
+    assert_eq!(moved.len(), 1, "moved, not painted");
+    let dx = moved[0].strokes[0].points[0][0] - before.strokes[0].points[0][0];
+    assert!(dx < -0.02, "{dx}");
+    assert!((moved[0].dest[0] - before.dest[0] - dx).abs() < 1e-9);
+    assert_eq!(h.state().develop_doc().unwrap().history().len(), steps + 1);
+
+    // ⌥-drag across it erases from it.
+    let y = 0.5;
+    let x = moved[0].dest[0] as f32;
+    drag(
+        &mut h,
+        at(x - 0.05, y),
+        at(x + 0.05, y),
+        egui::Modifiers::ALT,
+    );
+    let s = spots(&h);
+    assert_eq!(s.len(), 1);
+    assert_eq!(s[0].strokes.len(), 2);
+    assert!(s[0].strokes[1].erase);
+    assert_eq!(
+        h.state()
+            .develop_doc()
+            .unwrap()
+            .history()
+            .last()
+            .unwrap()
+            .label,
+        "Erase from removal"
+    );
 }
 
 /// Auto-upright: a photo of a window grid turned 3° comes out level with

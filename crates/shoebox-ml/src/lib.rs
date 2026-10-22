@@ -13,6 +13,7 @@ pub mod convert;
 pub mod download;
 mod encoder;
 pub mod faces;
+pub mod inpaint;
 pub mod onnx;
 pub mod rawnind;
 pub mod sam;

@@ -440,7 +440,9 @@ pub struct Heal {
 /// Heal blends the copied texture into its surroundings (matching their
 /// brightness and colour); clone copies it as it is. Red eye takes the red
 /// out of the pupil found in the circle; pet eye darkens the bright
-/// reflection of an animal's pupil. The eyes have no source.
+/// reflection of an animal's pupil. Remove fills what its brush strokes
+/// paint over from the surroundings, with an inpainting model. Only heal
+/// and clone have a source.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SpotKind {
@@ -449,17 +451,25 @@ pub enum SpotKind {
     Clone,
     RedEye,
     PetEye,
+    Remove,
 }
 
 impl SpotKind {
     pub fn is_eye(self) -> bool {
         matches!(self, SpotKind::RedEye | SpotKind::PetEye)
     }
+
+    /// Heal and clone copy from a source.
+    pub fn has_source(self) -> bool {
+        matches!(self, SpotKind::Heal | SpotKind::Clone)
+    }
 }
 
-/// One spot: a circle at `dest` filled from the same circle at `source`.
-/// Positions and radius are in the stored image, in units of its long edge
-/// (as local adjustment masks).
+/// One spot: a circle at `dest` filled from the same circle at `source`;
+/// or, removing an object, what `strokes` paint (`dest` their middle,
+/// where the spot is grabbed; `radius` the brush's). Positions and radius
+/// are in the stored image, in units of its long edge (as local
+/// adjustment masks).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Spot {
@@ -467,12 +477,16 @@ pub struct Spot {
     pub dest: [f64; 2],
     pub source: [f64; 2],
     pub radius: f64,
-    /// The soft edge, 0–1 of the radius.
+    /// The soft edge, 0–1 of the radius (removing: beyond the strokes).
     pub feather: f64,
     /// 0–100.
     pub opacity: f64,
     /// Eyes: how dark the pupil turns, 0–100.
     pub darken: f64,
+    /// Removing: the brush strokes over the object (flow is ignored; an
+    /// erasing stroke takes away what earlier ones painted).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub strokes: Vec<Stroke>,
 }
 
 impl Default for Spot {
@@ -485,6 +499,7 @@ impl Default for Spot {
             feather: 0.3,
             opacity: 100.0,
             darken: 50.0,
+            strokes: Vec::new(),
         }
     }
 }

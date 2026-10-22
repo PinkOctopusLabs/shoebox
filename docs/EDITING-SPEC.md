@@ -101,6 +101,8 @@ Every model runs on `candle`, which `shoebox-ml` already uses. Each is implement
 As built (2026-10-22, DECISIONS "Sky and landscape masks"): SegFormer's weights are under NVIDIA's non-commercial licence, which GPL-3.0 can't carry, so the sky and landscape model is UperNet on ConvNeXt-B (ImageNet-22K) trained on ADE20K by ConvNeXt's authors (Meta, MIT): their own checkpoint from Meta's file server (489 MB), ported to candle in `shoebox-ml::scene`.
 | Object removal | Decide in Phase 4 | LaMa needs FFT, which candle lacks | Choose a convolution-only inpainting model, or skip it | 4 |
 
+As built (2026-10-22, DECISIONS "Object removal"): MI-GAN (Picsart AI Research, ICCV 2023; code and weights MIT), the 512 px Places2 model, convolutions only: the authors' own checkpoint from their Google Drive (29.6 MB), ported to candle in `shoebox-ml::inpaint`.
+
 **RawNIND: choosing the checkpoint**
 
 The author's folder has two Bayer checkpoints worth testing:
@@ -428,6 +430,7 @@ As built (2026-10-22, DECISIONS): layers run after the global dehaze, highlights
 - **Spot heal:** click a blemish and the source is chosen automatically by patch similarity, with drag to override. Blend with gradient-domain (Poisson) solving, a few hundred Jacobi iterations on the GPU.
 - **Clone:** the same, without the blend.
 - **Object removal:** an inpainting model for larger areas (power lines, people). Big-LaMa needs FFT, which candle lacks, so pick a convolution-only model in Phase 4 or use Core ML. Check the model's licence.
+- As built (2026-10-22, DECISIONS "Object removal"): MI-GAN on candle. A removal is a spot holding brush strokes (Spot removal → Remove), applied in order with the other spots on the source after the detail stage (so in linear light, before tone). A square crop around the strokes (in the stored image's units, so the proxy and exports crop alike) is sRGB-encoded relative to its own bright end, filled at 512², decoded, upsampled, blended by the strokes' feathered coverage, and given back the photo's grain. Fills are kept in memory and on disk (16-bit PNGs, by what the model saw); the live view gets them on a thread of its own; exports ask the model again at full size.
 - Healing runs after denoise and lens correction so patches match, and before tone, so blends happen in linear light.
 
 ## Tools beyond PhotoLab

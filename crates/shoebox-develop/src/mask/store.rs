@@ -2,7 +2,9 @@
 //! on the proxy and cached as 8-bit PNG"): what a finder or segmenter
 //! returned, as an 8-bit grayscale PNG named by a key over everything it
 //! was given, so opening a photo again, or restarting, reads the mask
-//! instead of running Vision or SAM.
+//! instead of running Vision or SAM. Object removal keeps its fills in a
+//! store of its own the same way, as 16-bit RGB PNGs
+//! (`crate::heal::remove`).
 //!
 //! The key is a BLAKE3 over the picture the finder saw (its exact bytes
 //! and size, so the file's content, its raw settings, the source's size,
@@ -121,9 +123,37 @@ impl Store {
     /// A kept mask of `w`×`h` (its time touched, so it's kept longest).
     /// None if there's none, or it can't be read or is the wrong size.
     pub fn get(&self, key: &str, w: usize, h: usize) -> Option<Vec<u8>> {
+        self.read(key, w, h, Pixels::Gray8)
+    }
+
+    /// Keep a mask (written beside, then renamed into place), removing the
+    /// least recently used past the limit.
+    pub fn put(&self, key: &str, mask: &[u8], w: usize, h: usize) -> std::io::Result<()> {
+        self.write(key, mask, w, h, Pixels::Gray8)
+    }
+
+    /// A kept 16-bit RGB picture of `w`×`h` (object removal's fills).
+    pub fn get_rgb16(&self, key: &str, w: usize, h: usize) -> Option<Vec<u16>> {
+        let b = self.read(key, w, h, Pixels::Rgb16)?;
+        Some(
+            b.as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_be_bytes(*c))
+                .collect(),
+        )
+    }
+
+    /// Keep a 16-bit RGB picture, as [`Store::put`].
+    pub fn put_rgb16(&self, key: &str, rgb: &[u16], w: usize, h: usize) -> std::io::Result<()> {
+        let b: Vec<u8> = rgb.iter().flat_map(|v| v.to_be_bytes()).collect();
+        self.write(key, &b, w, h, Pixels::Rgb16)
+    }
+
+    fn read(&self, key: &str, w: usize, h: usize, px: Pixels) -> Option<Vec<u8>> {
         let p = self.path(key);
         let bytes = std::fs::read(&p).ok()?;
-        let m = decode(&bytes, w, h)?;
+        let m = decode(&bytes, w, h, px)?;
         let _ = std::fs::File::options()
             .append(true)
             .open(&p)
@@ -131,10 +161,8 @@ impl Store {
         Some(m)
     }
 
-    /// Keep a mask (written beside, then renamed into place), removing the
-    /// least recently used past the limit.
-    pub fn put(&self, key: &str, mask: &[u8], w: usize, h: usize) -> std::io::Result<()> {
-        let bytes = encode(mask, w, h).map_err(std::io::Error::other)?;
+    fn write(&self, key: &str, data: &[u8], w: usize, h: usize, px: Pixels) -> std::io::Result<()> {
+        let bytes = encode(data, w, h, px).map_err(std::io::Error::other)?;
         std::fs::create_dir_all(&self.dir)?;
         let p = self.path(key);
         let n = TMP.fetch_add(1, Ordering::Relaxed);
@@ -203,9 +231,34 @@ impl Store {
     }
 }
 
-/// An 8-bit grayscale PNG.
-fn encode(mask: &[u8], w: usize, h: usize) -> Result<Vec<u8>, String> {
-    if mask.len() != w * h || w == 0 || h == 0 {
+/// What a PNG here holds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Pixels {
+    /// Masks.
+    Gray8,
+    /// Object removal's fills (samples big-endian, as PNG holds them).
+    Rgb16,
+}
+
+impl Pixels {
+    fn bytes(self) -> usize {
+        match self {
+            Pixels::Gray8 => 1,
+            Pixels::Rgb16 => 6,
+        }
+    }
+
+    fn png(self) -> (png::ColorType, png::BitDepth) {
+        match self {
+            Pixels::Gray8 => (png::ColorType::Grayscale, png::BitDepth::Eight),
+            Pixels::Rgb16 => (png::ColorType::Rgb, png::BitDepth::Sixteen),
+        }
+    }
+}
+
+/// A PNG of `px`.
+fn encode(mask: &[u8], w: usize, h: usize, px: Pixels) -> Result<Vec<u8>, String> {
+    if mask.len() != w * h * px.bytes() || w == 0 || h == 0 {
         return Err("the mask is the wrong size".into());
     }
     let err = |e: png::EncodingError| e.to_string();
@@ -216,8 +269,9 @@ fn encode(mask: &[u8], w: usize, h: usize) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     {
         let mut enc = png::Encoder::new(&mut out, pw, ph);
-        enc.set_color(png::ColorType::Grayscale);
-        enc.set_depth(png::BitDepth::Eight);
+        let (colour, depth) = px.png();
+        enc.set_color(colour);
+        enc.set_depth(depth);
         enc.set_compression(png::Compression::Fast);
         let mut wr = enc.write_header().map_err(err)?;
         wr.write_image_data(mask).map_err(err)?;
@@ -225,22 +279,21 @@ fn encode(mask: &[u8], w: usize, h: usize) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// A PNG written by [`encode`], if it's whole and `w`×`h`.
-fn decode(bytes: &[u8], w: usize, h: usize) -> Option<Vec<u8>> {
+/// A PNG written by [`encode`], if it's whole, `w`×`h` and holds `px`.
+fn decode(bytes: &[u8], w: usize, h: usize, px: Pixels) -> Option<Vec<u8>> {
     let mut r = png::Decoder::new(std::io::Cursor::new(bytes))
         .read_info()
         .ok()?;
     let info = r.info();
     if (info.width as usize, info.height as usize) != (w, h)
-        || info.color_type != png::ColorType::Grayscale
-        || info.bit_depth != png::BitDepth::Eight
+        || (info.color_type, info.bit_depth) != px.png()
     {
         return None;
     }
     let mut buf = vec![0; r.output_buffer_size()?];
     let frame = r.next_frame(&mut buf).ok()?;
     buf.truncate(frame.buffer_size());
-    (buf.len() == w * h).then_some(buf)
+    (buf.len() == w * h * px.bytes()).then_some(buf)
 }
 
 #[cfg(test)]
@@ -250,11 +303,17 @@ mod tests {
     #[test]
     fn pngs_round_trip() {
         let m: Vec<u8> = (0..35).map(|i| (i * 7) as u8).collect();
-        let b = encode(&m, 7, 5).unwrap_or_default();
-        assert_eq!(decode(&b, 7, 5), Some(m));
-        assert_eq!(decode(&b, 5, 7), None, "the wrong size");
-        assert_eq!(decode(&b[..b.len() / 2], 7, 5), None, "cut short");
-        assert_eq!(decode(b"not a png", 7, 5), None);
+        let g = Pixels::Gray8;
+        let b = encode(&m, 7, 5, g).unwrap_or_default();
+        assert_eq!(decode(&b, 7, 5, g), Some(m));
+        assert_eq!(decode(&b, 5, 7, g), None, "the wrong size");
+        assert_eq!(decode(&b[..b.len() / 2], 7, 5, g), None, "cut short");
+        assert_eq!(decode(b"not a png", 7, 5, g), None);
+        assert_eq!(decode(&b, 7, 5, Pixels::Rgb16), None, "not a fill");
+        let rgb: Vec<u8> = (0..7 * 5 * 6).map(|i| (i * 13) as u8).collect();
+        let b = encode(&rgb, 7, 5, Pixels::Rgb16).unwrap_or_default();
+        assert_eq!(decode(&b, 7, 5, Pixels::Rgb16), Some(rgb));
+        assert_eq!(decode(&b, 7, 5, g), None, "not a mask");
     }
 
     #[test]

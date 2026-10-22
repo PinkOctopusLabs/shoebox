@@ -12,9 +12,16 @@
 //!
 //! A soft edge (feather) and opacity blend the result in. Positions are in
 //! the stored image, in units of its long edge, as masks are.
+//!
+//! Removals (object removal, [`remove`]) are spots too: what their brush
+//! strokes paint is filled by an inpainting model.
 
 // Channel loops read clearer indexed.
 #![allow(clippy::needless_range_loop)]
+
+pub mod remove;
+
+use std::sync::Arc;
 
 use crate::cpu::Rgb;
 use crate::edit::{Spot, SpotKind};
@@ -27,10 +34,28 @@ pub const MAX_RADIUS: f64 = 0.25;
 /// The most relaxation sweeps one heal takes.
 const MAX_SWEEPS: usize = 4000;
 
-/// The source after these spots.
+/// The source after these spots (removals filled here and now; see
+/// [`heal_with`]).
 pub fn heal(img: &Rgb, spots: &[Spot]) -> Rgb {
+    heal_with(img, spots, &mut |_, job| match remove::run(job) {
+        Ok(f) => Some(Arc::new(f)),
+        Err(e) => {
+            tracing::warn!("object removal: {e}");
+            None
+        }
+    })
+}
+
+/// The source after these spots, each removal's fill (spot `i`, asked of
+/// the model as `job`) from `fill`: None leaves it out (still on its way,
+/// or it couldn't be made).
+pub fn heal_with(
+    img: &Rgb,
+    spots: &[Spot],
+    fill: &mut dyn FnMut(usize, &remove::Job) -> Option<Arc<remove::Fill>>,
+) -> Rgb {
     let mut out = img.clone();
-    for s in spots.iter().take(MAX_SPOTS) {
+    for (i, s) in spots.iter().enumerate().take(MAX_SPOTS) {
         let finite = s.dest.iter().chain(&s.source).all(|v| v.is_finite())
             && s.radius.is_finite()
             && s.feather.is_finite()
@@ -46,6 +71,14 @@ pub fn heal(img: &Rgb, spots: &[Spot]) -> Rgb {
             darken: s.darken.clamp(0.0, 100.0),
             ..s.clone()
         };
+        if s.kind == SpotKind::Remove {
+            if let Some(job) = remove::job(&out, &s)
+                && let Some(f) = fill(i, &job)
+            {
+                remove::apply(&mut out, &s, &job, &f);
+            }
+            continue;
+        }
         spot(&mut out, &s);
     }
     out

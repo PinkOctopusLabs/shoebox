@@ -237,11 +237,13 @@ impl Demosaiced {
         };
         let keep: Vec<_> = main.iter().chain(&ai).cloned().collect();
         Some(self.cache.aux(key, keep, || {
+            // Removals take the fills the source itself has (the model
+            // isn't asked again for these copies).
             let heal = |img: Rgb| {
                 if spots.is_empty() {
                     img
                 } else {
-                    crate::heal::heal(&img, spots)
+                    crate::heal::heal_with(&img, spots, &mut |i, _| self.cache.fill_used(i))
                 }
             };
             // The source at another AI strength, as the detail stage and
@@ -310,19 +312,38 @@ impl Demosaiced {
         if spots.is_empty() {
             return detailed;
         }
+        let removes = spots
+            .iter()
+            .any(|p| p.kind == crate::edit::SpotKind::Remove);
         let key = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
             serde_json::to_string(spots)
                 .unwrap_or_default()
                 .hash(&mut h);
+            // A removal's fill arriving redoes it.
+            if removes {
+                self.cache.found_generation().hash(&mut h);
+            }
             h.finish()
         };
         let from = detailed.as_deref().unwrap_or(&self.rgb);
-        Some(
-            self.cache
-                .healed(detailed.as_ref(), key, || crate::heal::heal(from, spots)),
-        )
+        Some(self.cache.healed(detailed.as_ref(), key, || {
+            if !removes {
+                return crate::heal::heal(from, spots);
+            }
+            self.cache.begin_fills();
+            let mut used = vec![None; spots.len()];
+            let out = crate::heal::heal_with(from, spots, &mut |i, job| {
+                let f = self.cache.fill(job);
+                if let Some(u) = used.get_mut(i) {
+                    *u = f.clone();
+                }
+                f
+            });
+            self.cache.end_fills(used);
+            out
+        }))
     }
 }
 

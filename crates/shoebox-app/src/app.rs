@@ -265,6 +265,8 @@ pub struct AppPaths {
     pub denoise: (PathBuf, PathBuf),
     /// The landscape model (UperNet on ConvNeXt-B, ADE20K), likewise.
     pub landscape: (PathBuf, PathBuf),
+    /// The object removal model (MI-GAN), likewise.
+    pub inpaint: (PathBuf, PathBuf),
     /// Names given to people.
     pub people: PathBuf,
     /// Develop's caches (DNGs of High efficiency NEFs, under `dng/`).
@@ -315,6 +317,10 @@ impl AppPaths {
             ),
             landscape: (
                 shoebox_core::paths::models_dir(&data).join("upernet-convnext-base-ade20k"),
+                cache.join("model-download"),
+            ),
+            inpaint: (
+                shoebox_core::paths::models_dir(&data).join("migan-512-places2"),
                 cache.join("model-download"),
             ),
             people: shoebox_core::paths::people_file(&data),
@@ -477,6 +483,8 @@ pub struct ShoeboxApp {
     pub(crate) denoiser: std::sync::Arc<crate::models::Model>,
     /// The landscape model (sky and landscape masks).
     pub(crate) landscape: std::sync::Arc<crate::models::Model>,
+    /// The object removal model.
+    pub(crate) inpainter: std::sync::Arc<crate::models::Model>,
     /// Edited photos: photo path → its preview's key.
     pub(crate) edited: HashMap<PathBuf, String>,
     /// Edited photos' edit documents (for export).
@@ -555,6 +563,8 @@ impl ShoeboxApp {
             crate::models::register_denoiser(paths.denoise.0.clone(), paths.denoise.1.clone());
         let landscape =
             crate::models::register_landscape(paths.landscape.0.clone(), paths.landscape.1.clone());
+        let inpainter =
+            crate::models::register_inpainter(paths.inpaint.0.clone(), paths.inpaint.1.clone());
         let display = crate::display::DisplayTagger::new(cc);
         let target = crate::display::DisplayTagger::target(display.as_ref());
         tracing::info!("rendering images in {target:?}");
@@ -638,6 +648,7 @@ impl ShoeboxApp {
             objects,
             denoiser,
             landscape,
+            inpainter,
             edited: HashMap::new(),
             edited_json: HashMap::new(),
             export: Default::default(),
@@ -1125,6 +1136,29 @@ impl ShoeboxApp {
     /// Develop's spot tool: on, and the spot selected (tests).
     pub fn develop_spots(&self) -> (bool, Option<usize>) {
         (self.develop.spots.active, self.develop.spots.selected)
+    }
+
+    /// Object removal: a fill on its way, why the last couldn't be made,
+    /// and whether the first spot has its fill (tests).
+    pub fn develop_removing(&self) -> (bool, Option<String>, bool) {
+        self.develop
+            .ready
+            .as_ref()
+            .map_or((false, None, false), |r| {
+                let (pending, failed) = r.src.cache.removing();
+                (pending, failed, r.src.cache.fill_used(0).is_some())
+            })
+    }
+
+    /// The source as Develop's live pipe reads it (after spot removal) at
+    /// a point, in the stored image's units (tests).
+    pub fn develop_source_at(&self, u: [f64; 2]) -> Option<[f32; 3]> {
+        let r = self.develop.ready.as_ref()?;
+        let prepared = r.src.prepared(self.develop.doc.as_ref()?.settings());
+        let img = prepared.as_deref().unwrap_or(&r.src.rgb);
+        let long = img.width.max(img.height) as f64;
+        let (x, y) = ((u[0] * long) as usize, (u[1] * long) as usize);
+        (x < img.width && y < img.height).then(|| img.px(x, y))
     }
 
     /// Where Develop's split divider is drawn (tests).

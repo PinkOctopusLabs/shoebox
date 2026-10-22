@@ -524,6 +524,11 @@ fn worker(
         &cache_dir.join("ai-masks"),
         shoebox_develop::mask::store::DEFAULT_LIMIT,
     )));
+    // Object removal's fills, likewise by what the model saw.
+    shoebox_develop::heal::remove::set_store(Some(shoebox_develop::mask::store::Store::new(
+        &cache_dir.join("ai-fills"),
+        shoebox_develop::heal::remove::DEFAULT_LIMIT,
+    )));
     // Subject and person masks come from Apple's Vision (macOS only; a
     // portable model is a later phase). Kept on disk by the OS build.
     let vision = shoebox_ml::vision::identity().unwrap_or_default();
