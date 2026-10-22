@@ -1941,3 +1941,26 @@ masks; AI raw denoise (RawNIND); Smart-light tone; finer AI masks.
   Backspace removes the selected spot, Escape puts the tool down. Spot
   removal is its own part in presets and copied settings, unticked by
   default.
+
+## Red-eye (2026-10-22)
+
+- Two more spot kinds, so the spot tool does both (Q, then Red eye or Pet
+  eye): a click puts a circle on the eye; there's no source.
+- **Red eye** finds the pupil inside the circle by redness, red above the
+  larger of green and blue relative to brightness (full at 0.4, none
+  below 0.2, so skin, about 0.15, is left alone), softened by a 3×3 blur;
+  red takes green and blue's mean and the pupil darkens (Darken, 0–100).
+- **Pet eye** turns the whole circle (feathered) into a dark grey of its
+  own brightness: animals' reflections are green, yellow or white, not
+  red, so redness can't find them.
+- Like spots, on the source after the detail stage, in camera RGB
+  balanced at as shot for raws (near enough neutral for redness).
+- **Bounds on edit files** (from an automated security review): an edit
+  is JSON anyone could write, so spots are read with radius at most a
+  quarter of the long edge, feather, opacity and darken in range, and
+  positions finite (else skipped); at most 2000 spots and 4000
+  relaxation sweeps; brush radii at most a long edge.
+- `browse_views_render` now allows 120 s for its library (the biggest
+  fixture, NEFs included) to settle: with three more GPU-heavy Develop
+  tests beside it, 60 s ran out twice in a full run; alone it settles in
+  under 30.

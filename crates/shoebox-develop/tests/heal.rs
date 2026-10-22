@@ -38,6 +38,7 @@ fn spot(kind: SpotKind) -> Spot {
         radius: 8.0 / 200.0,
         feather: 0.0,
         opacity: 100.0,
+        ..Default::default()
     }
 }
 
@@ -114,4 +115,72 @@ fn the_prepared_source_is_kept_until_the_spots_change() {
     assert!(std::sync::Arc::ptr_eq(&a, &src.prepared(&s).unwrap()));
     s.modules.heal.spots[0].kind = SpotKind::Clone;
     assert!(!std::sync::Arc::ptr_eq(&a, &src.prepared(&s).unwrap()));
+}
+
+#[test]
+fn red_eye_takes_the_red_out_of_the_pupil_only() {
+    // Skin with a red pupil at (50, 50).
+    let (w, h) = (100, 100);
+    let skin = [0.6, 0.42, 0.32];
+    let mut img = Rgb::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let pupil = (x as f32 - 50.0).hypot(y as f32 - 50.0) < 6.0;
+            let p = if pupil { [0.5, 0.05, 0.06] } else { skin };
+            let i = (y * w + x) * 3;
+            img.data[i..i + 3].copy_from_slice(&p);
+        }
+    }
+    let eye = Spot {
+        kind: SpotKind::RedEye,
+        dest: [50.5 / 100.0, 50.5 / 100.0],
+        source: [50.5 / 100.0, 50.5 / 100.0],
+        radius: 12.0 / 100.0,
+        ..Default::default()
+    };
+    let out = heal(&img, std::slice::from_ref(&eye));
+    let p = out.px(50, 50);
+    assert!(
+        p[0] < 0.1 && (p[0] - p[1]).abs() < 0.05,
+        "no longer red: {p:?}"
+    );
+    // Skin inside the circle stays skin.
+    assert_eq!(out.px(50, 60), skin);
+    // Pet eye darkens the whole circle.
+    let pet = heal(
+        &img,
+        &[Spot {
+            kind: SpotKind::PetEye,
+            feather: 0.0,
+            ..eye
+        }],
+    );
+    let p = pet.px(50, 58);
+    assert!(
+        p[0] < 0.3 && p[0] == p[1] && p[1] == p[2],
+        "dark grey: {p:?}"
+    );
+}
+
+#[test]
+fn hand_written_spots_are_kept_in_bounds() {
+    // A huge radius, a position that isn't a number: quick, and the bad
+    // one does nothing.
+    let img = blotted();
+    let t = std::time::Instant::now();
+    let out = heal(
+        &img,
+        &[
+            Spot {
+                radius: 1e9,
+                ..spot(SpotKind::Heal)
+            },
+            Spot {
+                dest: [f64::NAN, 0.2],
+                ..spot(SpotKind::Clone)
+            },
+        ],
+    );
+    assert!(t.elapsed().as_secs() < 10, "{:?}", t.elapsed());
+    assert_eq!((out.width, out.height), (img.width, img.height));
 }

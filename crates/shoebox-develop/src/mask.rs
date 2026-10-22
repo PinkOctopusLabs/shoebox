@@ -201,7 +201,13 @@ fn brush(strokes: &[Stroke], w: usize, h: usize, units: [f64; 2]) -> Vec<f32> {
         if s.points.is_empty() {
             continue;
         }
-        let r = (s.radius * k).max(0.5);
+        // At most a long edge (edit files are JSON anyone can write).
+        let radius = if s.radius.is_finite() {
+            s.radius.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let r = (radius * k).max(0.5);
         let inner = r * (1.0 - s.feather.clamp(0.0, 1.0));
         let flow = s.flow.clamp(0.0, 1.0) as f32;
         let pts: Vec<[f64; 2]> = s

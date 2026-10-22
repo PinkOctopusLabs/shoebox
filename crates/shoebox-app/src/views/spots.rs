@@ -1,7 +1,8 @@
-//! Develop's spot removal (EDITING-SPEC, Healing; `shoebox_develop::heal`):
-//! with the tool on (Q), a click on the photo heals or clones a spot there
-//! from a source found automatically; drag the spot or its source to move
-//! it. Backspace removes the selected spot.
+//! Develop's spot removal (EDITING-SPEC, Healing; `shoebox_develop::heal`)
+//! and red-eye: with the tool on (Q), a click on the photo heals or clones
+//! a spot there from a source found automatically, or corrects a red (or
+//! pet) eye; drag the spot or its source to move it. Backspace removes the
+//! selected spot.
 
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke, vec2};
 use shoebox_develop::edit::{Heal, Settings, Spot, SpotKind};
@@ -21,6 +22,7 @@ pub struct Tool {
     pub radius: f64,
     pub feather: f64,
     pub opacity: f64,
+    pub darken: f64,
 }
 
 impl Default for Tool {
@@ -33,6 +35,7 @@ impl Default for Tool {
             radius: s.radius,
             feather: s.feather,
             opacity: s.opacity,
+            darken: s.darken,
         }
     }
 }
@@ -72,8 +75,23 @@ pub fn section(app: &mut ShoeboxApp, ui: &mut egui::Ui, h: &Heal) {
             ui.selectable_value(&mut t.kind, SpotKind::Clone, "Clone")
                 .on_hover_text("Copy it exactly");
         });
-        let sel = app.develop.spots.selected;
-        // A kind chosen with a spot selected changes that spot.
+        ui.horizontal(|ui| {
+            let t = &mut app.develop.spots;
+            ui.selectable_value(&mut t.kind, SpotKind::RedEye, "Red eye")
+                .on_hover_text("Click an eye: the red goes from its pupil");
+            ui.selectable_value(&mut t.kind, SpotKind::PetEye, "Pet eye")
+                .on_hover_text("Click an animal's eye: its glowing pupil darkens");
+        });
+        // A kind chosen with a spot selected changes that spot (heal and
+        // clone into each other, the eyes likewise); otherwise it's for
+        // the next one.
+        let mut sel = app.develop.spots.selected;
+        if let Some(i) = sel
+            && h.spots[i].kind.is_eye() != app.develop.spots.kind.is_eye()
+        {
+            app.develop.spots.selected = None;
+            sel = None;
+        }
         if let Some(i) = sel
             && h.spots[i].kind != app.develop.spots.kind
         {
@@ -90,6 +108,15 @@ pub fn section(app: &mut ShoeboxApp, ui: &mut egui::Ui, h: &Heal) {
             let radius = shown.map_or(t.radius, |s| s.radius);
             let feather = shown.map_or(t.feather, |s| s.feather);
             let opacity = shown.map_or(t.opacity, |s| s.opacity);
+            let darken = shown.map_or(t.darken, |s| s.darken);
+            if t.kind.is_eye()
+                && let Some(v) = slider(ui, "Darken", darken, 0.0..=100.0, 50.0, 0)
+            {
+                app.develop.spots.darken = v;
+                change(app, sel, "spot-darken", format!("Darken {v:.0}"), |s| {
+                    s.darken = v
+                });
+            }
             if let Some(v) = slider(ui, "Size", radius * 200.0, 0.5..=20.0, 2.0, 1) {
                 app.develop.spots.radius = v / 200.0;
                 change(app, sel, "spot-size", format!("Spot size {v:.1}"), |s| {
@@ -214,12 +241,12 @@ pub fn on_photo(
         let on = sel == Some(i);
         let c = map.to_screen(sp.dest);
         let r = (sp.radius as f32 * map.scale_at(sp.dest)).max(3.0);
-        let ends: &[End] = if on {
+        let ends: &[End] = if on && !sp.kind.is_eye() {
             &[End::Dest, End::Source]
         } else {
             &[End::Dest]
         };
-        if on {
+        if on && !sp.kind.is_eye() {
             let sc = map.to_screen(sp.source);
             ring(painter, sc, r, 1.0);
             let d = c - sc;
@@ -316,9 +343,13 @@ fn add(app: &mut ShoeboxApp, map: &Mapping<'_>, p: Pos2, s: &Settings) {
     let dest = map.to_units(p);
     // Found on the photo as healed so far, so it doesn't copy a blemish
     // already dealt with.
-    let healed = ready.src.prepared(s);
-    let img = healed.as_deref().unwrap_or(&ready.src.rgb);
-    let source = shoebox_develop::heal::find_source(img, dest, t.radius);
+    let source = if t.kind.is_eye() {
+        dest
+    } else {
+        let healed = ready.src.prepared(s);
+        let img = healed.as_deref().unwrap_or(&ready.src.rgb);
+        shoebox_develop::heal::find_source(img, dest, t.radius)
+    };
     let spot = Spot {
         kind: t.kind,
         dest,
@@ -326,12 +357,15 @@ fn add(app: &mut ShoeboxApp, map: &Mapping<'_>, p: Pos2, s: &Settings) {
         radius: t.radius,
         feather: t.feather,
         opacity: t.opacity,
+        darken: t.darken,
     };
     let n = s.modules.heal.spots.len();
     app.develop.last_step_done();
     let label = match t.kind {
         SpotKind::Heal => "Heal spot",
         SpotKind::Clone => "Clone spot",
+        SpotKind::RedEye => "Red eye",
+        SpotKind::PetEye => "Pet eye",
     };
     edit(app, "spot-add", label.into(), |s| {
         s.modules.heal.spots.push(spot)

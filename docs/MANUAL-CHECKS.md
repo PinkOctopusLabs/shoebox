@@ -104,3 +104,6 @@ together at the end, before the release.
   on skin, a small sign on a wall): heal leaves no visible edge or colour
   shift at 100% and in a full-size export; the automatic source picks a
   sensible place; clone copies texture exactly.
+- [ ] **Red-eye** on a flash portrait (and a pet photo if there's one):
+  the pupil loses its red without a ring, the iris and skin around it
+  stay as they were, and pet eye covers the glow.

@@ -98,7 +98,9 @@ fn browse_views_render() {
         .count();
     let p = paths(t.path(), &[lib.join("ref"), lib.join("scan")]);
     let mut h = harness(p, egui::vec2(1400.0, 900.0));
-    settle(&mut h, Duration::from_secs(60));
+    // The biggest fixture library (NEFs too), loading while every other UI
+    // test runs: give it longer.
+    settle(&mut h, Duration::from_secs(120));
     assert_eq!(h.state().photo_count(), 17); // 7 reference + 10 scan images
     // The library panel counts photos (stacks), as the grid shows them.
     let photos = h.state().shown_count();
@@ -4585,8 +4587,9 @@ fn develop_point_colour() {
 }
 
 /// Spot removal: Q, a click heals a spot there from a source found
-/// nearby; dragging the spot moves it (one step); Backspace removes it;
-/// Escape puts the tool down without leaving Develop.
+/// nearby; dragging the spot moves it (one step); Backspace removes it; a
+/// red eye has no source; Escape puts the tool down without leaving
+/// Develop.
 #[test]
 fn develop_spot_removal() {
     let t = tempfile::tempdir().unwrap();
@@ -4599,7 +4602,7 @@ fn develop_spot_removal() {
     )
     .unwrap();
     let p = paths(t.path(), std::slice::from_ref(&root));
-    let mut h = harness(p, egui::vec2(1400.0, 1200.0));
+    let mut h = harness(p, egui::vec2(1400.0, 2600.0));
     settle(&mut h, Duration::from_secs(60));
     h.get_by_label("spots.jpg").click();
     h.run_steps(2);
@@ -4662,6 +4665,32 @@ fn develop_spot_removal() {
     h.key_press(egui::Key::Backspace);
     h.run_steps(3);
     assert!(spots(&h).is_empty());
+
+    // Red eye: a spot with no source of its own.
+    h.get_by_label("Spot removal").click();
+    h.run_steps(2);
+    h.get_by_label("Red eye").click();
+    h.run_steps(2);
+    let eye = at + egui::vec2(60.0, 30.0);
+    h.event(egui::Event::PointerMoved(eye));
+    h.run_steps(1);
+    h.event(button(eye, true));
+    h.event(button(eye, false));
+    h.run_steps(3);
+    let s = spots(&h);
+    assert_eq!(s.len(), 1);
+    assert_eq!(s[0].kind, shoebox_develop::edit::SpotKind::RedEye);
+    assert_eq!(s[0].source, s[0].dest);
+    assert_eq!(
+        h.state()
+            .develop_doc()
+            .unwrap()
+            .history()
+            .last()
+            .unwrap()
+            .label,
+        "Red eye"
+    );
     h.key_press(egui::Key::Escape);
     h.run_steps(2);
     assert!(!h.state().develop_spots().0);

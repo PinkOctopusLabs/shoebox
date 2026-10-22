@@ -366,13 +366,23 @@ pub struct Heal {
 }
 
 /// Heal blends the copied texture into its surroundings (matching their
-/// brightness and colour); clone copies it as it is.
+/// brightness and colour); clone copies it as it is. Red eye takes the red
+/// out of the pupil found in the circle; pet eye darkens the bright
+/// reflection of an animal's pupil. The eyes have no source.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SpotKind {
     #[default]
     Heal,
     Clone,
+    RedEye,
+    PetEye,
+}
+
+impl SpotKind {
+    pub fn is_eye(self) -> bool {
+        matches!(self, SpotKind::RedEye | SpotKind::PetEye)
+    }
 }
 
 /// One spot: a circle at `dest` filled from the same circle at `source`.
@@ -389,6 +399,8 @@ pub struct Spot {
     pub feather: f64,
     /// 0–100.
     pub opacity: f64,
+    /// Eyes: how dark the pupil turns, 0–100.
+    pub darken: f64,
 }
 
 impl Default for Spot {
@@ -400,6 +412,7 @@ impl Default for Spot {
             radius: 0.01,
             feather: 0.3,
             opacity: 100.0,
+            darken: 50.0,
         }
     }
 }
