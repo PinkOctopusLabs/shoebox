@@ -15,7 +15,7 @@ use shoebox_core::fileops::PlannedCopy;
 use shoebox_core::merges::{self, Kind};
 use shoebox_core::scan::Root;
 use shoebox_develop::dng::{Converter, DngCache};
-use shoebox_develop::merge::{self as dm, MergeError, hdr};
+use shoebox_develop::merge::{self as dm, MergeError, focus, hdr};
 
 use crate::develop::Event;
 
@@ -27,6 +27,8 @@ pub struct Job {
     /// first is where the file goes).
     pub sources: Vec<(PathBuf, u16)>,
     pub options: hdr::Options,
+    /// A focus stack's options.
+    pub focus: focus::Options,
     /// The library's folders.
     pub roots: Vec<Root>,
     pub cancel: Arc<AtomicBool>,
@@ -73,17 +75,21 @@ fn merge(
         });
     }
     let progress = |f: f32| emit(Event::MergeProgress(0.05 + 0.85 * f));
-    let out = match job.kind {
-        Kind::Hdr => hdr::merge(&inputs, &job.options, &progress, &job.cancel),
-        Kind::Panorama | Kind::Focus => Err(MergeError::Refused(format!(
+    // The result, and why each frame fell short (None: fine).
+    let (merged, failed): (dm::Merged, Vec<Option<&str>>) = match job.kind {
+        Kind::Hdr => hdr::merge(&inputs, &job.options, &progress, &job.cancel)
+            .map(|o| (o.merged, o.frames.iter().map(|f| f.align_failed).collect())),
+        Kind::Focus => focus::merge(&inputs, &job.focus, &progress, &job.cancel)
+            .map(|o| (o.merged, o.frames.iter().map(|f| f.align_failed).collect())),
+        Kind::Panorama => Err(MergeError::Refused(format!(
             "{} isn't built yet",
             job.kind.label()
         ))),
     }
     .map_err(|e| e.to_string())?;
     let mut notes = Vec::new();
-    for (f, (p, _)) in out.frames.iter().zip(&job.sources) {
-        if let Some(why) = f.align_failed {
+    for (f, (p, _)) in failed.iter().zip(&job.sources) {
+        if let Some(why) = f {
             notes.push(format!("{} {why}", name(p)));
         }
     }
@@ -95,8 +101,8 @@ fn merge(
             .map(|(p, h)| (name(p), blake3::Hash::from_bytes(*h).to_hex().to_string()))
             .collect(),
     };
-    let bytes = dm::dng(&out.merged, &record).map_err(|e| e.to_string())?;
-    drop(out);
+    let bytes = dm::dng(&merged, &record).map_err(|e| e.to_string())?;
+    drop(merged);
     emit(Event::MergeProgress(0.95));
     let stem = plan
         .dst

@@ -6357,3 +6357,83 @@ fn hdr_merge_from_the_photo_menu() {
         assert_eq!(&std::fs::read(p).unwrap(), bytes);
     }
 }
+
+/// Merge to Focus Stack… from the photo menu: three frames focused near,
+/// middle and far (breathing a little); the dialog lists them with the
+/// middle one as the reference, Method and Align; the stack lands beside
+/// the first as `-Focus.dng`, a photo of its own, selected, its Info
+/// listing the frames; ⌘Z sends it to the Trash. The sources are never
+/// written.
+#[test]
+fn focus_stack_from_the_photo_menu() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(&root).unwrap();
+    let mut originals = Vec::new();
+    for (i, focus) in [0.0, 0.5, 1.0].into_iter().enumerate() {
+        let d = i as f64 - 1.0;
+        let f = shoebox_fixtures::FocusFrame {
+            scale: 1.0 + 0.004 * d,
+            shift: (0.6 * d, -0.4 * d),
+            seed: i as u64 + 1,
+            subsec: ["10", "30", "50"][i],
+            ..shoebox_fixtures::FocusFrame::new(240, 160, focus)
+        };
+        let p = root.join(format!("DSC_0{}.dng", 101 + i));
+        let bytes = f.write();
+        std::fs::write(&p, &bytes).unwrap();
+        originals.push((p, bytes));
+    }
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+    h.state_mut()
+        .select_names(&["DSC_0101.dng", "DSC_0102.dng", "DSC_0103.dng"]);
+    h.run_steps(2);
+    h.get_by_label("DSC_0102.dng").click_secondary();
+    h.run_steps(2);
+    h.get_by_label("Merge to Focus Stack…").click();
+    h.run_steps(3);
+    assert_eq!(h.state().merge_state(), (true, false, 0));
+    assert!(h.query_by_label("Merge to Focus Stack").is_some());
+    assert!(h.get_all_by_label("DSC_0103.dng").count() >= 2);
+    // The middle frame is the reference; no exposures compared.
+    assert!(h.query_by_label("reference").is_some());
+    assert!(h.query_by_label("+0.0 EV").is_none());
+    assert!(h.query_by_label("Method").is_some());
+    assert!(h.query_by_label("Align the photos").is_some());
+    snapshot(&mut h, "merge-focus-dialog");
+    h.get_by_label("Merge").click();
+    h.run_steps(2);
+    let merged = root.join("DSC_0101-Focus.dng");
+    wait_for(&mut h, Duration::from_secs(60), "the stack", |_| {
+        merged.exists()
+    });
+    wait_for(&mut h, Duration::from_secs(30), "selected", |a| {
+        a.photo_count() == 4 && a.current_name().as_deref() == Some("DSC_0101-Focus.dng")
+    });
+    let (open, running, merges) = h.state().merge_state();
+    assert!(!open && !running && merges == 1);
+    assert_eq!(h.state().shown_count(), 4);
+    h.run_steps(3);
+    assert!(h.query_by_label("FOCUS STACK OF").is_some());
+    snapshot(&mut h, "merge-focus-done");
+    for (p, bytes) in &originals {
+        assert_eq!(&std::fs::read(p).unwrap(), bytes, "{}", p.display());
+    }
+    // A linear raw, cut a little to what all three frames cover.
+    let back = shoebox_decode::raw::decode(&std::fs::read(&merged).unwrap()).unwrap();
+    assert!(back.linear.is_some());
+    assert!(back.width < 240 && back.width > 230, "{}", back.width);
+    assert!(back.height < 160 && back.height > 152, "{}", back.height);
+
+    // ⌘Z: to the Trash.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    wait_for(&mut h, Duration::from_secs(30), "undone", |a| {
+        !merged.exists() && a.photo_count() == 3
+    });
+    assert!(t.path().join("trash/DSC_0101-Focus.dng").is_file());
+    for (p, bytes) in &originals {
+        assert_eq!(&std::fs::read(p).unwrap(), bytes);
+    }
+}

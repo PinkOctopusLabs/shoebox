@@ -1,5 +1,6 @@
 //! Photo merges (EDITING-SPEC, Phase 4 additions; SPEC, Merges): Merge to
-//! HDR… in the photo menu (⌃H) opens a dialog listing the photos chosen,
+//! HDR… (⌃H) and Merge to Focus Stack… in the photo menu open a dialog
+//! (one for every kind, its options by kind) listing the photos chosen,
 //! with what's wrong if they can't be merged, the options, and what will
 //! be written where (rule 6's dry run: one new file, from these photos,
 //! which are only read). Merge runs on the develop thread's merge thread,
@@ -13,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use eframe::egui::{self, RichText};
 use shoebox_core::merges::Kind;
+use shoebox_develop::merge::focus;
 use shoebox_develop::merge::hdr::{self, Deghost};
 
 use crate::app::ShoeboxApp;
@@ -21,6 +23,12 @@ use crate::app::ShoeboxApp;
 pub struct State {
     /// The dialog, with these photos in capture order.
     pub open: Option<Vec<PathBuf>>,
+    /// What the dialog merges them into.
+    pub kind: Kind,
+    /// A focus stack's method.
+    pub method: focus::Method,
+    /// The kind of the merge running (for its messages).
+    ran: Kind,
     pub align: Option<bool>,
     pub deghost: Deghost,
     /// The reference, by place in the list (None: the middle exposure).
@@ -38,8 +46,14 @@ fn name(p: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// Open the dialog with the selected photos (each stack's primary).
+/// Open the HDR dialog with the selected photos.
 pub fn open(app: &mut ShoeboxApp) {
+    open_as(app, Kind::Hdr);
+}
+
+/// Open the dialog for `kind` with the selected photos (each stack's
+/// primary).
+pub fn open_as(app: &mut ShoeboxApp, kind: Kind) {
     let mut photos: Vec<(Option<f64>, PathBuf)> = app
         .selected_stacks()
         .into_iter()
@@ -55,7 +69,26 @@ pub fn open(app: &mut ShoeboxApp) {
     });
     let st = &mut app.merge;
     st.open = Some(photos.into_iter().map(|(_, p)| p).collect());
+    st.kind = kind;
     st.reference = None;
+}
+
+/// "HDR merge", "Focus stack", for titles and messages.
+fn title(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Hdr => "HDR merge",
+        Kind::Panorama => "Panorama",
+        Kind::Focus => "Focus stack",
+    }
+}
+
+/// The status bar's words for the merge running.
+pub fn status(app: &ShoeboxApp) -> &'static str {
+    match app.merge.ran {
+        Kind::Hdr => "Merging HDR",
+        Kind::Panorama => "Merging panorama",
+        Kind::Focus => "Stacking focus",
+    }
 }
 
 /// "1/250 s · f/2.8 · ISO 400".
@@ -74,14 +107,24 @@ fn exposure(x: &shoebox_core::exif::ExifInfo) -> String {
     parts.join(" · ")
 }
 
-/// Why these photos can't be merged to HDR (None: they can).
-fn refusal(app: &ShoeboxApp, photos: &[PathBuf]) -> Option<String> {
-    if !(hdr::MIN_FRAMES..=hdr::MAX_FRAMES).contains(&photos.len()) {
-        return Some(format!(
-            "Choose {} to {} bracketed photos.",
-            hdr::MIN_FRAMES,
-            hdr::MAX_FRAMES
-        ));
+/// Why these photos can't be merged as `kind` (None: they can).
+fn refusal(app: &ShoeboxApp, photos: &[PathBuf], kind: Kind) -> Option<String> {
+    match kind {
+        Kind::Focus if photos.len() < focus::MIN_FRAMES => {
+            return Some(format!(
+                "Choose at least {} photos focused at different distances.",
+                focus::MIN_FRAMES
+            ));
+        }
+        Kind::Focus => {}
+        _ if !(hdr::MIN_FRAMES..=hdr::MAX_FRAMES).contains(&photos.len()) => {
+            return Some(format!(
+                "Choose {} to {} bracketed photos.",
+                hdr::MIN_FRAMES,
+                hdr::MAX_FRAMES
+            ));
+        }
+        _ => {}
     }
     let mut size = None;
     let mut camera = None;
@@ -92,8 +135,9 @@ fn refusal(app: &ShoeboxApp, photos: &[PathBuf]) -> Option<String> {
         let photo = &app.catalog.photos[i];
         if !photo.format.is_raw() {
             return Some(format!(
-                "{} isn't a raw photo: HDR merges need raw files.",
-                name(p)
+                "{} isn't a raw photo: {}s need raw files.",
+                name(p),
+                kind.label()
             ));
         }
         if app.catalog.is_reference(i) {
@@ -125,7 +169,8 @@ pub fn dialog(app: &mut ShoeboxApp, ctx: &egui::Context) {
     let Some(photos) = app.merge.open.clone() else {
         return;
     };
-    let refused = refusal(app, &photos);
+    let kind = app.merge.kind;
+    let refused = refusal(app, &photos, kind);
     let busy = app.merge.progress.is_some();
     let rows: Vec<(String, String, Option<f64>)> = photos
         .iter()
@@ -151,25 +196,41 @@ pub fn dialog(app: &mut ShoeboxApp, ctx: &egui::Context) {
             .copied()
             .unwrap_or(0)
     };
-    let reference = app
-        .merge
-        .reference
-        .filter(|&r| r < rows.len())
-        .unwrap_or(auto);
+    let reference = match kind {
+        // The middle frame, as the stack takes it.
+        Kind::Focus => rows.len().saturating_sub(1) / 2,
+        _ => app
+            .merge
+            .reference
+            .filter(|&r| r < rows.len())
+            .unwrap_or(auto),
+    };
     let mut open = true;
     let mut go = false;
     let mut cancel = false;
-    egui::Window::new("Merge to HDR")
+    let heading = match kind {
+        Kind::Hdr => "Merge to HDR",
+        Kind::Panorama => "Merge to Panorama",
+        Kind::Focus => "Merge to Focus Stack",
+    };
+    egui::Window::new(heading)
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
         .default_width(460.0)
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .show(ctx, |ui| {
-            ui.label(format!(
-                "{} bracketed photos, merged into one raw photo with the range of all of them:",
-                rows.len()
-            ));
+            ui.label(match kind {
+                Kind::Focus => format!(
+                    "{} photos focused at different distances, merged into one raw photo \
+                     sharp throughout:",
+                    rows.len()
+                ),
+                _ => format!(
+                    "{} bracketed photos, merged into one raw photo with the range of all of them:",
+                    rows.len()
+                ),
+            });
             ui.add_space(4.0);
             egui::Grid::new("merge-photos")
                 .num_columns(3)
@@ -181,6 +242,7 @@ pub fn dialog(app: &mut ShoeboxApp, ctx: &egui::Context) {
                         ui.weak(e);
                         let rel = match (stops, base) {
                             _ if i == reference => "reference".to_owned(),
+                            _ if kind == Kind::Focus => String::new(),
                             (Some(s), Some(b)) => format!("{:+.1} EV", s - b),
                             _ => String::new(),
                         };
@@ -189,48 +251,10 @@ pub fn dialog(app: &mut ShoeboxApp, ctx: &egui::Context) {
                     }
                 });
             ui.add_space(6.0);
-            let st = &mut app.merge;
-            let mut align = st.align.unwrap_or(true);
-            if ui
-                .checkbox(&mut align, "Align the photos")
-                .on_hover_text("For brackets taken hand-held; a tripod's need none")
-                .changed()
-            {
-                st.align = Some(align);
+            match kind {
+                Kind::Focus => focus_options(ui, &mut app.merge),
+                _ => hdr_options(ui, &mut app.merge, &rows, auto),
             }
-            ui.horizontal(|ui| {
-                ui.label("Deghost");
-                egui::ComboBox::from_id_salt("merge-deghost")
-                    .selected_text(st.deghost.label())
-                    .show_ui(ui, |ui| {
-                        for d in Deghost::ALL {
-                            ui.selectable_value(&mut st.deghost, d, d.label());
-                        }
-                    })
-                    .response
-                    .on_hover_text(
-                        "Things that moved between the photos are taken from the reference alone",
-                    );
-            });
-            ui.horizontal(|ui| {
-                ui.label("Reference");
-                let shown = match st.reference {
-                    None => format!("Middle exposure ({})", rows[auto].0),
-                    Some(r) => rows.get(r).map(|r| r.0.clone()).unwrap_or_default(),
-                };
-                egui::ComboBox::from_id_salt("merge-reference")
-                    .selected_text(shown)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut st.reference, None, "Middle exposure");
-                        for (i, r) in rows.iter().enumerate() {
-                            ui.selectable_value(&mut st.reference, Some(i), &r.0);
-                        }
-                    })
-                    .response
-                    .on_hover_text(
-                        "Its brightness, colour and EXIF become the merge's, and moving things come from it",
-                    );
-            });
             ui.add_space(6.0);
             if let Some(first) = photos.first() {
                 let stem = first
@@ -245,9 +269,15 @@ pub fn dialog(app: &mut ShoeboxApp, ctx: &egui::Context) {
                 ui.label(format!(
                     "Writes {stem}-{}.dng beside {} in {folder} (with -1, -2 if the name's taken). \
                      The photos themselves are only read.",
-                    Kind::Hdr.suffix(),
+                    kind.suffix(),
                     name(first)
                 ));
+                if kind == Kind::Focus {
+                    ui.weak(
+                        "It's cut a little to what every photo covers (focus breathing changes \
+                         their view).",
+                    );
+                }
                 ui.weak("The new photo's edit starts from the defaults. ⌘Z sends it to the Trash.");
             }
             if let Some(why) = &refused {
@@ -286,20 +316,103 @@ pub fn dialog(app: &mut ShoeboxApp, ctx: &egui::Context) {
         let flag = Arc::new(AtomicBool::new(false));
         let st = &mut app.merge;
         let job = crate::merge::Job {
-            kind: Kind::Hdr,
+            kind,
             sources,
             options: hdr::Options {
                 align: st.align.unwrap_or(true),
                 deghost: st.deghost,
                 reference: st.reference,
             },
+            focus: focus::Options {
+                method: st.method,
+                align: st.align.unwrap_or(true),
+            },
             roots: app.catalog.roots.clone(),
             cancel: flag.clone(),
         };
         st.cancel = Some(flag);
+        st.ran = kind;
         st.progress = Some(0.0);
         st.open = None;
         app.developer.merge(job);
+    }
+}
+
+/// HDR's options: Align, Deghost, the reference.
+fn hdr_options(
+    ui: &mut egui::Ui,
+    st: &mut State,
+    rows: &[(String, String, Option<f64>)],
+    auto: usize,
+) {
+    let mut align = st.align.unwrap_or(true);
+    if ui
+        .checkbox(&mut align, "Align the photos")
+        .on_hover_text("For brackets taken hand-held; a tripod's need none")
+        .changed()
+    {
+        st.align = Some(align);
+    }
+    ui.horizontal(|ui| {
+        ui.label("Deghost");
+        egui::ComboBox::from_id_salt("merge-deghost")
+            .selected_text(st.deghost.label())
+            .show_ui(ui, |ui| {
+                for d in Deghost::ALL {
+                    ui.selectable_value(&mut st.deghost, d, d.label());
+                }
+            })
+            .response
+            .on_hover_text(
+                "Things that moved between the photos are taken from the reference alone",
+            );
+    });
+    ui.horizontal(|ui| {
+        ui.label("Reference");
+        let shown = match st.reference {
+            None => format!("Middle exposure ({})", rows[auto].0),
+            Some(r) => rows.get(r).map(|r| r.0.clone()).unwrap_or_default(),
+        };
+        egui::ComboBox::from_id_salt("merge-reference")
+            .selected_text(shown)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut st.reference, None, "Middle exposure");
+                for (i, r) in rows.iter().enumerate() {
+                    ui.selectable_value(&mut st.reference, Some(i), &r.0);
+                }
+            })
+            .response
+            .on_hover_text(
+                "Its brightness, colour and EXIF become the merge's, and moving things come from it",
+            );
+    });
+}
+
+/// A focus stack's options: Method, Align.
+fn focus_options(ui: &mut egui::Ui, st: &mut State) {
+    ui.horizontal(|ui| {
+        ui.label("Method");
+        egui::ComboBox::from_id_salt("merge-method")
+            .selected_text(st.method.label())
+            .show_ui(ui, |ui| {
+                for m in focus::Method::ALL {
+                    ui.selectable_value(&mut st.method, m, m.label())
+                        .on_hover_text(m.hint());
+                }
+            })
+            .response
+            .on_hover_text(st.method.hint());
+    });
+    let mut align = st.align.unwrap_or(true);
+    if ui
+        .checkbox(&mut align, "Align the photos")
+        .on_hover_text(
+            "Follows focus breathing (the view growing or shrinking as the lens focuses) and \
+             any movement; off only for photos that neither move nor change size",
+        )
+        .changed()
+    {
+        st.align = Some(align);
     }
 }
 
@@ -319,8 +432,8 @@ pub fn done(app: &mut ShoeboxApp, r: Result<crate::merge::Done, String>) {
     app.merge.progress = None;
     match r {
         Ok(d) => app.command(crate::jobs::LibraryCommand::AddMerge(Box::new(d))),
-        Err(_) if stopped => app.notice = Some("HDR merge stopped.".into()),
-        Err(e) => app.error = Some(format!("HDR merge: {e}")),
+        Err(_) if stopped => app.notice = Some(format!("{} stopped.", title(app.merge.ran))),
+        Err(e) => app.error = Some(format!("{}: {e}", title(app.merge.ran))),
     }
 }
 

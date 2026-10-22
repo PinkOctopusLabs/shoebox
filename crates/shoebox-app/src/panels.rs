@@ -777,7 +777,11 @@ pub fn status(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         if let Some(f) = app.merge.progress {
             ui.separator();
             ui.add(egui::Spinner::new().size(12.0));
-            ui.label(format!("Merging HDR {:.0}%", f * 100.0));
+            ui.label(format!(
+                "{} {:.0}%",
+                crate::views::merge::status(app),
+                f * 100.0
+            ));
             if ui.small_button("Stop").clicked() {
                 crate::views::merge::stop(app);
             }

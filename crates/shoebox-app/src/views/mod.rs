@@ -516,6 +516,18 @@ pub fn photo_menu(app: &mut ShoeboxApp, resp: &egui::Response, pos: usize) {
         }
         if n > 1
             && ui
+                .button("Merge to Focus Stack…")
+                .on_hover_text(
+                    "Merge raw photos focused at different distances into one raw photo sharp \
+                     throughout, written beside them as a new DNG",
+                )
+                .clicked()
+        {
+            merge::open_as(app, shoebox_core::merges::Kind::Focus);
+            ui.close();
+        }
+        if n > 1
+            && ui
                 .button("Match Total Exposures")
                 .on_hover_text(
                     "Set the others' Exposure so they come out as bright as this photo \

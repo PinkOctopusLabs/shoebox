@@ -171,6 +171,40 @@ fn a_merge_is_added_beside_its_first_source_and_undone() {
 }
 
 #[test]
+fn a_focus_stack_is_added_as_its_own_kind_and_undone() {
+    let l = lib();
+    let before: Vec<[u8; 32]> = l.sources.iter().map(|p| b3(p)).collect();
+    let plan = merges::plan(&l.roots, Kind::Focus, &l.sources).unwrap();
+    let dir = l.sources[0].parent().unwrap();
+    assert_eq!(plan.dst, dir.join("DSC_0041-Focus.dng"));
+    // Beside an HDR merge of the same first photo, under its own name.
+    let hdr = merges::plan(&l.roots, Kind::Hdr, &l.sources).unwrap();
+    l.add(&hdr).unwrap();
+    let batch = l.add(&plan).unwrap();
+    let j = l.fileops.journal();
+    let b = j.batch(batch).unwrap().unwrap();
+    assert_eq!((b.kind.as_str(), b.status.as_str()), ("merge", "done"));
+    assert!(plan.dst.is_file() && hdr.dst.is_file());
+    assert_eq!(before, l.sources.iter().map(|p| b3(p)).collect::<Vec<_>>());
+    // Its record says what it is (this test's `add` writes one record).
+    let rec = merges::load(std::slice::from_ref(&l.lib));
+    assert_eq!(rec.len(), 1);
+    assert_eq!(rec[0].kind, Kind::Focus);
+    assert_eq!(rec[0].file, plan.dst);
+    // Never over a file there, and never from a reference folder.
+    let again = merges::plan(&l.roots, Kind::Focus, &l.sources).unwrap();
+    assert_eq!(again.dst, dir.join("DSC_0041-Focus-1.dng"));
+    let mut with_ref = l.sources.clone();
+    with_ref.push(l.reference.join("REF_0001.dng"));
+    assert!(merges::plan(&l.roots, Kind::Focus, &with_ref).is_err());
+    // Undo: to the Trash, the sources untouched.
+    l.fileops.undo(batch).unwrap();
+    assert!(!plan.dst.exists());
+    assert!(l.trash.join("DSC_0041-Focus.dng").is_file());
+    assert_eq!(before, l.sources.iter().map(|p| b3(p)).collect::<Vec<_>>());
+}
+
+#[test]
 fn merges_read_their_sources_only_and_never_in_reference_folders() {
     let l = lib();
     // A source in a reference folder.
