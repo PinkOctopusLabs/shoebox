@@ -15,6 +15,7 @@ pub mod fileops;
 pub mod hash;
 pub mod import;
 pub mod marks;
+pub mod merges;
 pub mod meta;
 pub mod organise;
 pub mod paths;

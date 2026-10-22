@@ -171,6 +171,11 @@ pub fn items(roots: &[Root], analyzed: &[Analyzed]) -> Vec<Item> {
         .filter_map(|a| folder_stem(&a.file.path))
         .collect();
     let mut keys: std::collections::HashMap<FolderStem, usize> = Default::default();
+    let merged: std::collections::HashSet<std::path::PathBuf> =
+        crate::merges::load(&roots.iter().map(|r| r.path.clone()).collect::<Vec<_>>())
+            .into_iter()
+            .map(|m| m.file)
+            .collect();
     analyzed
         .iter()
         .map(|a| {
@@ -193,6 +198,7 @@ pub fn items(roots: &[Root], analyzed: &[Analyzed]) -> Vec<Item> {
                     .capture_time
                     .as_deref()
                     .and_then(|t| crate::exif::capture_seconds(t, x.subsec.as_deref())),
+                merged: merged.contains(&a.file.path),
             }
         })
         .collect()

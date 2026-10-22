@@ -333,6 +333,7 @@ mod tests {
             stacks,
             stack_of,
             links: Vec::new(),
+            merges: Vec::new(),
             folders: Vec::new(),
         }
     }

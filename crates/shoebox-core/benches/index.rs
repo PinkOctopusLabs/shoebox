@@ -45,6 +45,7 @@ fn items(n: usize) -> Vec<Item> {
             siblings: None,
             luma_stddev: Some(40.0),
             capture: None,
+            merged: false,
         });
     }
     out

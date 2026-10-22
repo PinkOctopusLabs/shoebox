@@ -839,6 +839,52 @@ impl FileOps {
         self.run("import", label, None, &ops, |_| Ok(()))
     }
 
+    /// A photo merge into the library (rule 3), as one batch of kind
+    /// `merge`: the DNG, written and hashed in the cache, copied in and
+    /// verified where nothing is, then the `writes` (`.shoebox` files: the
+    /// record). Each source must still have the content the merge read
+    /// (`sources`), and none may be in a reference root; they're only read.
+    /// Undo sends the DNG to the Trash and restores the record.
+    pub fn add_merge(
+        &self,
+        label: &str,
+        copy: &PlannedCopy,
+        sources: &[(PathBuf, [u8; 32])],
+        writes: Vec<(PathBuf, Vec<u8>)>,
+    ) -> Result<i64> {
+        self.check_unprotected(&copy.dst)?;
+        if exists(&copy.dst) {
+            return Err(CoreError::Refused(format!(
+                "{} already exists",
+                copy.dst.display()
+            )));
+        }
+        for (p, hash) in sources {
+            self.check_unprotected(p)?;
+            if !hash_file(p).is_ok_and(|h| h == *hash) {
+                return Err(CoreError::Refused(format!(
+                    "{} changed (or went) while it was being merged",
+                    p.display()
+                )));
+            }
+        }
+        for (path, _) in &writes {
+            self.check_sidecar_target(path)?;
+        }
+        let ops: Vec<Planned> = std::iter::once(Planned::Copy {
+            src: copy.src.clone(),
+            dst: copy.dst.clone(),
+            hash: copy.hash,
+        })
+        .chain(
+            writes
+                .into_iter()
+                .map(|(path, bytes)| Planned::Sidecar { path, bytes }),
+        )
+        .collect();
+        self.run("merge", label, None, &ops, |_| Ok(()))
+    }
+
     /// Move files to the Trash (an explicit command), each only if it still
     /// has the content it had when the person chose it. One batch.
     pub fn trash(&self, label: &str, files: &[(PathBuf, [u8; 32])]) -> Result<i64> {

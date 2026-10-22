@@ -169,7 +169,7 @@ pub fn plan_rename(c: &Catalog, stacks: &[usize], template: &Template) -> Result
 }
 
 /// After moves, the app's own files that name moved files (collections,
-/// stack links) rewritten for every writable root. Empty when
+/// stack links, merges' records) rewritten for every writable root. Empty when
 /// nothing refers to a moved file. Join these to the move batch.
 pub fn reference_writes(
     all_roots: &[PathBuf],
@@ -210,6 +210,18 @@ pub fn reference_writes(
     }
     if changed {
         out.extend(crate::stacks::plan_save_links(writable_roots, &links)?);
+    }
+    // Merges: the file and its sources.
+    let mut merges = crate::merges::load(all_roots);
+    let mut changed = false;
+    for m in &mut merges {
+        changed |= fix(&mut m.file);
+        for s in &mut m.sources {
+            changed |= fix(&mut s.path);
+        }
+    }
+    if changed {
+        out.extend(crate::merges::plan_save(writable_roots, &merges)?);
     }
     Ok(out)
 }

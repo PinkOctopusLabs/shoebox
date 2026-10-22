@@ -89,6 +89,8 @@ pub struct Catalog {
     pub stack_of: Vec<usize>,
     /// Files added to other stacks by hand (from `.shoebox/stacks.json`).
     pub links: Vec<crate::stacks::Link>,
+    /// Photo merges' records (from `.shoebox/merges.json`).
+    pub merges: Vec<crate::merges::Merge>,
     /// Every folder under the roots, empty ones included (after a refresh).
     pub folders: Vec<PathBuf>,
 }
@@ -152,12 +154,14 @@ impl Catalog {
                 });
             }
         }
-        let links =
-            crate::stacks::load_links(&roots.iter().map(|r| r.path.clone()).collect::<Vec<_>>());
+        let paths: Vec<PathBuf> = roots.iter().map(|r| r.path.clone()).collect();
+        let links = crate::stacks::load_links(&paths);
+        let merges = crate::merges::load(&paths);
         let mut c = Self {
             roots,
             photos,
             links,
+            merges,
             ..Default::default()
         };
         c.finish();
@@ -342,13 +346,15 @@ impl Catalog {
                 .collect();
             stats.forgotten += cache.forget_missing(id, &present)?;
         }
-        let links =
-            crate::stacks::load_links(&roots.iter().map(|r| r.path.clone()).collect::<Vec<_>>());
+        let paths: Vec<PathBuf> = roots.iter().map(|r| r.path.clone()).collect();
+        let links = crate::stacks::load_links(&paths);
+        let merges = crate::merges::load(&paths);
         let folders = scan::folders(&roots);
         let mut c = Self {
             roots,
             photos,
             links,
+            merges,
             folders,
             ..Default::default()
         };
@@ -751,7 +757,9 @@ impl Catalog {
     /// Sort photos and rebuild stacks (indices change).
     fn finish(&mut self) {
         self.sort();
-        let (stacks, of) = crate::stacks::build(&self.photos, &self.links);
+        let apart: HashSet<&std::path::Path> =
+            self.merges.iter().map(|m| m.file.as_path()).collect();
+        let (stacks, of) = crate::stacks::build_apart(&self.photos, &self.links, &apart);
         self.stacks = stacks;
         self.stack_of = of;
     }

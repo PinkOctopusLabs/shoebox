@@ -170,6 +170,16 @@ pub fn plan_save_links(
 /// Group photos into stacks. Returns the stacks and, for each photo, the
 /// index of its stack. `links` add files to other stacks as variants.
 pub fn build(photos: &[Photo], links: &[Link]) -> (Vec<Stack>, Vec<usize>) {
+    build_apart(photos, links, &HashSet::new())
+}
+
+/// [`build`], with `apart` (photo merges) never joined by capture time:
+/// a merge carries its reference's EXIF but is a photo of its own.
+pub fn build_apart(
+    photos: &[Photo],
+    links: &[Link],
+    apart: &HashSet<&Path>,
+) -> (Vec<Stack>, Vec<usize>) {
     let n = photos.len();
     let mut uf = UnionFind::new(n);
     let mut linked: HashSet<usize> = HashSet::new();
@@ -224,6 +234,9 @@ pub fn build(photos: &[Photo], links: &[Link]) -> (Vec<Stack>, Vec<usize>) {
     let mut by_time: HashMap<(&str, &str, &str), usize> = HashMap::new();
     for (i, p) in photos.iter().enumerate() {
         let x = &p.meta.exif;
+        if apart.contains(p.path.as_path()) {
+            continue;
+        }
         if let (Some(t), Some(ss), Some(serial)) = (&x.capture_time, &x.subsec, &x.serial) {
             let key = (t.as_str(), ss.trim(), serial.as_str());
             match by_time.get(&key) {

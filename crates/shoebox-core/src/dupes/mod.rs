@@ -41,6 +41,9 @@ pub struct Item {
     pub luma_stddev: Option<f32>,
     /// Capture time in seconds (see `exif::capture_seconds`), if known.
     pub capture: Option<f64>,
+    /// A photo merge Shoebox made (`merges`): it looks like its reference
+    /// by design, so it matches only exactly or by image data.
+    pub merged: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -94,7 +97,7 @@ pub fn same_frame(a: &Item, b: &Item) -> bool {
 /// Perceptual distance allowed between two files, or None if their hashes
 /// shouldn't be compared at all.
 fn perceptual_limit(a: &Item, b: &Item, cfg: &Config) -> Option<u32> {
-    if same_frame(a, b) {
+    if same_frame(a, b) || a.merged || b.merged {
         return None;
     }
     let detail = match (a.luma_stddev, b.luma_stddev) {
@@ -403,6 +406,7 @@ mod tests {
             siblings: None,
             luma_stddev: Some(40.0),
             capture: None,
+            merged: false,
         }
     }
 
