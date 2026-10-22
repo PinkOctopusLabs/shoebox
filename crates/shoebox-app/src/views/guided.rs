@@ -58,8 +58,7 @@ fn frame_size(app: &ShoeboxApp) -> Option<(f64, f64)> {
     let st = &app.develop;
     let (ready, doc) = (st.ready.as_ref()?, st.doc.as_ref()?);
     let g = &doc.settings().geometry;
-    let orientation = cpu::compose_orientation(o.orientation, g.quarter, g.flip);
-    let (w, h) = cpu::upright(ready.src.rgb.width, ready.src.rgb.height, orientation);
+    let (w, h) = cpu::frame_size(ready.src.rgb.width, ready.src.rgb.height, o.orientation, g);
     Some((w as f64, h as f64))
 }
 

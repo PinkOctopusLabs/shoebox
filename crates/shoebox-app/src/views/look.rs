@@ -268,8 +268,13 @@ pub fn upright(app: &mut ShoeboxApp, mode: shoebox_develop::upright::Mode) {
     let s = doc.settings();
     let lines = shoebox_develop::upright::analyse(&ready.meta, &ready.src, s, o.orientation);
     let c = shoebox_develop::upright::solve(&lines, mode);
-    let (w, h) =
-        shoebox_develop::cpu::upright(ready.src.rgb.width, ready.src.rgb.height, o.orientation);
+    // Sized for the frame as the edit turns it, not the file's own.
+    let (w, h) = shoebox_develop::cpu::frame_size(
+        ready.src.rgb.width,
+        ready.src.rgb.height,
+        o.orientation,
+        &s.geometry,
+    );
     let crop = shoebox_develop::cpu::max_crop(w as f64, h as f64, c.rotate);
     if app.develop.guided.active {
         super::guided::set_active(app, false);

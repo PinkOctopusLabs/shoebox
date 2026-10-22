@@ -371,6 +371,52 @@ fn quarter_turns_and_mirror_compose_with_the_files_orientation() {
 }
 
 #[test]
+fn the_largest_crop_fits_the_frame_as_the_edit_turns_it() {
+    use shoebox_develop::cpu::{frame_size, geometry_map};
+    let (w, h) = (120usize, 80usize);
+    for orientation in [1u16, 6] {
+        for quarter in 0..4u8 {
+            for flip in [false, true] {
+                let mut g = Geometry {
+                    quarter,
+                    flip,
+                    rotate: 7.0,
+                    ..Default::default()
+                };
+                // An odd number of turns, the file's and the edit's
+                // together, stands the frame on its end.
+                let tall = (orientation == 6) != (quarter % 2 == 1);
+                let (fw, fh) = frame_size(w, h, orientation, &g);
+                assert_eq!((fw, fh), if tall { (h, w) } else { (w, h) });
+                // As Auto-upright and the Angle slider crop.
+                g.crop = max_crop(fw as f64, fh as f64, g.rotate);
+                let (m, ow, oh) = geometry_map(w, h, orientation, &g);
+                let (aspect, want) = (ow as f64 / oh as f64, fw as f64 / fh as f64);
+                assert!(
+                    (aspect - want).abs() < 0.03,
+                    "o{orientation} q{quarter} f{flip}: {ow}×{oh}, frame {fw}×{fh}"
+                );
+                // Every corner of the crop comes from inside the photo, and
+                // one of them from its edge: the largest that fits.
+                let mut slack = f64::INFINITY;
+                for (x, y) in [(0, 0), (ow - 1, 0), (0, oh - 1), (ow - 1, oh - 1)] {
+                    let (x, y) = (x as f64, y as f64);
+                    let sx = m[0][0] * x + m[0][1] * y + m[0][2];
+                    let sy = m[1][0] * x + m[1][1] * y + m[1][2];
+                    let room = (sx + 0.5)
+                        .min(w as f64 - 0.5 - sx)
+                        .min(sy + 0.5)
+                        .min(h as f64 - 0.5 - sy);
+                    assert!(room > -1.0, "o{orientation} q{quarter}: ({sx}, {sy})");
+                    slack = slack.min(room);
+                }
+                assert!(slack < 1.5, "o{orientation} q{quarter} f{flip}: {slack}");
+            }
+        }
+    }
+}
+
+#[test]
 fn a_turned_crop_shows_the_same_pixels_turned() {
     let t = truth(60, 40);
     let mut g = Geometry {

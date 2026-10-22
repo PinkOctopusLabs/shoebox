@@ -1990,6 +1990,14 @@ masks; AI raw denoise (RawNIND); Smart-light tone; finer AI masks.
   (3.0°), and level again after the real render (mean lean under 0.5°).
 - Guided upright (drawing the lines) followed the same day: see
   "Guided upright (2026-10-22)".
+- **The crop's frame** (2026-10-22): Auto-upright and the Angle slider
+  sized the largest crop from the file's orientation alone, leaving out
+  the edit's quarter turns (Guided already had them). `max_crop` is
+  symmetric in width and height (its two limits swap places), so the
+  crops came out the same and nothing showed; all three, and
+  `geometry_map`, now take the frame from `cpu::frame_size` (file
+  orientation, then quarter turns and mirror), so a crop that one day
+  depends on the aspect stays right.
 
 ## Reference view and Match Total Exposures (2026-10-22)
 

@@ -2299,7 +2299,8 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                         });
                         egui::Grid::new("geo-grid").num_columns(2).show(ui, |ui| {
                             if let Some(v) = slider(ui, "Angle", g.rotate, -45.0..=45.0, 0.0, 1) {
-                                let (w, h) = cpu::upright(src_size.0, src_size.1, orientation);
+                                let (w, h) =
+                                    cpu::frame_size(src_size.0, src_size.1, orientation, g);
                                 let crop = cpu::max_crop(w as f64, h as f64, v);
                                 edit(app, "rotate", format!("Rotate {v:+.1}°"), |s| {
                                     s.geometry.rotate = v;

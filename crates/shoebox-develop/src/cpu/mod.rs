@@ -579,6 +579,14 @@ pub fn upright(w: usize, h: usize, orientation: u16) -> (usize, usize) {
     }
 }
 
+/// The frame as the edit shows it before rotation and perspective: a
+/// `w`×`h` source turned upright by the file's EXIF `orientation`, then by
+/// the edit's quarter turns (its mirror keeps the size). Crops, rotation
+/// and guides are fractions of this frame.
+pub fn frame_size(w: usize, h: usize, orientation: u16, g: &Geometry) -> (usize, usize) {
+    upright(w, h, compose_orientation(orientation, g.quarter, g.flip))
+}
+
 /// The affine map from output pixels to source pixels: crop in the rotated
 /// upright frame, rotation about its centre (degrees, clockwise), then the
 /// EXIF orientation back to the stored image. Pixel centres are at +0.5.
@@ -588,8 +596,8 @@ pub fn geometry_map(
     orientation: u16,
     g: &Geometry,
 ) -> ([[f64; 3]; 3], usize, usize) {
+    let (uw, uh) = frame_size(src_w, src_h, orientation, g);
     let orientation = compose_orientation(orientation, g.quarter, g.flip);
-    let (uw, uh) = upright(src_w, src_h, orientation);
     let (uwf, uhf) = (uw as f64, uh as f64);
     let [l, t, r, b] = g.crop.map(|v| v.clamp(0.0, 1.0));
     let ow = ((r - l) * uwf).round().max(1.0) as usize;
