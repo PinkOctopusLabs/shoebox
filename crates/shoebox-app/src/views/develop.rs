@@ -248,9 +248,14 @@ struct GpuShared {
     /// The image before the detail stage, when there is one (the
     /// original, for comparing).
     base: Option<shoebox_develop::gpu::Source>,
-    /// What was uploaded: the demosaiced image, and the detail stage's
-    /// result from it when there was one (to tell when either changes).
-    from: (Arc<cpu::Demosaiced>, Option<Arc<cpu::Rgb>>),
+    /// What was uploaded: the demosaiced image, the detail stage's result
+    /// from it when there was one, and the images local adjustments need
+    /// beside it (to tell when any changes).
+    from: (
+        Arc<cpu::Demosaiced>,
+        Option<Arc<cpu::Rgb>>,
+        Option<Arc<cpu::Aux>>,
+    ),
     histogram: Option<shoebox_develop::gpu::Histogram>,
 }
 
@@ -834,7 +839,7 @@ fn follow(app: &mut ShoeboxApp) {
     // AI raw denoise, once the photo's prepared and the model's here.
     let st = &mut app.develop;
     let Some(doc) = &st.doc else { return };
-    let wanted = doc.settings().modules.denoise_ai.enabled;
+    let wanted = cpu::layers::wants_ai(doc.settings());
     let Some(ready) = &st.ready else { return };
     if wanted
         && app.denoiser.ready()
@@ -915,9 +920,16 @@ fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_w
     // detail stage: noise reduction, sharpening, texture; and spot
     // removal).
     let detailed = ready.src.prepared(&settings);
+    // Images beside it, when a local adjustment changes the AI strength.
+    let aux = ready.src.aux(&settings);
     let same = |g: &GpuShared| {
         Arc::ptr_eq(&g.from.0, &ready.src)
             && match (&g.from.1, &detailed) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            }
+            && match (&g.from.2, &aux) {
                 (None, None) => true,
                 (Some(a), Some(b)) => Arc::ptr_eq(a, b),
                 _ => false,
@@ -933,10 +945,11 @@ fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_w
         };
         match pipe {
             Ok(pipe) => {
-                let source = pipe.upload(
+                let source = pipe.upload_with(
                     &rs.device,
                     &rs.queue,
                     detailed.as_deref().unwrap_or(&ready.src.rgb),
+                    aux.as_deref(),
                 );
                 let base = detailed
                     .is_some()
@@ -948,7 +961,7 @@ fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_w
                     pipe,
                     source,
                     base,
-                    from: (ready.src.clone(), detailed.clone()),
+                    from: (ready.src.clone(), detailed.clone(), aux.clone()),
                     histogram,
                 });
             }
@@ -996,7 +1009,11 @@ fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_w
             &mut st.edited,
             key,
             &frame,
-            (detailed.as_deref().unwrap_or(&ready.src.rgb), false),
+            (
+                detailed.as_deref().unwrap_or(&ready.src.rgb),
+                aux.as_deref(),
+                false,
+            ),
             on_gpu.as_mut(),
             ctx,
             true,
@@ -1021,7 +1038,7 @@ fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_w
                 &mut st.original,
                 key,
                 &frame,
-                (&ready.src.rgb, true),
+                (&ready.src.rgb, None, true),
                 on_gpu.as_mut(),
                 ctx,
                 false,
@@ -1037,9 +1054,9 @@ fn render_into(
     slot: &mut Option<Shown>,
     key: (PhotoId, String, u64),
     frame: &Frame,
-    // The source on the CPU, and whether it's the unprocessed one (the
-    // GPU's `base`).
-    (img, base): (&cpu::Rgb, bool),
+    // The source on the CPU, the images beside it, and whether it's the
+    // unprocessed one (the GPU's `base`).
+    (img, aux, base): (&cpu::Rgb, Option<&cpu::Aux>, bool),
     gpu: Option<&mut (&eframe::egui_wgpu::RenderState, &mut GpuShared)>,
     ctx: &egui::Context,
     count: bool,
@@ -1103,7 +1120,7 @@ fn render_into(
         }
         None => {
             // No GPU (or it failed): the same pipe on the CPU.
-            let img = cpu::apply(img, frame, true);
+            let img = cpu::apply_with(img, aux, frame, true);
             if count && !frame.warnings && !frame.gamut_warning {
                 counts = Some(Box::new(cpu::histogram(&img)));
             }

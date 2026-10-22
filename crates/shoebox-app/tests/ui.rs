@@ -4426,6 +4426,10 @@ fn develop_local_adjustments() {
     assert_eq!(l.len(), 1);
     assert_eq!(h.state().develop_local().0.as_deref(), Some("l1"));
     assert_eq!(h.state().develop_local().2, 1, "rendered with the mask");
+    assert!(
+        h.query_by_label("AI denoise").is_none(),
+        "no AI denoise strength for a JPEG"
+    );
 
     // The mask's Temperature (the last of the two) moves its own value.
     let temp = h.query_all_by_label("Temperature").last().unwrap().rect();
@@ -5310,6 +5314,81 @@ fn develop_ai_denoise() {
         assert!(err.is_none(), "{err:?}");
         arrived
     });
+}
+
+/// A mask's AI denoise strength on a raw photo: its slider moves the
+/// layer's own value (not the global module's) and the photo renders with
+/// it; without the model the panel says what's missing.
+#[test]
+fn develop_local_ai_denoise() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    let dng = shoebox_fixtures::Dng::new(600, 400);
+    let bytes = dng.write(|x, y| 1500 + ((x * 7 + y * 13) % 600) as u16 * 15);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("DSC_0003.NEF"), &bytes).unwrap();
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let with_model = std::env::var_os("SHOEBOX_RAWNIND_MODEL").is_some();
+    let mut h = harness(p, egui::vec2(1400.0, 2900.0));
+    settle(&mut h, Duration::from_secs(60));
+    h.get_by_label("DSC_0003.NEF").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(30), "develop", |a| {
+        a.develop_ready()
+    });
+    h.run_steps(3);
+    h.get_by_label("New mask").click();
+    h.run_steps(2);
+    h.get_by_label("Radial gradient").click();
+    h.run_steps(3);
+    assert_eq!(h.state().develop_local().0.as_deref(), Some("l1"));
+
+    // The mask's AI denoise slider, on the rail's positive half (the
+    // sliders start after the widest label, the mask's Temperature). The
+    // window is tall enough for the panel to show it.
+    let ai = h.get_by_label("AI denoise").rect();
+    let temp = h.query_all_by_label("Temperature").last().unwrap().rect();
+    let on_rail = egui::pos2(temp.right() + 100.0, ai.center().y);
+    let button = |pressed| egui::Event::PointerButton {
+        pos: on_rail,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.event(egui::Event::PointerMoved(on_rail));
+    h.run_steps(1);
+    h.event(button(true));
+    h.event(button(false));
+    h.run_steps(3);
+    let doc = h.state().develop_doc().unwrap().clone();
+    let l = &doc.settings().locals[0];
+    assert_ne!(l.adjust.denoise_ai, 0.0, "{:?}", l.adjust);
+    assert!(
+        !doc.settings().modules.denoise_ai.enabled,
+        "the global module is untouched"
+    );
+    assert!(
+        doc.history()
+            .last()
+            .unwrap()
+            .label
+            .starts_with("Mask AI denoise"),
+        "{}",
+        doc.history().last().unwrap().label
+    );
+    // It renders with the mask.
+    wait_for(&mut h, Duration::from_secs(30), "rendered", |a| {
+        a.develop_local().2 == 1
+    });
+    if !with_model && l.adjust.denoise_ai > 0.0 {
+        assert!(
+            h.query_by_label_contains("AI denoise needs its model")
+                .is_some(),
+            "says what's missing"
+        );
+    }
+    snapshot(&mut h, "develop-local-ai-denoise");
 }
 
 /// AI denoise in Auto from an ISO (Settings → Raw, off by default): ticked,

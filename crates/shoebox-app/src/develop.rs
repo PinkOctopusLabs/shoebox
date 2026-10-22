@@ -633,7 +633,7 @@ fn worker(
         }
         if let Some(job) = region.take() {
             let r = &job.request;
-            let ai = job.settings.modules.denoise_ai.enabled;
+            let ai = cpu::layers::wants_ai(&job.settings);
             if full.as_ref().is_none_or(|f| {
                 f.id != r.id || f.raw != r.raw || (ai && f.src.cache.ai().is_none())
             }) {
@@ -739,7 +739,7 @@ fn preview(
         return Ok(true);
     }
     let raw = p.settings.modules.raw.clone();
-    let ai = p.settings.modules.denoise_ai.enabled;
+    let ai = cpu::layers::wants_ai(&p.settings);
     let ready = match kept.iter().find(|k| k.id == p.id && k.raw == raw) {
         Some(k) => k.clone(),
         None => {
@@ -1295,7 +1295,7 @@ fn export_item(
         raw: item.settings.modules.raw.clone(),
         lens: item.lens.clone(),
     };
-    let ai = item.settings.modules.denoise_ai.enabled;
+    let ai = cpu::layers::wants_ai(&item.settings);
     let failed = match prepare(&r, None, converter, dngs, &|_| {}, ai) {
         Ok(Some(ready)) => {
             for (k, preset) in job.presets.iter().enumerate() {

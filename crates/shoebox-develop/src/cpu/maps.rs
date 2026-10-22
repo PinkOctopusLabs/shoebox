@@ -95,6 +95,9 @@ struct Inner {
     /// Find them on a thread of their own (the live view) rather than
     /// waiting (exports, 100% regions).
     background: bool,
+    /// The images beside the source for local adjustments (see
+    /// `cpu::Aux`): their key, what they were made from, and them.
+    aux: Option<(u64, Vec<Arc<Rgb>>, Arc<super::Aux>)>,
 }
 
 /// What was found, the orientation it was found in, and the grid size.
@@ -267,6 +270,31 @@ impl Cache {
         let img = Arc::new(out);
         self.lock().blended = Some((strength.to_bits(), img.clone()));
         img
+    }
+
+    /// The images beside the source for `key` (`make` runs on a miss);
+    /// `from` (what they're made from) is kept with them.
+    pub fn aux(
+        &self,
+        key: u64,
+        from: Vec<Arc<Rgb>>,
+        make: impl FnOnce() -> super::Aux,
+    ) -> Arc<super::Aux> {
+        if let Some((k, _, a)) = &self.lock().aux
+            && *k == key
+        {
+            return a.clone();
+        }
+        // The old ones go first: they can be as large as the source.
+        self.lock().aux = None;
+        let a = Arc::new(make());
+        self.lock().aux = Some((key, from, a.clone()));
+        a
+    }
+
+    /// No layer needs the images beside the source any more.
+    pub fn forget_aux(&self) {
+        self.lock().aux = None;
     }
 }
 

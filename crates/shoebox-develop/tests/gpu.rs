@@ -338,6 +338,83 @@ fn gpu_matches_the_cpu_reference() {
     }
 }
 
+/// Layers that change the source stage (AI strength up and down) read the
+/// images beside the source the same way in both pipes.
+#[test]
+fn layers_on_the_source_stage_match_the_cpu() {
+    let Some((device, queue)) = headless() else {
+        eprintln!("skipping: no GPU adapter");
+        return;
+    };
+    let raw = zf();
+    let src = Demosaiced::new(
+        synthetic(160, 120),
+        [1.1425778, 1.0, 1.7753916],
+        shoebox_develop::cpu::Referred::Scene,
+    );
+    // A stand-in AI result: darker and flatter.
+    let mut ai = src.rgb.clone();
+    for (i, v) in ai.data.iter_mut().enumerate() {
+        *v = 0.7 * *v + 0.02 * ((i % 7) as f32);
+    }
+    src.cache.set_ai(std::sync::Arc::new(ai));
+    let pipe = Pipe::new(&device, Output::Rgba32Float).unwrap();
+    let o = Options::default();
+
+    let mut cases: Vec<(&str, Settings)> = Vec::new();
+    // Global AI at half: one layer raises it, the other lowers it.
+    let mut s = Settings {
+        locals: local_layers(),
+        ..Default::default()
+    };
+    s.modules.denoise_ai.enabled = true;
+    s.modules.denoise_ai.strength = 50.0;
+    s.locals[1].adjust.denoise_ai = -80.0;
+    cases.push(("AI up and down", s.clone()));
+    // With noise reduction, so the images go through the detail stage.
+    s.modules.noise_reduction.luminance = 40.0;
+    cases.push(("AI up and down, noise reduction", s.clone()));
+    // The global module off: a layer alone turns it on in its mask.
+    let mut s = Settings {
+        locals: local_layers(),
+        ..Default::default()
+    };
+    s.locals[0].adjust.denoise_ai = 100.0;
+    cases.push(("AI from a layer alone", s));
+
+    for (name, s) in &cases {
+        let main = src.prepared(s);
+        let main = main.as_deref().unwrap_or(&src.rgb);
+        let aux = src
+            .aux(s)
+            .expect("a layer wants an image beside the source");
+        if name.starts_with("AI up and down") {
+            assert!(aux.more_ai.is_some() && aux.less_ai.is_some(), "{name}");
+        }
+        let gsrc = pipe.upload_with(&device, &queue, main, Some(&aux));
+        let f = cpu::frame(&raw, &src, s, &o);
+        for display in [true, false] {
+            let want = cpu::apply_with(main, Some(&aux), &f, display);
+            // The layers do change the picture.
+            let plain = cpu::apply(main, &f, display);
+            assert!(max_diff(&want, &plain).0 > 1e-3, "{name}: no change");
+            let got = pipe.render(&device, &queue, &gsrc, &f, display).unwrap();
+            let (d, at) = max_diff(&want, &got);
+            let scale = if display {
+                1.0
+            } else {
+                want.data.iter().fold(1.0f32, |m, v| m.max(v.abs()))
+            };
+            assert!(
+                d / scale <= 1e-4,
+                "{name} (display {display}): differs by {d} at pixel {at}: cpu {:?} gpu {:?}",
+                want.px(at % want.width, at / want.width),
+                got.px(at % got.width, at / got.width)
+            );
+        }
+    }
+}
+
 #[test]
 fn a_proxy_frame_renders_quickly() {
     let Some((device, queue)) = headless() else {
@@ -592,6 +669,7 @@ fn local_layers() -> Vec<shoebox_develop::edit::Local> {
                 clarity: 30.0,
                 dehaze: 20.0,
                 sharpness: -60.0,
+                denoise_ai: 40.0,
             },
             ..Default::default()
         },

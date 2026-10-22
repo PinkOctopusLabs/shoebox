@@ -65,6 +65,8 @@ struct Params {
     fx0: vec4<f32>,       // vignette: amount, midpoint, round, feather
     fx1: vec4<f32>,       // vignette highlights; grain: amount, cell, roughness
     fx2: vec4<f32>,       // the whole frame's size, this render's offset in it
+    srcmix: vec4<f32>,    // images beside the source the layers use (array layer + 1; 0: none): AI strength 1, 0
+    srcg: vec4<f32>,      // x: the AI strength the source has
 };
 
 const GAMUT_SLACK: f32 = 2e-3;
@@ -119,11 +121,27 @@ fn mul3(r0: vec4<f32>, r1: vec4<f32>, r2: vec4<f32>, v: vec3<f32>) -> vec3<f32> 
     return vec3<f32>(dot(r0.xyz, v), dot(r1.xyz, v), dot(r2.xyz, v));
 }
 
+// Images beside the source (see `cpu::Aux`), one array layer each.
+@group(0) @binding(10) var aux: texture_2d_array<f32>;
+
+// How this pixel mixes them in (see `cpu::layers::Mix`).
+var<private> mix_more: f32 = 0.0;
+var<private> mix_less: f32 = 0.0;
+
+// The source as this pixel reads it (see `cpu::Source`).
 fn texel(x: f32, y: f32) -> vec3<f32> {
     if (x < 0.0 || y < 0.0 || x >= p.size.z || y >= p.size.w) {
         return vec3<f32>(0.0);
     }
-    return textureLoad(src, vec2<i32>(i32(x), i32(y)), 0).xyz;
+    let at = vec2<i32>(i32(x), i32(y));
+    var v = textureLoad(src, at, 0).xyz;
+    if (mix_more > 0.0) {
+        v = v + mix_more * (textureLoad(aux, at, i32(p.srcmix.x) - 1, 0).xyz - v);
+    }
+    if (mix_less > 0.0) {
+        v = v + mix_less * (textureLoad(aux, at, i32(p.srcmix.y) - 1, 0).xyz - v);
+    }
+    return v;
 }
 
 fn bilinear(x: f32, y: f32) -> vec3<f32> {
@@ -518,6 +536,33 @@ fn layers_px(px0: vec3<f32>, detail: vec3<f32>, mx: f32, my: f32, sx: f32, sy: f
     return px;
 }
 
+// How the layers mix the source at (mx, my) (see `cpu::layers::mix_at`).
+fn source_mix(mx: f32, my: f32) {
+    let gx = (mx + 0.5) * p.mscale.x - 0.5;
+    let gy = (my + 0.5) * p.mscale.y - 0.5;
+    let g = p.srcg.x;
+    var k = g;
+    for (var i = 0u; i < u32(p.layers.x); i++) {
+        let b = i * LAYER;
+        let ai = layer[b + 19u];
+        if (layer[b + 17u] < 0.5 || ai == 0.0) {
+            continue;
+        }
+        let m = mask_at(i, gx, gy);
+        if (m <= 0.0) {
+            continue;
+        }
+        let t = clamp(k + ai, 0.0, 1.0);
+        k += (t - k) * m;
+    }
+    if (k > g && p.srcmix.x > 0.5) {
+        mix_more = (k - g) / (1.0 - g);
+    }
+    if (k < g && p.srcmix.y > 0.5) {
+        mix_less = (g - k) / g;
+    }
+}
+
 fn grid_at(x: u32, y: u32, k: u32) -> f32 {
     return grid[(y * u32(p.lens.y) + x) * GRID + k];
 }
@@ -737,6 +782,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     var sy = (p.map1.x * x + p.map1.y * y + p.map1.z) / pw;
     let mx = sx;
     let my = sy;
+    if (p.layers.x > 0.5 && (p.srcmix.x > 0.5 || p.srcmix.y > 0.5)) {
+        source_mix(mx, my);
+    }
     var raw: vec3<f32>;
     if (p.lens.x > 0.5) {
         let l = lens_sample(sx, sy);

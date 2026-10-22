@@ -362,3 +362,197 @@ fn local_sharpness_sharpens_and_softens() {
     assert!(contrast(&with(80.0)) > plain * 1.5, "sharper");
     assert!(contrast(&with(-100.0)) < plain * 0.2, "softer");
 }
+
+/// A Z f's matrices and as-shot balance over a noisy grey mosaic.
+fn noisy_raw() -> shoebox_decode::raw::RawImage {
+    use shoebox_decode::raw::{ColorMatrix, RawImage};
+    let m = |v: [f32; 9]| [[v[0], v[1], v[2]], [v[3], v[4], v[5]], [v[6], v[7], v[8]]];
+    let as_shot = [1.1425778, 1.0, 1.7753916];
+    let (w, h) = (96, 64);
+    let cfa = [[0, 1], [1, 2]];
+    let mut seed = 0x9e37_79b9u32;
+    let mut data = vec![0f32; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            let noise = (seed as f32 / u32::MAX as f32 - 0.5) * 0.08;
+            let c = usize::from(cfa[y % 2][x % 2]);
+            data[y * w + x] = (0.2 + noise) / as_shot[c];
+        }
+    }
+    RawImage {
+        width: w,
+        height: h,
+        cfa,
+        data,
+        as_shot: Some(as_shot),
+        matrices: vec![
+            ColorMatrix {
+                temperature: 2856.0,
+                xyz_to_cam: m([
+                    1.3904, -0.7947, 0.0654, -0.432, 1.2105, 0.2497, -0.0235, 0.083, 0.9243,
+                ]),
+            },
+            ColorMatrix {
+                temperature: 6504.0,
+                xyz_to_cam: m([
+                    1.1607, -0.4491, -0.0977, -0.4522, 1.246, 0.2304, -0.0458, 0.1519, 0.7616,
+                ]),
+            },
+        ],
+        make: "Nikon".into(),
+        model: "Z f".into(),
+    }
+}
+
+/// A stand-in AI denoiser (this test binary's own): each packed plane
+/// box-blurred 5×5, then red, the greens' mean and blue over each 2×2.
+fn register_blurring_denoiser() {
+    shoebox_develop::denoise::register(
+        "blurring stand-in",
+        Box::new(|p, h, w, progress, _cancel| {
+            let n = h * w;
+            let blurred: Vec<f32> = (0..4 * n)
+                .map(|i| {
+                    let (c, y, x) = (i / n, (i % n) / w, i % w);
+                    let mut sum = 0.0;
+                    for dy in -2isize..=2 {
+                        for dx in -2isize..=2 {
+                            let yy = (y as isize + dy).clamp(0, h as isize - 1) as usize;
+                            let xx = (x as isize + dx).clamp(0, w as isize - 1) as usize;
+                            sum += p[c * n + yy * w + xx];
+                        }
+                    }
+                    sum / 25.0
+                })
+                .collect();
+            let mut out = vec![0f32; 3 * 4 * n];
+            for y in 0..2 * h {
+                for x in 0..2 * w {
+                    let i = (y / 2) * w + x / 2;
+                    let rgb = [
+                        blurred[i],
+                        0.5 * (blurred[n + i] + blurred[2 * n + i]),
+                        blurred[3 * n + i],
+                    ];
+                    for c in 0..3 {
+                        out[(c * 2 * h + y) * 2 * w + x] = rgb[c];
+                    }
+                }
+            }
+            progress(1.0);
+            Ok(out)
+        }),
+    );
+}
+
+/// Green's standard deviation over columns `xs` (rows 6 to 58).
+fn spread(img: &Rgb, xs: std::ops::Range<usize>) -> f32 {
+    let v: Vec<f32> = (6..58)
+        .flat_map(|y| xs.clone().map(move |x| (x, y)))
+        .map(|(x, y)| img.px(x, y)[1])
+        .collect();
+    let mean = v.iter().sum::<f32>() / v.len() as f32;
+    (v.iter().map(|g| (g - mean).powi(2)).sum::<f32>() / v.len() as f32).sqrt()
+}
+
+#[test]
+fn a_layers_ai_strength_denoises_inside_its_mask() {
+    register_blurring_denoiser();
+    let raw = noisy_raw();
+    let o = Options::default();
+    let plain_settings = Settings::default();
+    let ai = shoebox_develop::denoise::run(
+        &raw,
+        &plain_settings.modules.raw,
+        &|_| {},
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .unwrap();
+    let src = cpu::demosaic(&raw, &plain_settings.modules.raw, None);
+    // The left half (the photo is 1 × 2/3 long edges).
+    let left = |denoise_ai| {
+        let mut l = layer(vec![part(
+            Op::Add,
+            Shape::Brush {
+                strokes: vec![Stroke {
+                    points: vec![[0.25, 0.0], [0.25, 0.67]],
+                    radius: 0.25,
+                    feather: 0.0,
+                    flow: 1.0,
+                    erase: false,
+                }],
+            },
+        )]);
+        l.adjust = LocalAdjust {
+            denoise_ai,
+            ..Default::default()
+        };
+        l
+    };
+    let mut s = Settings {
+        locals: vec![left(100.0)],
+        ..Default::default()
+    };
+    // No AI result yet: the layer does nothing.
+    let plain = cpu::render_from(&raw, &src, &plain_settings, &o, false);
+    assert_eq!(cpu::render_from(&raw, &src, &s, &o, false).data, plain.data);
+    assert!(src.aux(&s).is_none());
+    assert!(
+        cpu::layers::wants_ai(&s),
+        "the layer asks for the AI's result"
+    );
+
+    // With it: smoother inside the mask, untouched outside.
+    src.cache.set_ai(std::sync::Arc::new(ai));
+    let out = cpu::render_from(&raw, &src, &s, &o, false);
+    let (inside, outside) = (spread(&out, 6..40), spread(&out, 56..90));
+    assert!(
+        inside < 0.5 * outside,
+        "inside {inside} vs outside {outside}"
+    );
+    assert!((spread(&plain, 6..40) - outside).abs() < 0.3 * outside);
+    for y in 6..58 {
+        for x in 56..90 {
+            assert_eq!(out.px(x, y), plain.px(x, y), "outside at ({x}, {y})");
+        }
+    }
+
+    // −100 cancels a global 100 inside the mask.
+    s.modules.denoise_ai.enabled = true;
+    s.locals[0] = left(-100.0);
+    let mut global = s.clone();
+    global.locals.clear();
+    let all_ai = cpu::render_from(&raw, &src, &global, &o, false);
+    let out = cpu::render_from(&raw, &src, &s, &o, false);
+    for y in 6..58 {
+        for x in 6..40 {
+            let (a, b) = (out.px(x, y), plain.px(x, y));
+            for c in 0..3 {
+                assert!(
+                    (a[c] - b[c]).abs() < 1e-5,
+                    "inside at ({x}, {y}): {a:?} vs {b:?}"
+                );
+            }
+        }
+        for x in 56..90 {
+            assert_eq!(out.px(x, y), all_ai.px(x, y), "outside at ({x}, {y})");
+        }
+    }
+
+    // Spots are healed on the image beside the source too.
+    s.modules.denoise_ai.enabled = false;
+    s.locals[0] = left(100.0);
+    s.modules.heal.spots = vec![shoebox_develop::edit::Spot {
+        dest: [0.3, 0.3],
+        source: [0.7, 0.3],
+        radius: 0.05,
+        ..Default::default()
+    }];
+    let aux = src.aux(&s).unwrap();
+    let want = shoebox_develop::heal::heal(&src.cache.ai().unwrap(), &s.modules.heal.spots);
+    assert_eq!(aux.more_ai.as_ref().unwrap().data, want.data);
+    assert!(aux.less_ai.is_none(), "only what a layer needs");
+}

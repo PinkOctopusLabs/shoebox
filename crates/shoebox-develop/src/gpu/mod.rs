@@ -12,7 +12,7 @@
 //! maps worked out on the CPU (`cpu::maps`, a fast guided filter) and
 //! evaluated here per pixel; the maps are uploaded only when they change.
 
-use crate::cpu::{DISPLAY_GREY, Frame, MID_GREY, Rgb};
+use crate::cpu::{Aux, DISPLAY_GREY, Frame, MID_GREY, Rgb};
 
 const SHADER: &str = include_str!("develop.wgsl");
 const HISTOGRAM: &str = include_str!("histogram.wgsl");
@@ -51,6 +51,8 @@ pub struct Pipe {
     maps: std::sync::Mutex<Option<(std::sync::Arc<crate::cpu::maps::Maps>, wgpu::Buffer)>>,
     /// The last local adjustment masks uploaded, and their buffer.
     masks: std::sync::Mutex<Option<(std::sync::Arc<crate::mask::Masks>, wgpu::Buffer)>>,
+    /// Bound for the images beside the source when there are none.
+    no_aux: wgpu::TextureView,
 }
 
 /// A read-only storage buffer at `binding`.
@@ -86,6 +88,98 @@ pub struct Source {
     view: wgpu::TextureView,
     pub width: u32,
     pub height: u32,
+    /// The images beside it (see [`Aux`]) as one texture array, and which
+    /// layer holds each (index + 1; 0: not there).
+    aux: Option<(wgpu::Texture, wgpu::TextureView)>,
+    aux_layers: AuxLayers,
+}
+
+/// Where each of [`Aux`]'s images is in the texture array (index + 1; 0:
+/// not there).
+#[derive(Debug, Clone, Copy, Default)]
+struct AuxLayers {
+    more_ai: u32,
+    less_ai: u32,
+}
+
+/// [`Aux`]'s images in the order they're stacked, and where each went.
+fn aux_images(aux: &Aux) -> (Vec<&Rgb>, AuxLayers) {
+    fn at<'a>(list: &mut Vec<&'a Rgb>, img: Option<&'a Rgb>) -> u32 {
+        match img {
+            Some(i) => {
+                list.push(i);
+                list.len() as u32
+            }
+            None => 0,
+        }
+    }
+    let mut list = Vec::new();
+    let layers = AuxLayers {
+        more_ai: at(&mut list, aux.more_ai.as_deref()),
+        less_ai: at(&mut list, aux.less_ai.as_deref()),
+    };
+    (list, layers)
+}
+
+/// An image as RGBA f32 texels (alpha 1, or `alpha` when given).
+fn rgba_bytes(img: &Rgb, alpha: Option<&[f32]>) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(img.width * img.height * 16);
+    for (i, p) in img.data.as_chunks::<3>().0.iter().enumerate() {
+        let a = alpha.and_then(|a| a.get(i)).copied().unwrap_or(1.0);
+        for v in [p[0], p[1], p[2], a] {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    bytes
+}
+
+/// Images of one size as an RGBA float texture, one array layer each.
+fn texture_of(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    imgs: &[&Rgb],
+) -> wgpu::Texture {
+    let (width, height) = imgs
+        .first()
+        .map_or((1, 1), |i| (i.width as u32, i.height as u32));
+    let size = |layers: usize| wgpu::Extent3d {
+        width,
+        height,
+        depth_or_array_layers: layers as u32,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: size(imgs.len().max(1)),
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    for (layer, img) in imgs.iter().enumerate() {
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: layer as u32,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &rgba_bytes(img, None),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 16),
+                rows_per_image: Some(height),
+            },
+            size(1),
+        );
+    }
+    texture
 }
 
 const WORKGROUP: u32 = 16;
@@ -148,6 +242,18 @@ impl Pipe {
                 storage(7),
                 storage(8),
                 storage(9),
+                // The images beside the source (a texture, so it doesn't
+                // take one of the eight storage buffers a stage may bind).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -163,63 +269,75 @@ impl Pipe {
             compilation_options: Default::default(),
             cache: None,
         });
+        let no_aux = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("no images beside the source"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            });
         Self {
             output,
             layout,
             pipeline,
             maps: Default::default(),
             masks: Default::default(),
+            no_aux,
         }
     }
 
     /// Upload a demosaiced image (RGB f32) as an RGBA float texture.
     pub fn upload(&self, device: &wgpu::Device, queue: &wgpu::Queue, img: &Rgb) -> Source {
+        self.upload_with(device, queue, img, None)
+    }
+
+    /// [`Self::upload`], with the images local adjustments need beside it
+    /// (see [`crate::cpu::Demosaiced::aux`]), the same size.
+    pub fn upload_with(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        img: &Rgb,
+        aux: Option<&Aux>,
+    ) -> Source {
         let (width, height) = (img.width as u32, img.height as u32);
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("demosaiced"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba32Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let mut bytes = Vec::with_capacity(img.width * img.height * 16);
-        for p in img.data.as_chunks::<3>().0 {
-            for v in [p[0], p[1], p[2], 1.0] {
-                bytes.extend_from_slice(&v.to_le_bytes());
-            }
-        }
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &bytes,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width * 16),
-                rows_per_image: Some(height),
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
+        let texture = texture_of(device, queue, "demosaiced", &[img]);
         let view = texture.create_view(&Default::default());
+        let (aux, aux_layers) = match aux.map(aux_images) {
+            Some((list, at))
+                if !list.is_empty()
+                    && list
+                        .iter()
+                        .all(|i| (i.width, i.height) == (img.width, img.height)) =>
+            {
+                let t = texture_of(device, queue, "beside the source", &list);
+                let v = t.create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::D2Array),
+                    ..Default::default()
+                });
+                (Some((t, v)), at)
+            }
+            _ => (None, AuxLayers::default()),
+        };
         Source {
             texture,
             view,
             width,
             height,
+            aux,
+            aux_layers,
         }
     }
 
@@ -321,7 +439,12 @@ impl Pipe {
                     v.extend([r[0], r[1], r[2], 0.0]);
                 }
                 v.extend([l.contrast, l.shadows, l.highlights, l.clarity]);
-                v.extend([l.dehaze, if l.active { 1.0 } else { 0.0 }, l.sharpness, 0.0]);
+                v.extend([
+                    l.dehaze,
+                    if l.active { 1.0 } else { 0.0 },
+                    l.sharpness,
+                    l.denoise_ai,
+                ]);
                 v
             })
             .flat_map(f32::to_le_bytes)
@@ -392,6 +515,12 @@ impl Pipe {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: wgpu::BindingResource::TextureView(
+                        src.aux.as_ref().map_or(&self.no_aux, |a| &a.1),
+                    ),
                 },
             ],
         });
@@ -706,7 +835,7 @@ impl Histogram {
     }
 }
 
-/// The uniform block (`Params` in the shader), as 60 vec4s.
+/// The uniform block (`Params` in the shader), as vec4s.
 fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
     let row = |r: [f32; 3]| [r[0], r[1], r[2], 0.0];
     let d = &f.display;
@@ -820,6 +949,13 @@ fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
     v.extend([e.vignette, e.midpoint, e.round, e.feather]);
     v.extend([e.highlights, e.grain, e.cell, e.rough]);
     v.extend([e.full[0], e.full[1], e.offset[0], e.offset[1]]);
+    // The images beside the source the layers use (layer + 1; 0: none),
+    // and the AI strength the source has.
+    let w = &ls.wants;
+    let at = |want: bool, layer: u32| if want { layer as f32 } else { 0.0 };
+    let a = &src.aux_layers;
+    v.extend([at(w.more_ai, a.more_ai), at(w.less_ai, a.less_ai), 0.0, 0.0]);
+    v.extend([w.ai, 0.0, 0.0, 0.0]);
     v
 }
 

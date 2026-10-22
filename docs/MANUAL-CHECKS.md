@@ -134,6 +134,12 @@ together at the end, before the release.
   reduction, detail (hair, foliage, text) kept, colours unchanged, no
   tile seams; look at bright lights in night shots for coloured edges;
   note the time per photo. Export one and check it matches Develop.
+- [ ] **AI denoise per mask** on high-ISO NEFs: with the global AI
+  denoise off, a brushed mask at +100 denoises only where brushed, with
+  no seam along a hard or feathered edge; with the global at 100, a mask
+  at −100 over a face brings back RCD's grain there and nowhere else;
+  with a spot healed inside the mask, the spot still looks healed; the
+  100% view and a full-size export match Develop.
 - [ ] **AI denoise in Auto** (Settings → Raw, "AI denoise in Auto from
   ISO"): pick the ISO where the classic noise reduction stops being
   enough on the Z f's files; on an APFS clone, opening a NEF above it

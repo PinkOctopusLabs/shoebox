@@ -171,23 +171,99 @@ impl Demosaiced {
         detail::Detail::new(s, self.cache.noise(&self.rgb), self.scale)
     }
 
+    /// The AI-denoised source, when it's arrived and fits (raw photos
+    /// only).
+    pub fn ai_ready(&self) -> Option<std::sync::Arc<Rgb>> {
+        if self.referred != Referred::Scene {
+            return None;
+        }
+        self.cache
+            .ai()
+            .filter(|ai| (ai.width, ai.height) == (self.rgb.width, self.rgb.height))
+    }
+
+    /// The global AI strength the source has (0–1; 0 when the module is
+    /// off), or None while there's no AI result to blend.
+    pub fn ai_strength(&self, s: &Settings) -> Option<f32> {
+        self.ai_ready()?;
+        let a = &s.modules.denoise_ai;
+        Some(if a.enabled {
+            (a.strength / 100.0).clamp(0.0, 1.0) as f32
+        } else {
+            0.0
+        })
+    }
+
     /// The source before the detail stage: `rgb`, or (None) blended with
     /// the AI-denoised source when that's on and has arrived.
     pub fn base(&self, s: &Settings) -> Option<std::sync::Arc<Rgb>> {
-        let a = &s.modules.denoise_ai;
-        if !a.enabled || self.referred != Referred::Scene {
+        if !s.modules.denoise_ai.enabled {
             return None;
         }
-        let ai = self.cache.ai()?;
-        if (ai.width, ai.height) != (self.rgb.width, self.rgb.height) {
-            return None;
-        }
-        let k = (a.strength / 100.0).clamp(0.0, 1.0) as f32;
+        let ai = self.ai_ready()?;
+        let k = self.ai_strength(s)?;
         Some(if k >= 1.0 {
             ai
         } else {
             self.cache.blended(&self.rgb, &ai, k)
         })
+    }
+
+    /// The images local adjustments need beside the source (see [`Aux`]):
+    /// None when no layer needs any. Kept while what they're made from
+    /// stays the same.
+    pub fn aux(&self, s: &Settings) -> Option<std::sync::Arc<Aux>> {
+        use std::hash::{Hash, Hasher};
+        let w = layers::wants(self, s);
+        if !w.any() {
+            self.cache.forget_aux();
+            return None;
+        }
+        let main = self.prepared(s);
+        let ai = self.ai_ready();
+        let d = self.detail(s);
+        let spots = &s.modules.heal.spots;
+        let key = {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            format!("{w:?} {d:?}").hash(&mut h);
+            serde_json::to_string(spots)
+                .unwrap_or_default()
+                .hash(&mut h);
+            // What the images are made from (kept alive with them, so the
+            // addresses can't be reused).
+            main.as_ref().map(std::sync::Arc::as_ptr).hash(&mut h);
+            ai.as_ref().map(std::sync::Arc::as_ptr).hash(&mut h);
+            h.finish()
+        };
+        let keep: Vec<_> = main.iter().chain(&ai).cloned().collect();
+        Some(self.cache.aux(key, keep, || {
+            // The source at another AI strength, as the detail stage and
+            // spot removal make it.
+            let through = |from: &std::sync::Arc<Rgb>| -> std::sync::Arc<Rgb> {
+                if d.is_none() && spots.is_empty() {
+                    return from.clone();
+                }
+                let img = match &d {
+                    Some(d) => detail::process(from, d),
+                    None => (**from).clone(),
+                };
+                std::sync::Arc::new(if spots.is_empty() {
+                    img
+                } else {
+                    crate::heal::heal(&img, spots)
+                })
+            };
+            Aux {
+                more_ai: if w.more_ai {
+                    ai.as_ref().map(through)
+                } else {
+                    None
+                },
+                less_ai: w
+                    .less_ai
+                    .then(|| through(&std::sync::Arc::new(self.rgb.clone()))),
+            }
+        }))
     }
 
     /// The source after the detail stage: None when neither it nor the AI
@@ -226,6 +302,69 @@ impl Demosaiced {
             self.cache
                 .healed(detailed.as_ref(), key, || crate::heal::heal(from, spots)),
         )
+    }
+}
+
+/// Images beside the source, the source's size, for local adjustments that
+/// change the source stage inside their masks (see [`layers::Wants`]);
+/// each is made only when a layer needs it, so a photo without such layers
+/// keeps one source in memory. The GPU gets them as one texture array.
+#[derive(Debug, Default)]
+pub struct Aux {
+    /// The source at AI strength 1 and 0, through the detail stage and
+    /// spot removal as the source is: where a layer raises or lowers the
+    /// strength, each pixel mixes towards one.
+    pub more_ai: Option<std::sync::Arc<Rgb>>,
+    pub less_ai: Option<std::sync::Arc<Rgb>>,
+}
+
+/// What source sampling reads from: one image, or the source mixed with
+/// [`Aux`]'s images at a pixel.
+trait Texels {
+    fn size(&self) -> (usize, usize);
+    fn texel(&self, x: usize, y: usize) -> [f32; 3];
+}
+
+impl Texels for Rgb {
+    fn size(&self) -> (usize, usize) {
+        (self.width, self.height)
+    }
+
+    #[inline]
+    fn texel(&self, x: usize, y: usize) -> [f32; 3] {
+        self.px(x, y)
+    }
+}
+
+/// The source as one output pixel reads it: mixed with the images beside
+/// it by that pixel's [`layers::Mix`]. The shader's `texel` does the same.
+struct Source<'a> {
+    main: &'a Rgb,
+    aux: Option<&'a Aux>,
+    mix: layers::Mix,
+}
+
+impl Texels for Source<'_> {
+    fn size(&self) -> (usize, usize) {
+        (self.main.width, self.main.height)
+    }
+
+    #[inline]
+    fn texel(&self, x: usize, y: usize) -> [f32; 3] {
+        let mut v = self.main.px(x, y);
+        let Some(aux) = self.aux else {
+            return v;
+        };
+        let m = &self.mix;
+        for (img, t) in [(&aux.more_ai, m.more), (&aux.less_ai, m.less)] {
+            if let Some(img) = img
+                && t > 0.0
+            {
+                let o = img.px(x, y);
+                v = [0, 1, 2].map(|c| v[c] + t * (o[c] - v[c]));
+            }
+        }
+        v
     }
 }
 
@@ -885,13 +1024,18 @@ impl Frame {
 
 /// Bilinear sample at a fractional position (black outside the image).
 pub fn sample(img: &Rgb, x: f32, y: f32) -> [f32; 3] {
+    sample_in(img, x, y)
+}
+
+fn sample_in<T: Texels>(img: &T, x: f32, y: f32) -> [f32; 3] {
     let (x0, y0) = (x.floor(), y.floor());
     let (fx, fy) = (x - x0, y - y0);
+    let (w, h) = img.size();
     let get = |xi: f32, yi: f32| -> [f32; 3] {
-        if xi < 0.0 || yi < 0.0 || xi >= img.width as f32 || yi >= img.height as f32 {
+        if xi < 0.0 || yi < 0.0 || xi >= w as f32 || yi >= h as f32 {
             [0.0; 3]
         } else {
-            img.px(xi as usize, yi as usize)
+            img.texel(xi as usize, yi as usize)
         }
     };
     let (a, b, c, d) = (
@@ -921,13 +1065,20 @@ pub(crate) fn mul3(m: &[[f32; 3]; 3], p: [f32; 3]) -> [f32; 3] {
 /// curve) of every output pixel; with `display` false, the scene-linear
 /// Rec.2020 values before the display transform.
 pub fn apply(src: &Rgb, f: &Frame, display: bool) -> Rgb {
+    apply_with(src, None, f, display)
+}
+
+/// [`apply`] with the images local adjustments need beside the source
+/// (see [`Demosaiced::aux`]); without them, layers' AI strength does
+/// nothing.
+pub fn apply_with(src: &Rgb, aux: Option<&Aux>, f: &Frame, display: bool) -> Rgb {
     let mut out = Rgb::new(f.width, f.height);
     out.data
         .par_chunks_mut(f.width * 3)
         .enumerate()
         .for_each(|(y, line)| {
             for x in 0..f.width {
-                let (lin, mx, my, seen) = before_display(src, f, x as f32, y as f32);
+                let (lin, mx, my, seen) = before_display(src, aux, f, x as f32, y as f32);
                 let px = if display {
                     let (d, out) = display_out(&f.display, lin);
                     let d = if f.effects.active() {
@@ -964,8 +1115,14 @@ pub fn greyed(d: [f32; 3], w: f32) -> [f32; 3] {
 /// Output pixel `(x, y)` up to the display transform: linear Rec.2020,
 /// its source position before lens corrections, and how much the Point
 /// Color point shown applied.
-fn before_display(src: &Rgb, f: &Frame, x: f32, y: f32) -> ([f32; 3], f32, f32, f32) {
-    let (lin, mx, my) = look_input_at(src, f, x, y);
+fn before_display(
+    src: &Rgb,
+    aux: Option<&Aux>,
+    f: &Frame,
+    x: f32,
+    y: f32,
+) -> ([f32; 3], f32, f32, f32) {
+    let (lin, mx, my) = look_input_at(src, aux, f, x, y);
     let (lin, seen) = look::look_point(&f.look, lin, f.point_view);
     (lin, mx, my, seen)
 }
@@ -973,34 +1130,40 @@ fn before_display(src: &Rgb, f: &Frame, x: f32, y: f32) -> ([f32; 3], f32, f32, 
 /// Output pixel `(x, y)` through geometry, lens corrections, the colour
 /// matrix and defringe; with its source positions before and after lens
 /// corrections.
-fn colour_input(src: &Rgb, f: &Frame, x: f32, y: f32) -> ([f32; 3], f32, f32, f32, f32) {
-    let (mx, my) = f.source_at(x, y);
-    let (rgb, sx, sy) = lens_sample(src, f.lens.as_deref(), mx, my);
+fn colour_input(src: &Source, f: &Frame, mx: f32, my: f32) -> ([f32; 3], f32, f32) {
+    let (rgb, sx, sy) = lens_sample_in(src, f.lens.as_deref(), mx, my);
     let mut lin = mul3(&f.colour, rgb);
     if f.look.fringe {
         let y = |dx: f32, dy: f32| {
-            let p = mul3(&f.colour, sample(src, sx + dx, sy + dy));
+            let p = mul3(&f.colour, sample_in(src, sx + dx, sy + dy));
             f.look.luma[0] * p[0] + f.look.luma[1] * p[1] + f.look.luma[2] * p[2]
         };
         let e = look::edge(y(-1.0, 0.0), y(1.0, 0.0), y(0.0, -1.0), y(0.0, 1.0));
         lin = look::defringe_pixel(&f.look, lin, e);
     }
-    (lin, mx, my, sx, sy)
+    (lin, sx, sy)
 }
 
 /// What the colour stage sees at output pixel `(x, y)`: linear Rec.2020
 /// after the local tone maps and local adjustments (Point Color picks it).
 pub fn look_input(src: &Rgb, f: &Frame, x: f32, y: f32) -> [f32; 3] {
-    look_input_at(src, f, x, y).0
+    look_input_at(src, None, f, x, y).0
 }
 
 /// [`look_input`], and the source position before lens corrections.
-fn look_input_at(src: &Rgb, f: &Frame, x: f32, y: f32) -> ([f32; 3], f32, f32) {
-    let (lin, mx, my, sx, sy) = colour_input(src, f, x, y);
+fn look_input_at(main: &Rgb, aux: Option<&Aux>, f: &Frame, x: f32, y: f32) -> ([f32; 3], f32, f32) {
+    let (mx, my) = f.source_at(x, y);
+    // How the layers mix the source here (read where masks are).
+    let mix = match aux {
+        Some(_) => layers::mix_at(&f.layers, mx, my),
+        None => Default::default(),
+    };
+    let src = &Source { main, aux, mix };
+    let (lin, sx, sy) = colour_input(src, f, mx, my);
     // Fine detail for local sharpness: the pixel less its neighbours'
     // mean (one source pixel away, before the local tone maps).
     let detail = if f.layers.detail {
-        let n = |dx: f32, dy: f32| mul3(&f.colour, sample(src, sx + dx, sy + dy));
+        let n = |dx: f32, dy: f32| mul3(&f.colour, sample_in(src, sx + dx, sy + dy));
         let (a, b, c, d) = (n(-1.0, 0.0), n(1.0, 0.0), n(0.0, -1.0), n(0.0, 1.0));
         [0, 1, 2].map(|k| lin[k] - 0.25 * (a[k] + b[k] + c[k] + d[k]))
     } else {
@@ -1021,10 +1184,21 @@ pub fn lens_sample(
     sx: f32,
     sy: f32,
 ) -> ([f32; 3], f32, f32) {
+    lens_sample_in(src, grid, sx, sy)
+}
+
+fn lens_sample_in<T: Texels>(
+    src: &T,
+    grid: Option<&crate::lens::Grid>,
+    sx: f32,
+    sy: f32,
+) -> ([f32; 3], f32, f32) {
+    let sample = sample_in::<T>;
     let Some(g) = grid else {
         return (sample(src, sx, sy), sx, sy);
     };
-    let (w, h) = (src.width as f32, src.height as f32);
+    let (w, h) = src.size();
+    let (w, h) = (w as f32, h as f32);
     let n = g.at(
         sx / (w - 1.0).max(1.0) * (g.cols - 1) as f32,
         sy / (h - 1.0).max(1.0) * (g.rows - 1) as f32,
@@ -1072,9 +1246,10 @@ pub fn render_from(
 /// [`apply`] on the source after the detail stage and spot removal for
 /// `s` (the settings `f` was made from).
 pub fn apply_from(src: &Demosaiced, s: &Settings, f: &Frame, display: bool) -> Rgb {
+    let aux = src.aux(s);
     match src.prepared(s) {
-        Some(img) => apply(&img, f, display),
-        None => apply(&src.rgb, f, display),
+        Some(img) => apply_with(&img, aux.as_deref(), f, display),
+        None => apply_with(&src.rgb, aux.as_deref(), f, display),
     }
 }
 

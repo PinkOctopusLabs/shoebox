@@ -2131,8 +2131,9 @@ below). Existing Linux branches stay. To come back to with Linux:
   redraws when it lands (RCD's until then, with progress shown);
   regions at 100%, previews and exports make or load it inline. The
   model downloads from the panel when first wanted.
-- Not yet: per-layer AI denoise strength (local adjustments) and the
-  spec's "AI denoise per mask".
+- Per-layer AI denoise strength (local adjustments; the spec's "AI
+  denoise per mask") came later: "Local AI denoise strength and
+  sharpening (2026-10-22)".
 - UI tests now run at most half the cores' worth of apps at once: as the
   suite grew, whichever was slowest missed its settle timeout.
 
@@ -2215,9 +2216,9 @@ below). Existing Linux branches stay. To come back to with Linux:
   neighbours). Worked out per pixel in both pipes only when a layer uses
   it; no extra images kept.
 - Its reach is a source pixel, so on the proxy it's coarser than at
-  100%; the spec's per-layer sharpening on the detail stage itself, and
-  per-layer AI denoise strength (which needs the un-denoised source bound
-  beside the denoised one in both pipes), are still to come.
+  100%; the spec's per-layer sharpening on the detail stage itself is
+  still to come. Per-layer AI denoise strength came with "Local AI
+  denoise strength and sharpening (2026-10-22)".
 
 ## Auto: AI denoise from an ISO (2026-10-22)
 
@@ -2385,3 +2386,45 @@ Face parts, Object), from EDITING-SPEC's "Rendering masks".
   GB more.
 - Done in bands of 32 rows, so beyond the result only a few rows of
   floats are held per thread.
+
+## Local AI denoise strength and sharpening (2026-10-22)
+
+- **AI denoise strength per layer** (`LocalAdjust.denoise_ai`, −100 to
+  +100; its slider shows for raw photos only): added to the global
+  Strength inside the mask, the sum kept to 0–100. Layers apply in order,
+  each blending towards its target by its mask, so −100 cancels a global
+  100 where its mask is full. The module off counts as 0, so a layer
+  alone brings AI denoise in where it's drawn: the app runs the model when
+  the module is on or a layer adds strength (`cpu::layers::wants_ai`).
+  Without the AI's result (the model still running, or not downloaded) a
+  layer's strength does nothing, as the global Strength doesn't; the
+  panel says the model's missing.
+- **Images beside the source** (`cpu::Aux`, made by `Demosaiced::aux`):
+  the source the pipe reads stays what it was (the global Strength's
+  blend through the detail stage and spots). Where a layer raises the
+  strength a pixel mixes towards the source at full strength, where one
+  lowers it towards the source at none (RCD's), each made the same way
+  (detail stage, then heal), by (k − g)/(1 − g) or (g − k)/g, g being the
+  global strength and k the pixel's. That's exact where a mask is fully
+  on or off; in a feather it's a blend of the two finished images rather
+  than the detail stage of the blended input (the stage isn't linear),
+  which only differs with noise reduction on and the global strength
+  between 0 and 100.
+- **Only what's needed:** the full-strength image when a layer raises it
+  (and the global isn't already 100), RCD's when one lowers it (and the
+  global isn't 0), none when no layer touches it, so other photos keep
+  one source in memory and spots are healed once. They're cached on the
+  source, keyed by what they're made from (the detail stage, the spots,
+  the source the pipe reads and the AI's result), so dragging a mask or
+  a slider doesn't remake them; they go when no layer needs them.
+- **GPU:** one more binding, a `texture_2d_array` (binding 10) with the
+  images as its layers, or a 1×1 placeholder. A texture rather than a
+  buffer: the pipe binds seven of the eight storage buffers wgpu's
+  default limits allow a stage (the app's device uses those limits), and
+  sampled textures (16 allowed) leave room. The shader's `texel` mixes
+  them in on every read, as the CPU's `Source` does, so lens corrections
+  and defringe's neighbours see the same mixed source. Each layer is an
+  RGBA f32 texture the source's size (70 MB at the 2560 px proxy).
+- **Everywhere:** the live view uploads them with the source
+  (`Pipe::upload_with`); the CPU fallback, 100% regions, previews and
+  exports use `cpu::apply_from`, which makes them at their size.

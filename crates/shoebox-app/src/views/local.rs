@@ -373,7 +373,7 @@ pub fn section(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &Settings) {
     }
 }
 
-const ADJUST_KEYS: [&str; 10] = [
+const ADJUST_KEYS: [&str; 11] = [
     "l-exposure",
     "l-contrast",
     "l-highlights",
@@ -384,6 +384,7 @@ const ADJUST_KEYS: [&str; 10] = [
     "l-clarity",
     "l-dehaze",
     "l-sharpness",
+    "l-denoise-ai",
 ];
 
 fn layer_controls(app: &mut ShoeboxApp, ui: &mut egui::Ui, l: &Local) {
@@ -501,8 +502,14 @@ fn layer_controls(app: &mut ShoeboxApp, ui: &mut egui::Ui, l: &Local) {
             app.develop.local.show_mask = true;
         }
     }
-    // The sliders.
+    // The sliders (AI denoise strength for raw photos only).
     let a = &l.adjust;
+    let raw = app
+        .develop
+        .ready
+        .as_ref()
+        .is_some_and(|r| r.src.referred == cpu::Referred::Scene);
+    let model = app.denoiser.ready();
     egui::Grid::new(("mask-sliders", &id))
         .num_columns(2)
         .show(ui, |ui| {
@@ -511,7 +518,7 @@ fn layer_controls(app: &mut ShoeboxApp, ui: &mut egui::Ui, l: &Local) {
                     l.amount = v
                 });
             }
-            let rows: [(&str, f64, f64, usize); 10] = [
+            let rows: [(&str, f64, f64, usize); 11] = [
                 ("Exposure", a.exposure, 4.0, 2),
                 ("Contrast", a.contrast, 100.0, 0),
                 ("Highlights", a.highlights, 100.0, 0),
@@ -522,13 +529,22 @@ fn layer_controls(app: &mut ShoeboxApp, ui: &mut egui::Ui, l: &Local) {
                 ("Clarity", a.clarity, 100.0, 0),
                 ("Dehaze", a.dehaze, 100.0, 0),
                 ("Sharpness", a.sharpness, 100.0, 0),
+                ("AI denoise", a.denoise_ai, 100.0, 0),
             ];
             for (k, (name, v, max, dp)) in rows.into_iter().enumerate() {
+                if k == 10 && !raw {
+                    continue;
+                }
                 if let Some(v) = slider(ui, name, v, -max..=max, 0.0, dp) {
-                    let label = if dp > 0 {
-                        format!("Mask {} {v:+.2}", name.to_lowercase())
+                    let what = if k == 10 {
+                        name.to_owned()
                     } else {
-                        format!("Mask {} {v:+.0}", name.to_lowercase())
+                        name.to_lowercase()
+                    };
+                    let label = if dp > 0 {
+                        format!("Mask {what} {v:+.2}")
+                    } else {
+                        format!("Mask {what} {v:+.0}")
                     };
                     edit_layer(app, ADJUST_KEYS[k], label, &id, |l| {
                         set_adjust(&mut l.adjust, k, v)
@@ -536,6 +552,15 @@ fn layer_controls(app: &mut ShoeboxApp, ui: &mut egui::Ui, l: &Local) {
                 }
             }
         });
+    if raw && !model && a.denoise_ai != 0.0 {
+        ui.label(
+            egui::RichText::new(
+                "AI denoise needs its model: download it under Detail, AI denoise.",
+            )
+            .small()
+            .weak(),
+        );
+    }
 }
 
 fn set_adjust(a: &mut LocalAdjust, k: usize, v: f64) {
@@ -549,7 +574,8 @@ fn set_adjust(a: &mut LocalAdjust, k: usize, v: f64) {
         6 => &mut a.saturation,
         7 => &mut a.clarity,
         8 => &mut a.dehaze,
-        _ => &mut a.sharpness,
+        9 => &mut a.sharpness,
+        _ => &mut a.denoise_ai,
     };
     *f = v;
 }

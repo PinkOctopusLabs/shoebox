@@ -7,6 +7,10 @@
 //! balance and saturation as one matrix, contrast about mid grey, and
 //! highlights, shadows and clarity through the global maps' base layers.
 //! The shader (`develop.wgsl`) follows these operation for operation.
+//!
+//! AI denoise strength acts earlier, on the source itself: where a layer
+//! changes it, the source is read mixed with images made beside it (see
+//! [`Wants`], [`mix_at`] and `cpu::Aux`).
 
 use std::sync::Arc;
 
@@ -30,8 +34,102 @@ pub struct Layer {
     pub highlights: f32,
     pub clarity: f32,
     pub dehaze: f32,
-    /// Fine detail added (+) or taken away (−): −1 to 1.
+    /// Sharpening added (+, in the global module's amount: 1 is 100) or
+    /// softening (−): −1 to 1.
     pub sharpness: f32,
+    /// AI denoise strength added (−1 to 1).
+    pub denoise_ai: f32,
+}
+
+/// What the layers want from the source stage: images beside the source
+/// (see `cpu::Aux`), made only when a layer uses them.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Wants {
+    /// The AI strength the source has (0–1): the global Strength when the
+    /// AI's result is there, else 0.
+    pub ai: f32,
+    /// The global sharpening amount (0–1.5).
+    pub sharpen: f32,
+    /// A layer raises the AI strength (the source at full strength is
+    /// needed), lowers it (at none).
+    pub more_ai: bool,
+    pub less_ai: bool,
+}
+
+impl Wants {
+    pub fn any(&self) -> bool {
+        self.more_ai || self.less_ai
+    }
+}
+
+/// What the layers of `s` want from `src`'s source stage.
+pub fn wants(src: &Demosaiced, s: &Settings) -> Wants {
+    let ai = src.ai_strength(s);
+    let mut w = Wants {
+        ai: ai.unwrap_or(0.0),
+        ..Default::default()
+    };
+    for l in active(s).0.iter().map(|l| layer(l)).filter(|l| l.active) {
+        // Without the AI's result, its strength does nothing.
+        if ai.is_some() {
+            w.more_ai |= l.denoise_ai > 0.0 && w.ai < 1.0;
+            w.less_ai |= l.denoise_ai < 0.0 && w.ai > 0.0;
+        }
+    }
+    w
+}
+
+/// Whether `s` needs the AI denoiser's result: the global module is on, or
+/// a layer adds AI strength.
+pub fn wants_ai(s: &Settings) -> bool {
+    s.modules.denoise_ai.enabled
+        || active(s)
+            .0
+            .iter()
+            .any(|l| l.amount > 0.0 && l.adjust.denoise_ai > 0.0)
+}
+
+/// How the source is read at one pixel: towards the AI-denoised source
+/// (`more`, 0–1) or RCD's (`less`) from what the source has.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Mix {
+    pub more: f32,
+    pub less: f32,
+}
+
+/// The source's mix at source position `(mx, my)` (before lens
+/// corrections, where masks are read). Layers apply in order, each
+/// blending towards its target by its mask: the AI strength so far plus
+/// the layer's, kept to 0–1.
+pub fn mix_at(ls: &Layers, mx: f32, my: f32) -> Mix {
+    let w = &ls.wants;
+    let Some(masks) = ls.masks.as_ref().filter(|_| w.any()) else {
+        return Mix::default();
+    };
+    let (gx, gy) = (
+        (mx + 0.5) * ls.scale[0] - 0.5,
+        (my + 0.5) * ls.scale[1] - 0.5,
+    );
+    let mut k = w.ai;
+    for (i, l) in ls.list.iter().enumerate() {
+        if !l.active || l.denoise_ai == 0.0 {
+            continue;
+        }
+        let m = mask::sample(masks, i, gx, gy);
+        if m <= 0.0 {
+            continue;
+        }
+        let t = (k + l.denoise_ai).clamp(0.0, 1.0);
+        k += (t - k) * m;
+    }
+    Mix {
+        more: if k > w.ai {
+            (k - w.ai) / (1.0 - w.ai)
+        } else {
+            0.0
+        },
+        less: if k < w.ai { (w.ai - k) / w.ai } else { 0.0 },
+    }
 }
 
 /// What the live pipe needs for the local adjustments.
@@ -49,6 +147,8 @@ pub struct Layers {
     /// A layer sharpens or softens: the pipe works out each pixel's fine
     /// detail.
     pub detail: bool,
+    /// What the layers want from the source stage.
+    pub wants: Wants,
 }
 
 impl Layers {
@@ -142,6 +242,7 @@ pub fn layers(
     let list: Vec<Layer> = locals.iter().map(|l| layer(l)).collect();
     Layers {
         detail: list.iter().any(|l| l.active && l.sharpness != 0.0),
+        wants: wants(src, s),
         list,
         ids: locals.iter().map(|l| l.id.clone()).collect(),
         from,
@@ -310,6 +411,7 @@ fn layer(l: &Local) -> Layer {
         clarity: unit(a.clarity),
         dehaze: unit(a.dehaze),
         sharpness: unit(a.sharpness).clamp(-1.0, 1.0),
+        denoise_ai: unit(a.denoise_ai).clamp(-1.0, 1.0),
     }
 }
 
