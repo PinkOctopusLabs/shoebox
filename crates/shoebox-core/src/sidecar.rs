@@ -78,6 +78,87 @@ pub struct Loaded {
     pub marks: Marks,
     /// The per-file sidecar, if it exists (where writes go).
     pub sidecar: Option<PathBuf>,
+    /// When it was taken, from a sidecar (never the image's own XMP): set
+    /// in another app, or by an iCloud Photos import. Wins over EXIF.
+    pub date: Option<SidecarDate>,
+}
+
+/// A capture time from a sidecar, in EXIF's terms.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidecarDate {
+    /// `YYYY:MM:DD HH:MM:SS`.
+    pub time: String,
+    pub subsec: Option<String>,
+    /// `+01:00`.
+    pub offset: Option<String>,
+}
+
+impl SidecarDate {
+    /// Put it in place of the file's own capture time.
+    pub fn apply(&self, meta: &mut crate::meta::Meta) {
+        meta.exif.capture_time = Some(self.time.clone());
+        meta.exif.subsec = self.subsec.clone();
+        meta.exif.offset = self.offset.clone();
+    }
+
+    /// Read `2024-06-03T14:15:02.120+01:00` (XMP's ISO 8601) or
+    /// `2024:06:03 14:15:02`; a date without a time isn't a capture time.
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        if s.len() < 19 {
+            return None;
+        }
+        let (dt, rest) = s.split_at(19);
+        let b = dt.as_bytes();
+        let digits = |r: std::ops::Range<usize>| b[r].iter().all(u8::is_ascii_digit);
+        let ok = digits(0..4)
+            && matches!(b[4], b'-' | b':')
+            && digits(5..7)
+            && matches!(b[7], b'-' | b':')
+            && digits(8..10)
+            && matches!(b[10], b'T' | b' ')
+            && digits(11..13)
+            && b[13] == b':'
+            && digits(14..16)
+            && b[16] == b':'
+            && digits(17..19);
+        if !ok {
+            return None;
+        }
+        let time = format!("{}:{}:{} {}", &dt[0..4], &dt[5..7], &dt[8..10], &dt[11..19]);
+        let (subsec, zone) = match rest.strip_prefix('.') {
+            Some(r) => {
+                let n = r.bytes().take_while(u8::is_ascii_digit).count();
+                (Some(r[..n].to_owned()).filter(|x| !x.is_empty()), &r[n..])
+            }
+            None => (None, rest),
+        };
+        let offset = match zone {
+            "" => None,
+            "Z" => Some("+00:00".to_owned()),
+            z if z.len() == 6 && (z.starts_with('+') || z.starts_with('-')) => Some(z.to_owned()),
+            _ => return None,
+        };
+        Some(Self {
+            time,
+            subsec,
+            offset,
+        })
+    }
+
+    /// XMP's form: `2024-06-03T14:15:02.120+01:00`.
+    pub fn to_xmp(&self) -> String {
+        let t = &self.time;
+        let mut out = format!("{}-{}-{}T{}", &t[0..4], &t[5..7], &t[8..10], &t[11..]);
+        if let Some(s) = &self.subsec {
+            out.push('.');
+            out.push_str(s);
+        }
+        if let Some(o) = &self.offset {
+            out.push_str(o);
+        }
+        out
+    }
 }
 
 /// Merge the layers and interpret them as marks. `image`: None leaves out
@@ -89,16 +170,25 @@ pub fn load(
     file: Option<&Path>,
 ) -> Result<Loaded> {
     let mut props = image.map(|i| image_props(i, format)).unwrap_or_default();
+    let mut date = None;
     for side in [stem, file].into_iter().flatten() {
         let bytes = std::fs::read(side).map_err(io(side))?;
         match xmp::read(&bytes) {
-            Ok(p) => props.extend(p),
+            Ok(p) => {
+                let d = [Prop::DateTimeOriginal, Prop::DateCreated]
+                    .iter()
+                    .filter_map(|k| p.get(k).and_then(xmp::Value::first))
+                    .find_map(|v| SidecarDate::parse(&v));
+                date = d.or(date);
+                props.extend(p);
+            }
             Err(e) => tracing::warn!("ignoring unreadable sidecar {}: {e}", side.display()),
         }
     }
     Ok(Loaded {
         marks: Marks::from_props(&props),
         sidecar: file.map(Path::to_path_buf),
+        date,
     })
 }
 

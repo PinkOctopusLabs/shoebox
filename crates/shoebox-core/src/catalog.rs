@@ -250,7 +250,7 @@ impl Catalog {
                     let f = &t.f;
                     // A cloud-only file isn't read (that would download it),
                     // nor cached, so it's read once it's here.
-                    let (m, ok) = match &t.meta {
+                    let (mut m, ok) = match &t.meta {
                         Some(m) => (m.clone(), !f.cloud),
                         None if f.cloud => (Meta::default(), false),
                         None => match meta::read(&f.path, f.format) {
@@ -268,6 +268,9 @@ impl Catalog {
                             tracing::warn!("marks: {e}");
                             sidecar::Loaded::default()
                         });
+                    if let Some(d) = &loaded.date {
+                        d.apply(&mut m);
+                    }
                     let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                     progress(n, total);
                     let p = Photo {
@@ -614,6 +617,9 @@ impl Catalog {
                     sidecar::Loaded::default()
                 });
             let p = &mut self.photos[i];
+            if let Some(d) = &loaded.date {
+                d.apply(&mut p.meta);
+            }
             p.size = size;
             p.mtime_ns = mtime_ns;
             p.marks = loaded.marks;

@@ -20,6 +20,7 @@ pub mod meta;
 pub mod organise;
 pub mod paths;
 pub mod people;
+pub mod photos;
 pub mod pipeline;
 pub mod query;
 pub mod review;

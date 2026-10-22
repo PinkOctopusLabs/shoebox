@@ -1,6 +1,6 @@
 # Shoebox — iCloud Photos Spec
 
-Oct 20, 2026 · Draft for review
+Oct 20, 2026 · Accepted; Phases 1–2 built Oct 22
 
 Copy photos out of the Mac's Photos library (and so iCloud Photos) into a Shoebox library root, sync again later without copying anything twice, and send a photo, usually one edited in Develop, back into Photos. Once this spec is accepted, it is the source of truth for the feature the way `docs/EDITING-SPEC.md` is for editing.
 
@@ -19,7 +19,7 @@ Copy photos out of the Mac's Photos library (and so iCloud Photos) into a Shoebo
 - Translating Photos' own adjustments into a Shoebox edit, or a Shoebox edit into Photos adjustments. Photos gets rendered pixels.
 - Shared Albums (iCloud Shared Albums hold reduced copies, not originals). The iCloud Shared Photo Library *is* in scope: its assets are in the system library.
 - Reading `Photos Library.photoslibrary` directly (see Decisions).
-- Linux. The code stays portable (see Architecture), but the feature needs PhotoKit.
+- Linux (deferred for the whole app; the feature needs PhotoKit anyway).
 
 **Conflicts with `docs/SPEC.md` to resolve when this is accepted**
 
@@ -97,13 +97,13 @@ These follow the folder-names feature: the plan lists each album with what it be
 - Before starting, check free space on the destination volume and the cache volume: the import needs the planned size plus 10 GB headroom. If it doesn't fit, say so and offer to import a date range.
 - Each resource downloads with `writeData` into a staging folder in the cache (`<cache>/photos-staging/<batch>/`), is hashed, and then is copied into the library through `fileops` as any import file is: journaled first, verified by BLAKE3, never overwriting. The staged file is then removed (it's in a cache directory, so rule 1 allows it). Staging keeps `fileops` the only thing that writes into the library and keeps a half-downloaded file out of it.
 - Four downloads at once, with the copy into the library running behind them. Progress shows assets and bytes downloaded, the speed and time left, separately from the copy's progress.
-- **Resumable.** Each asset is recorded in the ledger as soon as its files are copied and verified, so a cancelled, quit or crashed import loses at most the assets in flight. Running it again continues where it stopped. The batch for the run stays one History entry and is undoable as a whole.
+- **Resumable.** Assets are copied and recorded a few at a time (a step), the records written with the step's copies, so a cancelled, quit or crashed import loses at most the step in flight (and its files are then found in the library by hash next time). Running it again continues where it stopped. The batch for the run stays one History entry and is undoable as a whole.
 - An asset that fails (download error, iCloud says it's unavailable, decode error on a file that's then found to be corrupt) is skipped with its reason and listed at the end with **Try again**. It's not recorded as synced.
 - The first run of 30k assets will take hours and may use a few hundred GB. The Import screen says that up front and recommends an AC adapter; Shoebox asks the system to stay awake while it runs (`NSProcessInfo.beginActivity`; nothing in the app does this yet, so this feature adds it, and card imports can use it too).
 
 ## Sync ledger
 
-What's been copied is recorded per library root in `<root>/.shoebox/photos.json`, beside `collections.json` and `events.json`, so it survives a catalog rebuild and travels with the library. It's written atomically through `fileops` in the import's batch (undoing the import removes its entries).
+What's been copied is recorded per library root in `<root>/.shoebox/photos/`, beside `collections.json` and `events.json`, so it survives a catalog rebuild and travels with the library. Each step of a sync (a few assets) writes its records as a **new** file, `synced-<run>-<n>.json`, in the sync's batch, together with that step's copies; files are never rewritten. When several files have the same asset, the newest record wins. This keeps the journal small (a 30k-asset first sync would otherwise store a growing multi-megabyte file before and after every step), and undo works for free: undoing a sync empties its own files, so the records from before it come back. `choices.json` holds what each album became and the change token, and is rewritten each run.
 
 ```json
 {
@@ -113,38 +113,31 @@ What's been copied is recorded per library root in `<root>/.shoebox/photos.json`
       "local_id": "9F2C…/L0/001",
       "status": "copied",
       "files": [
-        { "kind": "original", "rel": "2024/2024-06-03/20240603-141502-120.HEIC", "blake3": "…", "size": 2840193 },
-        { "kind": "paired_video", "rel": "2024/2024-06-03/20240603-141502-120.MOV", "blake3": "…", "size": 3120044 },
-        { "kind": "photos_edit", "rel": "2024/2024-06-03/20240603-141502-120-photos.JPG", "blake3": "…", "size": 1932001, "photos_modified": "2024-06-04T09:12:00Z" }
+        { "kind": "original", "rel": "2024/2024-06-03/20240603-141502-120.heic", "blake3": "…", "size": 2840193 },
+        { "kind": "paired_video", "rel": "2024/2024-06-03/20240603-141502-120.mov", "blake3": "…", "size": 3120044 },
+        { "kind": "edited", "rel": "2024/2024-06-03/20240603-141502-120-photos.jpg", "blake3": "…", "size": 1932001 }
       ],
-      "batch": "b-…",
-      "synced_at": "2026-10-21T10:02:11Z"
+      "albums": ["<album local id>"],
+      "favourite": true,
+      "edit_modified": "2024-06-04T09:12:00Z",
+      "updated": 1792658531000
     }
-  },
-  "pushed": {
-    "<PHCloudIdentifier>": {
-      "from": { "rel": "2026/2026-10-12/DSC_1234.NEF", "blake3": "…", "copy": "main" },
-      "kind": "edit_of_original",
-      "render_hash": "…",
-      "pushed_at": "2026-10-22T18:30:00Z",
-      "batch": "b-…"
-    }
-  },
-  "change_token": "<base64 PHPersistentChangeToken>",
-  "albums": { "<album local id>": { "name": "Trips › Japan", "use": "event", "event": "Trips › Japan" } }
+  }
 }
 ```
 
-- **Status** is `copied`, `in_library` (skipped: the same bytes were already there, with the path), or `left_out` (the person chose not to import it; it's offered again only with **Show left-out**).
+`choices.json`: `{ "schema": 1, "albums": { "<album local id>": { "name": "Trips › Japan", "use": "event" } }, "change_token": "<base64>" }`. Push records (Phase 5) will be added to the same folder.
+
+- **Status** is `copied`, or `in_library` (nothing copied: the same bytes were already there; `rel` is then the library file's full path).
 - **"Synced before" means a ledger entry**, not "a file exists". An asset whose copy was later moved to `_rejected/` or the Trash stays synced and isn't copied again. Settings › iCloud Photos has **Re-import missing**, which lists entries whose files are no longer anywhere in the library (found by BLAKE3, so moves don't count as missing) and copies them again on request.
-- **A changed Photos edit.** If the asset's `modificationDate` and its `.fullSizePhoto` changed since `photos_modified` (the person edited it again in Photos), the next run offers the new render as **updated in Photos** and imports it as another variant (`-photos-1`); the earlier one is never replaced. Edits Shoebox itself pushed are recognised by our adjustment format id and never come back as imports.
+- **A changed Photos edit.** If the asset's `modificationDate` is later than the record's `edit_modified` (the person edited it again in Photos), the next run offers the new render as **updated in Photos** and imports it as another variant (`-photos-1`); the earlier one is never replaced. Edits Shoebox itself pushed are recognised by our adjustment format id and never come back as imports.
 - **No round trips.** Nothing Shoebox sends to Photos is ever imported back as a new photo:
   - *A photo that came from Photos* goes back as an edit of the same asset, which is already in the ledger as synced, so it isn't copied again. Its edit changes the asset's `modificationDate`, which would normally offer the render as **updated in Photos**, but the edit carries our adjustment format id, so it's recognised as Shoebox's own and skipped.
   - *A photo from elsewhere* becomes a new asset, recorded under `pushed` with its cloud id the moment PhotoKit returns it, and skipped by later imports.
   - *Backstop for a lost ledger:* every file Shoebox renders for Photos carries a Shoebox marker in its XMP (`shoebox:PushedFrom` = the source photo's BLAKE3 and copy id). Photos keeps an asset's original bytes, so a later import, or **Rebuild sync record**, reads the marker and links the asset back to the Shoebox photo it came from instead of importing it.
   - *Edited again in Photos* (on the phone, after a push): that's a genuine change made outside Shoebox, so it's offered as **updated in Photos** and imported as a `-photos` variant in the source photo's stack, never as a separate photo.
 - **Several roots.** The ledger is per root, and import checks the ledgers of *every* root, so an asset copied into one root isn't copied again into another.
-- **Lost ledger.** If `photos.json` is gone, the exact-hash check still prevents duplicate copies (Photos returns originals byte-for-byte), at the cost of downloading again. Settings offers **Rebuild sync record**: fetch, download and hash, match against the library (and Shoebox's push markers), write the ledger, copy nothing.
+- **Lost ledger.** If the records are gone, the exact-hash check still prevents duplicate copies (Photos returns originals byte-for-byte), at the cost of downloading again. Settings offers **Rebuild sync record**: fetch, download and hash, match against the library (and Shoebox's push markers), write the ledger, copy nothing.
 - **Quick re-sync.** The change token lets a later run ask Photos for only the inserted and updated assets since last time, so "Sync again" on a 30k library takes seconds when little changed. Without a usable token (first run, token expired, other Mac) it falls back to the full fetch and diff, which is still metadata only.
 
 ## Push to Photos
@@ -155,7 +148,7 @@ Pushing is exporting with Photos as the destination: what goes to Photos is alwa
 
 | Shoebox photo | Has a Develop edit | Sent as |
 | --- | --- | --- |
-| Came from Photos (in the ledger) | Yes | An **edit of the original asset**: the rendered JPEG plus adjustment data `{format: "com.pinkoctopuslabs.shoebox", version: "1", data: {render_hash, edit path}}`. Photos shows the edit, keeps its original, and offers Revert to Original |
+| Came from Photos (in the ledger) | Yes | An **edit of the original asset**: the rendered JPEG plus adjustment data `{format: "com.crankyunicorn.shoebox", version: "1", data: {render_hash, edit path}}`. Photos shows the edit, keeps its original, and offers Revert to Original |
 | Came from Photos | No | Nothing to send; the menu item is disabled and says "already in Photos" |
 | Anything else (NEF, scan, card JPEG) | Yes or no | A **new asset** whose original is the rendered file, dated and located like the source (an unedited NEF renders with the default settings, as an export does) |
 | Already pushed before | Edited since | The same asset is updated with a new edit (for an asset Shoebox created, that's an edit on top of the first push, so its first push is the "original"). Never a second asset |
@@ -182,13 +175,15 @@ shoebox-core::photos          (pure Rust, no PhotoKit)
   source.rs    trait PhotoSource: authorise, assets(since token), albums,
                download(resource, to path, progress, cancel), push(…)
   model.rs     Asset, Resource, ResourceKind, Album, PushRequest, PushResult
-  ledger.rs    photos.json: load across roots, merge, plan_save (fileops)
+  ledger.rs    .shoebox/photos/: load across roots, newest record wins,
+               a new record file per sync step
+  sync.rs      the driver: download, place, copy in steps of one batch
   plan.rs      assets + ledgers → import::Plan (reuses import::decide),
                album/mark mapping, sidecar dates and GPS
   push.rs      selection → push plan (new / edit / update / up to date)
   fake.rs      FakeSource from fixtures (#[cfg(any(test, feature = "fake"))])
 
-shoebox-photos                (new crate, macOS only; Linux: empty stub)
+shoebox-photos                (new crate, macOS)
   sys.rs       thin FFI over objc2-photos (unsafe allowed here)
   kit.rs       PhotoKitSource: impl PhotoSource
   examples/photos_probe.rs
@@ -200,17 +195,18 @@ shoebox-app
   views/files  Import source picker gains "iCloud Photos"; Settings › iCloud Photos
 ```
 
-- **Why a trait in core.** All the logic that decides what to copy, what's synced, and what a push does lives in core and is tested against `FakeSource`, including the UI tests, so the rules are exercised on every CI run (macOS and Linux) without PhotoKit. `shoebox-photos` is only translation. It's the same shape as `semantic.rs`'s `Model` and `people.rs`'s `FaceModel`.
+- **Why a trait in core.** All the logic that decides what to copy, what's synced, and what a push does lives in core and is tested against `FakeSource`, including the UI tests, so the rules are exercised on every CI run without PhotoKit. `shoebox-photos` is only translation. It's the same shape as `semantic.rs`'s `Model` and `people.rs`'s `FaceModel`.
 - **Bindings:** `objc2-photos` (0.3, MIT/Apache-2.0/Zlib, compatible with GPL-3.0) alongside the `objc2`, `objc2-foundation` and `block2` the app already uses. Completion-handler APIs (`requestAuthorization`, `writeData`, `performChanges`) are wrapped to block the Photos thread on a channel, never the UI thread.
 - **Unsafe:** add `crates/shoebox-photos/src/sys.rs` to CLAUDE.md's list of FFI wrappers.
 - **Bundle:** `scripts/bundle-macos.sh` adds `NSPhotoLibraryUsageDescription` ("Shoebox copies photos from your Photos library into your Shoebox library, and adds photos you send to Photos.") and the photos-library entitlement to the signing step. An unbundled `cargo run` binary can't get Photos access reliably (TCC attributes it to the terminal), so PhotoKit work is tested from a bundled build (`SHOEBOX_DATA_DIR=<scratch>`, `BUNDLE_ID=…photostest`).
-- **Linux:** `shoebox-photos` builds as a stub whose `PhotoKitSource::new()` returns `Unavailable`; the Import screen doesn't show the source.
 - **CLI:** `shoebox photos status --root <root>` (reads the ledger; no Photos access needed) and `shoebox photos import --root <root> --dry-run`. Real imports from the CLI need the terminal to have Photos access, so they're documented as a convenience, not the main path.
 - **Catalog:** a cached table `photos_assets(cloud_id, root_id, rel, kind, blake3)` rebuilt from the ledgers, for the Info panel's "From Photos" / "In Photos" rows and the stale-push badge.
 
 ## Plan
 
 Each phase is one reviewable chunk, finished with `cargo fmt`, `clippy -D warnings` and `cargo test`.
+
+**Status (2026-10-22):** Phases 1 and 2 are built (`shoebox_core::photos`, `tests/photos.rs`; DECISIONS "iCloud Photos: the core"), against the fake library. Phase 0's probe needs PhotoKit and a test account, so it's written with Phase 3 and run with the manual checks.
 
 **Phase 0 — Spike (in a test macOS account)**
 - Create the test account and its test Photos library: about 200 synthetic assets from `shoebox-fixtures` (HEIC, JPEG with and without EXIF, a Live Photo pair, a RAW+JPEG pair, a video, a few edited in Photos, two albums in a folder, favourites, one hidden), with the `Shoebox test library` album.
@@ -228,7 +224,7 @@ Each phase is one reviewable chunk, finished with `cargo fmt`, `clippy -D warnin
 
 **Phase 3 — Staged copy and the PhotoKit backend**
 - App `photos.rs`: downloads to staging (four at a time), hash, hand over to the library worker's import, ledger after each verified asset, cancel and resume, free-space check, keep-awake, failures with Try again.
-- `shoebox-photos`: `PhotoKitSource` for authorisation, fetch, change tokens, `writeData`; Linux stub; bundle script changes.
+- `shoebox-photos`: `PhotoKitSource` for authorisation, fetch, change tokens, `writeData`; bundle script changes.
 - *Done when* an import of the test library in the test account produces exactly the names and stacks the fake predicts for the same assets, a second run copies nothing, a run killed mid-way resumes, and undo puts the root back.
 
 **Phase 4 — Import UI**
@@ -237,7 +233,7 @@ Each phase is one reviewable chunk, finished with `cargo fmt`, `clippy -D warnin
 
 **Phase 5 — Push**
 - `photos::push` planning; the built-in Photos export preset; `PhotoSource::push` for new asset, edit, update and undo; dry-run table, ledger `pushed` entries, History batch; stale-push badge and Info panel row; the album option.
-- *Done when* in the test account each row of the "What gets sent" table works, a pushed edit shows on the asset in Photos with Revert to Original, a second push updates rather than duplicates, the next import ignores everything pushed (also with `photos.json` deleted, through the marker), and undo reverses each kind.
+- *Done when* in the test account each row of the "What gets sent" table works, a pushed edit shows on the asset in Photos with Revert to Original, a second push updates rather than duplicates, the next import ignores everything pushed (also with `.shoebox/photos/` deleted, through the marker), and undo reverses each kind.
 
 **Phase 6 — CLI, docs and first real run**
 - `shoebox photos status` and `import --dry-run`; SPEC.md and CLAUDE.md updates (non-goal wording, rules 9 and 10, layout, M7).

@@ -30,6 +30,7 @@ pub const NS_DIGIKAM: &str = "http://www.digikam.org/ns/1.0/";
 pub const NS_IPTC_EXT: &str = "http://iptc.org/std/Iptc4xmpExt/2008-02-29/";
 pub const NS_SHOEBOX: &str = "http://ns.crankyunicorn.com/shoebox/1.0/";
 pub const NS_EXIF: &str = "http://ns.adobe.com/exif/1.0/";
+pub const NS_PHOTOSHOP: &str = "http://ns.adobe.com/photoshop/1.0/";
 
 /// Preferred prefixes when we have to declare a namespace ourselves.
 fn default_prefix(ns: &str) -> &'static str {
@@ -39,6 +40,8 @@ fn default_prefix(ns: &str) -> &'static str {
         NS_LR => "lr",
         NS_DIGIKAM => "digiKam",
         NS_IPTC_EXT => "Iptc4xmpExt",
+        NS_EXIF => "exif",
+        NS_PHOTOSHOP => "photoshop",
         NS_SHOEBOX => "shoebox",
         _ => "ns",
     }
@@ -55,13 +58,19 @@ pub enum Prop {
     HierarchicalSubject,
     TagsList,
     Event,
-    /// A location added in another app (read, never written).
+    /// A location added in another app, or by an iCloud Photos import
+    /// (written only into a copy's new sidecar).
     GpsLatitude,
     GpsLongitude,
+    /// When it was taken, set in another app or by an iCloud Photos import
+    /// (ISO 8601; written only into a copy's new sidecar). Read from
+    /// sidecars only; it wins over the file's EXIF.
+    DateTimeOriginal,
+    DateCreated,
 }
 
 impl Prop {
-    pub const ALL: [Prop; 11] = [
+    pub const ALL: [Prop; 13] = [
         Prop::Rating,
         Prop::PickLabel,
         Prop::Pick,
@@ -73,6 +82,8 @@ impl Prop {
         Prop::Event,
         Prop::GpsLatitude,
         Prop::GpsLongitude,
+        Prop::DateTimeOriginal,
+        Prop::DateCreated,
     ];
 
     fn ns(self) -> &'static str {
@@ -83,7 +94,8 @@ impl Prop {
             Prop::Subject => NS_DC,
             Prop::HierarchicalSubject => NS_LR,
             Prop::Event => NS_IPTC_EXT,
-            Prop::GpsLatitude | Prop::GpsLongitude => NS_EXIF,
+            Prop::GpsLatitude | Prop::GpsLongitude | Prop::DateTimeOriginal => NS_EXIF,
+            Prop::DateCreated => NS_PHOTOSHOP,
         }
     }
 
@@ -100,6 +112,8 @@ impl Prop {
             Prop::Event => "Event",
             Prop::GpsLatitude => "GPSLatitude",
             Prop::GpsLongitude => "GPSLongitude",
+            Prop::DateTimeOriginal => "DateTimeOriginal",
+            Prop::DateCreated => "DateCreated",
         }
     }
 

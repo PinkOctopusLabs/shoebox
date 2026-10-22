@@ -20,6 +20,9 @@ pub enum CoreError {
     Csv(#[from] csv::Error),
     #[error("{0}")]
     Invalid(String),
+    /// The Photos library refused or failed a request.
+    #[error("Photos: {0}")]
+    Photos(String),
     /// A safety rule stopped the operation before anything was touched.
     #[error("refused: {0}")]
     Refused(String),

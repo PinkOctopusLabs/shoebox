@@ -3961,3 +3961,68 @@ is ported (the methods are the papers'); no new crates.
   to lift the 150 MP cap; DNG DefaultCrop for the uncropped boundary; Fill
   edges by MI-GAN; blending across a 360°'s back edge; several panoramas
   from one selection (Brown and Lowe's connected components).
+
+## iCloud Photos: the core (2026-10-22)
+`docs/PHOTOS-SPEC.md` accepted (its open questions answered 2026-10-20):
+originals at full quality, favourites ★5, Photos' edits as `-photos`
+variants, albums as events, hidden left out, the card import's Into root
+and Names template, pushes as rendered files only, videos copied. Phases 1
+and 2 built in `shoebox_core::photos`, against a fake library; PhotoKit
+(`shoebox-photos`, Phase 3) and the UI are next.
+- **The sync record is a folder, not one file.** `.shoebox/photos/` gets a
+  new `synced-<run>-<n>.json` per sync step, never rewritten; the newest
+  record of an asset wins; `choices.json` (album choices, change token) is
+  rewritten each run. One `photos.json` rewritten after each step would have
+  put a growing multi-megabyte file into the journal twice per step (a
+  30k-asset first sync: gigabytes). Undo empties a sync's own files
+  (fileops leaves `{}`), so earlier records come back by themselves.
+- **One batch per sync, in steps.** `FileOps::begin_import`,
+  `import_step` (checked and run like `import_until`, appended to the
+  batch), `end_import`. A sync quit half-way is a running batch, which crash
+  recovery offers to resume or roll back like any other. Each step's copies
+  and its records go together, so a stop loses at most a step; its files
+  are then found by hash.
+- **Keyed by `PHCloudIdentifier`**, else `local:<localIdentifier>`; also
+  looked up by local id, so an asset recorded before it reached iCloud
+  isn't copied again when it gets a cloud id.
+- **Dates.** The file's EXIF date stands when it's the same moment as
+  Photos' creation date (within a second; without an EXIF offset, any whole
+  number of quarter hours up to 14 hours, as the camera's clock may have
+  been in another zone). Otherwise, or with no EXIF date, Photos' date names
+  the file (in the EXIF offset's zone if there is one, else the Mac's) and
+  goes into the copy's new sidecar as `exif:DateTimeOriginal` and
+  `photoshop:DateCreated` (ISO 8601). Sidecar dates (never the image's own
+  XMP) now win over EXIF when the catalog reads a photo
+  (`sidecar::SidecarDate`); both properties joined `xmp::Prop`, so undoing
+  a sidecar write strips them too. Photos' location goes into the sidecar
+  (as `exif:GPSLatitude`/`GPSLongitude`, which the map already reads) when
+  the file has none.
+- **Names.** One frame per asset: the original, a RAW+JPEG pair's other
+  half and a Live Photo's movie share the stem and one suffix, named from
+  the original (as card imports name a Live Photo's movie). Photos' edit
+  is `<stem>-photos.<ext>` beside it; a newer edit later is
+  `-photos-1`, `-photos-2`, beside the original wherever an earlier sync
+  put it (in that root). Files whose bytes the library has are recorded as
+  `in_library` with the library path and not copied; an asset with none
+  copied is `in_library`.
+- **Albums** default to events (nested by Photos' folders, joining existing
+  events of the same name), except names that say nothing (`import::
+  says_nothing`: dates, `Photos`). Assets synced before that join albums, or
+  are favourited, get the marks in their existing sidecars (never a
+  reference root's; ★5 only when unrated) without downloading; leaving an
+  album is only counted.
+- **Updated Photos edits** are offered when the asset's modified time is
+  later than the record's `edit_modified`; a favourite also changes it, so
+  the render is downloaded and dropped if its hash is already recorded.
+- **Downloads** go to a cache folder (`staging`), are hashed and read
+  there, then copied in through `fileops`; the staged files are removed
+  after each step. Sequential for now; four at once is the app's job
+  (Phase 3).
+- **Tests** (`tests/photos.rs`): the first sync's names, ★5, the album's
+  event, the screenshot dated and placed by Photos and read back so, one
+  batch; syncing again (also after a move in Finder, also into another
+  root) downloads and copies nothing; a joined album and a newer Photos
+  edit; a failed download tried again next time; undo; the record deleted
+  (everything found in the library, nothing copied). Units: the ledger's
+  merge across roots and undo, the date rules, GPS text read back.
+

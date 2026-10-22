@@ -19,7 +19,7 @@ Shoebox is a fast, local-first macOS app, written in Rust with egui, for browsin
 
 - RAW development or pixel editing. DxO PhotoLab does this.
 - A proprietary catalog. The SQLite database is a cache that can be rebuilt from files and sidecars at any time.
-- Cloud sync, sharing, multi-user access, or library roots on network shares. (A folder a cloud drive keeps on the Mac, such as Google Drive's, can be a root; files that are in the cloud only are handled as below.)
+- Cloud sync, sharing, multi-user access, or library roots on network shares. (Copying from iCloud Photos and sending photos back to it, by hand, is covered by `docs/PHOTOS-SPEC.md`: an import plus an explicit push, not two-way sync.) (A folder a cloud drive keeps on the Mac, such as Google Drive's, can be a root; files that are in the cloud only are handled as below.)
 - Video playback beyond a poster frame.
 - Windows and Linux builds. Keep the code portable, but only ship and test on macOS.
 
@@ -281,6 +281,8 @@ The app must be safe to point at the only copy of a photo library, so these rule
 6. **Verified copies.** An import copy counts only after its BLAKE3 matches the source.
 7. **Reference roots are read-only**: no moves, renames or sidecar writes.
 8. **Crash recovery.** On startup, the journal is checked for batches that were started but not finished, and the user is shown what to resume or roll back.
+9. **Photos is written only by an explicit push** (`docs/PHOTOS-SPEC.md`), with a dry-run table and confirmation, and only to add a new asset, add or replace an edit Shoebox made (Photos can always revert it), or undo a push. No other asset, album or metadata in Photos is ever changed.
+10. **No Photos access during development except a test library.** PhotoKit only opens the system Photo Library, so an APFS clone can't stand in for it: real PhotoKit code runs only in a separate macOS user account whose library is a test library made from fixtures.
 
 ## Keyboard shortcuts
 
@@ -332,6 +334,7 @@ Build the core and the duplicate CLI first: it solves the recovered-preview prob
 6. **M5 — File operations and import.** Move and rename with templates, card import, History panel with undo, collections.
    - Done when importing a card produces exactly the names the default template predicts and every batch can be undone.
 7. **M6 — Later.** Timeline view, GPS map, and AI enrichment through ONNX Runtime (the `ort` crate): faces with InsightFace, objects with YOLO, and CLIP embeddings in sqlite-vec for semantic search.
+8. **M7 — iCloud Photos.** Copy the Photos library into a root, sync again without copying anything twice, and send edited photos back (`docs/PHOTOS-SPEC.md`, its Plan).
 
 ## Notes for Claude Code
 

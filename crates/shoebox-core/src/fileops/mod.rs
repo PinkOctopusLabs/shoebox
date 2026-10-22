@@ -53,6 +53,12 @@ pub enum TrashMode {
     Folder(PathBuf),
 }
 
+/// Where an import's steps go: a batch of their own, or one begun earlier.
+enum ImportInto<'a> {
+    New(&'a str),
+    Batch(i64),
+}
+
 /// A planned import copy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedCopy {
@@ -700,6 +706,46 @@ impl FileOps {
         progress: &dyn Fn(CopyProgress<'_>),
         stop: &AtomicBool,
     ) -> Result<i64> {
+        self.import_in(ImportInto::New(label), copies, writes, progress, stop)
+    }
+
+    /// Start an import that runs in steps (an iCloud Photos sync, which
+    /// copies assets as they download): each [`Self::import_step`] adds its
+    /// copies and writes to this one batch, so one undo reverses the whole
+    /// sync, and [`Self::end_import`] closes it. A batch the app quit in the
+    /// middle of is found by crash recovery, like any other.
+    pub fn begin_import(&self, label: &str) -> Result<i64> {
+        self.journal.begin_batch("import", label, None)
+    }
+
+    /// One step of a batch from [`Self::begin_import`], checked and run as
+    /// [`Self::import_until`] runs a whole import. An error or a stop
+    /// closes the batch (failed or cancelled), keeping what ran.
+    pub fn import_step(
+        &self,
+        batch: i64,
+        copies: &[PlannedCopy],
+        writes: Vec<(PathBuf, Vec<u8>)>,
+        progress: &dyn Fn(CopyProgress<'_>),
+        stop: &AtomicBool,
+    ) -> Result<()> {
+        self.import_in(ImportInto::Batch(batch), copies, writes, progress, stop)
+            .map(|_| ())
+    }
+
+    /// Close a batch from [`Self::begin_import`] once its steps have run.
+    pub fn end_import(&self, batch: i64) -> Result<()> {
+        self.journal.set_batch_status(batch, "done")
+    }
+
+    fn import_in(
+        &self,
+        into: ImportInto<'_>,
+        copies: &[PlannedCopy],
+        writes: Vec<(PathBuf, Vec<u8>)>,
+        progress: &dyn Fn(CopyProgress<'_>),
+        stop: &AtomicBool,
+    ) -> Result<i64> {
         let mut dsts = HashSet::new();
         let mut sizes = Vec::with_capacity(copies.len());
         for c in copies {
@@ -778,14 +824,23 @@ impl FileOps {
                 }
             },
         };
-        self.run_until("import", label, None, &ops, &mut hooks, |i| {
+        let after = |i: usize| {
             if let Some(size) = sizes.get(i) {
                 let (before, done) = finished.get();
                 finished.set((before + size, done + 1));
                 report(copies.get(i + 1).map(|c| c.src.as_path()), 0);
             }
             Ok(())
-        })
+        };
+        match into {
+            ImportInto::New(label) => {
+                self.run_until("import", label, None, &ops, &mut hooks, after)
+            }
+            ImportInto::Batch(batch) => {
+                self.run_in(batch, &ops, &mut hooks, after)?;
+                Ok(batch)
+            }
+        }
     }
 
     /// Exports into the library, as one batch: the earlier exports they
@@ -1002,18 +1057,34 @@ impl FileOps {
         undo_of: Option<i64>,
         ops: &[Planned],
         hooks: &mut Hooks<'_>,
-        mut after_each: impl FnMut(usize) -> Result<()>,
+        after_each: impl FnMut(usize) -> Result<()>,
     ) -> Result<i64> {
+        let batch = self.journal.begin_batch(kind, label, undo_of)?;
+        self.run_in(batch, ops, hooks, after_each)?;
+        self.journal.set_batch_status(batch, "done")?;
+        Ok(batch)
+    }
+
+    /// Journal `ops` after whatever `batch` holds already, then run them.
+    /// On an error or a stop the batch is marked failed or cancelled; when
+    /// they all ran it's left as it was (running), for the caller to close.
+    fn run_in(
+        &self,
+        batch: i64,
+        ops: &[Planned],
+        hooks: &mut Hooks<'_>,
+        mut after_each: impl FnMut(usize) -> Result<()>,
+    ) -> Result<()> {
         let j = &self.journal;
-        let batch = j.begin_batch(kind, label, undo_of)?;
-        let owners = match j.transaction(|| self.record_plan(batch, ops)) {
+        let start = j.ops(batch)?.len();
+        let owners = match j.transaction(|| self.record_plan(batch, ops, start)) {
             Ok(o) => o,
             Err(e) => {
                 j.set_batch_status(batch, "failed")?;
                 return Err(e);
             }
         };
-        let steps = j.ops(batch)?;
+        let steps: Vec<OpRecord> = j.ops(batch)?.into_iter().skip(start).collect();
         let mut done = 0;
         for (op, owner) in steps.iter().zip(&owners) {
             if hooks.stop.is_some_and(|s| s.load(Ordering::Relaxed)) {
@@ -1046,17 +1117,16 @@ impl FileOps {
                 after_each(*i)?;
             }
         }
-        j.set_batch_status(batch, "done")?;
-        Ok(batch)
+        Ok(())
     }
 
     /// Journal every step of a plan as pending, folders to create included.
     /// Returns, per journal row, the plan step it belongs to (None for a
     /// folder created on the way).
-    fn record_plan(&self, batch: i64, ops: &[Planned]) -> Result<Vec<Option<usize>>> {
+    fn record_plan(&self, batch: i64, ops: &[Planned], start: usize) -> Result<Vec<Option<usize>>> {
         let j = &self.journal;
         let mut owners = Vec::new();
-        let mut seq = 0usize;
+        let mut seq = start;
         let mut dirs: HashSet<PathBuf> = HashSet::new();
         let mut trash_taken: HashSet<PathBuf> = HashSet::new();
         let mut mkdirs =
@@ -2039,7 +2109,7 @@ mod tests {
         // then "crash" after moving b but before marking it done.
         let j = fo.journal();
         let batch = j.begin_batch("move", "crash", None).unwrap();
-        j.transaction(|| fo.record_plan(batch, &plan)).unwrap();
+        j.transaction(|| fo.record_plan(batch, &plan, 0)).unwrap();
         let steps = j.ops(batch).unwrap();
         assert_eq!(
             steps.len(),

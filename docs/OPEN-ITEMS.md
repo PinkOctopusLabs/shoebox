@@ -23,10 +23,14 @@ has no `TODO` or `FIXME` comments).
 
 Provisional choices the person should confirm or change.
 
-- [ ] **iCloud Photos (M7).** `docs/PHOTOS-SPEC.md` is still a draft for
-  review: nothing of it is built (no `shoebox-photos` crate). Accept, change
-  or shelve it; accepting also means SPEC's non-goal wording, safety rules 9
-  and 10 and CLAUDE.md. Source: PHOTOS-SPEC, "Conflicts with SPEC".
+- [ ] **iCloud Photos (M7): the four Phase 0 facts.** The spec was accepted
+  (2026-10-20) and its core is built (Phases 1–2: planning, placing, the
+  sync record, the sync in one batch, all against the fake library), but it
+  rests on four PhotoKit facts nobody has checked yet: originals come back
+  byte-identical, `PHCloudIdentifier` is there for a test library, our
+  adjustment data round-trips, and whether resource sizes are given. The
+  probe (Phase 0) is still to write, and runs only in a test macOS account.
+  Source: PHOTOS-SPEC, "Plan"; DECISIONS "iCloud Photos: the core".
 - [ ] **Spec items not built and not dropped.** Neither built nor recorded
   as out of scope: AMaZE demosaic ("max detail"), export output sharpening
   (screen, matte, glossy), preset packs (`.shoeboxpack`), Lightroom XMP
@@ -113,6 +117,12 @@ Provisional choices the person should confirm or change.
   Open questions.
 
 ## Bugs
+
+- [ ] **A sidecar date stays in the metadata cache after it's removed.**
+  A capture time from a sidecar (iCloud Photos' date, or one set in another
+  app) is applied to the photo's metadata, which is cached; if the sidecar
+  date is later deleted, the old one stays until the image itself changes
+  or the cache is rebuilt. S. Source: DECISIONS "iCloud Photos: the core".
 
 Small known defects.
 
