@@ -92,6 +92,26 @@ fn defringe(app: &mut ShoeboxApp, ui: &mut egui::Ui, d: &Defringe) {
 /// Perspective (vertical, horizontal), aspect, scale and offsets.
 fn transform(app: &mut ShoeboxApp, ui: &mut egui::Ui, t: &Transform) {
     let reset = section(ui, "Transform", *t != Transform::default(), false, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Upright");
+            for m in shoebox_develop::upright::Mode::ALL {
+                let hint = match m {
+                    shoebox_develop::upright::Mode::Auto => {
+                        "Level and straighten, without overdoing it"
+                    }
+                    shoebox_develop::upright::Mode::Level => "Make the horizon level",
+                    shoebox_develop::upright::Mode::Vertical => {
+                        "Level, and make vertical lines vertical"
+                    }
+                    shoebox_develop::upright::Mode::Full => {
+                        "Level, and straighten vertical and horizontal lines"
+                    }
+                };
+                if ui.button(m.label()).on_hover_text(hint).clicked() {
+                    upright(app, m);
+                }
+            }
+        });
         egui::Grid::new("transform-grid")
             .num_columns(2)
             .show(ui, |ui| {
@@ -149,6 +169,31 @@ fn transform(app: &mut ShoeboxApp, ui: &mut egui::Ui, t: &Transform) {
             s.geometry.transform = Transform::default();
         });
     }
+}
+
+/// Auto-upright: the photo's lines decide its rotation (with the largest
+/// crop that stays inside) and perspective, as one step.
+pub fn upright(app: &mut ShoeboxApp, mode: shoebox_develop::upright::Mode) {
+    let o = super::develop::options(app);
+    let st = &app.develop;
+    let (Some(ready), Some(doc)) = (&st.ready, &st.doc) else {
+        return;
+    };
+    let s = doc.settings();
+    let lines = shoebox_develop::upright::analyse(&ready.meta, &ready.src, s, o.orientation);
+    let c = shoebox_develop::upright::solve(&lines, mode);
+    let (w, h) =
+        shoebox_develop::cpu::upright(ready.src.rgb.width, ready.src.rgb.height, o.orientation);
+    let crop = shoebox_develop::cpu::max_crop(w as f64, h as f64, c.rotate);
+    app.develop.last_step_done();
+    edit(app, "upright", format!("Upright: {}", mode.label()), |s| {
+        s.geometry.rotate = c.rotate;
+        s.geometry.crop = crop;
+        let t = &mut s.geometry.transform;
+        t.vertical = c.vertical;
+        t.horizontal = c.horizontal;
+        t.constrain = true;
+    });
 }
 
 /// A transform slider: name, history key, value, range, default, field.

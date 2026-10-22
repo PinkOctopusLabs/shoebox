@@ -1964,3 +1964,29 @@ masks; AI raw denoise (RawNIND); Smart-light tone; finer AI masks.
   fixture, NEFs included) to settle: with three more GPU-heavy Develop
   tests beside it, 60 s ran out twice in a full run; alone it settles in
   under 30.
+
+## Auto-upright (2026-10-22)
+
+- **Lines:** in a copy of the photo at 1024 px, upright (orientation,
+  quarter turns, mirror) and lens-corrected, before rotation and
+  perspective. Log luminance, a 3×3 blur, Sobel; the top fifth of
+  gradients (at least 0.6 stops) grown into regions of one direction
+  (within 22.5°), each fitted with its principal axis and kept if at
+  least 4% of the long edge and thin (LSD's idea, much simplified; no
+  false-alarm test).
+- **Solving:** lines within 30° of vertical or level count; the cost is
+  each line's lean once corrected, squared, capped at 6° (so a stray line
+  can't pull the result), weighted by length. A grid (rotation ±10° in
+  1° steps; perspective ±100 in 10s), then a pattern search halving the
+  steps eight times. The correction is the rotation (with the largest
+  crop that fits, as the Angle slider does) and the Transform's vertical
+  and horizontal perspective, with Constrain on, as one history step.
+- **Modes:** Level turns only; Vertical adds vertical perspective (levels
+  count a quarter: a facade's horizontals converge); Full adds horizontal
+  perspective; Auto is Full limited to ±60 and charged a little for
+  strong corrections.
+- Tested on lines distorted by a known correction (recovered within 0.5°
+  and 4 slider units) and on a drawn grid turned 3°, found, levelled
+  (3.0°), and level again after the real render (mean lean under 0.5°).
+- Lightroom's Guided upright (drawing the lines) isn't built; it would
+  feed hand-drawn segments to the same solver.

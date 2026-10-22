@@ -20,6 +20,7 @@ pub mod mask;
 pub mod overlay;
 pub mod preset;
 pub mod profile;
+pub mod upright;
 pub mod wb;
 
 use std::path::PathBuf;

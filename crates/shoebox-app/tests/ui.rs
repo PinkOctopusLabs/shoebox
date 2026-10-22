@@ -4696,3 +4696,50 @@ fn develop_spot_removal() {
     assert!(!h.state().develop_spots().0);
     assert_eq!(h.state().view_name(), shoebox_app::app::View::Develop);
 }
+
+/// Auto-upright: a photo of a window grid turned 3° comes out level with
+/// Upright → Level (one step), the crop the largest that fits.
+#[test]
+fn develop_upright_levels_a_tilted_photo() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(&root).unwrap();
+    let (w, h) = (900u32, 600u32);
+    let a = 3f64.to_radians();
+    let img = image::RgbImage::from_fn(w, h, |x, y| {
+        let (cx, cy) = (f64::from(x) - 450.0, f64::from(y) - 300.0);
+        let (u, v) = (cx * a.cos() + cy * a.sin(), -cx * a.sin() + cy * a.cos());
+        let on = (u.rem_euclid(90.0) < 4.0 || v.rem_euclid(90.0) < 4.0)
+            && u.abs() < 380.0
+            && v.abs() < 250.0;
+        if on {
+            image::Rgb([30, 30, 35])
+        } else {
+            image::Rgb([200, 195, 185])
+        }
+    });
+    std::fs::write(
+        root.join("tilted.jpg"),
+        shoebox_fixtures::jpeg(&img, 92).unwrap(),
+    )
+    .unwrap();
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let mut h = harness(p, egui::vec2(1400.0, 2600.0));
+    settle(&mut h, Duration::from_secs(60));
+    h.get_by_label("tilted.jpg").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(30), "develop", |a| {
+        a.develop_ready()
+    });
+    h.run_steps(3);
+    h.get_by_label("Transform").click();
+    h.run_steps(2);
+    h.get_by_label("Level").click();
+    h.run_steps(3);
+    let doc = h.state().develop_doc().unwrap();
+    let g = &doc.settings().geometry;
+    assert!((g.rotate.abs() - 3.0).abs() < 0.3, "{g:?}");
+    assert!(g.crop[0] > 0.0, "cropped to fit: {g:?}");
+    assert_eq!(doc.history().last().unwrap().label, "Upright: Level");
+}

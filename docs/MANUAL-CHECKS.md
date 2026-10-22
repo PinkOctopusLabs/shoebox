@@ -107,3 +107,8 @@ together at the end, before the release.
 - [ ] **Red-eye** on a flash portrait (and a pet photo if there's one):
   the pupil loses its red without a ring, the iris and skin around it
   stay as they were, and pet eye covers the glow.
+- [ ] **Auto-upright** on real architecture (a tall building shot
+  looking up, an interior, a horizon over water) and on photos without
+  strong lines (a portrait, foliage): Auto straightens the first kind
+  without looking stretched and leaves the second nearly alone; Level
+  levels the horizon.

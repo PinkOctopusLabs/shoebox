@@ -788,7 +788,7 @@ fn follow(app: &mut ShoeboxApp) {
 }
 
 /// The orientation and output space of the render.
-fn options(app: &ShoeboxApp) -> Options {
+pub(super) fn options(app: &ShoeboxApp) -> Options {
     let upright = app.develop.ready.as_ref().is_some_and(|r| r.upright);
     let orientation = if upright {
         1
