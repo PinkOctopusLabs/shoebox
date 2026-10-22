@@ -16,6 +16,7 @@ pub mod look;
 pub mod loupe;
 pub mod map;
 pub mod masonry;
+pub mod merge;
 pub mod point_colour;
 pub mod presets;
 pub mod settings;
@@ -499,6 +500,18 @@ pub fn photo_menu(app: &mut ShoeboxApp, resp: &egui::Response, pos: usize) {
             .clicked()
         {
             app.export.open = true;
+            ui.close();
+        }
+        if n > 1
+            && ui
+                .button("Merge to HDR…  (Ctrl-H)")
+                .on_hover_text(
+                    "Merge bracketed raw photos into one raw photo with the range of all of \
+                     them, written beside them as a new DNG",
+                )
+                .clicked()
+        {
+            merge::open(app);
             ui.close();
         }
         if n > 1

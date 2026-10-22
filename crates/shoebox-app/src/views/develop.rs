@@ -878,6 +878,14 @@ pub fn poll(app: &mut ShoeboxApp) {
                 app.export.clashes = Some((job, files));
                 continue;
             }
+            Event::MergeProgress(f) => {
+                super::merge::progress(app, f);
+                continue;
+            }
+            Event::MergeDone(r) => {
+                super::merge::done(app, r);
+                continue;
+            }
             Event::ExportProgress { done, total, .. } => {
                 app.export.progress = Some((done, total));
                 continue;

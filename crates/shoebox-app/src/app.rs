@@ -499,6 +499,8 @@ pub struct ShoeboxApp {
     pub(crate) edited_json: HashMap<PathBuf, String>,
     /// Export: the dialog, presets and progress.
     pub(crate) export: views::export::State,
+    /// Photo merges: the dialog and progress.
+    pub(crate) merge: views::merge::State,
     /// Previews rendered and on disk, by key.
     previews_ready: HashSet<String>,
     /// The DNG converter and cache, as last checked (Settings → Raw).
@@ -662,6 +664,7 @@ impl ShoeboxApp {
             edited: HashMap::new(),
             edited_json: HashMap::new(),
             export: Default::default(),
+            merge: Default::default(),
             previews_ready: HashSet::new(),
             raw_status: None,
             unattached: Vec::new(),
@@ -953,6 +956,16 @@ impl ShoeboxApp {
             self.export.of_photo.as_ref().map(|(_, r)| r.len()),
             self.notice.clone(),
             self.error.clone(),
+        )
+    }
+
+    /// The merge dialog open, a merge running, and how many merges the
+    /// library knows of (tests).
+    pub fn merge_state(&self) -> (bool, bool, usize) {
+        (
+            self.merge.open.is_some(),
+            self.merge.progress.is_some(),
+            self.catalog.merges.len(),
         )
     }
 
@@ -1430,6 +1443,7 @@ impl ShoeboxApp {
                 }
                 LibraryEvent::OrgPreview(p) => self.org.preview = Some(p),
                 LibraryEvent::Notice(n) => self.notice = Some(n),
+                LibraryEvent::Merged(path) => self.merge.select = Some(path),
                 LibraryEvent::Organised { batch, files, verb } => {
                     self.org.preview = None;
                     self.notice = Some(format!(
@@ -4015,6 +4029,11 @@ impl ShoeboxApp {
             views::presets::paste(self);
             return;
         }
+        // ⌃H: Merge to HDR (Lightroom's key).
+        if m.ctrl && !m.mac_cmd && pressed(egui::Key::H) {
+            views::merge::open(self);
+            return;
+        }
         if m.command && m.shift && pressed(egui::Key::E) {
             if m.alt {
                 views::export::repeat(self);
@@ -4354,6 +4373,7 @@ impl eframe::App for ShoeboxApp {
         crate::updater::tick(&ctx, crate::jobs::working());
         self.handle_keys(&ctx);
         views::develop::poll(self);
+        views::merge::tick(self);
         if self.view == View::Develop {
             views::develop::tick(self);
         }
@@ -4441,6 +4461,7 @@ impl eframe::App for ShoeboxApp {
         views::files::dialogs(self, &ctx);
         views::settings::show(self, &ctx);
         views::export::dialog(self, &ctx);
+        views::merge::dialog(self, &ctx);
         views::presets::copy_window(self, &ctx);
         self.scroll_to_current = false;
 

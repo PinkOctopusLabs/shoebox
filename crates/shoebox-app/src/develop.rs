@@ -106,6 +106,9 @@ enum Message {
     /// folder, first make it if it isn't there and show it in Finder.
     /// Answered by `Colours`.
     Colours(Option<ColourFolder>),
+    /// A photo merge (on its own thread; answered by `MergeProgress` and
+    /// `MergeDone`).
+    Merge(Box<crate::merge::Job>),
 }
 
 /// The person's own colour files, in Shoebox's data folder: only read,
@@ -322,6 +325,10 @@ pub enum Event {
     AiProgress(PhotoId, f32),
     Ai(PhotoId, Raw, Arc<cpu::Rgb>),
     AiFailed(PhotoId, String),
+    /// A photo merge: how far (0–1); done, written in the cache for the
+    /// library worker (`LibraryCommand::AddMerge`), or why not.
+    MergeProgress(f32),
+    MergeDone(Result<crate::merge::Done, String>),
 }
 
 pub struct Develop {
@@ -336,6 +343,11 @@ impl Develop {
     /// Export photos (after any photo being opened).
     pub fn export(&self, job: ExportJob) {
         let _ = self.requests.send(Message::Export(Box::new(job)));
+    }
+
+    /// Merge photos (one merge at a time, after any before it).
+    pub fn merge(&self, job: crate::merge::Job) {
+        let _ = self.requests.send(Message::Merge(Box::new(job)));
     }
 
     /// Render part of the photo at full size (the newest request wins).
@@ -471,6 +483,25 @@ fn worker(
             });
         if let Err(e) = spawned {
             tracing::error!("could not start the export thread: {e}");
+        }
+    }
+    // Photo merges on another (minutes at most; Develop never waits).
+    let (merger, merges) = crossbeam_channel::unbounded::<(crate::merge::Job, Option<PathBuf>)>();
+    {
+        let (dngs, events, repaint) = (dngs.clone(), events.clone(), repaint.clone());
+        let staging = crate::merge::staging(cache_dir);
+        let spawned = std::thread::Builder::new()
+            .name("merge".into())
+            .spawn(move || {
+                while let Ok((job, conv)) = merges.recv() {
+                    crate::merge::run(&job, conv.as_deref(), &dngs, &staging, &|e| {
+                        let _ = events.send(e);
+                        repaint();
+                    });
+                }
+            });
+        if let Err(e) = spawned {
+            tracing::error!("could not start the merge thread: {e}");
         }
     }
     // Conversions ahead of need, on another.
@@ -634,6 +665,11 @@ fn worker(
                 Message::Export(job) => {
                     if exporter.send((*job, converter.clone())).is_err() {
                         tracing::warn!("the export thread has stopped");
+                    }
+                }
+                Message::Merge(job) => {
+                    if merger.send((*job, converter.clone())).is_err() {
+                        tracing::warn!("the merge thread has stopped");
                     }
                 }
                 Message::ConvertAhead(list) => {

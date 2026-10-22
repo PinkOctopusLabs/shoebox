@@ -6,6 +6,7 @@ mod display;
 pub mod icons;
 pub mod jobs;
 pub mod menu;
+pub mod merge;
 pub mod models;
 pub mod objects;
 mod panels;

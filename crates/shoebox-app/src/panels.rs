@@ -774,6 +774,14 @@ pub fn status(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             ui.add(egui::Spinner::new().size(12.0));
             ui.label(format!("Exporting {done}/{total}"));
         }
+        if let Some(f) = app.merge.progress {
+            ui.separator();
+            ui.add(egui::Spinner::new().size(12.0));
+            ui.label(format!("Merging HDR {:.0}%", f * 100.0));
+            if ui.small_button("Stop").clicked() {
+                crate::views::merge::stop(app);
+            }
+        }
         if let Some(p) = app.current.and_then(|c| app.photo(c)) {
             ui.separator();
             ui.label(RichText::new(short_path(&p.path)).weak())
@@ -1789,6 +1797,7 @@ fn details(app: &mut ShoeboxApp, ui: &mut egui::Ui, id: crate::jobs::PhotoId, id
         );
     }
     let path = photo.path.clone();
+    crate::views::merge::info_section(app, ui, &path);
     crate::views::export::info_section(app, ui, id, &path);
     let change = app
         .current

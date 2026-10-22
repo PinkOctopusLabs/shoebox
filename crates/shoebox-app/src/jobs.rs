@@ -414,6 +414,10 @@ pub enum LibraryCommand {
     /// (replacing only the earlier exports they redo, which go to the
     /// Trash), then remove them from the cache.
     AddExports(Vec<crate::develop::LibraryExport>),
+    /// Add a photo merge written in the cache to the library beside its
+    /// first source, with its record, as one journaled batch (rule 3), then
+    /// remove it from the cache. Answered by `Merged`.
+    AddMerge(Box<crate::merge::Done>),
 }
 
 /// A move, reject, rename or trash of stacks, by the paths of their files.
@@ -606,6 +610,8 @@ pub enum LibraryEvent {
     Collections(Vec<Collection>),
     /// Something for the status bar.
     Notice(String),
+    /// A photo merge was added to the library as this file.
+    Merged(PathBuf),
     /// Every journal batch, oldest first.
     Batches(Vec<BatchRow>),
     /// One batch's operations: (op, source, destination, done).
@@ -1643,6 +1649,43 @@ fn library_worker(
                 batches(&fileops);
                 (false, true)
             }
+            LibraryCommand::AddMerge(done) => {
+                let r = add_merge(&done, &settings, &fileops);
+                // The cache's copy, whatever happened (an interrupted batch
+                // is resumed from the journal, so keep it then).
+                if !matches!(r, Err(shoebox_core::CoreError::BatchCancelled { .. })) {
+                    let _ = std::fs::remove_file(&done.copy.src);
+                }
+                match r {
+                    Ok(b) => {
+                        undo.push(b);
+                        redo.clear();
+                        fresh.set(true);
+                        history(&undo, &redo);
+                        let name = done
+                            .plan
+                            .dst
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let mut notice = format!(
+                            "Merged {} photos into {name}. ⌘Z undoes it.",
+                            done.plan.sources.len()
+                        );
+                        for n in &done.notes {
+                            notice.push_str(&format!(" {n}."));
+                        }
+                        emit(LibraryEvent::Notice(notice));
+                        emit(LibraryEvent::Merged(done.plan.dst.clone()));
+                    }
+                    Err(e) => emit(LibraryEvent::Error(format!(
+                        "{}: {e}",
+                        done.plan.kind.label()
+                    ))),
+                }
+                batches(&fileops);
+                (false, true)
+            }
             LibraryCommand::LoadExports(photo) => {
                 let rows = photo
                     .to_str()
@@ -2125,6 +2168,25 @@ fn add_exports(
     }));
     let writes = shoebox_core::stacks::plan_save_links(&settings.writable_roots(), &links)?;
     fileops.add_exports("export into the library", &replaced, &copies, writes)
+}
+
+/// A photo merge into the library: the DNG copied in beside its first
+/// source and its record added to `merges.json`, one batch.
+fn add_merge(
+    done: &crate::merge::Done,
+    settings: &Settings,
+    fileops: &FileOps,
+) -> shoebox_core::Result<i64> {
+    let mut list = shoebox_core::merges::load(&settings.all_roots());
+    list.retain(|m| m.file != done.plan.dst);
+    list.push(done.plan.record());
+    let writes = shoebox_core::merges::plan_save(&settings.writable_roots(), &list)?;
+    let label = format!(
+        "{} of {} photos",
+        done.plan.kind.label(),
+        done.plan.sources.len()
+    );
+    fileops.add_merge(&label, &done.copy, &done.plan.sources, writes)
 }
 
 /// Photos Shoebox moved take their edits along (`Catalog::note_moved`):
