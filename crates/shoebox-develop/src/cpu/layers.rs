@@ -96,6 +96,12 @@ pub fn layers(
             ))
         })
         .collect();
+    // Larger than the grid with AI parts (exports, 100% regions): a finer
+    // grid, the AI parts upsampled along the source (`mask::fine`).
+    let fine = (!found.is_empty())
+        .then(|| mask::fine::grid(sw, sh, locals.len()))
+        .flatten();
+    let (mw, mh) = fine.unwrap_or((gw, gh));
     let key = {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -104,7 +110,7 @@ pub fn layers(
                 .unwrap_or_default()
                 .hash(&mut h);
         }
-        (gw, gh).hash(&mut h);
+        (gw, gh, mw, mh).hash(&mut h);
         if !finds.is_empty() {
             (orientation, src.cache.found_generation()).hash(&mut h);
         }
@@ -123,7 +129,15 @@ pub fn layers(
             tones_of(&small, colour, display)
         });
         let lookup = |f: mask::Find| found.iter().find(|x| x.0 == f).map(|x| x.1.clone());
-        mask::rasterise_with(&locals, gw, gh, units, t.as_ref(), &lookup)
+        match fine {
+            Some(f) => {
+                let small = src.cache.mask_source(&src.rgb, gw, gh);
+                let guide = mask::fine::Guide::new(&src.rgb, &small);
+                let grid = (gw, gh);
+                mask::fine::rasterise(&locals, grid, f, units, t.as_ref(), &lookup, &guide)
+            }
+            None => mask::rasterise_with(&locals, gw, gh, units, t.as_ref(), &lookup),
+        }
     });
     let list: Vec<Layer> = locals.iter().map(|l| layer(l)).collect();
     Layers {
@@ -132,7 +146,7 @@ pub fn layers(
         ids: locals.iter().map(|l| l.id.clone()).collect(),
         from,
         masks: Some(masks),
-        scale: [gw as f32 / sw as f32, gh as f32 / sh as f32],
+        scale: [mw as f32 / sw as f32, mh as f32 / sh as f32],
     }
 }
 

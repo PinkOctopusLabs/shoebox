@@ -478,34 +478,43 @@ fn worker(
         }
     }
     let previews = cache_dir.join("edited");
+    // What Vision and SAM find, kept on disk by the picture they saw.
+    shoebox_develop::mask::store::set(Some(shoebox_develop::mask::store::Store::new(
+        &cache_dir.join("ai-masks"),
+        shoebox_develop::mask::store::DEFAULT_LIMIT,
+    )));
     // Subject and person masks come from Apple's Vision (macOS only; a
-    // portable model is a later phase).
-    shoebox_develop::mask::register_finder(Box::new(|rgb, w, h, what| {
-        use shoebox_develop::edit::FacePart as P;
-        use shoebox_develop::mask::Find;
-        use shoebox_ml::vision::FacePart as V;
-        let find = match what {
-            Find::Subject => shoebox_ml::vision::Find::Subject,
-            Find::Person => shoebox_ml::vision::Find::Person,
-            Find::Face(part) => {
-                let part = match part {
-                    P::Skin => V::Skin,
-                    P::Eyes => V::Eyes,
-                    P::Eyebrows => V::Eyebrows,
-                    P::Lips => V::Lips,
-                    P::Teeth => V::Teeth,
-                };
-                return shoebox_ml::vision::face_parts(rgb, w, h, part)
-                    .map(|c| c.data)
-                    .map_err(|e| e.to_string());
-            }
-            // Objects go to the segmenter (`objects`), not here.
-            Find::Object(_) => return Err("not a Vision search".into()),
-        };
-        shoebox_ml::vision::segment(rgb, w, h, find)
-            .map(|c| c.data)
-            .map_err(|e| e.to_string())
-    }));
+    // portable model is a later phase). Kept on disk by the OS build.
+    let vision = shoebox_ml::vision::identity().unwrap_or_default();
+    shoebox_develop::mask::register_finder(
+        &vision,
+        Box::new(|rgb, w, h, what| {
+            use shoebox_develop::edit::FacePart as P;
+            use shoebox_develop::mask::Find;
+            use shoebox_ml::vision::FacePart as V;
+            let find = match what {
+                Find::Subject => shoebox_ml::vision::Find::Subject,
+                Find::Person => shoebox_ml::vision::Find::Person,
+                Find::Face(part) => {
+                    let part = match part {
+                        P::Skin => V::Skin,
+                        P::Eyes => V::Eyes,
+                        P::Eyebrows => V::Eyebrows,
+                        P::Lips => V::Lips,
+                        P::Teeth => V::Teeth,
+                    };
+                    return shoebox_ml::vision::face_parts(rgb, w, h, part)
+                        .map(|c| c.data)
+                        .map_err(|e| e.to_string());
+                }
+                // Objects go to the segmenter (`objects`), not here.
+                Find::Object(_) => return Err("not a Vision search".into()),
+            };
+            shoebox_ml::vision::segment(rgb, w, h, find)
+                .map(|c| c.data)
+                .map_err(|e| e.to_string())
+        }),
+    );
     // Faces' boxes for Smart Lighting's spot (Vision's are x, y, w, h).
     shoebox_develop::mask::register_face_finder(Box::new(|rgb, w, h| {
         shoebox_ml::vision::faces(rgb, w, h)

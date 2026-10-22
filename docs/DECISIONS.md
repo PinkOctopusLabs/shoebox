@@ -2038,10 +2038,9 @@ masks; AI raw denoise (RawNIND); Smart-light tone; finer AI masks.
   (the render keys on a generation counter; repaints are asked for while
   a search runs). Exports, 100% regions and previews search on their own
   threads as they render.
-- The spec's 8-bit PNG cache on disk keyed by file hash isn't built yet:
-  opening a photo searches again (a fraction of a second). Guided-filter
-  upsampling of AI masks for full-size exports also waits (they're read
-  from the 2560 px grid, like other masks).
+- The spec's 8-bit PNG cache on disk and the guided-filter upsampling
+  for full-size exports came later: see "AI masks on disk, and finer for
+  export (2026-10-22)".
 
 ## Linux deferred (2026-10-22)
 
@@ -2090,8 +2089,8 @@ below). Existing Linux branches stay. To come back to with Linux:
   unstable (Meta's dynamic multimask). The last picture's encoding is
   kept, so each further click only runs the decoder. Two objects need two
   parts (one prompt finds one object).
-- Not yet: the spec's on-disk mask cache, and guided-filter upsampling to
-  full resolution.
+- The spec's on-disk mask cache and guided-filter upsampling to full
+  resolution: see "AI masks on disk, and finer for export (2026-10-22)".
 
 ## AI raw denoise: RawNIND on candle (2026-10-22)
 
@@ -2316,3 +2315,73 @@ below). Existing Linux branches stay. To come back to with Linux:
   Spot weighted starts with a box in the middle (30% of the long edge)
   and shows it on the photo (Edit box): corners resize, inside moves,
   a drag outside draws a new one (fitted only: zoomed, a drag pans).
+
+## AI masks on disk, and finer for export (2026-10-22)
+
+The two leftovers of the AI mask parts (Subject, People, Background,
+Face parts, Object), from EDITING-SPEC's "Rendering masks".
+
+- **On disk** (`mask::store`): what Vision or SAM returned, as an 8-bit
+  grayscale PNG in `<cache>/ai-masks/<key>.png`, written beside and
+  renamed into place; 512 MB, least recently used removed first (a read
+  touches the file), and only our own `*.png` (and our temporary files
+  a day old) are ever removed there. A damaged file, or one of the wrong
+  size, is ignored and found again. `mask::find` and `mask::segment` go
+  through it, so the in-memory cache (per source) is unchanged and the
+  live view's background search reads the disk on its thread; opening a
+  photo again or restarting reads the PNG instead of searching.
+- **The key** is a BLAKE3 over: the exact picture the finder is given
+  (its bytes and size), the kind (subject, person, face part; object
+  with its clicks in that picture's pixels), the finder's identity and a
+  format version. The spec says "keyed by file hash and prompt points";
+  the picture's own hash is stricter and needs nothing from the app: it
+  changes with the file's content, its raw settings, the source's size
+  (proxy or full), the colour and display it's shown with and its
+  orientation, which are what the finder's result depends on. (The
+  in-memory key is what, orientation and grid size per source, and
+  deliberately ignores colour edits; on disk a colour edit then reopening
+  searches once more, never shows a mask found on another picture.) An
+  object's own key in the edit (`object_key`, `DefaultHasher`) isn't
+  used: it isn't stable across Rust versions; the clicks themselves are.
+- **Identities:** `register_finder` and `register_segmenter` now take one.
+  Vision's is `vision/<REVISION>/<macOS build>` (`shoebox_ml::vision::
+  identity`, from SystemVersion.plist: Vision's models come with the OS;
+  `REVISION` is bumped when our requests or `draw_parts` change); SAM's
+  is `sam::MODEL_ID`. An empty identity (no readable build) keeps
+  nothing.
+- **Finer for export** (`mask::fine`): when the source is larger than
+  the 2560 px grid (exports and 100% regions read the full-size source)
+  and a layer has an AI part, every layer is rasterised on the source's
+  own pixels instead, within 128 MB for all layers (a 45 MP export: full
+  size with two masks, a little smaller with more; 128 MB is also wgpu's
+  default storage binding, so the GPU could take it). AI parts are found
+  on the grid as before and upsampled by He and Sun's fast guided filter:
+  coefficients on the grid (radius 4 grid pixels, ε 10⁻³), read
+  bilinearly and applied to the full-size guide per pixel. Both pipes
+  read the result like any masks (the shader is unchanged; a GPU case on
+  a source wider than the grid agrees within 1e-4). Previews and the live
+  view (proxies at most 2560 px) are as before.
+- **The guide is colour, not luminance** (differing from the spec's "on
+  full-resolution luminance"): each channel of the source, relative to
+  its mean luminance, compressed `v/(1+v)` and gamma encoded, through He's
+  colour guided filter (a 3×3 solve per grid pixel). On a luminance guide
+  an edge between two colours equally bright is invisible, and there the
+  filter blurs the mask (wider than bilinear); with colour it's as sharp
+  as any. It reads the source before the edit, so colour edits don't
+  redo it.
+- **Geometric parts** (gradients, ellipses, brushes) are rasterised at
+  the fine size: they're formulas, as cheap per pixel there, and a hard
+  brush edge stays sharp. **Ranges** stay on the grid, read bilinearly:
+  they need tones per pixel (three floats, 540 MB at 45 MP) and are soft
+  by construction. Masks without AI parts keep the 2560 px grid, so
+  nothing else changes.
+- **Measured:** a disc's edge in a 256 px picture with its mask on a 64
+  px grid: mean error within 8 px of the edge 0.002 against bilinear's
+  0.084 (blocky mask), 0.115 against 0.287 (also blurred over 5 grid
+  pixels), and no pixel on the wrong side of a half against 355 and 174;
+  the same between two colours equally bright. A 45 MP frame with three
+  masks (two AI parts) takes 2.3 s in all (release, M2 Max) and holds
+  127 MB of masks; working the coefficients out briefly takes about 0.3
+  GB more.
+- Done in bands of 32 rows, so beyond the result only a few rows of
+  floats are held per thread.

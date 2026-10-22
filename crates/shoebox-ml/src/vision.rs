@@ -6,6 +6,28 @@
 
 use crate::MlError;
 
+/// Bumped when the requests made, or how their results become masks
+/// (`draw_parts`), change.
+pub const REVISION: u32 = 1;
+
+/// What finds the masks, for keeping them: this code's [`REVISION`] and
+/// the system's build (Vision's models come with the OS), e.g.
+/// `vision/1/25A354`. None where the build can't be read (masks found
+/// then aren't kept).
+pub fn identity() -> Option<String> {
+    let plist = std::fs::read_to_string("/System/Library/CoreServices/SystemVersion.plist").ok()?;
+    let build = build_version(&plist)?;
+    Some(format!("vision/{REVISION}/{build}"))
+}
+
+/// `ProductBuildVersion` from SystemVersion.plist's XML.
+fn build_version(plist: &str) -> Option<&str> {
+    let after = plist.split("<key>ProductBuildVersion</key>").nth(1)?;
+    let v = after.trim_start().strip_prefix("<string>")?;
+    let v = v.split("</string>").next()?.trim();
+    (!v.is_empty() && v.chars().all(|c| c.is_ascii_alphanumeric())).then_some(v)
+}
+
 /// What to find.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Find {
@@ -588,6 +610,20 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_build_is_read_from_the_plist() {
+        let plist = "<dict>\n\t<key>ProductBuildVersion</key>\n\t<string>25A354</string>\n\
+                     \t<key>ProductName</key>\n\t<string>macOS</string>\n</dict>";
+        assert_eq!(build_version(plist), Some("25A354"));
+        assert_eq!(build_version("<dict></dict>"), None);
+        assert_eq!(
+            build_version("<key>ProductBuildVersion</key><string>../x</string>"),
+            None
+        );
+        #[cfg(target_os = "macos")]
+        assert!(identity().is_some_and(|i| i.starts_with("vision/")));
+    }
 
     /// A square face at (100, 100), 100 wide: eyes, brows, a mouth.
     fn face() -> Face {

@@ -158,3 +158,16 @@ together at the end, before the release.
   comes up towards a natural brightness while the bright background
   holds; a box dragged over a dark subject does the same; no halos round
   the subject, and the export matches Develop.
+- [ ] **AI mask edges at full size** (guided upsampling, from
+  2026-10-22): a portrait with flyaway hair against a sky, a bare tree
+  against a bright sky, and a red flower on green leaves (an edge
+  between two colours equally bright), each with a Subject (or People)
+  mask and a strong adjustment (exposure −2 on the background). At 100%
+  and in a full-size export, the edge follows the hair, twigs and petals
+  rather than going blocky or haloed, and fine strands aren't lost; the
+  export doesn't differ visibly from Develop at fit. Note the export's
+  time against the same photo without the mask.
+- [ ] **AI masks kept on disk**: open a photo with Subject and Object
+  masks, close the app, open it again: the masks are there at once
+  ("Finding it…" no more than flickers), and `<cache>/ai-masks` holds a PNG per mask. After a
+  macOS update, Subject and People are found again (once).

@@ -7,11 +7,18 @@
 //! The grid's long edge is at most [`LONG`] whatever the source, so a
 //! mask is the same on the proxy, in 100% regions and in an export. Parts
 //! that depend on the picture (luminance and colour ranges) read
-//! [`Tones`] on that grid.
+//! [`Tones`] on that grid. For sources larger than the grid with AI parts
+//! (exports, 100% regions), [`fine`] rasterises on a finer grid, the AI
+//! parts upsampled by a guided filter on the full-size source.
+//!
+//! What the AI finders return is kept on disk by [`store`].
+
+pub mod fine;
+pub mod store;
 
 use rayon::prelude::*;
 
-use crate::edit::{Local, Op, Part, Shape, Stroke};
+use crate::edit::{Local, MaskPart, Op, Part, Shape, Stroke};
 
 /// The grid's longest edge.
 pub const LONG: usize = 2560;
@@ -61,15 +68,27 @@ pub enum Find {
 pub type Segmenter =
     dyn Fn(&[u8], usize, usize, &[(f32, f32, bool)]) -> Result<Vec<u8>, String> + Send + Sync;
 
-static SEGMENTER: std::sync::OnceLock<Box<Segmenter>> = std::sync::OnceLock::new();
-
-/// Give the masks a way to find objects at clicks (the app registers SAM
-/// 2.1). Once.
-pub fn register_segmenter(f: Box<Segmenter>) {
-    let _ = SEGMENTER.set(f);
+/// A registered finder and its identity (the model and its version:
+/// results are kept on disk by it; empty keeps nothing).
+struct Registered<F: ?Sized> {
+    id: String,
+    run: Box<F>,
 }
 
-/// Find the object at `clicks` with the registered segmenter.
+static SEGMENTER: std::sync::OnceLock<Registered<Segmenter>> = std::sync::OnceLock::new();
+
+/// Give the masks a way to find objects at clicks (the app registers SAM
+/// 2.1), named `id` (the model's identity, e.g. `sam::MODEL_ID`: masks
+/// are kept on disk by it). Once.
+pub fn register_segmenter(id: &str, f: Box<Segmenter>) {
+    let _ = SEGMENTER.set(Registered {
+        id: id.to_owned(),
+        run: f,
+    });
+}
+
+/// Find the object at `clicks` with the registered segmenter (or read
+/// what it found before from the [`store`]).
 pub fn segment(
     rgb: &[u8],
     w: usize,
@@ -77,7 +96,9 @@ pub fn segment(
     clicks: &[(f32, f32, bool)],
 ) -> Result<Vec<u8>, String> {
     match SEGMENTER.get() {
-        Some(f) => f(rgb, w, h, clicks),
+        Some(f) => store::through(&f.id, "object", clicks, rgb, w, h, || {
+            (f.run)(rgb, w, h, clicks)
+        }),
         None => Err("no object finder in this build".into()),
     }
 }
@@ -98,20 +119,52 @@ pub fn object_key(clicks: &[crate::edit::ObjectClick]) -> u64 {
 /// a coverage byte per pixel, or why it couldn't.
 pub type Finder = dyn Fn(&[u8], usize, usize, Find) -> Result<Vec<u8>, String> + Send + Sync;
 
-static FINDER: std::sync::OnceLock<Box<Finder>> = std::sync::OnceLock::new();
+static FINDER: std::sync::OnceLock<Registered<Finder>> = std::sync::OnceLock::new();
 
 /// Give the masks a way to find subjects and people (the app registers
-/// Apple's Vision; `shoebox-develop` doesn't depend on it). Once.
-pub fn register_finder(f: Box<Finder>) {
-    let _ = FINDER.set(f);
+/// Apple's Vision; `shoebox-develop` doesn't depend on it), named `id`
+/// (what finds them and its version, e.g. the OS build: masks are kept on
+/// disk by it; empty keeps nothing). Once.
+pub fn register_finder(id: &str, f: Box<Finder>) {
+    let _ = FINDER.set(Registered {
+        id: id.to_owned(),
+        run: f,
+    });
 }
 
-/// Find `what` with the registered finder.
+/// Find `what` with the registered finder (or read what it found before
+/// from the [`store`]).
 pub fn find(rgb: &[u8], w: usize, h: usize, what: Find) -> Result<Vec<u8>, String> {
+    use crate::edit::FacePart as P;
+    let kind = match what {
+        Find::Subject => "subject",
+        Find::Person => "person",
+        Find::Face(P::Skin) => "face-skin",
+        Find::Face(P::Eyes) => "face-eyes",
+        Find::Face(P::Eyebrows) => "face-eyebrows",
+        Find::Face(P::Lips) => "face-lips",
+        Find::Face(P::Teeth) => "face-teeth",
+        // Objects are the segmenter's (their clicks are its key).
+        Find::Object(_) => "",
+    };
     match FINDER.get() {
-        Some(f) => f(rgb, w, h, what),
+        Some(f) if !kind.is_empty() => {
+            store::through(&f.id, kind, &[], rgb, w, h, || (f.run)(rgb, w, h, what))
+        }
+        Some(f) => (f.run)(rgb, w, h, what),
         None => Err("no subject finder in this build".into()),
     }
+}
+
+/// The [`Find`] an AI part reads (None: not an AI part).
+pub fn find_of(shape: &Shape) -> Option<Find> {
+    Some(match shape {
+        Shape::Subject => Find::Subject,
+        Shape::Person => Find::Person,
+        Shape::Object { clicks } => Find::Object(object_key(clicks)),
+        Shape::Face { part } => Find::Face(*part),
+        _ => return None,
+    })
 }
 
 /// Finds the faces in an upright 8-bit sRGB image (`rgb`, width, height):
@@ -206,36 +259,16 @@ pub fn rasterise_with(
         let mut m = vec![0f32; n];
         for part in &l.mask.parts {
             let Part::Known(p) = part else { continue };
-            let v = match &p.shape {
-                Shape::Subject | Shape::Person | Shape::Object { .. } | Shape::Face { .. } => {
-                    let f = match &p.shape {
-                        Shape::Subject => Find::Subject,
-                        Shape::Person => Find::Person,
-                        Shape::Object { clicks } => Find::Object(object_key(clicks)),
-                        Shape::Face { part } => Find::Face(*part),
-                        _ => Find::Subject,
-                    };
-                    match found(f).filter(|c| c.len() == n) {
-                        Some(c) => c.iter().map(|&b| f32::from(b) / 255.0).collect(),
-                        None => vec![0.0; n],
-                    }
-                }
-                _ => shape(&p.shape, width, height, units, tones),
+            let v = match find_of(&p.shape) {
+                Some(f) => match found(f).filter(|c| c.len() == n) {
+                    Some(c) => c.iter().map(|&b| f32::from(b) / 255.0).collect(),
+                    None => vec![0.0; n],
+                },
+                None => shape(&p.shape, width, height, units, tones),
             };
-            m.par_iter_mut().zip(&v).for_each(|(m, &v)| {
-                let v = if p.invert { 1.0 - v } else { v };
-                *m = match p.op {
-                    Op::Add => m.max(v),
-                    Op::Subtract => *m * (1.0 - v),
-                    Op::Intersect => *m * v,
-                };
-            });
+            combine(&mut m, &v, p);
         }
-        let amount = (l.amount / 100.0).clamp(0.0, 1.0) as f32;
-        plane
-            .par_iter_mut()
-            .zip(&m)
-            .for_each(|(o, v)| *o = ((v * amount).clamp(0.0, 1.0) * 255.0).round() as u8);
+        quantise(plane, &m, l.amount);
     }
     Masks {
         width,
@@ -245,8 +278,43 @@ pub fn rasterise_with(
     }
 }
 
+/// A part on a layer's coverage so far (`m`), by its op and invert.
+pub(crate) fn combine(m: &mut [f32], v: &[f32], p: &MaskPart) {
+    m.par_iter_mut().zip(v).for_each(|(m, &v)| {
+        let v = if p.invert { 1.0 - v } else { v };
+        *m = match p.op {
+            Op::Add => m.max(v),
+            Op::Subtract => *m * (1.0 - v),
+            Op::Intersect => *m * v,
+        };
+    });
+}
+
+/// A layer's coverage, times its amount (0–100), to bytes.
+pub(crate) fn quantise(plane: &mut [u8], m: &[f32], amount: f64) {
+    let amount = (amount / 100.0).clamp(0.0, 1.0) as f32;
+    plane
+        .par_iter_mut()
+        .zip(m)
+        .for_each(|(o, v)| *o = ((v * amount).clamp(0.0, 1.0) * 255.0).round() as u8);
+}
+
 /// One part's coverage, 0–1 per grid pixel.
 fn shape(s: &Shape, w: usize, h: usize, units: [f64; 2], tones: Option<&Tones>) -> Vec<f32> {
+    shape_rows(s, w, h, 0..h, units, tones)
+}
+
+/// One part's coverage on rows `rows` of a `w`×`h` grid, 0–1 per pixel
+/// (`tones`, when given, cover the whole grid).
+pub(crate) fn shape_rows(
+    s: &Shape,
+    w: usize,
+    h: usize,
+    rows: std::ops::Range<usize>,
+    units: [f64; 2],
+    tones: Option<&Tones>,
+) -> Vec<f32> {
+    let (y0, n) = (rows.start, rows.len() * w);
     // A grid pixel's centre in the long edge's units.
     let at = move |x: usize, y: usize| {
         [
@@ -255,20 +323,24 @@ fn shape(s: &Shape, w: usize, h: usize, units: [f64; 2], tones: Option<&Tones>) 
         ]
     };
     let each = |f: &(dyn Fn([f64; 2], usize) -> f64 + Sync)| -> Vec<f32> {
-        let mut v = vec![0f32; w * h];
-        v.par_chunks_mut(w).enumerate().for_each(|(y, line)| {
-            for (x, o) in line.iter_mut().enumerate() {
-                *o = f(at(x, y), y * w + x) as f32;
-            }
-        });
+        let mut v = vec![0f32; n];
+        v.par_chunks_mut(w.max(1))
+            .enumerate()
+            .for_each(|(row, line)| {
+                let y = y0 + row;
+                for (x, o) in line.iter_mut().enumerate() {
+                    *o = f(at(x, y), y * w + x) as f32;
+                }
+            });
         v
     };
+    let tones = tones.filter(|t| t.shown.len() == w * h);
     match s {
         Shape::Linear { from, to } => {
             let d = [to[0] - from[0], to[1] - from[1]];
             let len2 = d[0] * d[0] + d[1] * d[1];
             if len2 <= 0.0 {
-                return vec![0.0; w * h];
+                return vec![0.0; n];
             }
             each(&|p, _| {
                 let t = ((p[0] - from[0]) * d[0] + (p[1] - from[1]) * d[1]) / len2;
@@ -292,10 +364,10 @@ fn shape(s: &Shape, w: usize, h: usize, units: [f64; 2], tones: Option<&Tones>) 
                 1.0 - smoothstep(inner, 1.0, r)
             })
         }
-        Shape::Brush { strokes } => brush(strokes, w, h, units),
+        Shape::Brush { strokes } => brush(strokes, w, rows, units),
         Shape::Luminance { range, smooth } => {
             let Some(t) = tones else {
-                return vec![0.0; w * h];
+                return vec![0.0; n];
             };
             let (lo, hi, s) = (range[0], range[1], smooth.max(0.0));
             each(&|_, i| {
@@ -314,8 +386,8 @@ fn shape(s: &Shape, w: usize, h: usize, units: [f64; 2], tones: Option<&Tones>) 
             })
         }
         Shape::Colour { hue, width } => {
-            let Some(t) = tones else {
-                return vec![0.0; w * h];
+            let Some(t) = tones.filter(|t| t.hue.len() == w * h && t.chroma.len() == w * h) else {
+                return vec![0.0; n];
             };
             let width = width.max(1.0);
             each(&|_, i| {
@@ -327,7 +399,7 @@ fn shape(s: &Shape, w: usize, h: usize, units: [f64; 2], tones: Option<&Tones>) 
         }
         // Read from what was found (see `rasterise_with`).
         Shape::Subject | Shape::Person | Shape::Object { .. } | Shape::Face { .. } => {
-            vec![0.0; w * h]
+            vec![0.0; n]
         }
     }
 }
@@ -335,8 +407,9 @@ fn shape(s: &Shape, w: usize, h: usize, units: [f64; 2], tones: Option<&Tones>) 
 /// Strokes in order: within a stroke the strongest dab counts (so a stroke
 /// doesn't build up over itself); strokes build on each other by their
 /// flow, and erasing strokes take away.
-fn brush(strokes: &[Stroke], w: usize, h: usize, units: [f64; 2]) -> Vec<f32> {
-    let mut b = vec![0f32; w * h];
+/// On rows `rows` of a grid `w` wide.
+fn brush(strokes: &[Stroke], w: usize, rows: std::ops::Range<usize>, units: [f64; 2]) -> Vec<f32> {
+    let mut b = vec![0f32; w * rows.len()];
     // Grid pixels per unit.
     let k = w as f64 / units[0].max(1e-9);
     for s in strokes {
@@ -365,7 +438,7 @@ fn brush(strokes: &[Stroke], w: usize, h: usize, units: [f64; 2]) -> Vec<f32> {
             y1 = y1.max(p[1] + r);
         }
         let clampx = |v: f64| (v.max(0.0) as usize).min(w);
-        let clampy = |v: f64| (v.max(0.0) as usize).min(h);
+        let clampy = |v: f64| (v.max(0.0) as usize).clamp(rows.start, rows.end);
         let (bx0, bx1) = (clampx(x0.floor()), clampx(x1.ceil() + 1.0));
         let (by0, by1) = (clampy(y0.floor()), clampy(y1.ceil() + 1.0));
         if bx0 >= bx1 || by0 >= by1 {
@@ -376,7 +449,7 @@ fn brush(strokes: &[Stroke], w: usize, h: usize, units: [f64; 2]) -> Vec<f32> {
         } else {
             pts.windows(2).map(|p| (p[0], p[1])).collect()
         };
-        b[by0 * w..by1 * w]
+        b[(by0 - rows.start) * w..(by1 - rows.start) * w]
             .par_chunks_mut(w)
             .enumerate()
             .for_each(|(row, line)| {

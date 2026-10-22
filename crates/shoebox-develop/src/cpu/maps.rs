@@ -613,7 +613,7 @@ pub fn dehaze_px(p: [f32; 3], t: f32, airlight: [f32; 3], amount: f32) -> [f32; 
 }
 
 /// The mean of a `(2r+1)²` box (clipped at the edges), by running sums.
-fn box_mean(v: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
+pub(crate) fn box_mean(v: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
     let mut rows = vec![0f32; w * h];
     rows.par_chunks_mut(w).enumerate().for_each(|(y, out)| {
         let line = &v[y * w..(y + 1) * w];

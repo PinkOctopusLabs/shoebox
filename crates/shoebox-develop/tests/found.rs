@@ -15,16 +15,19 @@ static SEEN: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
 static ONE: Mutex<()> = Mutex::new(());
 
 fn register() {
-    mask::register_finder(Box::new(|rgb, w, h, _what| {
-        SEEN.lock().unwrap().push((w, h));
-        // "Subject": the red pixels.
-        Ok(rgb
-            .as_chunks::<3>()
-            .0
-            .iter()
-            .map(|p| if p[0] > 150 && p[1] < 80 { 255 } else { 0 })
-            .collect())
-    }));
+    mask::register_finder(
+        "fake",
+        Box::new(|rgb, w, h, _what| {
+            SEEN.lock().unwrap().push((w, h));
+            // "Subject": the red pixels.
+            Ok(rgb
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|p| if p[0] > 150 && p[1] < 80 { 255 } else { 0 })
+                .collect())
+        }),
+    );
 }
 
 /// 120×80, grey, with a red square at the stored image's top left.
@@ -140,15 +143,18 @@ fn objects_are_found_where_clicked() {
     let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
     // A disc of radius 6 around the first click, in the picture it's
     // given (upright).
-    mask::register_segmenter(Box::new(|_rgb, w, h, clicks| {
-        let (cx, cy, _) = clicks[0];
-        Ok((0..w * h)
-            .map(|i| {
-                let (x, y) = ((i % w) as f32, (i / w) as f32);
-                if (x - cx).hypot(y - cy) < 6.0 { 255 } else { 0 }
-            })
-            .collect())
-    }));
+    mask::register_segmenter(
+        "fake",
+        Box::new(|_rgb, w, h, clicks| {
+            let (cx, cy, _) = clicks[0];
+            Ok((0..w * h)
+                .map(|i| {
+                    let (x, y) = ((i % w) as f32, (i / w) as f32);
+                    if (x - cx).hypot(y - cy) < 6.0 { 255 } else { 0 }
+                })
+                .collect())
+        }),
+    );
     // A click at stored pixel (90, 60) of the 120×80 source.
     let at = [(90.0 + 0.5) / 120.0, (60.0 + 0.5) / 120.0];
     let s = Settings {

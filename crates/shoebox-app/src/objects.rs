@@ -27,9 +27,11 @@ impl Objects {
             last: Mutex::new(None),
         });
         let seg = o.clone();
-        shoebox_develop::mask::register_segmenter(Box::new(move |rgb, w, h, clicks| {
-            seg.segment(rgb, w, h, clicks)
-        }));
+        // Masks are kept on disk by the model.
+        shoebox_develop::mask::register_segmenter(
+            shoebox_ml::sam::MODEL_ID,
+            Box::new(move |rgb, w, h, clicks| seg.segment(rgb, w, h, clicks)),
+        );
         o
     }
 
