@@ -29,6 +29,8 @@ use crate::edit::{Spot, SpotKind};
 /// At most this many spots are applied (an edit file is JSON anyone can
 /// write; this keeps one from taking forever).
 pub const MAX_SPOTS: usize = 2000;
+/// At most this many removals run (each asks the model, about 0.6 s).
+pub const MAX_REMOVALS: usize = 100;
 /// The largest radius, in long edges.
 pub const MAX_RADIUS: f64 = 0.25;
 /// The most relaxation sweeps one heal takes.
@@ -55,6 +57,7 @@ pub fn heal_with(
     fill: &mut dyn FnMut(usize, &remove::Job) -> Option<Arc<remove::Fill>>,
 ) -> Rgb {
     let mut out = img.clone();
+    let mut removals = 0;
     for (i, s) in spots.iter().enumerate().take(MAX_SPOTS) {
         let finite = s.dest.iter().chain(&s.source).all(|v| v.is_finite())
             && s.radius.is_finite()
@@ -72,6 +75,10 @@ pub fn heal_with(
             ..s.clone()
         };
         if s.kind == SpotKind::Remove {
+            removals += 1;
+            if removals > MAX_REMOVALS {
+                continue;
+            }
             if let Some(job) = remove::job(&out, &s)
                 && let Some(f) = fill(i, &job)
             {

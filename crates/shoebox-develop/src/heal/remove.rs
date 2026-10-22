@@ -48,9 +48,15 @@ const SIZE: usize = 512;
 pub const MIN_SIDE: f64 = 0.2;
 /// … and this many times the strokes' extent.
 const CONTEXT: f64 = 2.0;
-/// Bounds on what an edit file can ask for.
+/// Bounds on what an edit file can ask for: strokes, points, and the area
+/// (long edges²) the strokes' segments reach over together, which is what
+/// drawing them costs (a hand-painted removal is well under one).
 pub const MAX_STROKES: usize = 500;
 pub const MAX_POINTS: usize = 20_000;
+pub const MAX_AREA: f64 = 16.0;
+/// A point nearer the last one kept than this many radii is dropped, as
+/// the brush spaces them.
+const SPACING: f64 = 0.25;
 /// Fills kept on disk: about 1 MB each.
 pub const DEFAULT_LIMIT: u64 = 256 << 20;
 /// Bumped whenever the crop, encoding or what's kept changes in a way the
@@ -108,30 +114,54 @@ pub struct Fill {
 }
 
 /// The strokes a removal paints with, sane (an edit file is JSON anyone
-/// can write): finite, radii within bounds, at most [`MAX_STROKES`] and
-/// [`MAX_POINTS`] in all.
+/// can write): finite, radii within bounds, points spaced as the brush
+/// spaces them, at most [`MAX_STROKES`], [`MAX_POINTS`] and [`MAX_AREA`]
+/// in all.
 pub fn strokes(spot: &Spot) -> Vec<Stroke> {
-    let mut points = 0;
-    spot.strokes
-        .iter()
-        .take(MAX_STROKES)
-        .filter(|s| s.radius.is_finite() && s.radius > 0.0)
-        .filter_map(|s| {
-            let pts: Vec<[f64; 2]> = s
-                .points
-                .iter()
-                .filter(|p| p.iter().all(|v| v.is_finite() && v.abs() < 4.0))
-                .take(MAX_POINTS.saturating_sub(points))
-                .copied()
-                .collect();
-            points += pts.len();
-            (!pts.is_empty()).then(|| Stroke {
+    let (mut points, mut area) = (0, 0.0);
+    let mut out = Vec::new();
+    for s in spot.strokes.iter().take(MAX_STROKES) {
+        if !(s.radius.is_finite() && s.radius > 0.0) {
+            continue;
+        }
+        let radius = s.radius.min(super::MAX_RADIUS);
+        // The feather reaches up to the radius again beyond it.
+        let reach = 2.0 * radius;
+        let mut pts: Vec<[f64; 2]> = Vec::new();
+        let finite = s
+            .points
+            .iter()
+            .filter(|p| p.iter().all(|v| v.is_finite() && v.abs() < 4.0));
+        for p in finite {
+            if points + pts.len() >= MAX_POINTS {
+                break;
+            }
+            let cost = match pts.last() {
+                Some(q) => {
+                    let (dx, dy) = ((p[0] - q[0]).abs(), (p[1] - q[1]).abs());
+                    if dx.hypot(dy) < SPACING * radius {
+                        continue;
+                    }
+                    (dx + 2.0 * reach) * (dy + 2.0 * reach)
+                }
+                None => (2.0 * reach).powi(2),
+            };
+            if area + cost > MAX_AREA {
+                break;
+            }
+            area += cost;
+            pts.push(*p);
+        }
+        points += pts.len();
+        if !pts.is_empty() {
+            out.push(Stroke {
                 points: pts,
-                radius: s.radius.min(super::MAX_RADIUS),
+                radius,
                 ..s.clone()
-            })
-        })
-        .collect()
+            });
+        }
+    }
+    out
 }
 
 /// The strokes' reach, in pixels of an image `long` pixels on its long
@@ -710,5 +740,29 @@ mod tests {
         assert_eq!(s.len(), 2);
         assert_eq!(s[0].points, vec![[0.5, 0.5]]);
         assert_eq!(s[1].radius, super::super::MAX_RADIUS);
+    }
+
+    #[test]
+    fn strokes_cost_is_bounded() {
+        // Close points are dropped, as the brush spaces them.
+        let fine = (0..100).map(|i| [0.5 + i as f64 * 1e-4, 0.5]).collect();
+        let s = strokes(&Spot {
+            strokes: vec![stroke(fine, 0.01, false)],
+            ..Default::default()
+        });
+        assert_eq!(s[0].points.len(), 4);
+        // Big strokes zigzagging across the picture stop at the budget.
+        let zigzag = (0..MAX_POINTS)
+            .map(|i| [(i % 2) as f64, 0.5])
+            .collect::<Vec<_>>();
+        let s = strokes(&Spot {
+            strokes: vec![stroke(zigzag.clone(), 9.0, false); 3],
+            ..Default::default()
+        });
+        let r = super::super::MAX_RADIUS;
+        let segment = (1.0 + 4.0 * r) * (4.0 * r);
+        let n: usize = s.iter().map(|s| s.points.len()).sum();
+        assert!(n as f64 * segment <= MAX_AREA + segment, "{n} points");
+        assert!(n > 1);
     }
 }

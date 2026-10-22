@@ -3216,7 +3216,13 @@ library".
   Size on a selected removal resizes its strokes. No SAM "click an
   object to remove it" yet: a removal's hole is strokes only.
 - **Bounds:** at most 500 strokes and 20,000 points a removal, finite
-  points, radii at most a quarter of the long edge (as spots).
+  points, radii at most a quarter of the long edge (as spots). Points
+  are spaced at least a quarter radius apart (as the brush spaces them),
+  and a removal's segments may reach over 16 long edges² in all (each
+  segment's box, which is what drawing it costs; a hand-painted removal
+  is well under one), so a hand-written edit can't make a removal take
+  hours. At most 100 removals run in one edit (each asks the model).
+  Found by a security review of the commit.
 - **Measured** (M2 Max, release, Metal): the model 0.6 s a fill (CPU 2.7
   s), the first in a process about 1 s with Metal's compilation; load
   0.1 s; making the job 16–35 ms, blending 2–10 ms on a 24 MP frame. On a
