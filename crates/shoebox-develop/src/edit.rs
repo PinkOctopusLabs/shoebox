@@ -989,6 +989,8 @@ pub struct LocalAdjust {
     pub saturation: f64,
     pub clarity: f64,
     pub dehaze: f64,
+    /// Sharpening (+) or softening (−) of fine detail.
+    pub sharpness: f64,
 }
 
 impl Settings {

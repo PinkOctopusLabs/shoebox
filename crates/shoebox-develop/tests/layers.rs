@@ -312,3 +312,53 @@ fn a_proxy_mask_rasterises_quickly() {
         assert!(ms < 60.0, "{ms} ms");
     }
 }
+
+#[test]
+fn local_sharpness_sharpens_and_softens() {
+    let raw = shoebox_decode::raw::RawImage {
+        width: 0,
+        height: 0,
+        cfa: [[0, 1], [1, 2]],
+        data: Vec::new(),
+        as_shot: None,
+        matrices: Vec::new(),
+        make: String::new(),
+        model: String::new(),
+    };
+    // A fine checker.
+    let mut img = Rgb::new(64, 48);
+    for y in 0..48 {
+        for x in 0..64 {
+            let v = if (x + y) % 2 == 0 { 0.3 } else { 0.1 };
+            img.data[(y * 64 + x) * 3..][..3].copy_from_slice(&[v; 3]);
+        }
+    }
+    let src = Demosaiced::new(img, [1.0; 3], Referred::Display);
+    let o = Options::default();
+    let contrast = |s: &Settings| {
+        let out = cpu::render_from(&raw, &src, s, &o, false);
+        (out.px(20, 20)[1] - out.px(21, 20)[1]).abs()
+    };
+    let plain = contrast(&Settings::default());
+    let with = |sharpness| {
+        let mut l = layer(vec![part(
+            Op::Add,
+            Shape::Radial {
+                centre: [0.5, 0.375],
+                radii: [0.6, 0.6],
+                angle: 0.0,
+                feather: 0.0,
+            },
+        )]);
+        l.adjust = LocalAdjust {
+            sharpness,
+            ..Default::default()
+        };
+        Settings {
+            locals: vec![l],
+            ..Default::default()
+        }
+    };
+    assert!(contrast(&with(80.0)) > plain * 1.5, "sharper");
+    assert!(contrast(&with(-100.0)) < plain * 0.2, "softer");
+}

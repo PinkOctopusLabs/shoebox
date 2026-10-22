@@ -321,7 +321,7 @@ impl Pipe {
                     v.extend([r[0], r[1], r[2], 0.0]);
                 }
                 v.extend([l.contrast, l.shadows, l.highlights, l.clarity]);
-                v.extend([l.dehaze, if l.active { 1.0 } else { 0.0 }, 0.0, 0.0]);
+                v.extend([l.dehaze, if l.active { 1.0 } else { 0.0 }, l.sharpness, 0.0]);
                 v
             })
             .flat_map(f32::to_le_bytes)
@@ -807,7 +807,7 @@ fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
         .mask_view
         .map_or((0.0, 0.0), |(k, o)| ((k + 1) as f32, flag(o)));
     v.extend([ls.list.len() as f32, lw, lh, shown]);
-    v.extend([ls.scale[0], ls.scale[1], only, 0.0]);
+    v.extend([ls.scale[0], ls.scale[1], only, flag(ls.detail)]);
     let shown_point = f.point_view.map_or(0.0, |k| (k + 1) as f32);
     v.extend([l.point_count as f32, shown_point, 0.0, 0.0]);
     v.extend([lc.smart, lc.smart_bias, 0.0, 0.0]);

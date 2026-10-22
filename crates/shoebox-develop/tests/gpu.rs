@@ -588,6 +588,7 @@ fn local_layers() -> Vec<shoebox_develop::edit::Local> {
                 highlights: -50.0,
                 clarity: 30.0,
                 dehaze: 20.0,
+                sharpness: -60.0,
             },
             ..Default::default()
         },
@@ -619,6 +620,7 @@ fn local_layers() -> Vec<shoebox_develop::edit::Local> {
             adjust: LocalAdjust {
                 exposure: -0.5,
                 saturation: -60.0,
+                sharpness: 70.0,
                 ..Default::default()
             },
             ..Default::default()

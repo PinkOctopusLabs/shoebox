@@ -30,6 +30,8 @@ pub struct Layer {
     pub highlights: f32,
     pub clarity: f32,
     pub dehaze: f32,
+    /// Fine detail added (+) or taken away (−): −1 to 1.
+    pub sharpness: f32,
 }
 
 /// What the live pipe needs for the local adjustments.
@@ -44,6 +46,9 @@ pub struct Layers {
     pub masks: Option<Arc<Masks>>,
     /// Source pixels → mask pixels.
     pub scale: [f32; 2],
+    /// A layer sharpens or softens: the pipe works out each pixel's fine
+    /// detail.
+    pub detail: bool,
 }
 
 impl Layers {
@@ -120,8 +125,10 @@ pub fn layers(
         let lookup = |f: mask::Find| found.iter().find(|x| x.0 == f).map(|x| x.1.clone());
         mask::rasterise_with(&locals, gw, gh, units, t.as_ref(), &lookup)
     });
+    let list: Vec<Layer> = locals.iter().map(|l| layer(l)).collect();
     Layers {
-        list: locals.iter().map(|l| layer(l)).collect(),
+        detail: list.iter().any(|l| l.active && l.sharpness != 0.0),
+        list,
         ids: locals.iter().map(|l| l.id.clone()).collect(),
         from,
         masks: Some(masks),
@@ -237,6 +244,7 @@ fn layer(l: &Local) -> Layer {
         highlights: unit(a.highlights),
         clarity: unit(a.clarity),
         dehaze: unit(a.dehaze),
+        sharpness: unit(a.sharpness).clamp(-1.0, 1.0),
     }
 }
 
@@ -319,10 +327,14 @@ fn tone_with(
 /// The local adjustments for one linear Rec.2020 pixel: masks read at
 /// source position `(mx, my)` (before lens corrections, where they were
 /// drawn), the global maps at `(sx, sy)`.
+/// `detail`: the pixel less the mean of its four neighbours (when
+/// `ls.detail`; else zeros).
+#[allow(clippy::too_many_arguments)]
 pub fn layers_pixel(
     ls: &Layers,
     local: &maps::Local,
     p: [f32; 3],
+    detail: [f32; 3],
     mx: f32,
     my: f32,
     sx: f32,
@@ -344,19 +356,33 @@ pub fn layers_pixel(
         if w <= 0.0 {
             continue;
         }
-        let q = adjust(l, local, p, sx, sy);
+        let q = adjust(l, local, p, detail, sx, sy);
         p = [0, 1, 2].map(|c| p[c] + (q[c] - p[c]) * w);
     }
     p
 }
 
 /// One layer's sliders on a pixel.
-fn adjust(l: &Layer, local: &maps::Local, p: [f32; 3], sx: f32, sy: f32) -> [f32; 3] {
+fn adjust(
+    l: &Layer,
+    local: &maps::Local,
+    p: [f32; 3],
+    detail: [f32; 3],
+    sx: f32,
+    sy: f32,
+) -> [f32; 3] {
     let m = local
         .maps
         .as_ref()
         .map(|maps| (maps, maps::at_source(local, maps, sx, sy)));
-    let mut q = p;
+    // Sharpness first: at −1 the pixel is averaged with its neighbours'
+    // mean.
+    let mut q = if l.sharpness != 0.0 {
+        let k = if l.sharpness > 0.0 { 1.5 } else { 0.5 } * l.sharpness;
+        [0, 1, 2].map(|c| (p[c] + k * detail[c]).max(0.0))
+    } else {
+        p
+    };
     if l.dehaze != 0.0
         && let Some((maps, m)) = &m
     {

@@ -57,7 +57,7 @@ struct Params {
     unproof1: vec4<f32>,
     unproof2: vec4<f32>,
     layers: vec4<f32>,    // local adjustments: count, mask width, mask height, mask shown (index + 1; 0: none)
-    mscale: vec4<f32>,    // source → mask pixels (x, y); z: the mask alone (0/1)
+    mscale: vec4<f32>,    // source → mask pixels (x, y); z: the mask alone (0/1); w: a layer sharpens (0/1)
     points: vec4<f32>,    // Point Color: count, point shown (index + 1; 0: none)
     smart: vec4<f32>,     // Smart Lighting: strength (0–1), bias (−1..1)
     grade: vec4<f32>,     // colour grading: on (0/1), pivot, power
@@ -474,7 +474,7 @@ fn layer_row(k: u32, r: u32) -> vec3<f32> {
 
 // The local adjustments (see `cpu::layers::layers_pixel`): masks read at
 // (mx, my), before lens corrections; the maps at (sx, sy).
-fn layers_px(px0: vec3<f32>, mx: f32, my: f32, sx: f32, sy: f32) -> vec3<f32> {
+fn layers_px(px0: vec3<f32>, detail: vec3<f32>, mx: f32, my: f32, sx: f32, sy: f32) -> vec3<f32> {
     let gx = (mx + 0.5) * p.mscale.x - 0.5;
     let gy = (my + 0.5) * p.mscale.y - 0.5;
     let has_maps = p.maps.x > 0.5;
@@ -494,7 +494,13 @@ fn layers_px(px0: vec3<f32>, mx: f32, my: f32, sx: f32, sy: f32) -> vec3<f32> {
         }
         let contrast = layer[i + 12u];
         let dz = layer[i + 16u];
+        // Sharpness first (see `cpu::layers::adjust`).
         var q = px;
+        let sharp = layer[i + 18u];
+        if (sharp != 0.0) {
+            let k = select(0.5, 1.5, sharp > 0.0) * sharp;
+            q = max(px + k * detail, vec3<f32>(0.0));
+        }
         if (dz != 0.0 && has_maps) {
             q = dehaze_at(m, q, dz);
         }
@@ -744,11 +750,22 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (p.fringe.x > 0.5) {
         px = defringe(px, sx, sy);
     }
+    let pre = px;
     if (p.maps.x > 0.5) {
         px = local_px(px, sx, sy);
     }
     if (p.layers.x > 0.5) {
-        px = layers_px(px, mx, my, sx, sy);
+        var detail = vec3<f32>(0.0);
+        if (p.mscale.w > 0.5) {
+            // The pixel less its neighbours' mean (see `cpu::look_input_at`);
+            // `pre` is the pixel before the local maps.
+            let a = mul3(p.colour0, p.colour1, p.colour2, bilinear(sx - 1.0, sy));
+            let b = mul3(p.colour0, p.colour1, p.colour2, bilinear(sx + 1.0, sy));
+            let c = mul3(p.colour0, p.colour1, p.colour2, bilinear(sx, sy - 1.0));
+            let d = mul3(p.colour0, p.colour1, p.colour2, bilinear(sx, sy + 1.0));
+            detail = pre - 0.25 * (a + b + c + d);
+        }
+        px = layers_px(px, detail, mx, my, sx, sy);
     }
     var seen = 0.0;
     if (p.look.x > 0.5) {

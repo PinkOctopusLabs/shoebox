@@ -989,8 +989,17 @@ pub fn look_input(src: &Rgb, f: &Frame, x: f32, y: f32) -> [f32; 3] {
 /// [`look_input`], and the source position before lens corrections.
 fn look_input_at(src: &Rgb, f: &Frame, x: f32, y: f32) -> ([f32; 3], f32, f32) {
     let (lin, mx, my, sx, sy) = colour_input(src, f, x, y);
+    // Fine detail for local sharpness: the pixel less its neighbours'
+    // mean (one source pixel away, before the local tone maps).
+    let detail = if f.layers.detail {
+        let n = |dx: f32, dy: f32| mul3(&f.colour, sample(src, sx + dx, sy + dy));
+        let (a, b, c, d) = (n(-1.0, 0.0), n(1.0, 0.0), n(0.0, -1.0), n(0.0, 1.0));
+        [0, 1, 2].map(|k| lin[k] - 0.25 * (a[k] + b[k] + c[k] + d[k]))
+    } else {
+        [0.0; 3]
+    };
     let lin = maps::local_pixel(&f.local, lin, sx, sy);
-    let lin = layers::layers_pixel(&f.layers, &f.local, lin, mx, my, sx, sy);
+    let lin = layers::layers_pixel(&f.layers, &f.local, lin, detail, mx, my, sx, sy);
     (lin, mx, my)
 }
 

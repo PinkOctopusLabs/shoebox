@@ -373,7 +373,7 @@ pub fn section(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &Settings) {
     }
 }
 
-const ADJUST_KEYS: [&str; 9] = [
+const ADJUST_KEYS: [&str; 10] = [
     "l-exposure",
     "l-contrast",
     "l-highlights",
@@ -383,6 +383,7 @@ const ADJUST_KEYS: [&str; 9] = [
     "l-saturation",
     "l-clarity",
     "l-dehaze",
+    "l-sharpness",
 ];
 
 fn layer_controls(app: &mut ShoeboxApp, ui: &mut egui::Ui, l: &Local) {
@@ -510,7 +511,7 @@ fn layer_controls(app: &mut ShoeboxApp, ui: &mut egui::Ui, l: &Local) {
                     l.amount = v
                 });
             }
-            let rows: [(&str, f64, f64, usize); 9] = [
+            let rows: [(&str, f64, f64, usize); 10] = [
                 ("Exposure", a.exposure, 4.0, 2),
                 ("Contrast", a.contrast, 100.0, 0),
                 ("Highlights", a.highlights, 100.0, 0),
@@ -520,6 +521,7 @@ fn layer_controls(app: &mut ShoeboxApp, ui: &mut egui::Ui, l: &Local) {
                 ("Saturation", a.saturation, 100.0, 0),
                 ("Clarity", a.clarity, 100.0, 0),
                 ("Dehaze", a.dehaze, 100.0, 0),
+                ("Sharpness", a.sharpness, 100.0, 0),
             ];
             for (k, (name, v, max, dp)) in rows.into_iter().enumerate() {
                 if let Some(v) = slider(ui, name, v, -max..=max, 0.0, dp) {
@@ -546,7 +548,8 @@ fn set_adjust(a: &mut LocalAdjust, k: usize, v: f64) {
         5 => &mut a.tint,
         6 => &mut a.saturation,
         7 => &mut a.clarity,
-        _ => &mut a.dehaze,
+        8 => &mut a.dehaze,
+        _ => &mut a.sharpness,
     };
     *f = v;
 }

@@ -2195,3 +2195,16 @@ stay. To come back to with Linux:
 - **Waiting:** hair, clothes and body skin (Lightroom's people masks) and
   landscape categories need segmentation models of their own; Sky is
   Phase 4 in the spec (SegFormer), the rest with it.
+
+## Local sharpness (2026-10-22)
+
+- Local adjustments gain Sharpness (−100 to +100): each pixel's fine
+  detail (itself less the mean of its four neighbours one source pixel
+  away, through the colour matrix, before the local tone maps) added at
+  up to 1.5× or taken away at up to half (averaging it with its
+  neighbours). Worked out per pixel in both pipes only when a layer uses
+  it; no extra images kept.
+- Its reach is a source pixel, so on the proxy it's coarser than at
+  100%; the spec's per-layer sharpening on the detail stage itself, and
+  per-layer AI denoise strength (which needs the un-denoised source bound
+  beside the denoised one in both pipes), are still to come.
