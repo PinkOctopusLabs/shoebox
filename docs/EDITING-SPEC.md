@@ -547,6 +547,8 @@ flowchart LR
 
 Nothing from Phase 4 starts before the Phase 3 gate passes; that gate is the definition of done from Goals.
 
+As decided (2026-10-22, DECISIONS "Phase 4 scope"): Phase 3's gate is a photo gate, deferred to the manual checks, so Phase 4 started before it passed, as the deferral rule above allows. The gate still defines done for Phase 3, and no release claims Phase 3 until it passes.
+
 **Risks**
 
 | Risk | Impact | Mitigation |

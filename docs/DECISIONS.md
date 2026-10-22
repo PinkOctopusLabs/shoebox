@@ -2468,3 +2468,27 @@ Face parts, Object), from EDITING-SPEC's "Rendering masks".
   stays, so a preview made before shows the old look until the edit
   changes.
 
+
+## Phase 4 scope (2026-10-22)
+
+- Phase 4 starts with Phase 3's gate (the 30-NEF review) still deferred to
+  `docs/MANUAL-CHECKS.md`, as the spec's rule for photo gates allows; the
+  spec's "nothing from Phase 4 before the Phase 3 gate" line now says so.
+  Every phase's person-eye checks are done together once the phases are
+  built.
+- **In**, in three waves (agents on separate parts of the code at once):
+  1. Sky and landscape masks (one scene-segmentation model with an open
+     licence: SegFormer's own weights are checked first), control points
+     (U Point), DCP profiles with colour calibration (CAT16) and `.cube`
+     looks, AVIF and linear DNG export.
+  2. Object removal (a convolution-only inpainting model), Lens Blur
+     (Depth Anything V2 Small), the wide-angle face fix (volume
+     deformation).
+  3. Photo merges: HDR, focus stacking, panorama. These need safety rule
+     3 to cover merge results (new files beside their sources, through
+     `fileops`); the rule is amended when wave 3 starts.
+- **Out:** JPEG XL export (`jpegxl-rs` builds Google's C++ libjxl; AVIF
+  covers the modern-format need), learning your taste (needs a few
+  hundred Shoebox edits first), body masks (hair, clothes, skin: no
+  openly licensed human-parsing model chosen yet; revisit after the
+  landscape model).
