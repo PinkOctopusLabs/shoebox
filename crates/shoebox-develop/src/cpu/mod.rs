@@ -614,6 +614,9 @@ pub struct Display {
     /// A DNG camera profile's tone curve in place of the scene curve (see
     /// [`crate::dcp::Tone`]).
     pub dcp_tone: Option<crate::dcp::Tone>,
+    /// A look (`.cube`) after the camera match look (see
+    /// [`crate::cube::Stage`]).
+    pub cube: Option<crate::cube::Stage>,
     /// Soft proofing: colours limited to an export space's before the
     /// output space.
     pub proof: Option<Proof>,
@@ -700,6 +703,7 @@ impl Display {
             tone: None,
             look: None,
             dcp_tone: None,
+            cube: None,
             proof: None,
             target,
         }
@@ -974,6 +978,17 @@ pub fn frame(raw: &RawImage, src: &Demosaiced, s: &Settings, o: &Options) -> Fra
             display.outset
         },
         dcp_tone,
+        ..display
+    };
+    // A look, while it's there.
+    let lk = &s.modules.look_lut;
+    let display = Display {
+        cube: lk
+            .lut
+            .as_ref()
+            .filter(|_| lk.amount != 0.0)
+            .and_then(crate::cube::find)
+            .map(|c| crate::cube::Stage::new(c, lk.amount, &display.outset)),
         ..display
     };
     let dcp = dcp.and_then(|d| crate::dcp::Stage::new(d, temp, gain));
@@ -1484,9 +1499,14 @@ pub fn display_pixel(d: &Display, p: [f32; 3]) -> [f32; 3] {
 /// [`display_pixel`], and whether soft proofing had to change the colour.
 pub fn display_out(d: &Display, p: [f32; 3]) -> ([f32; 3], bool) {
     let shaped = shape(d, p);
-    // The camera match look (a profile's table), then the tone curve.
+    // The camera match look (a profile's table), a look, then the tone curve.
     let shaped = match &d.look {
         Some(l) => l.apply(shaped),
+        None => shaped,
+    };
+    // A look (`.cube`), in sRGB as shown.
+    let shaped = match &d.cube {
+        Some(c) => c.apply(shaped),
         None => shaped,
     };
     // The tone curve, on 2.2-encoded display values.

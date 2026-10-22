@@ -575,6 +575,27 @@ pub struct Wheel {
     pub luminance: f64,
 }
 
+/// A look (`.cube`, see `cube`) on the display transform's output, mixed
+/// in by Amount.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LookLut {
+    /// The look, by name and contents (None: no look).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lut: Option<FileRef>,
+    /// 0–200 (%).
+    pub amount: f64,
+}
+
+impl Default for LookLut {
+    fn default() -> Self {
+        Self {
+            lut: None,
+            amount: 100.0,
+        }
+    }
+}
+
 /// Effects (module 15): a post-crop vignette and film grain, on the
 /// photo as shown.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -709,6 +730,7 @@ pub struct Modules {
     pub tone_curve: ToneCurve,
     pub display_transform: DisplayTransform,
     pub effects: Effects,
+    pub look_lut: LookLut,
     /// Modules from a newer build, kept untouched.
     #[serde(flatten)]
     pub other: BTreeMap<String, Value>,

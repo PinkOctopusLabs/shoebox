@@ -58,14 +58,15 @@ pub struct Pipe {
 }
 
 /// The colour tables a frame uses, as one storage buffer (binding 6; the
-/// shader may bind only eight): the camera match look, then a DNG
-/// profile's HueSatMap tables, LookTable and tone curve. Kept by the
+/// shader may bind only eight): the camera match look, a DNG profile's
+/// HueSatMap tables, LookTable and tone curve, and a look (`.cube`). Kept by the
 /// tables themselves, so the buffer is rebuilt only when one changes.
 #[derive(Debug, Clone, Default)]
 struct Tables {
     look: Option<std::sync::Arc<crate::profile::Lut3>>,
     dcp: Option<std::sync::Arc<crate::dcp::Dcp>>,
     tone: Option<std::sync::Arc<[f32]>>,
+    cube: Option<std::sync::Arc<crate::cube::Cube>>,
 }
 
 impl Tables {
@@ -74,6 +75,7 @@ impl Tables {
             look: f.display.look.clone(),
             dcp: f.dcp.as_ref().map(|d| d.dcp.clone()),
             tone: f.display.dcp_tone.as_ref().map(|t| t.table.clone()),
+            cube: f.display.cube.as_ref().map(|c| c.cube.clone()),
         }
     }
 
@@ -85,12 +87,15 @@ impl Tables {
                 _ => false,
             }
         }
-        eq(&self.look, &o.look) && eq(&self.dcp, &o.dcp) && eq(&self.tone, &o.tone)
+        eq(&self.look, &o.look)
+            && eq(&self.dcp, &o.dcp)
+            && eq(&self.tone, &o.tone)
+            && eq(&self.cube, &o.cube)
     }
 
     /// In the buffer's order: camera look, HueSatMap (cooler, warmer),
-    /// LookTable, tone curve.
-    fn parts(&self) -> [Option<&[f32]>; 5] {
+    /// LookTable, tone curve, look (`.cube`).
+    fn parts(&self) -> [Option<&[f32]>; 6] {
         let hs = |i: usize| {
             self.dcp
                 .as_ref()
@@ -106,11 +111,12 @@ impl Tables {
                 .and_then(|d| d.look.as_ref())
                 .map(|t| t.data.as_flattened()),
             self.tone.as_deref(),
+            self.cube.as_ref().map(|c| c.lut.data.as_flattened()),
         ]
     }
 
     /// Where each part starts, in floats, plus one (0: not there).
-    fn offsets(&self) -> [f32; 5] {
+    fn offsets(&self) -> [f32; 6] {
         let mut at = 0usize;
         self.parts().map(|p| match p {
             Some(p) => {
@@ -1082,6 +1088,18 @@ fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
     };
     for r in to.into_iter().chain(back) {
         v.extend(row(r));
+    }
+    // A look (`.cube`, see `cube::Stage`).
+    match &d.cube {
+        Some(c) => {
+            v.extend([offs[5], c.cube.lut.size as f32, c.amount, 0.0]);
+            v.extend(row(c.cube.min));
+            v.extend(row(c.cube.max));
+            for r in c.to_srgb.into_iter().chain(c.back) {
+                v.extend(row(r));
+            }
+        }
+        None => v.extend([0.0; 4 * 9]),
     }
     v
 }

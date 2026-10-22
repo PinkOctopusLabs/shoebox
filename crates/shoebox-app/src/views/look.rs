@@ -57,6 +57,7 @@ pub fn modules(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &Settings) {
     colour(app, ui, &s.modules.colour);
     super::point_colour::section(app, ui, &s.modules.point_colour);
     super::grading::section(app, ui, &s.modules.colour_grading);
+    look_lut(app, ui, &s.modules.look_lut);
     detail(app, ui, s);
     lens(app, ui, &s.modules.lens);
     defringe(app, ui, &s.modules.defringe);
@@ -64,6 +65,90 @@ pub fn modules(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &Settings) {
     black_and_white(app, ui, &s.modules.black_and_white);
     calibration(app, ui, &s.modules.calibration);
     effects(app, ui, &s.modules.effects);
+}
+
+/// A look (`.cube`) from the looks folder, and its Amount.
+fn look_lut(app: &mut ShoeboxApp, ui: &mut egui::Ui, l: &shoebox_develop::edit::LookLut) {
+    use shoebox_develop::cube;
+    use shoebox_develop::edit::{FileRef, LookLut};
+    let reset = section(ui, "Look", *l != LookLut::default(), false, |ui| {
+        let looks = cube::all();
+        let missing = l.lut.as_ref().is_some_and(|r| cube::find(r).is_none());
+        let selected = match &l.lut {
+            None => "None".to_owned(),
+            Some(r) if missing => format!("{} (missing)", r.name),
+            Some(r) => r.name.clone(),
+        };
+        let mut pick: Option<Option<FileRef>> = None;
+        egui::ComboBox::from_id_salt("look-lut")
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(l.lut.is_none(), "None").clicked() && l.lut.is_some() {
+                    pick = Some(None);
+                }
+                for c in &looks {
+                    let on = l.lut.as_ref().is_some_and(|r| r.blake3 == c.blake3);
+                    let mut item = ui.selectable_label(on, &c.name);
+                    if let Some(t) = &c.title {
+                        item = item.on_hover_text(t);
+                    }
+                    if item.clicked() && !on {
+                        pick = Some(Some(c.file_ref()));
+                    }
+                }
+                ui.separator();
+                if ui
+                    .button("Show looks folder")
+                    .on_hover_text("Looks (.cube files, 3D or 1D) go here")
+                    .clicked()
+                {
+                    app.developer
+                        .colours(Some(crate::develop::ColourFolder::Looks));
+                }
+                if ui.button("Read looks again").clicked() {
+                    app.developer.colours(None);
+                }
+            })
+            .response
+            .on_hover_text("A look from a .cube file, applied to the photo as shown (in sRGB)");
+        if missing && let Some(r) = &l.lut {
+            ui.label(
+                RichText::new(format!(
+                    "The look “{}” isn't in the looks folder (or has changed).",
+                    r.name
+                ))
+                .color(ui.visuals().warn_fg_color),
+            );
+            if let Some(now) = cube::named(&r.name)
+                && ui
+                    .button(format!("Use “{}” as it is now", now.name))
+                    .clicked()
+            {
+                pick = Some(Some(now.file_ref()));
+            }
+        }
+        if l.lut.is_some() {
+            egui::Grid::new("look-grid").num_columns(2).show(ui, |ui| {
+                if let Some(v) = slider(ui, "Amount", l.amount, 0.0..=200.0, 100.0, 0) {
+                    edit(app, "look-amount", format!("Look amount {v:.0}%"), |s| {
+                        s.modules.look_lut.amount = v;
+                    });
+                }
+            });
+        }
+        if let Some(r) = pick {
+            let label = match &r {
+                Some(r) => format!("Look {}", r.name),
+                None => "Look none".to_owned(),
+            };
+            edit(app, "look", label, |s| s.modules.look_lut.lut = r);
+        }
+    });
+    if reset {
+        edit(app, "look", "Reset look".into(), |s| {
+            s.modules.look_lut = LookLut::default();
+        });
+    }
 }
 
 /// A post-crop vignette and grain.

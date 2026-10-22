@@ -115,21 +115,25 @@ pub enum ColourFolder {
     /// `<data>/profiles`: DNG camera profiles (`.dcp`) and camera match
     /// profiles.
     Profiles,
+    /// `<data>/looks`: looks (`.cube`).
+    Looks,
 }
 
 impl ColourFolder {
     fn path(self, data: &std::path::Path) -> PathBuf {
         match self {
             ColourFolder::Profiles => data.join("profiles"),
+            ColourFolder::Looks => data.join("looks"),
         }
     }
 }
 
-/// Read the DNG camera profiles in the data folder (`data`).
+/// Read the DNG camera profiles and looks in the data folder (`data`).
 fn load_colours(data: &std::path::Path) {
     let n = shoebox_develop::dcp::load_dir(&ColourFolder::Profiles.path(data));
-    if n > 0 {
-        tracing::info!("{n} DNG camera profiles");
+    let k = shoebox_develop::cube::load_dir(&ColourFolder::Looks.path(data));
+    if n + k > 0 {
+        tracing::info!("{n} DNG camera profiles, {k} looks");
     }
 }
 

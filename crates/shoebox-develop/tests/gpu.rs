@@ -720,6 +720,66 @@ fn dcp_profiles_match_the_cpu() {
     }
 }
 
+/// A look (`.cube`) at several amounts, on a raw and a finished image,
+/// with a domain other than 0–1.
+#[test]
+fn looks_match_the_cpu() {
+    let Some((device, queue)) = headless() else {
+        eprintln!("skipping: no GPU adapter");
+        return;
+    };
+    use shoebox_develop::cube::{Cube, register};
+    let n = 9;
+    let mut lut = shoebox_develop::profile::Lut3::identity(n);
+    for c in &mut lut.data {
+        let [r, g, b] = *c;
+        *c = [
+            (0.05 + 0.9 * r * r + 0.05 * g).min(1.0),
+            (0.1 + 0.8 * g + 0.1 * (b - r)).clamp(0.0, 1.0),
+            (0.2 + 0.6 * b.sqrt()).min(1.0),
+        ];
+    }
+    let c = register(Cube {
+        name: "GPU test look".into(),
+        title: None,
+        blake3: "gpu-test-look".into(),
+        lut,
+        min: [0.0, -0.1, 0.0],
+        max: [1.0, 1.1, 1.2],
+    });
+    let raw = zf();
+    let pipe = Pipe::new(&device, Output::Rgba32Float).unwrap();
+    let px: Vec<u8> = (0..160 * 120 * 3).map(|i| ((i * 37) % 256) as u8).collect();
+    for src in [
+        Demosaiced::new(
+            synthetic(160, 120),
+            [1.1425778, 1.0, 1.7753916],
+            shoebox_develop::cpu::Referred::Scene,
+        ),
+        cpu::from_display(160, 120, &px, Target::Srgb),
+    ] {
+        let gsrc = pipe.upload(&device, &queue, &src.rgb);
+        for amount in [70.0, 100.0, 150.0] {
+            let mut s = Settings::default();
+            s.modules.look_lut.lut = Some(c.file_ref());
+            s.modules.look_lut.amount = amount;
+            s.modules.tone_curve.rgb = vec![[0.3, 0.25], [0.7, 0.8]];
+            let f = cpu::frame(&raw, &src, &s, &Options::default());
+            assert!(f.display.cube.is_some());
+            let want = cpu::apply(&src.rgb, &f, true);
+            let got = pipe.render(&device, &queue, &gsrc, &f, true).unwrap();
+            let (d, at) = max_diff(&want, &got);
+            assert!(
+                d <= 1e-4,
+                "{:?} at {amount}: {d} at {at}: cpu {:?} gpu {:?}",
+                src.referred,
+                want.px(at % want.width, at / want.width),
+                got.px(at % got.width, at / got.width)
+            );
+        }
+    }
+}
+
 /// Soft proofing a saturated P3 render to sRGB: CPU and GPU agree, every
 /// colour shown fits in sRGB, and the gamut warning marks the same pixels.
 #[test]

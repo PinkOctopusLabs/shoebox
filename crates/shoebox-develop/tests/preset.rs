@@ -84,3 +84,30 @@ fn smart_lightings_spot_stays_with_its_photo() {
     let out = p.apply(&Settings::default(), 1.0);
     assert_eq!(out.modules.smart_lighting.spot, None);
 }
+
+/// A look, a DNG camera profile and colour calibration travel with the
+/// Colour and White balance parts; the look's Amount scales from 100%.
+#[test]
+fn looks_profiles_and_calibration_travel() {
+    use shoebox_develop::edit::{Adaptation, FileRef, Profile};
+    let r = |n: &str| FileRef {
+        name: n.into(),
+        blake3: n.repeat(4),
+    };
+    let mut s = Settings::default();
+    s.modules.look_lut.lut = Some(r("Film"));
+    s.modules.look_lut.amount = 60.0;
+    s.modules.input_colour.profile = Profile::Dcp;
+    s.modules.input_colour.dcp = Some(r("Mine"));
+    s.modules.white_balance.adaptation = Adaptation::Cat16;
+    let p = Preset::from_settings("Film", &s, &[Part::Colour, Part::WhiteBalance]);
+    let out = p.apply(&Settings::default(), 1.0);
+    assert_eq!(out.modules.look_lut, s.modules.look_lut);
+    assert_eq!(out.modules.input_colour, s.modules.input_colour);
+    assert_eq!(out.modules.white_balance.adaptation, Adaptation::Cat16);
+    let half = p.apply(&Settings::default(), 0.5);
+    assert_eq!(half.modules.look_lut.amount, 80.0);
+    assert_eq!(half.modules.look_lut.lut, s.modules.look_lut.lut);
+    let none = p.apply(&Settings::default(), 0.2);
+    assert_eq!(none.modules.look_lut.lut, None);
+}

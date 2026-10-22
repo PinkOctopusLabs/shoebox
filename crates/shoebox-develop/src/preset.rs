@@ -102,6 +102,7 @@ impl Part {
                 &["modules", "point_colour"],
                 &["modules", "colour_grading"],
                 &["modules", "input_colour"],
+                &["modules", "look_lut"],
             ],
             Part::BlackAndWhite => &[&["modules", "black_and_white"]],
             Part::Calibration => &[&["modules", "calibration"]],

@@ -238,3 +238,8 @@ together at the end, before the release.
   over the window with Temperature/Tint to take the second light out:
   no hue shift at the mask's edge beyond the light's own. Deep blue or
   violet LEDs shouldn't go to flat or negative-looking blotches.
+- [ ] **Looks (`.cube`)**: a few film-emulation packs (a 33³ and a 65³
+  Adobe cube, a Resolve cube with a shaper, a 1D curve) in the looks
+  folder: each reads (nothing in the log), looks as it does in the
+  app it came from on the same JPEG, Amount at 50% and 150% behave, a
+  smooth sky shows no banding, and a full-size export matches Develop.

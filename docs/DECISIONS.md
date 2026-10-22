@@ -2730,3 +2730,39 @@ Face parts, Object), from EDITING-SPEC's "Rendering masks".
   as before; no process version change. A DNG profile's tables blend for
   the temperature the camera's calibration is blended at
   (`Resolved::calibrated_at`: the white's, or D65 under calibration).
+
+### Looks (`.cube`)
+
+- **What's read** (`cube`): Adobe's and Resolve's `.cube` text: TITLE,
+  LUT_3D_SIZE (2–65; larger is refused), LUT_1D_SIZE, DOMAIN_MIN/MAX,
+  LUT_1D/3D_INPUT_RANGE, comments (whole lines and after data), other
+  keywords skipped; wrong counts, bad numbers and empty ranges refused
+  with the line. A 1D look becomes a 33³ table (exact between its
+  points, since trilinear is linear per channel on a per-channel curve;
+  a dense 1D curve loses a little between them); a 1D shaper before a 3D
+  table is folded into the table. Hald CLUT PNGs aren't read yet.
+- **Where:** on the display transform's output, after the camera match
+  look and before the tone curve (the spec's "just after the display
+  transform"; the tone curve can still adjust a look, as Lightroom's
+  come before its curve). The files don't say their space; nearly all
+  are made for sRGB-encoded Rec.709, so that's assumed: display-linear
+  Rec.2020 (after the AgX outset) → linear sRGB, clipped to 0–1,
+  encoded, the table (trilinear, `Lut3::sample`, as the camera match
+  look), decoded, back. So a look keeps wide-gamut colours only at
+  Amount 0. Amount (0–200%, default 100) mixes the result with what went
+  in, extrapolating past 100%.
+- **The edit** stores `look_lut: {lut: {name, blake3}, amount}`; a look
+  that's gone or changed is skipped (the section says so and offers one
+  of the same name as it is now). It's part of presets' Colour part with
+  the profile, so a "film" preset carries its look; a preset's Amount
+  scales the look's from 100% (below 50% a preset leaves the look out,
+  as for anything that isn't a number).
+- **The folder** is `<data>/looks/*.cube` (files over 64 MB skipped),
+  read at start and from the section's menu ("Read looks again"; "Show
+  looks folder" makes and opens it). Shoebox never writes into it:
+  "importing" a look is putting it there, which keeps the person's files
+  as they are and needs no copy through Shoebox.
+- **GPU:** the table goes in the shared colour-tables buffer (a 65³
+  table is 3.3 MB, uploaded once and kept while it's the same look);
+  checked within 1e-4 at 70, 100 and 150% on a raw and a finished image
+  with an unusual domain.

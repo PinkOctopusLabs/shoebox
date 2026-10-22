@@ -5,7 +5,8 @@
 // → DNG profile tables (`dcp::Stage`) → local (dehaze,
 // highlights and shadows, clarity: `cpu::maps`) → local adjustments
 // (`cpu::layers`, masks from `mask`) → look (colour, black and
-// white: `cpu::look`) → display transform → tone curve → soft proof (into
+// white: `cpu::look`) → display transform → camera match look → look
+// (`.cube`: `cube::Stage`) → tone curve → soft proof (into
 // an export space, clipped, back: `cpu::Proof`) → output space and sRGB
 // transfer curve.
 //
@@ -78,6 +79,15 @@ struct Params {
     unpp0: vec4<f32>,     // and back
     unpp1: vec4<f32>,
     unpp2: vec4<f32>,
+    cube: vec4<f32>,      // look (`.cube`): table (offset + 1; 0: none), its size, amount (0–2)
+    cubemin: vec4<f32>,   // its input range
+    cubemax: vec4<f32>,
+    srgb0: vec4<f32>,     // display values (before the outset) → linear sRGB
+    srgb1: vec4<f32>,
+    srgb2: vec4<f32>,
+    unsrgb0: vec4<f32>,   // and back
+    unsrgb1: vec4<f32>,
+    unsrgb2: vec4<f32>,
 };
 
 const GAMUT_SLACK: f32 = 2e-3;
@@ -130,6 +140,35 @@ fn camera_look(px: vec3<f32>) -> vec3<f32> {
         }
     }
     return pow(max(out, vec3<f32>(0.0)), vec3<f32>(2.2));
+}
+fn cube_at(r: u32, g: u32, b: u32) -> vec3<f32> {
+    let n = u32(p.cube.y);
+    return tab3(u32(p.cube.x) - 1u + ((b * n + g) * n + r) * 3u);
+}
+
+// A look (see `cube::Stage::apply`): in sRGB, trilinear (as
+// `profile::Lut3::sample`), mixed in by its amount.
+fn cube_look(px: vec3<f32>) -> vec3<f32> {
+    let s = clamp(mul3(p.srgb0, p.srgb1, p.srgb2, px), vec3<f32>(0.0), vec3<f32>(1.0));
+    let e = vec3<f32>(oetf(s.x), oetf(s.y), oetf(s.z));
+    let n = p.cube.y - 1.0;
+    let pos = clamp((e - p.cubemin.xyz) / (p.cubemax.xyz - p.cubemin.xyz), vec3<f32>(0.0), vec3<f32>(1.0)) * n;
+    let i = min(vec3<u32>(floor(pos)), vec3<u32>(u32(n) - 1u));
+    let f = pos - vec3<f32>(i);
+    var out = vec3<f32>(0.0);
+    for (var db = 0u; db < 2u; db++) {
+        for (var dg = 0u; dg < 2u; dg++) {
+            for (var dr = 0u; dr < 2u; dr++) {
+                let wr = select(1.0 - f.x, f.x, dr == 1u);
+                let wg = select(1.0 - f.y, f.y, dg == 1u);
+                let wb = select(1.0 - f.z, f.z, db == 1u);
+                out += wr * wg * wb * cube_at(i.x + dr, i.y + dg, i.z + db);
+            }
+        }
+    }
+    let lin = vec3<f32>(eotf(out.x), eotf(out.y), eotf(out.z));
+    let q = mul3(p.unsrgb0, p.unsrgb1, p.unsrgb2, lin);
+    return px + (q - px) * p.cube.z;
 }
 const CURVE_SIZE: u32 = 1024u;
 const CENTRES = array<f32, 8>(29.0, 58.0, 110.0, 142.0, 195.0, 264.0, 295.0, 328.0);
@@ -893,6 +932,9 @@ fn display(px: vec3<f32>) -> vec4<f32> {
     }
     if (p.look3.x > 0.5) {
         shaped = camera_look(shaped);
+    }
+    if (p.cube.x > 0.5) {
+        shaped = cube_look(shaped);
     }
     if (p.tone.x > 0.5) {
         shaped = tone_curve(shaped);
