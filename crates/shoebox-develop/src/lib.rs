@@ -11,6 +11,7 @@ pub mod cpu;
 pub mod cube;
 pub mod dcp;
 pub mod denoise;
+pub mod depth;
 pub mod dng;
 pub mod edit;
 pub mod encode;

@@ -88,6 +88,10 @@ struct Params {
     unsrgb0: vec4<f32>,   // and back
     unsrgb1: vec4<f32>,
     unsrgb2: vec4<f32>,
+    blur0: vec4<f32>,     // Lens Blur (see `cpu::lens_blur`): on (0/1), focus depth, half the range, circle per depth unit
+    blur1: vec4<f32>,     // depth map width, height; source → depth map (x, y)
+    blur2: vec4<f32>,     // working copy width, height; source pixels per working pixel (x, y)
+    blur3: vec4<f32>,     // depth map shown (0/1)
 };
 
 const GAMUT_SLACK: f32 = 2e-3;
@@ -207,7 +211,90 @@ fn texel(x: f32, y: f32) -> vec3<f32> {
     if (mix_soften > 0.0) {
         v = v + mix_soften * textureLoad(aux, at, i32(p.srcmix.w) - 1, 0).xyz;
     }
+    if (p.blur0.x > 0.5) {
+        v = blur_texel(v, x, y);
+    }
     return v;
+}
+
+// Lens Blur's depth map (see `cpu::lens_blur::Depth`) and its two layers
+// on the working copy: the back (colour, the pixel's circle) and the
+// front (premultiplied colour, alpha).
+@group(0) @binding(11) var depth: texture_2d<f32>;
+@group(0) @binding(12) var blurred: texture_2d_array<f32>;
+
+fn depth_px(x: u32, y: u32) -> f32 {
+    return textureLoad(depth, vec2<i32>(i32(x), i32(y)), 0).x;
+}
+
+// The depth at source position (x, y) (see `lens_blur::Stage::depth_at`).
+fn depth_at(sx: f32, sy: f32) -> f32 {
+    let w = p.blur1.x;
+    let h = p.blur1.y;
+    let x = clamp((sx + 0.5) * p.blur1.z - 0.5, 0.0, w - 1.0);
+    let y = clamp((sy + 0.5) * p.blur1.w - 0.5, 0.0, h - 1.0);
+    let x0 = u32(floor(x));
+    let y0 = u32(floor(y));
+    let x1 = min(x0 + 1u, u32(w) - 1u);
+    let y1 = min(y0 + 1u, u32(h) - 1u);
+    let fx = x - f32(x0);
+    let fy = y - f32(y0);
+    let a = depth_px(x0, y0);
+    let b = depth_px(x1, y0);
+    let c = depth_px(x0, y1);
+    let d = depth_px(x1, y1);
+    let top = a + (b - a) * fx;
+    let bot = c + (d - c) * fx;
+    return top + (bot - top) * fy;
+}
+
+fn blur_coc(d: f32) -> f32 {
+    let e = d - p.blur0.y;
+    let m = max(abs(e) - p.blur0.z, 0.0) * p.blur0.w;
+    return select(-m, m, e >= 0.0);
+}
+
+// The source pixel v at (x, y) with the blur mixed in (see
+// `lens_blur::texel`).
+fn blur_texel(v: vec3<f32>, x: f32, y: f32) -> vec3<f32> {
+    let c = blur_coc(depth_at(x, y));
+    let w = clamp((abs(c) - 0.25) / 0.75, 0.0, 1.0);
+    let ww = p.blur2.x;
+    let wh = p.blur2.y;
+    let wx = clamp((x + 0.5) / p.blur2.z - 0.5, 0.0, ww - 1.0);
+    let wy = clamp((y + 0.5) / p.blur2.w - 0.5, 0.0, wh - 1.0);
+    let x0 = u32(floor(wx));
+    let y0 = u32(floor(wy));
+    let x1 = min(x0 + 1u, u32(ww) - 1u);
+    let y1 = min(y0 + 1u, u32(wh) - 1u);
+    let fx = wx - f32(x0);
+    let fy = wy - f32(y0);
+    let at = array<vec2<i32>, 4>(
+        vec2<i32>(i32(x0), i32(y0)),
+        vec2<i32>(i32(x1), i32(y0)),
+        vec2<i32>(i32(x0), i32(y1)),
+        vec2<i32>(i32(x1), i32(y1)),
+    );
+    let wt = array<f32, 4>((1.0 - fx) * (1.0 - fy), fx * (1.0 - fy), (1.0 - fx) * fy, fx * fy);
+    var base = v;
+    if (w > 0.0) {
+        var s = vec3<f32>(0.0);
+        var n = 0.0;
+        for (var k = 0u; k < 4u; k++) {
+            let q = textureLoad(blurred, at[k], 0, 0);
+            let d = q.w - c;
+            let wk = wt[k] * (1.0 / (1.0 + d * d));
+            s += wk * q.xyz;
+            n += wk;
+        }
+        let back = s / max(n, 1e-12);
+        base = v + (back - v) * w;
+    }
+    var f = vec4<f32>(0.0);
+    for (var k = 0u; k < 4u; k++) {
+        f += wt[k] * textureLoad(blurred, at[k], 1, 0);
+    }
+    return base * (1.0 - f.w) + f.xyz;
 }
 
 fn bilinear(x: f32, y: f32) -> vec3<f32> {
@@ -1095,6 +1182,15 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 px = vec3<f32>(w);
             } else {
                 px = px + (vec3<f32>(1.0, 0.0, 0.0) - px) * (0.5 * w);
+            }
+        }
+        // Lens Blur's depth map shown (see `cpu::lens_blur::shown`).
+        if (p.blur0.x > 0.5 && p.blur3.x > 0.5) {
+            let d = depth_at(mx, my);
+            let gr = clamp(d, 0.0, 1.0);
+            px = vec3<f32>(gr);
+            if (abs(d - p.blur0.y) <= p.blur0.z) {
+                px = px + (vec3<f32>(1.0, 0.7, 0.15) - px) * 0.5;
             }
         }
     }

@@ -55,6 +55,402 @@ pub struct Pipe {
     tables: std::sync::Mutex<Option<(Tables, wgpu::Buffer)>>,
     /// Bound for the images beside the source when there are none.
     no_aux: wgpu::TextureView,
+    /// Lens Blur's passes and what they keep (see [`Blur`]).
+    blur: Blur,
+}
+
+/// Lens Blur on the GPU (`lens_blur.wgsl`, after `cpu::lens_blur`): two
+/// passes before the develop pass, each with its own bindings, so the
+/// develop pass only gains two sampled textures (the depth map and the
+/// blurred layers, bindings 11 and 12) and no storage buffers.
+struct Blur {
+    prepare_layout: wgpu::BindGroupLayout,
+    prepare: wgpu::ComputePipeline,
+    gather_layout: wgpu::BindGroupLayout,
+    gather: wgpu::ComputePipeline,
+    /// Bound when there's no blur.
+    no_depth: wgpu::TextureView,
+    no_blurred: wgpu::TextureView,
+    /// The last depth map uploaded, the taps, and the working textures (by
+    /// size).
+    depth: std::sync::Mutex<
+        Option<(
+            std::sync::Arc<crate::cpu::lens_blur::Depth>,
+            wgpu::TextureView,
+        )>,
+    >,
+    taps: std::sync::Mutex<Option<(std::sync::Arc<crate::cpu::lens_blur::Taps>, wgpu::Buffer)>>,
+    #[allow(clippy::type_complexity)]
+    work: std::sync::Mutex<Option<((u32, u32), wgpu::TextureView, wgpu::TextureView)>>,
+}
+
+const BLUR_SHADER: &str = include_str!("lens_blur.wgsl");
+
+/// A sampled float texture binding (not filterable).
+fn sampled(binding: u32, dim: wgpu::TextureViewDimension) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+            view_dimension: dim,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+/// A uniform buffer binding.
+fn uniform(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+/// A write-only RGBA f32 storage texture binding.
+fn written(binding: u32, dim: wgpu::TextureViewDimension) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::StorageTexture {
+            access: wgpu::StorageTextureAccess::WriteOnly,
+            format: wgpu::TextureFormat::Rgba32Float,
+            view_dimension: dim,
+        },
+        count: None,
+    }
+}
+
+impl Blur {
+    fn new(device: &wgpu::Device) -> Self {
+        use wgpu::TextureViewDimension as D;
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("lens blur"),
+            source: wgpu::ShaderSource::Wgsl(BLUR_SHADER.into()),
+        });
+        let pipeline = |label: &str, entries: &[wgpu::BindGroupLayoutEntry], entry: &str| {
+            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some(label),
+                entries,
+            });
+            let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some(label),
+                bind_group_layouts: &[Some(&layout)],
+                immediate_size: 0,
+            });
+            let p = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pl),
+                module: &module,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+            (layout, p)
+        };
+        let (prepare_layout, prepare) = pipeline(
+            "lens blur: prepare",
+            &[
+                sampled(0, D::D2),
+                sampled(1, D::D2),
+                uniform(2),
+                written(3, D::D2),
+            ],
+            "prepare",
+        );
+        let (gather_layout, gather) = pipeline(
+            "lens blur: gather",
+            &[
+                sampled(4, D::D2),
+                storage(5),
+                uniform(6),
+                written(7, D::D2Array),
+            ],
+            "gather",
+        );
+        let blank = |label: &str, format, layers: u32, dim| {
+            device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: layers,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(dim),
+                    ..Default::default()
+                })
+        };
+        Self {
+            prepare_layout,
+            prepare,
+            gather_layout,
+            gather,
+            no_depth: blank("no depth map", wgpu::TextureFormat::R32Float, 1, D::D2),
+            no_blurred: blank(
+                "no lens blur",
+                wgpu::TextureFormat::Rgba32Float,
+                2,
+                D::D2Array,
+            ),
+            depth: Default::default(),
+            taps: Default::default(),
+            work: Default::default(),
+        }
+    }
+
+    /// The depth map as a texture, kept while it's the same map (copied in
+    /// by the encoder, from a buffer with its rows padded as copies need).
+    fn depth_view(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        d: &std::sync::Arc<crate::cpu::lens_blur::Depth>,
+    ) -> wgpu::TextureView {
+        let mut kept = self.depth.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((k, v)) = &*kept
+            && std::sync::Arc::ptr_eq(k, d)
+        {
+            return v.clone();
+        }
+        let size = wgpu::Extent3d {
+            width: d.width as u32,
+            height: d.height as u32,
+            depth_or_array_layers: 1,
+        };
+        let t = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("depth map"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let row = (size.width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let mut bytes = vec![0u8; row as usize * d.height];
+        for (line, out) in d
+            .data
+            .chunks(d.width.max(1))
+            .zip(bytes.chunks_mut(row as usize))
+        {
+            for (v, o) in line.iter().zip(out.as_chunks_mut::<4>().0) {
+                *o = v.to_le_bytes();
+            }
+        }
+        let staging = wgpu::util::DeviceExt::create_buffer_init(
+            device,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("depth map upload"),
+                contents: &bytes,
+                usage: wgpu::BufferUsages::COPY_SRC,
+            },
+        );
+        encoder.copy_buffer_to_texture(
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(size.height),
+                },
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &t,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            size,
+        );
+        let v = t.create_view(&Default::default());
+        *kept = Some((d.clone(), v.clone()));
+        v
+    }
+
+    /// The taps and area table as one storage buffer, kept.
+    fn taps_buffer(
+        &self,
+        device: &wgpu::Device,
+        t: &std::sync::Arc<crate::cpu::lens_blur::Taps>,
+    ) -> wgpu::Buffer {
+        let mut kept = self.taps.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((k, b)) = &*kept
+            && std::sync::Arc::ptr_eq(k, t)
+        {
+            return b.clone();
+        }
+        let bytes: Vec<u8> = t
+            .list
+            .iter()
+            .flat_map(|p| [p[0], p[1], p[2], 0.0])
+            .chain(t.area.iter().copied())
+            .flat_map(f32::to_le_bytes)
+            .collect();
+        let b = storage_buffer(device, "lens blur taps", &bytes);
+        *kept = Some((t.clone(), b.clone()));
+        b
+    }
+
+    /// The working copy (written by `prepare`) and the two layers (by
+    /// `gather`), kept while the size is the same.
+    fn work_views(
+        &self,
+        device: &wgpu::Device,
+        w: u32,
+        h: u32,
+    ) -> (wgpu::TextureView, wgpu::TextureView) {
+        let mut kept = self.work.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((s, a, b)) = &*kept
+            && *s == (w, h)
+        {
+            return (a.clone(), b.clone());
+        }
+        let make = |label: &str, layers: u32| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: layers,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba32Float,
+                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+        };
+        let work = make("lens blur: working copy", 1).create_view(&Default::default());
+        let layers = make("lens blur: layers", 2).create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        *kept = Some(((w, h), work.clone(), layers.clone()));
+        (work, layers)
+    }
+
+    /// Record the two passes for `st` from `src`; the depth map's and the
+    /// layers' views for the develop pass.
+    fn encode(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        src: &Source,
+        st: &crate::cpu::lens_blur::Stage,
+    ) -> (wgpu::TextureView, wgpu::TextureView) {
+        let depth = self.depth_view(device, encoder, &st.depth);
+        let taps = self.taps_buffer(device, &st.taps);
+        let (ww, wh) = (st.work.0 as u32, st.work.1 as u32);
+        let (work, layers) = self.work_views(device, ww, wh);
+        let params: Vec<f32> = vec![
+            src.width as f32,
+            src.height as f32,
+            ww as f32,
+            wh as f32,
+            st.focus,
+            st.half,
+            st.coc,
+            st.boost,
+            st.depth.width as f32,
+            st.depth.height as f32,
+            st.dscale[0],
+            st.dscale[1],
+            st.per[0],
+            st.per[1],
+            st.count as f32,
+            (st.taps.list.len() * 4) as f32,
+            (st.taps.area.len() - 2) as f32,
+            0.0,
+            0.0,
+            0.0,
+        ];
+        let bytes: Vec<u8> = params.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let params = wgpu::util::DeviceExt::create_buffer_init(
+            device,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("lens blur params"),
+                contents: &bytes,
+                usage: wgpu::BufferUsages::UNIFORM,
+            },
+        );
+        let view = wgpu::BindingResource::TextureView;
+        let prepare = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lens blur: prepare"),
+            layout: &self.prepare_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: view(&src.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: view(&depth),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: params.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: view(&work),
+                },
+            ],
+        });
+        let gather = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lens blur: gather"),
+            layout: &self.gather_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: view(&work),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: taps.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: params.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: view(&layers),
+                },
+            ],
+        });
+        for (label, pipeline, group) in [
+            ("lens blur: prepare", &self.prepare, &prepare),
+            ("lens blur: gather", &self.gather, &gather),
+        ] {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some(label),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, group, &[]);
+            pass.dispatch_workgroups(ww.div_ceil(WORKGROUP), wh.div_ceil(WORKGROUP), 1);
+        }
+        (depth, layers)
+    }
 }
 
 /// The colour tables a frame uses, as one storage buffer (binding 6; the
@@ -341,6 +737,9 @@ impl Pipe {
                     },
                     count: None,
                 },
+                // Lens Blur's depth map and blurred layers.
+                sampled(11, wgpu::TextureViewDimension::D2),
+                sampled(12, wgpu::TextureViewDimension::D2Array),
             ],
         });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -383,6 +782,7 @@ impl Pipe {
             masks: Default::default(),
             tables: Default::default(),
             no_aux,
+            blur: Blur::new(device),
         }
     }
 
@@ -544,6 +944,11 @@ impl Pipe {
             .flat_map(f32::to_le_bytes)
             .collect();
         let points = storage_buffer(device, "colour points", &points);
+        // Lens Blur's two passes first, when it's on.
+        let (depth, blurred) = match &frame.lens_blur {
+            Some(st) => self.blur.encode(device, encoder, src, st),
+            None => (self.blur.no_depth.clone(), self.blur.no_blurred.clone()),
+        };
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("develop"),
             layout: &self.layout,
@@ -593,6 +998,14 @@ impl Pipe {
                     resource: wgpu::BindingResource::TextureView(
                         src.aux.as_ref().map_or(&self.no_aux, |a| &a.1),
                     ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: wgpu::BindingResource::TextureView(&depth),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::TextureView(&blurred),
                 },
             ],
         });
@@ -1100,6 +1513,21 @@ fn params(f: &Frame, src: &Source, display: bool) -> Vec<f32> {
             }
         }
         None => v.extend([0.0; 4 * 9]),
+    }
+    // Lens Blur (see `cpu::lens_blur`).
+    match &f.lens_blur {
+        Some(st) => {
+            v.extend([1.0, st.focus, st.half, st.coc]);
+            v.extend([
+                st.depth.width as f32,
+                st.depth.height as f32,
+                st.dscale[0],
+                st.dscale[1],
+            ]);
+            v.extend([st.work.0 as f32, st.work.1 as f32, st.per[0], st.per[1]]);
+            v.extend([flag(f.depth_view), 0.0, 0.0, 0.0]);
+        }
+        None => v.extend([0.0; 4 * 4]),
     }
     v
 }

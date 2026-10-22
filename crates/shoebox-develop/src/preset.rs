@@ -29,10 +29,11 @@ pub enum Part {
     Locals,
     Spots,
     Effects,
+    LensBlur,
 }
 
 impl Part {
-    pub const ALL: [Part; 16] = [
+    pub const ALL: [Part; 17] = [
         Part::WhiteBalance,
         Part::Exposure,
         Part::Tone,
@@ -49,6 +50,7 @@ impl Part {
         Part::Locals,
         Part::Spots,
         Part::Effects,
+        Part::LensBlur,
     ];
 
     pub fn label(self) -> &'static str {
@@ -69,16 +71,18 @@ impl Part {
             Part::Locals => "Local adjustments",
             Part::Spots => "Spot removal",
             Part::Effects => "Effects",
+            Part::LensBlur => "Lens Blur",
         }
     }
 
     /// Ticked when copying settings: geometry, raw handling, local
-    /// adjustments and spots rarely carry over from one frame to another
-    /// (EDITING-SPEC, Batch editing).
+    /// adjustments, spots and Lens Blur (its depth is the photo's own)
+    /// rarely carry over from one frame to another (EDITING-SPEC, Batch
+    /// editing).
     pub fn copied_by_default(self) -> bool {
         !matches!(
             self,
-            Part::Transform | Part::Crop | Part::Raw | Part::Locals | Part::Spots
+            Part::Transform | Part::Crop | Part::Raw | Part::Locals | Part::Spots | Part::LensBlur
         )
     }
 
@@ -130,6 +134,15 @@ impl Part {
             Part::Locals => &[&["locals"]],
             Part::Spots => &[&["modules", "heal"]],
             Part::Effects => &[&["modules", "effects"]],
+            // Not its focus point: a point on this photo's subject means
+            // nothing on another's (without one, the nearest things).
+            Part::LensBlur => &[
+                &["modules", "lens_blur", "enabled"],
+                &["modules", "lens_blur", "amount"],
+                &["modules", "lens_blur", "range"],
+                &["modules", "lens_blur", "bokeh"],
+                &["modules", "lens_blur", "boost"],
+            ],
         }
     }
 }

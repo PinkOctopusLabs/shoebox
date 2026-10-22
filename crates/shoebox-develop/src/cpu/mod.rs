@@ -24,6 +24,7 @@
 pub mod detail;
 pub mod effects;
 pub mod layers;
+pub mod lens_blur;
 pub mod look;
 pub mod maps;
 pub mod raw;
@@ -304,6 +305,34 @@ impl Demosaiced {
         )
     }
 
+    /// Lens Blur's images for frame `f` from `prepared` (what the pipe
+    /// reads, see [`Self::prepared`]; None: `rgb`): None when it's off.
+    /// The last are kept, so other sliders and 100% regions don't redo
+    /// them.
+    pub fn lens_blurred(
+        &self,
+        prepared: Option<&std::sync::Arc<Rgb>>,
+        f: &Frame,
+    ) -> Option<std::sync::Arc<lens_blur::Blurred>> {
+        use std::hash::{Hash, Hasher};
+        let st = f.lens_blur.as_ref()?;
+        let key = {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            std::sync::Arc::as_ptr(&st.depth).hash(&mut h);
+            std::sync::Arc::as_ptr(&st.taps).hash(&mut h);
+            for v in [st.focus, st.half, st.coc, st.boost, st.per[0], st.per[1]] {
+                v.to_bits().hash(&mut h);
+            }
+            (st.work, st.count, prepared.is_some()).hash(&mut h);
+            h.finish()
+        };
+        let img = prepared.map_or(&self.rgb, |p| &**p);
+        Some(
+            self.cache
+                .blurred(key, prepared, st.depth.clone(), || lens_blur::blur(img, st)),
+        )
+    }
+
     /// The source the live pipe reads: after the detail stage and spot
     /// removal. None when neither does anything (use `rgb`).
     pub fn prepared(&self, s: &Settings) -> Option<std::sync::Arc<Rgb>> {
@@ -389,6 +418,8 @@ struct Source<'a> {
     main: &'a Rgb,
     aux: Option<&'a Aux>,
     mix: layers::Mix,
+    /// Lens Blur, mixed in last.
+    blur: Option<(&'a lens_blur::Stage, &'a lens_blur::Blurred)>,
 }
 
 impl Texels for Source<'_> {
@@ -398,6 +429,18 @@ impl Texels for Source<'_> {
 
     #[inline]
     fn texel(&self, x: usize, y: usize) -> [f32; 3] {
+        let v = self.mixed(x, y);
+        match self.blur {
+            Some((st, b)) => lens_blur::texel(st, b, v, x as f32, y as f32),
+            None => v,
+        }
+    }
+}
+
+impl Source<'_> {
+    /// The source with the images beside it mixed in (before Lens Blur).
+    #[inline]
+    fn mixed(&self, x: usize, y: usize) -> [f32; 3] {
         let mut v = self.main.px(x, y);
         let Some(aux) = self.aux else {
             return v;
@@ -641,6 +684,11 @@ pub struct Frame {
     pub point_view: Option<usize>,
     /// Vignette and grain (see [`effects`]).
     pub effects: effects::Effects,
+    /// Lens Blur (see [`lens_blur`]): None when it's off or the depth map
+    /// isn't there yet.
+    pub lens_blur: Option<lens_blur::Stage>,
+    /// Lens Blur's depth map shown instead of the photo.
+    pub depth_view: bool,
 }
 
 /// The display transform's numbers.
@@ -1081,19 +1129,17 @@ pub fn frame(raw: &RawImage, src: &Demosaiced, s: &Settings, o: &Options) -> Fra
             }
         }
     }
+    let turned = compose_orientation(o.orientation, s.geometry.quarter, s.geometry.flip);
+    let layers = layers::layers(src, &colour, &display, s, turned);
     Frame {
         width,
         height,
         map: map.map(|r| r.map(|v| v as f32)),
         lens,
         local: maps::local(src, &colour, s),
-        layers: layers::layers(
-            src,
-            &colour,
-            &display,
-            s,
-            compose_orientation(o.orientation, s.geometry.quarter, s.geometry.flip),
-        ),
+        lens_blur: lens_blur::stage(src, &colour, &display, s, turned, &layers),
+        depth_view: false,
+        layers,
         colour,
         dcp,
         look: look::Look::new(
@@ -1251,13 +1297,27 @@ pub fn apply(src: &Rgb, f: &Frame, display: bool) -> Rgb {
 /// (see [`Demosaiced::aux`]); without them, layers' AI strength does
 /// nothing.
 pub fn apply_with(src: &Rgb, aux: Option<&Aux>, f: &Frame, display: bool) -> Rgb {
+    let blur = f.lens_blur.as_ref().map(|st| lens_blur::blur(src, st));
+    apply_blurred(src, aux, blur.as_ref(), f, display)
+}
+
+/// [`apply_with`] with Lens Blur's images already made (see
+/// [`lens_blur::blur`]; None: no blur).
+pub fn apply_blurred(
+    src: &Rgb,
+    aux: Option<&Aux>,
+    blur: Option<&lens_blur::Blurred>,
+    f: &Frame,
+    display: bool,
+) -> Rgb {
+    let blur = f.lens_blur.as_ref().zip(blur);
     let mut out = Rgb::new(f.width, f.height);
     out.data
         .par_chunks_mut(f.width * 3)
         .enumerate()
         .for_each(|(y, line)| {
             for x in 0..f.width {
-                let (lin, mx, my, seen) = before_display(src, aux, f, x as f32, y as f32);
+                let (lin, mx, my, seen) = before_display(src, aux, blur, f, x as f32, y as f32);
                 let px = if display {
                     let (d, out) = display_out(&f.display, lin);
                     let d = if f.effects.active() {
@@ -1271,8 +1331,12 @@ pub fn apply_with(src: &Rgb, aux: Option<&Aux>, f: &Frame, display: bool) -> Rgb
                         Some(_) => greyed(d, seen),
                         None => d,
                     };
-                    match f.mask_view {
+                    let d = match f.mask_view {
                         Some((k, only)) => layers::mask_shown(&f.layers, k, only, d, mx, my),
+                        None => d,
+                    };
+                    match f.lens_blur.as_ref().filter(|_| f.depth_view) {
+                        Some(st) => lens_blur::shown(st, st.depth_at(mx, my)),
                         None => d,
                     }
                 } else {
@@ -1297,11 +1361,12 @@ pub fn greyed(d: [f32; 3], w: f32) -> [f32; 3] {
 fn before_display(
     src: &Rgb,
     aux: Option<&Aux>,
+    blur: Option<(&lens_blur::Stage, &lens_blur::Blurred)>,
     f: &Frame,
     x: f32,
     y: f32,
 ) -> ([f32; 3], f32, f32, f32) {
-    let (lin, mx, my) = look_input_at(src, aux, f, x, y);
+    let (lin, mx, my) = look_input_at(src, aux, blur, f, x, y);
     let (lin, seen) = look::look_point(&f.look, lin, f.point_view);
     (lin, mx, my, seen)
 }
@@ -1329,18 +1394,30 @@ fn colour_input(src: &Source, f: &Frame, mx: f32, my: f32) -> ([f32; 3], f32, f3
 /// What the colour stage sees at output pixel `(x, y)`: linear Rec.2020
 /// after the local tone maps and local adjustments (Point Color picks it).
 pub fn look_input(src: &Rgb, f: &Frame, x: f32, y: f32) -> [f32; 3] {
-    look_input_at(src, None, f, x, y).0
+    look_input_at(src, None, None, f, x, y).0
 }
 
 /// [`look_input`], and the source position before lens corrections.
-fn look_input_at(main: &Rgb, aux: Option<&Aux>, f: &Frame, x: f32, y: f32) -> ([f32; 3], f32, f32) {
+fn look_input_at(
+    main: &Rgb,
+    aux: Option<&Aux>,
+    blur: Option<(&lens_blur::Stage, &lens_blur::Blurred)>,
+    f: &Frame,
+    x: f32,
+    y: f32,
+) -> ([f32; 3], f32, f32) {
     let (mx, my) = f.source_at(x, y);
     // How the layers mix the source here (read where masks are).
     let mix = match aux {
         Some(_) => layers::mix_at(&f.layers, mx, my),
         None => Default::default(),
     };
-    let src = &Source { main, aux, mix };
+    let src = &Source {
+        main,
+        aux,
+        mix,
+        blur,
+    };
     let (lin, sx, sy) = colour_input(src, f, mx, my);
     let lin = maps::local_pixel(&f.local, lin, sx, sy);
     let lin = layers::layers_pixel(&f.layers, &f.local, lin, mx, my, sx, sy);
@@ -1420,10 +1497,10 @@ pub fn render_from(
 /// `s` (the settings `f` was made from).
 pub fn apply_from(src: &Demosaiced, s: &Settings, f: &Frame, display: bool) -> Rgb {
     let aux = src.aux(s);
-    match src.prepared(s) {
-        Some(img) => apply_with(&img, aux.as_deref(), f, display),
-        None => apply_with(&src.rgb, aux.as_deref(), f, display),
-    }
+    let prepared = src.prepared(s);
+    let img = prepared.as_deref().unwrap_or(&src.rgb);
+    let blur = src.lens_blurred(prepared.as_ref(), f);
+    apply_blurred(img, aux.as_deref(), blur.as_deref(), f, display)
 }
 
 /// EXIF orientation applied (the geometry map with nothing else).
@@ -1459,6 +1536,8 @@ fn resample(img: &Rgb, map: [[f64; 3]; 3], w: usize, h: usize) -> Rgb {
         mask_view: None,
         point_view: None,
         effects: Default::default(),
+        lens_blur: None,
+        depth_view: false,
     };
     apply(img, &f, false)
 }

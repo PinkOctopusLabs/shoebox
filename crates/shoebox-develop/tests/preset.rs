@@ -85,6 +85,31 @@ fn smart_lightings_spot_stays_with_its_photo() {
     assert_eq!(out.modules.smart_lighting.spot, None);
 }
 
+#[test]
+fn lens_blurs_focus_stays_with_its_photo() {
+    use shoebox_develop::edit::Bokeh;
+    let mut s = Settings::default();
+    let lb = &mut s.modules.lens_blur;
+    lb.enabled = true;
+    lb.amount = 80.0;
+    lb.bokeh = Bokeh::Blades;
+    lb.focus = Some([0.3, 0.4]);
+    let p = Preset::from_settings("Shallow", &s, &[Part::LensBlur]);
+    assert_eq!(p.parts(), [Part::LensBlur]);
+    assert!(!Part::LensBlur.copied_by_default());
+    let mut other = Settings::default();
+    other.modules.lens_blur.focus = Some([0.7, 0.2]);
+    let out = p.apply(&other, 1.0);
+    assert!(out.modules.lens_blur.enabled);
+    assert_eq!(out.modules.lens_blur.amount, 80.0);
+    assert_eq!(out.modules.lens_blur.bokeh, Bokeh::Blades);
+    assert_eq!(out.modules.lens_blur.focus, Some([0.7, 0.2]));
+    assert_eq!(
+        p.apply(&Settings::default(), 1.0).modules.lens_blur.focus,
+        None
+    );
+}
+
 /// A look, a DNG camera profile and colour calibration travel with the
 /// Colour and White balance parts; the look's Amount scales from 100%.
 #[test]

@@ -918,6 +918,8 @@ fn local_layers() -> Vec<shoebox_develop::edit::Local> {
                 dehaze: 20.0,
                 sharpness: -60.0,
                 denoise_ai: 40.0,
+                // Lens Blur is off: nothing.
+                depth: 30.0,
             },
             ..Default::default()
         },

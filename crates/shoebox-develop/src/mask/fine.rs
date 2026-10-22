@@ -146,9 +146,14 @@ pub struct Coefficients {
 impl Coefficients {
     /// For `mask` (bytes, `w`×`h`) guided by `guide` (the same size).
     pub fn new(mask: &[u8], guide: &[[f32; 3]], w: usize, h: usize) -> Self {
+        let p: Vec<f32> = mask.par_iter().map(|&v| f32::from(v) / 255.0).collect();
+        Self::of_values(p, guide, w, h)
+    }
+
+    /// For values 0–1 (`w`×`h`) guided by `guide` (the same size).
+    pub fn of_values(p: Vec<f32>, guide: &[[f32; 3]], w: usize, h: usize) -> Self {
         let r = RADIUS;
         let mean = |v: &[f32]| box_mean(v, w, h, r);
-        let p: Vec<f32> = mask.par_iter().map(|&v| f32::from(v) / 255.0).collect();
         let chan = |c: usize| guide.par_iter().map(|g| g[c]).collect::<Vec<f32>>();
         let ch = [chan(0), chan(1), chan(2)];
         let mean_p = mean(&p);
@@ -285,13 +290,28 @@ fn bilinear(v: &[f32], w: usize, xs: &Taps, x: usize, (y0, y1, fy): (usize, usiz
 /// row `y`).
 pub fn upsample(
     mask: &[u8],
+    grid: (usize, usize),
+    guide_lo: &[[f32; 3]],
+    fine: (usize, usize),
+    guide: &(dyn Fn(usize, &mut [[f32; 3]]) + Sync),
+) -> Vec<u8> {
+    let p: Vec<f32> = mask.par_iter().map(|&v| f32::from(v) / 255.0).collect();
+    upsample_values(p, grid, guide_lo, fine, guide)
+        .par_iter()
+        .map(|v| (v * 255.0).round() as u8)
+        .collect()
+}
+
+/// [`upsample`] for values 0–1 (a depth map, say), kept as floats.
+pub fn upsample_values(
+    values: Vec<f32>,
     (gw, gh): (usize, usize),
     guide_lo: &[[f32; 3]],
     (fw, fh): (usize, usize),
     guide: &(dyn Fn(usize, &mut [[f32; 3]]) + Sync),
-) -> Vec<u8> {
-    let c = Coefficients::new(mask, guide_lo, gw, gh);
-    let mut out = vec![0u8; fw * fh];
+) -> Vec<f32> {
+    let c = Coefficients::of_values(values, guide_lo, gw, gh);
+    let mut out = vec![0f32; fw * fh];
     out.par_chunks_mut(BAND * fw.max(1))
         .enumerate()
         .for_each(|(b, band)| {
@@ -300,10 +320,7 @@ pub fn upsample(
             for (row, line) in g.chunks_mut(fw.max(1)).enumerate() {
                 guide(rows.start + row, line);
             }
-            let v = c.rows(rows, fw, fh, &g);
-            for (o, v) in band.iter_mut().zip(v) {
-                *o = (v * 255.0).round() as u8;
-            }
+            band.copy_from_slice(&c.rows(rows, fw, fh, &g));
         });
     out
 }

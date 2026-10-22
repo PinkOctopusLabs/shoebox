@@ -666,6 +666,47 @@ impl Default for Grain {
     }
 }
 
+/// Lens Blur (EDITING-SPEC, Phase 4 additions): a synthetic depth of field
+/// from a depth map. Amount 0–100 (how far from the focus the blur grows:
+/// an aperture); the focus point (in the stored image, in units of its
+/// long edge, as masks; None: the nearest things); focus range 0–100 (how
+/// deep the sharp band is, in hundredths of the depth map); the bokeh's
+/// shape; highlight boost 0–100 (bright points bloom brighter).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LensBlur {
+    pub enabled: bool,
+    pub amount: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus: Option<[f64; 2]>,
+    pub range: f64,
+    pub bokeh: Bokeh,
+    pub boost: f64,
+}
+
+impl Default for LensBlur {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            amount: 50.0,
+            focus: None,
+            range: 10.0,
+            bokeh: Bokeh::Circle,
+            boost: 0.0,
+        }
+    }
+}
+
+/// The shape out-of-focus highlights take: a round aperture, or one of six
+/// straight blades.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Bokeh {
+    #[default]
+    Circle,
+    Blades,
+}
+
 /// A monochrome treatment: how bright each hue band ([`HUES`]) turns out,
 /// −100 to +100.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -746,6 +787,7 @@ pub struct Modules {
     pub display_transform: DisplayTransform,
     pub effects: Effects,
     pub look_lut: LookLut,
+    pub lens_blur: LensBlur,
     /// Modules from a newer build, kept untouched.
     #[serde(flatten)]
     pub other: BTreeMap<String, Value>,
@@ -1192,6 +1234,9 @@ pub struct LocalAdjust {
     /// AI denoise strength added to the global Strength inside the mask
     /// (the sum kept to 0–100); raw photos only.
     pub denoise_ai: f64,
+    /// Lens Blur's depth map pushed nearer (+) or farther (−) inside the
+    /// mask: +100 is a whole depth map's range nearer.
+    pub depth: f64,
 }
 
 impl Settings {

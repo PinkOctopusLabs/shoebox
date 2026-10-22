@@ -108,6 +108,22 @@ struct Inner {
     /// Jobs for the fill thread (the live view's), and whether it runs.
     fill_queue: std::collections::VecDeque<Job>,
     fill_thread: bool,
+    /// Depth maps found (see `crate::depth`), by orientation and grid size,
+    /// as subjects are.
+    depth: std::collections::HashMap<DepthKey, Depthed>,
+    /// The last depth map refined by local adjustments (see
+    /// `cpu::lens_blur`), by what it was made from.
+    refined: Option<(u64, Kept, Arc<super::lens_blur::Depth>)>,
+    /// The last Lens Blur on the CPU: its key, the source it blurred and
+    /// the depth map (kept alive, so their addresses can't be reused), and
+    /// the result.
+    #[allow(clippy::type_complexity)]
+    blurred: Option<(
+        u64,
+        Option<Arc<Rgb>>,
+        Arc<super::lens_blur::Depth>,
+        Arc<super::lens_blur::Blurred>,
+    )>,
 }
 
 /// An object removal's fill.
@@ -115,6 +131,23 @@ struct Inner {
 pub enum Filled {
     Pending,
     Done(Arc<Fill>),
+    Failed(String),
+}
+
+/// What a refined depth map was made from, kept alive with it (so their
+/// addresses, in its key, can't be reused).
+pub type Kept = (Arc<Vec<f32>>, Option<Arc<crate::mask::Masks>>);
+
+/// A depth map's orientation and grid size.
+pub type DepthKey = (u16, usize, usize);
+
+/// A depth map search.
+#[derive(Debug, Clone)]
+pub enum Depthed {
+    Pending,
+    /// Relative inverse depth, 0–1 (1 nearest), on the grid, in the stored
+    /// image's orientation.
+    Done(Arc<Vec<f32>>),
     Failed(String),
 }
 
@@ -168,6 +201,7 @@ impl Cache {
         let mut inner = self.lock();
         inner.found.retain(|_, f| !matches!(f, Found::Failed(_)));
         inner.fills.retain(|_, f| !matches!(f, Filled::Failed(_)));
+        inner.depth.retain(|_, f| !matches!(f, Depthed::Failed(_)));
         inner.found_generation += 1;
     }
 
@@ -277,6 +311,56 @@ impl Cache {
         (pending, failed)
     }
 
+    pub fn depth(&self, key: &DepthKey) -> Option<Depthed> {
+        self.lock().depth.get(key).cloned()
+    }
+
+    /// A depth map search finished (or started): renders redraw.
+    pub fn set_depth(&self, key: DepthKey, d: Depthed) {
+        let mut inner = self.lock();
+        inner.depth.insert(key, d);
+        inner.found_generation += 1;
+    }
+
+    /// The depth map refined for `key` (`make` runs on a miss).
+    pub fn refined(
+        &self,
+        key: u64,
+        from: Kept,
+        make: impl FnOnce() -> super::lens_blur::Depth,
+    ) -> Arc<super::lens_blur::Depth> {
+        if let Some((k, _, d)) = &self.lock().refined
+            && *k == key
+        {
+            return d.clone();
+        }
+        let d = Arc::new(make());
+        self.lock().refined = Some((key, from, d.clone()));
+        d
+    }
+
+    /// Lens Blur's images for `key` from `from` (the source after the
+    /// detail stage and spots; None: the source itself) and `depth`
+    /// (`make` runs on a miss).
+    pub fn blurred(
+        &self,
+        key: u64,
+        from: Option<&Arc<Rgb>>,
+        depth: Arc<super::lens_blur::Depth>,
+        make: impl FnOnce() -> super::lens_blur::Blurred,
+    ) -> Arc<super::lens_blur::Blurred> {
+        if let Some((k, f, _, b)) = &self.lock().blurred
+            && *k == key
+            && same(f.as_ref(), from)
+        {
+            return b.clone();
+        }
+        self.lock().blurred = None;
+        let b = Arc::new(make());
+        self.lock().blurred = Some((key, from.cloned(), depth, b.clone()));
+        b
+    }
+
     /// Changes whenever a search finishes (renders key on it).
     pub fn found_generation(&self) -> u64 {
         self.lock().found_generation
@@ -285,9 +369,21 @@ impl Cache {
     /// A search still running, and the last one that failed (why).
     pub fn finding(&self) -> (bool, Option<String>) {
         let inner = self.lock();
-        let pending = inner.found.values().any(|f| matches!(f, Found::Pending));
+        let pending = inner.found.values().any(|f| matches!(f, Found::Pending))
+            || inner.depth.values().any(|f| matches!(f, Depthed::Pending));
         let failed = inner.found.values().find_map(|f| match f {
             Found::Failed(e) => Some(e.clone()),
+            _ => None,
+        });
+        (pending, failed)
+    }
+
+    /// A depth map search still running, and the last one that failed.
+    pub fn depthing(&self) -> (bool, Option<String>) {
+        let inner = self.lock();
+        let pending = inner.depth.values().any(|f| matches!(f, Depthed::Pending));
+        let failed = inner.depth.values().find_map(|f| match f {
+            Depthed::Failed(e) => Some(e.clone()),
             _ => None,
         });
         (pending, failed)

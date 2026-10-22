@@ -41,6 +41,8 @@ pub struct Layer {
     pub sharpness: f32,
     /// AI denoise strength added (−1 to 1).
     pub denoise_ai: f32,
+    /// Lens Blur's depth pushed nearer (−1 to 1; see `lens_blur`).
+    pub depth: f32,
 }
 
 /// What the layers want from the source stage: images beside the source
@@ -360,7 +362,7 @@ fn found(
 
 /// The picture as shown on the masks' `gw`×`gh` grid, upright, in 8
 /// bits, and its size.
-fn shown_upright(
+pub(crate) fn shown_upright(
     src: &Demosaiced,
     colour: &[[f32; 3]; 3],
     display: &Display,
@@ -422,7 +424,7 @@ pub fn faces(
 }
 
 /// The orientation that turns an image in orientation `o` back.
-fn undo_orientation(o: u16) -> u16 {
+pub(crate) fn undo_orientation(o: u16) -> u16 {
     match o {
         6 => 8,
         8 => 6,
@@ -455,6 +457,7 @@ fn layer(l: &Local, cat16: bool) -> Layer {
         dehaze: unit(a.dehaze),
         sharpness: unit(a.sharpness).clamp(-1.0, 1.0),
         denoise_ai: unit(a.denoise_ai).clamp(-1.0, 1.0),
+        depth: unit(a.depth).clamp(-1.0, 1.0),
     }
 }
 

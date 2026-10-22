@@ -108,6 +108,31 @@ pub fn through(
     Ok(m)
 }
 
+/// [`through`] for a map of values 0–1 on the finder's own grid (a depth
+/// map), kept as a 16-bit PNG.
+pub fn through_values(
+    model: &str,
+    what: &str,
+    rgb: &[u8],
+    w: usize,
+    h: usize,
+    run: impl FnOnce() -> Result<super::Coarse, String>,
+) -> Result<super::Coarse, String> {
+    let store = current().filter(|_| !model.is_empty());
+    let Some(store) = store else {
+        return run();
+    };
+    let k = key(model, what, &[], rgb, w, h);
+    if let Some(m) = store.get_values(&k) {
+        return Ok(m);
+    }
+    let m = run()?;
+    if let Err(e) = store.put_values(&k, &m) {
+        tracing::warn!("keeping a map in {}: {e}", store.dir.display());
+    }
+    Ok(m)
+}
+
 impl Store {
     pub fn new(dir: &Path, limit: u64) -> Self {
         Self {
@@ -161,15 +186,39 @@ impl Store {
         Some(m)
     }
 
+    /// A kept map of values (any size), touched as [`Self::get`] does.
+    pub fn get_values(&self, key: &str) -> Option<super::Coarse> {
+        let p = self.path(key);
+        let bytes = std::fs::read(&p).ok()?;
+        let m = decode16(&bytes)?;
+        let _ = std::fs::File::options()
+            .append(true)
+            .open(&p)
+            .and_then(|f| f.set_modified(std::time::SystemTime::now()));
+        Some(m)
+    }
+
+    /// Keep a map of values 0–1, 16 bits each.
+    pub fn put_values(&self, key: &str, m: &super::Coarse) -> std::io::Result<()> {
+        let bytes = encode16(m).map_err(std::io::Error::other)?;
+        self.write_bytes(key, &bytes)
+    }
+
     fn write(&self, key: &str, data: &[u8], w: usize, h: usize, px: Pixels) -> std::io::Result<()> {
         let bytes = encode(data, w, h, px).map_err(std::io::Error::other)?;
+        self.write_bytes(key, &bytes)
+    }
+
+    /// Write `bytes` beside, then rename them into place, removing the
+    /// least recently used past the limit.
+    fn write_bytes(&self, key: &str, bytes: &[u8]) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.dir)?;
         let p = self.path(key);
         let n = TMP.fetch_add(1, Ordering::Relaxed);
         let tmp = self
             .dir
             .join(format!(".{key}.{}.{n}.tmp", std::process::id()));
-        if let Err(e) = std::fs::write(&tmp, &bytes).and_then(|()| std::fs::rename(&tmp, &p)) {
+        if let Err(e) = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, &p)) {
             let _ = std::fs::remove_file(&tmp);
             return Err(e);
         }
@@ -296,9 +345,85 @@ fn decode(bytes: &[u8], w: usize, h: usize, px: Pixels) -> Option<Vec<u8>> {
     (buf.len() == w * h * px.bytes()).then_some(buf)
 }
 
+/// A 16-bit grayscale PNG of values 0–1.
+fn encode16(m: &super::Coarse) -> Result<Vec<u8>, String> {
+    let (w, h) = (m.width, m.height);
+    if m.data.len() != w * h || w == 0 || h == 0 {
+        return Err("the map is the wrong size".into());
+    }
+    let err = |e: png::EncodingError| e.to_string();
+    let (pw, ph) = (
+        u32::try_from(w).map_err(|e| e.to_string())?,
+        u32::try_from(h).map_err(|e| e.to_string())?,
+    );
+    let data: Vec<u8> = m
+        .data
+        .iter()
+        .flat_map(|v| ((v.clamp(0.0, 1.0) * 65535.0).round() as u16).to_be_bytes())
+        .collect();
+    let mut out = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut out, pw, ph);
+        enc.set_color(png::ColorType::Grayscale);
+        enc.set_depth(png::BitDepth::Sixteen);
+        enc.set_compression(png::Compression::Fast);
+        let mut wr = enc.write_header().map_err(err)?;
+        wr.write_image_data(&data).map_err(err)?;
+    }
+    Ok(out)
+}
+
+/// A PNG written by [`encode16`], if it's whole.
+fn decode16(bytes: &[u8]) -> Option<super::Coarse> {
+    let mut r = png::Decoder::new(std::io::Cursor::new(bytes))
+        .read_info()
+        .ok()?;
+    let info = r.info();
+    let (w, h) = (info.width as usize, info.height as usize);
+    if w == 0
+        || h == 0
+        || info.color_type != png::ColorType::Grayscale
+        || info.bit_depth != png::BitDepth::Sixteen
+    {
+        return None;
+    }
+    let mut buf = vec![0; r.output_buffer_size()?];
+    let frame = r.next_frame(&mut buf).ok()?;
+    buf.truncate(frame.buffer_size());
+    (buf.len() == w * h * 2).then(|| super::Coarse {
+        width: w,
+        height: h,
+        data: buf
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| f32::from(u16::from_be_bytes(*b)) / 65535.0)
+            .collect(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maps_round_trip_in_sixteen_bits() {
+        let m = super::super::Coarse {
+            width: 5,
+            height: 3,
+            data: (0..15).map(|i| i as f32 / 14.0).collect(),
+        };
+        let b = encode16(&m).unwrap_or_default();
+        let back = decode16(&b).unwrap_or_else(|| m.clone());
+        assert_eq!((back.width, back.height), (5, 3));
+        for (a, b) in m.data.iter().zip(&back.data) {
+            assert!((a - b).abs() < 1e-5);
+        }
+        assert!(decode16(&b[..b.len() / 2]).is_none(), "cut short");
+        // An 8-bit mask isn't a map.
+        let m8 = encode(&[1, 2, 3, 4], 2, 2, Pixels::Gray8).unwrap_or_default();
+        assert!(decode16(&m8).is_none());
+    }
 
     #[test]
     fn pngs_round_trip() {

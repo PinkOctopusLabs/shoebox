@@ -169,25 +169,39 @@ pub fn register_scene_finder(id: &str, f: Box<SceneFinder>) {
 /// rather than the coarse grid's, and stay soft where the model is unsure
 /// or the picture shows no edge.
 pub fn landscape(rgb: &[u8], w: usize, h: usize, c: &Coarse) -> Result<Vec<u8>, String> {
+    // The probabilities as bytes first, as they always were, then upsampled.
+    let c = Coarse {
+        data: c
+            .data
+            .iter()
+            .map(|v| (v.clamp(0.0, 1.0) * 255.0).round() / 255.0)
+            .collect(),
+        ..c.clone()
+    };
+    Ok(guided(rgb, w, h, &c)?
+        .iter()
+        .map(|v| (v * 255.0).round() as u8)
+        .collect())
+}
+
+/// Values 0–1 on a coarse grid over a picture (`rgb`, `w`×`h`, pixel
+/// centres lined up) at the picture's size: upsampled by the guided filter
+/// along its colour where the grid is coarser, else read bilinearly.
+pub fn guided(rgb: &[u8], w: usize, h: usize, c: &Coarse) -> Result<Vec<f32>, String> {
     let (cw, ch) = (c.width, c.height);
     if w == 0 || h == 0 || rgb.len() < w * h * 3 {
         return Err("no picture".into());
     }
     if cw == 0 || ch == 0 || c.data.len() != cw * ch {
-        return Err("the landscape mask came back the wrong size".into());
+        return Err("the coarse map came back the wrong size".into());
     }
-    let coarse: Vec<u8> = c
-        .data
-        .iter()
-        .map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
-        .collect();
     let at = |x: usize, y: usize| -> [f32; 3] {
         let p = &rgb[(y * w + x) * 3..][..3];
         [0, 1, 2].map(|i| f32::from(p[i]) / 255.0)
     };
     if cw >= w || ch >= h {
         // No finer than its grid: read it bilinearly.
-        let mut out = vec![0u8; w * h];
+        let mut out = vec![0f32; w * h];
         out.par_chunks_mut(w).enumerate().for_each(|(y, line)| {
             let fy = ((y as f32 + 0.5) * ch as f32 / h as f32 - 0.5).clamp(0.0, (ch - 1) as f32);
             let (y0, ty) = (fy as usize, fy.fract());
@@ -200,7 +214,7 @@ pub fn landscape(rgb: &[u8], w: usize, h: usize, c: &Coarse) -> Result<Vec<u8>, 
                 let v = |xx: usize, yy: usize| c.data[yy * cw + xx].clamp(0.0, 1.0);
                 let top = v(x0, y0) + (v(x1, y0) - v(x0, y0)) * tx;
                 let bot = v(x0, y1) + (v(x1, y1) - v(x0, y1)) * tx;
-                *o = ((top + (bot - top) * ty) * 255.0).round() as u8;
+                *o = top + (bot - top) * ty;
             }
         });
         return Ok(out);
@@ -224,11 +238,18 @@ pub fn landscape(rgb: &[u8], w: usize, h: usize, c: &Coarse) -> Result<Vec<u8>, 
             s
         })
         .collect();
-    Ok(fine::upsample(&coarse, (cw, ch), &lo, (w, h), &|y, row| {
-        for (x, o) in row.iter_mut().enumerate() {
-            *o = at(x, y);
-        }
-    }))
+    let values = c.data.iter().map(|v| v.clamp(0.0, 1.0)).collect();
+    Ok(fine::upsample_values(
+        values,
+        (cw, ch),
+        &lo,
+        (w, h),
+        &|y, row| {
+            for (x, o) in row.iter_mut().enumerate() {
+                *o = at(x, y);
+            }
+        },
+    ))
 }
 
 /// Find `what` with the registered finder (or read what it found before
