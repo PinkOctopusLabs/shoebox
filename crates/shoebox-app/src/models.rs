@@ -1,5 +1,5 @@
-//! Models Develop downloads when first asked for (the object model, AI raw
-//! denoise): pinned and checked by `shoebox_ml::download`, fetched on a
+//! Models Develop downloads when first asked for (the object model, the
+//! landscape model, AI raw denoise): pinned and checked by `shoebox_ml::download`, fetched on a
 //! thread of their own, their progress for the panel.
 
 use std::path::PathBuf;
@@ -131,6 +131,62 @@ pub fn download_ui(ui: &mut eframe::egui::Ui, model: &Arc<Model>, what: &str, hi
         }
     }
     ui.end_row();
+}
+
+/// Sky and landscape masks (`shoebox_ml::scene`): the scene model in `dir`
+/// (downloaded through `staging`), registered as the masks' scene finder
+/// and loaded on first use. One picture's segmentation is kept (by its
+/// hash), so each further part of it is immediate.
+pub fn register_landscape(dir: PathBuf, staging: PathBuf) -> Arc<Model> {
+    use shoebox_develop::edit::LandscapePart as L;
+    use shoebox_ml::scene::{Part, Scene, SceneModel};
+    let model = Model::new(&shoebox_ml::download::SCENE, dir, staging);
+    let net: Mutex<Option<SceneModel>> = Mutex::new(None);
+    let last: Mutex<Option<(blake3::Hash, Scene)>> = Mutex::new(None);
+    let m = model.clone();
+    shoebox_develop::mask::register_scene_finder(
+        shoebox_ml::scene::MODEL_ID,
+        Box::new(move |rgb, w, h, part| {
+            if !m.ready() {
+                return Err("the landscape model isn't downloaded yet".into());
+            }
+            let part = match part {
+                L::Sky => Part::Sky,
+                L::Vegetation => Part::Vegetation,
+                L::Water => Part::Water,
+                L::Mountains => Part::Mountains,
+                L::Buildings => Part::Buildings,
+                L::Ground => Part::Ground,
+            };
+            let key = blake3::hash(rgb);
+            // One search at a time (the model's lock), so a picture's
+            // parts asked for together are segmented once.
+            let mut net = net.lock().map_err(|e| e.to_string())?;
+            let mut last = last.lock().map_err(|e| e.to_string())?;
+            if last.as_ref().is_none_or(|(k, _)| *k != key) {
+                if net.is_none() {
+                    let path = m.dir.join(shoebox_ml::scene::FILE);
+                    *net = Some(
+                        SceneModel::load(&path, &shoebox_ml::device())
+                            .map_err(|e| e.to_string())?,
+                    );
+                }
+                let Some(n) = net.as_ref() else {
+                    return Err("no landscape model".into());
+                };
+                *last = Some((key, n.segment(rgb, w, h).map_err(|e| e.to_string())?));
+            }
+            let Some((_, s)) = last.as_ref() else {
+                return Err("no segmentation".into());
+            };
+            Ok(shoebox_develop::mask::Coarse {
+                width: s.width,
+                height: s.height,
+                data: s.part(part).to_vec(),
+            })
+        }),
+    );
+    model
 }
 
 /// AI raw denoise (RawNIND, `shoebox_ml::rawnind`): its model in `dir`

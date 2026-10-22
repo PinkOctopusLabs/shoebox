@@ -2529,3 +2529,93 @@ Face parts, Object), from EDITING-SPEC's "Rendering masks".
 - **K:** free in Develop (⌘K is keywords). Lightroom has no control
   points; its K is the adjustment brush, which Shoebox has no key for. If
   the brush gets a key it should be something else, or K moves.
+
+## Sky and landscape masks (2026-10-22)
+
+- **Not SegFormer.** NVIDIA's SegFormer weights (nvidia/segformer-b*-
+  finetuned-ade-*) say `license: other` on Hugging Face and point to
+  NVlabs/SegFormer, whose LICENSE is the NVIDIA Source Code License:
+  §3.3 "may be used or intended for use non-commercially … for research
+  or evaluation purposes only" (the README says the same). GPL-3.0
+  forbids such restrictions, so neither the weights nor `candle-
+  transformers`' `segformer` with them can be used.
+- **Also looked at:** DINOv2's ADE20K heads (Meta, Apache 2.0, in
+  `candle-transformers` as `dinov2`): ViT-S linear is 44.3 mIoU, and its
+  14-pixel patches give a coarse map (37 cells across a 512 px short
+  side); candle's `dinov2` also interpolates position embeddings by
+  nearest neighbour with height and width swapped for non-square
+  pictures and wants a classifier head the checkpoint lacks, so it would
+  have been a port anyway. Hugging Face's openmmlab/upernet-convnext-*
+  (MIT) are conversions of mmsegmentation's checkpoints; the authors'
+  own came first.
+- **Chosen:** UperNet on ConvNeXt-B (ImageNet-22K), 640 px crops,
+  trained on ADE20K by ConvNeXt's authors: facebookresearch/ConvNeXt
+  (MIT, "This project is released under the MIT license"), its semantic
+  segmentation table's `upernet_convnext_base_22k_640x640.pth` (489 MB,
+  f32, 122 M parameters; 52.6 mIoU single scale, against 46.0 for
+  ConvNeXt-T and SegFormer-B0's 37.4) from Meta's file server
+  (dl.fbaipublicfiles.com), SHA-256 pinned (`download::SCENE`). ADE20K's
+  images have their own (research) terms, which bind the dataset, not
+  the weights, as with SAM's SA-1B. The head dominates the work and is
+  the same for T, S and B, so B costs little more time than T.
+- **The port** (`shoebox-ml::scene`, from the repo at 048efcea and
+  mmsegmentation v0.x's UPerHead and PPM): channels last throughout;
+  the 7×7 depthwise convolutions as 49 shifted multiply-adds, each tap
+  one contiguous run of the padded, flattened picture (twice as fast as
+  strided views; candle's grouped convolution would run a convolution
+  per channel); the stem and downsamplings as reshapes and a matmul;
+  the head's 3×3 convolutions as one matmul per tap with batch norm
+  folded in, their concatenated inputs taken in parts (an im2col of the
+  2048-channel bottleneck would be 2.8 GB). f32 on Metal. The checkpoint
+  is read directly (`state_dict`). Tested against direct sums for the
+  convolutions and PyTorch's adaptive pooling bins.
+- **Input:** the picture as shown, upright, on the masks' grid, resized
+  so its short side is 640 (the long at most 2560) and both are
+  multiples of 32, normalised as mmsegmentation does; the whole picture
+  at once (the config's `whole` test mode).
+- **Parts:** each a sum of ADE20K classes' softmax, so edges and unsure
+  places are soft. Sky (sky); Vegetation (tree, grass, plant, field,
+  flower, palm); Water (water, sea, river, swimming pool, waterfall,
+  lake); Mountains (mountain, hill); Buildings (building, house,
+  skyscraper, hovel, tower, bridge, pier, grandstand, wall, windowpane,
+  door, column, awning); Ground (earth, land, sand, rock, road, path,
+  sidewalk, dirt track, runway, floor). Lightroom's split of ground into
+  natural and artificial is left as one; walls and floors count indoors
+  too. ADE20K has no snow class (snow lands in whatever it lies on).
+  In edits, `{"kind": "landscape", "part": "sky"}` (the spec's example
+  said `ai_sky`; it now matches); a part a later build adds is kept by
+  this one as an unknown part.
+- **Soft and sharp:** the model's map is a quarter of what it saw
+  (240×160 for a 3:2 photo). `mask::landscape` upsamples it to the
+  picture it was found in with the guided filter `mask::fine` uses
+  (coefficients on the coarse grid along the picture area-averaged
+  there, applied with the picture's own colour), so edges land where the
+  picture has them and stay soft where it has none. Exports and 100%
+  regions then upsample again to the source's pixels, as for the other
+  AI parts. A test edge one 8-pixel cell from a coarse cell's: the rows
+  either side are on and off within two pixels.
+- **Found once per picture:** the app registers the model as the masks'
+  scene finder (`register_scene_finder`, identity `scene::MODEL_ID`), so
+  each part goes through `mask::store` like Subject and People; the app
+  keeps the last picture's segmentation, so a second part of the same
+  photo is immediate. The model is downloaded when the panel's button is
+  pressed (as SAM), into `<models>/upernet-convnext-base-ade20k`.
+- **Timings** (M2 Max, Metal, release): load 1.2–1.7 s; a 2560×1707
+  picture (seen at 960×640) 1.2 s, of which the backbone is 0.9 s (the
+  depthwise convolutions most of it); the first run in a process takes
+  about 10 s more while Metal compiles candle's kernels (as SAM's does);
+  the guided upsampling to the 2560 px grid 0.3 s per part. On the three
+  real fixtures (fire dancers on a night beach, a road through a van's
+  windscreen, a still life against cardboard) the coarse parts looked
+  right: the night sky as Sky (less where smoke is), the sand as Ground;
+  the sky through the windscreen as Sky and the roadside buildings as
+  Buildings; the cardboard walls as Buildings.
+- **Checks:** unit tests with a fake finder (`tests/landscape.rs`:
+  edges follow the picture, upright and put back, once per part and on
+  disk, fine for big sources, edit JSON); a headless UI test (the
+  Landscape menu, the download offered; with `SHOEBOX_SKY_MODEL` the
+  sky of a drawn landscape found, 40% of the frame); the real model on a
+  drawn landscape (`SHOEBOX_SKY_MODEL=<folder> cargo test -p shoebox-ml
+  --test scene -- --ignored`): sky 1.00 above, 0.00 below, the grass all
+  Vegetation. `examples/scene_probe.rs` writes each part of real photos
+  as PNGs. Real skies: `docs/MANUAL-CHECKS.md`.

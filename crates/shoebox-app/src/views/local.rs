@@ -8,7 +8,9 @@
 
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke as Line, pos2, vec2};
 use shoebox_develop::cpu::{self, Frame};
-use shoebox_develop::edit::{Local, LocalAdjust, MaskPart, Op, Part, Settings, Shape, Stroke};
+use shoebox_develop::edit::{
+    LandscapePart, Local, LocalAdjust, MaskPart, Op, Part, Settings, Shape, Stroke,
+};
 
 use super::develop::{edit, slider};
 use crate::app::ShoeboxApp;
@@ -68,6 +70,7 @@ pub enum Kind {
     Background,
     Person,
     Face(shoebox_develop::edit::FacePart),
+    Landscape(LandscapePart),
     Object,
     Linear,
     Radial,
@@ -77,7 +80,7 @@ pub enum Kind {
 }
 
 impl Kind {
-    pub const ALL: [Kind; 14] = [
+    pub const ALL: [Kind; 20] = [
         Kind::Subject,
         Kind::Background,
         Kind::Person,
@@ -86,6 +89,12 @@ impl Kind {
         Kind::Face(shoebox_develop::edit::FacePart::Eyebrows),
         Kind::Face(shoebox_develop::edit::FacePart::Lips),
         Kind::Face(shoebox_develop::edit::FacePart::Teeth),
+        Kind::Landscape(LandscapePart::Sky),
+        Kind::Landscape(LandscapePart::Vegetation),
+        Kind::Landscape(LandscapePart::Water),
+        Kind::Landscape(LandscapePart::Mountains),
+        Kind::Landscape(LandscapePart::Buildings),
+        Kind::Landscape(LandscapePart::Ground),
         Kind::Object,
         Kind::Linear,
         Kind::Radial,
@@ -110,6 +119,14 @@ impl Kind {
                 shoebox_develop::edit::FacePart::Eyebrows => "Eyebrows",
                 shoebox_develop::edit::FacePart::Lips => "Lips",
                 shoebox_develop::edit::FacePart::Teeth => "Teeth",
+            },
+            Kind::Landscape(p) => match p {
+                LandscapePart::Sky => "Sky",
+                LandscapePart::Vegetation => "Vegetation",
+                LandscapePart::Water => "Water",
+                LandscapePart::Mountains => "Mountains",
+                LandscapePart::Buildings => "Buildings",
+                LandscapePart::Ground => "Ground",
             },
             Kind::Object => "Object (click)",
         }
@@ -143,13 +160,15 @@ impl Kind {
             Kind::Subject | Kind::Background => Shape::Subject,
             Kind::Person => Shape::Person,
             Kind::Face(part) => Shape::Face { part },
+            Kind::Landscape(part) => Shape::Landscape { part },
             Kind::Object => Shape::Object { clicks: Vec::new() },
         }
     }
 }
 
 /// The kinds of mask part as a menu: the ones found in the photo first
-/// (faces' parts in a submenu), then the drawn ones. The kind clicked.
+/// (faces' parts and landscape's in submenus), then the drawn ones. The
+/// kind clicked.
 fn kind_menu(ui: &mut egui::Ui) -> Option<Kind> {
     let mut chosen = None;
     let mut item = |ui: &mut egui::Ui, k: Kind| {
@@ -164,6 +183,13 @@ fn kind_menu(ui: &mut egui::Ui) -> Option<Kind> {
     ui.menu_button("Face", |ui| {
         for k in Kind::ALL {
             if matches!(k, Kind::Face(_)) {
+                item(ui, k);
+            }
+        }
+    });
+    ui.menu_button("Landscape", |ui| {
+        for k in Kind::ALL {
+            if matches!(k, Kind::Landscape(_)) {
                 item(ui, k);
             }
         }
@@ -192,6 +218,7 @@ fn kind_of(s: &Shape) -> Kind {
         Shape::Subject => Kind::Subject,
         Shape::Person => Kind::Person,
         Shape::Face { part } => Kind::Face(*part),
+        Shape::Landscape { part } => Kind::Landscape(*part),
         Shape::Object { .. } => Kind::Object,
     }
 }
@@ -780,6 +807,31 @@ fn part_controls(app: &mut ShoeboxApp, ui: &mut egui::Ui, id: &str, i: usize, p:
                     ui.weak("Found by Apple's Vision.");
                 }
                 ui.end_row();
+            }
+            Shape::Landscape { .. } => {
+                let model = app.landscape.clone();
+                if !model.ready() {
+                    crate::models::download_ui(
+                        ui,
+                        &model,
+                        "the landscape model",
+                        "Meta's ConvNeXt scene model (ADE20K), once, from Meta; it runs on this Mac",
+                    );
+                } else {
+                    let (finding, failed) = app
+                        .develop
+                        .ready
+                        .as_ref()
+                        .map_or((false, None), |r| r.src.cache.finding());
+                    if finding {
+                        ui.weak("Finding it…");
+                    } else if let Some(e) = failed {
+                        ui.weak(format!("Couldn't: {e}"));
+                    } else {
+                        ui.weak("Found by the landscape model.");
+                    }
+                    ui.end_row();
+                }
             }
         });
 }

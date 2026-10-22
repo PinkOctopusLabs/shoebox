@@ -57,6 +57,13 @@ fn paths(tmp: &Path, roots: &[PathBuf]) -> AppPaths {
                 .map_or_else(|| tmp.join("data/models/rawnind"), PathBuf::from),
             tmp.join("cache/model-download"),
         ),
+        // The landscape model: a real one when SHOEBOX_SKY_MODEL names it,
+        // else an empty folder.
+        landscape: (
+            std::env::var_os("SHOEBOX_SKY_MODEL")
+                .map_or_else(|| tmp.join("data/models/scene"), PathBuf::from),
+            tmp.join("cache/model-download"),
+        ),
         people: tmp.join("data/people.json"),
         raw_cache: tmp.join("cache"),
         export_presets: tmp.join("data/export-presets.json"),
@@ -5421,6 +5428,91 @@ fn develop_object_mask() {
     let (cover, _) = h.state().develop_mask_coverage();
     // The ball: π·110² of 640×480, about 0.12.
     assert!((cover - 0.124).abs() < 0.03, "{cover}");
+}
+
+/// Sky and landscape masks: the mask menu's Landscape submenu (Sky first)
+/// makes a mask of that part; without the model its part offers the
+/// download; with it (`SHOEBOX_SKY_MODEL`), the sky of a drawn landscape
+/// is found.
+#[test]
+fn develop_landscape_mask() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(&root).unwrap();
+    // Blue sky over the top 40%, paler towards the horizon; grass below.
+    let img = image::RgbImage::from_fn(640, 480, |x, y| {
+        let n = ((x * 7 + y * 13) % 11) as f32;
+        if y < 192 {
+            let t = y as f32 / 192.0;
+            image::Rgb([
+                (70.0 + 110.0 * t) as u8,
+                (130.0 + 80.0 * t) as u8,
+                (225.0 + 20.0 * t) as u8,
+            ])
+        } else {
+            image::Rgb([
+                (60.0 + n * 3.0) as u8,
+                (130.0 + n * 3.0) as u8,
+                (40.0 + n) as u8,
+            ])
+        }
+    });
+    std::fs::write(
+        root.join("field.jpg"),
+        shoebox_fixtures::jpeg(&img, 92).unwrap(),
+    )
+    .unwrap();
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let with_model = std::env::var_os("SHOEBOX_SKY_MODEL").is_some();
+    let mut h = harness(p, egui::vec2(1400.0, 2600.0));
+    settle(&mut h, Duration::from_secs(60));
+    h.get_by_label("field.jpg").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(30), "develop", |a| {
+        a.develop_ready()
+    });
+    h.run_steps(3);
+    h.get_by_label("New mask").click();
+    h.run_steps(2);
+    h.get_by_label("Landscape").click();
+    h.run_steps(2);
+    for label in ["Vegetation", "Water", "Mountains", "Buildings", "Ground"] {
+        assert!(h.query_by_label(label).is_some(), "{label} in the menu");
+    }
+    h.get_by_label("Sky").click();
+    h.run_steps(3);
+    let doc = h.state().develop_doc().unwrap();
+    let l = doc.settings().locals.last().unwrap();
+    assert_eq!(l.name, "Sky");
+    assert!(matches!(
+        &l.mask.parts[..],
+        [shoebox_develop::edit::Part::Known(
+            shoebox_develop::edit::MaskPart {
+                shape: shoebox_develop::edit::Shape::Landscape {
+                    part: shoebox_develop::edit::LandscapePart::Sky
+                },
+                invert: false,
+                ..
+            }
+        )]
+    ));
+    if !with_model {
+        assert!(
+            h.query_by_label_contains("Download the landscape model")
+                .is_some(),
+            "the download is offered"
+        );
+        snapshot(&mut h, "develop-landscape-mask");
+        return;
+    }
+    wait_for(&mut h, Duration::from_secs(120), "sky found", |a| {
+        let (cover, finding) = a.develop_mask_coverage();
+        !finding && cover > 0.0
+    });
+    let (cover, _) = h.state().develop_mask_coverage();
+    assert!((cover - 0.4).abs() < 0.05, "{cover}");
+    snapshot(&mut h, "develop-landscape-mask");
 }
 
 /// AI denoise on a raw photo: without the model the panel offers it; with

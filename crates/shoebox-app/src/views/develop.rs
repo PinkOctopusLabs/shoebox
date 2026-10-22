@@ -897,7 +897,8 @@ fn original_settings(doc: &EditDoc) -> Settings {
 /// Render the edit (and the original when it's shown) if they changed.
 fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_wgpu::RenderState>) {
     let o = options(app);
-    let app_objects_arrived = app.objects.model.take_arrived();
+    // Not short-circuited: both flags are taken.
+    let mask_model_arrived = app.objects.model.take_arrived() | app.landscape.take_arrived();
     let st = &mut app.develop;
     let (Some(ready), Some(doc)) = (&st.ready, &st.doc) else {
         return;
@@ -986,8 +987,9 @@ fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_w
     let mut frame = cpu::frame(&ready.meta, &ready.src, &settings, &o);
     overlays.apply(&mut frame);
     st.frame = Some(frame.clone());
-    // The object model just arrived: ask again for what it couldn't do.
-    if app_objects_arrived {
+    // The object or landscape model just arrived: ask again for what it
+    // couldn't do.
+    if mask_model_arrived {
         ready.src.cache.forget_failed();
     }
     // A subject or person found since redraws it; check back while a

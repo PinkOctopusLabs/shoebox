@@ -97,6 +97,8 @@ Every model runs on `candle`, which `shoebox-ml` already uses. Each is implement
 | RawNIND UtNet2, Bayer (joint denoise and demosaic) | Benoit Brummer, UCLouvain: [rawnind\_jddc](https://github.com/trougnouf/rawnind_jddc). Code GPL-3.0; weights GPL-3.0 + CC BY 4.0 | PyTorch checkpoints, only in the author's Google Drive folder (linked from the repo README) | Port `UtNet2` from `src/rawnind/models/raw_denoiser.py` to candle, about 120 lines: 3×3 convolutions with LeakyReLU, 2×2 max-pool, 2×2 stride-2 transposed convolutions, skip concatenation, and a 1×1 convolution plus PixelShuffle head. Weights converted once to safetensors (below) | 3 |
 | SAM 2.1 Hiera, image predictor only | Meta: [sam2](https://github.com/facebookresearch/sam2), Apache-2.0 | [facebook/sam2.1-hiera-tiny](https://huggingface.co/facebook/sam2.1-hiera-tiny) on Hugging Face: `model.safetensors`, 156 MB, Apache-2.0 | Port the image path to candle: Hiera encoder, FPN neck, prompt encoder and mask decoder, none of the video memory modules. Use `candle-transformers`' `segment_anything` (SAM 1) as the template for the prompt encoder and decoder. Pinned Hugging Face download, as SigLIP is | 3 |
 | Sky segmentation | SegFormer trained on ADE20K | Hugging Face; check the licence | `candle-transformers`' own `segformer` | 4 |
+
+As built (2026-10-22, DECISIONS "Sky and landscape masks"): SegFormer's weights are under NVIDIA's non-commercial licence, which GPL-3.0 can't carry, so the sky and landscape model is UperNet on ConvNeXt-B (ImageNet-22K) trained on ADE20K by ConvNeXt's authors (Meta, MIT): their own checkpoint from Meta's file server (489 MB), ported to candle in `shoebox-ml::scene`.
 | Object removal | Decide in Phase 4 | LaMa needs FFT, which candle lacks | Choose a convolution-only inpainting model, or skip it | 4 |
 
 **RawNIND: choosing the checkpoint**
@@ -185,7 +187,7 @@ Each photo's edit is one versioned JSON document. The catalog holds it for speed
   },
   "geometry": { "rotate": -0.8, "keystone_v": 0.12, "crop": [0.04, 0.02, 0.96, 0.97], "aspect": "3:2" },
   "locals": [
-    { "id": "l1", "name": "Sky", "mask": { "op": "add", "parts": [{ "kind": "ai_sky" }, { "kind": "linear", "from": [0.5, 0.0], "to": [0.5, 0.45] }] },
+    { "id": "l1", "name": "Sky", "mask": { "op": "add", "parts": [{ "kind": "landscape", "part": "sky" }, { "kind": "linear", "from": [0.5, 0.0], "to": [0.5, 0.45] }] },
       "adjust": { "exposure": -0.4, "dehaze": 20 } }
   ],
   "history": [ { "t": "2026-10-17T21:40:00+08:00", "label": "Exposure +0.7", "patch": [] } ],
@@ -408,7 +410,7 @@ As built (2026-10-22, DECISIONS): layers run after the global dehaze, highlights
 | Luminance / colour range | Smooth range on L and hue in Oklab, with picker | 3 |
 | AI subject / person | Apple Vision foreground-instance and person-segmentation requests via `objc2-vision`; on-device and fast | 3 |
 | AI object (click) | SAM 2.1 Tiny from Meta's own weights, ported to candle (Task 0.3), instead of `ort`; click to add, Alt-click to subtract | 3 |
-| AI sky | SegFormer trained on ADE20K (which has a sky class), using candle-transformers' own SegFormer; check the weights' licence | 4 |
+| AI sky | SegFormer trained on ADE20K (which has a sky class), using candle-transformers' own SegFormer; check the weights' licence. As built: UperNet on ConvNeXt-B from ConvNeXt's authors (MIT; SegFormer's weights are non-commercial), with Vegetation, Water, Mountains, Buildings and Ground beside Sky (groups of ADE20K classes), soft from the class probabilities and guided-filter upsampled to the picture | 4 |
 | Portable subject / person | For Linux (deferred, 2026-10-22): an open model on candle in place of Vision, such as BiRefNet (MIT) or U²-Net (Apache-2.0) for subjects and MODNet (Apache-2.0) for people | With Linux |
 
 **Control points (Phase 4):** PhotoLab's U Point-style control point is a radial part intersected with a colour and luminance range sampled where you click. Offer it as a one-click tool that builds that mask, so it needs no new mask machinery. As built (2026-10-22, DECISIONS "Control points"): K or the panel's Control point button, then a click; a near-grey click takes no colour part.

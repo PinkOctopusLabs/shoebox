@@ -928,6 +928,38 @@ pub enum Shape {
     },
     /// A part of every face, from Apple's Vision's face landmarks.
     Face { part: FacePart },
+    /// Sky or a kind of landscape, found by the scene model.
+    Landscape { part: LandscapePart },
+}
+
+/// What landscape parts a mask can take (each a group of the scene
+/// model's classes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LandscapePart {
+    Sky,
+    /// Trees, grass, plants, flowers, fields.
+    Vegetation,
+    /// Seas, rivers, lakes, waterfalls, pools.
+    Water,
+    /// Mountains and hills.
+    Mountains,
+    /// Buildings and their walls, windows and doors; bridges, towers.
+    Buildings,
+    /// Earth, sand, rock, roads, paths, pavements, floors.
+    Ground,
+}
+
+impl LandscapePart {
+    /// In the menus' order.
+    pub const ALL: [LandscapePart; 6] = [
+        LandscapePart::Sky,
+        LandscapePart::Vegetation,
+        LandscapePart::Water,
+        LandscapePart::Mountains,
+        LandscapePart::Buildings,
+        LandscapePart::Ground,
+    ];
 }
 
 /// Parts of faces a mask can take.

@@ -141,6 +141,26 @@ pub const RAWNIND: Spec = Spec {
     convert: false,
 };
 
+/// UperNet on ConvNeXt-B (ImageNet-22K) trained on ADE20K, by ConvNeXt's
+/// authors (Meta, MIT): landscape masks. Only on Meta's own file server
+/// (the facebookresearch/ConvNeXt semantic segmentation table), checked
+/// by its SHA-256.
+pub const SCENE: Spec = Spec {
+    id: crate::scene::MODEL_ID,
+    files: &[Remote {
+        repo: "facebookresearch/ConvNeXt",
+        revision: "048efcea897d999aed302f2639b6270aedf8d4c8",
+        name: crate::scene::FILE,
+        size: 488_619_917,
+        sha256: "6f8e36a4c826ad0579f5a190e8e4429867013dd2c3ac1e5402c4a0e3fb8e3db8",
+        direct: Some(
+            "https://dl.fbaipublicfiles.com/convnext/ade20k/upernet_convnext_base_22k_640x640.pth",
+        ),
+    }],
+    ready: &[crate::scene::FILE],
+    convert: false,
+};
+
 impl Spec {
     /// Bytes to download.
     pub fn bytes(&self) -> u64 {
@@ -149,8 +169,13 @@ impl Spec {
 
     /// Where it comes from, for the settings window.
     pub fn source(&self) -> String {
-        if let Some(f) = self.files.iter().find(|f| f.direct.is_some()) {
-            return format!("github.com/{} (the authors' Google Drive)", f.repo);
+        if let Some((f, url)) = self.files.iter().find_map(|f| Some((f, f.direct?))) {
+            let host = url.split('/').nth(2).unwrap_or_default();
+            return if host.contains("google") {
+                format!("github.com/{} (the authors' Google Drive)", f.repo)
+            } else {
+                format!("github.com/{} (the authors' {host})", f.repo)
+            };
         }
         let mut repos: Vec<&str> = self.files.iter().map(|f| f.repo).collect();
         repos.dedup();

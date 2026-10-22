@@ -11,6 +11,10 @@
 //! (exports, 100% regions), [`fine`] rasterises on a finer grid, the AI
 //! parts upsampled by a guided filter on the full-size source.
 //!
+//! Sky and landscape parts come from a scene model's probabilities on a
+//! coarser grid, upsampled to the picture along its colour by the same
+//! guided filter ([`landscape`]).
+//!
 //! What the AI finders return is kept on disk by [`store`].
 
 pub mod fine;
@@ -61,6 +65,7 @@ pub enum Find {
     Person,
     Object(u64),
     Face(crate::edit::FacePart),
+    Landscape(crate::edit::LandscapePart),
 }
 
 /// Finds the object at clicks in an upright 8-bit sRGB image (`rgb`,
@@ -132,10 +137,105 @@ pub fn register_finder(id: &str, f: Box<Finder>) {
     });
 }
 
+/// A part's probability (0–1) on a grid coarser than the picture it was
+/// found in (pixel centres lined up), row-major.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Coarse {
+    pub width: usize,
+    pub height: usize,
+    pub data: Vec<f32>,
+}
+
+/// Finds a landscape part in an upright 8-bit sRGB image (`rgb`, width,
+/// height): its probability on the finder's own coarser grid.
+pub type SceneFinder =
+    dyn Fn(&[u8], usize, usize, crate::edit::LandscapePart) -> Result<Coarse, String> + Send + Sync;
+
+static SCENE: std::sync::OnceLock<Registered<SceneFinder>> = std::sync::OnceLock::new();
+
+/// Give the masks a way to find sky and landscape (the app registers the
+/// scene model, `shoebox_ml::scene`), named `id` (the model's identity:
+/// masks are kept on disk by it). Once.
+pub fn register_scene_finder(id: &str, f: Box<SceneFinder>) {
+    let _ = SCENE.set(Registered {
+        id: id.to_owned(),
+        run: f,
+    });
+}
+
+/// A landscape part at the picture's size: the finder's probabilities
+/// upsampled by a guided filter along the picture's colour (as
+/// [`fine`] upsamples to full size), so its edges land on the picture's
+/// rather than the coarse grid's, and stay soft where the model is unsure
+/// or the picture shows no edge.
+pub fn landscape(rgb: &[u8], w: usize, h: usize, c: &Coarse) -> Result<Vec<u8>, String> {
+    let (cw, ch) = (c.width, c.height);
+    if w == 0 || h == 0 || rgb.len() < w * h * 3 {
+        return Err("no picture".into());
+    }
+    if cw == 0 || ch == 0 || c.data.len() != cw * ch {
+        return Err("the landscape mask came back the wrong size".into());
+    }
+    let coarse: Vec<u8> = c
+        .data
+        .iter()
+        .map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
+        .collect();
+    let at = |x: usize, y: usize| -> [f32; 3] {
+        let p = &rgb[(y * w + x) * 3..][..3];
+        [0, 1, 2].map(|i| f32::from(p[i]) / 255.0)
+    };
+    if cw >= w || ch >= h {
+        // No finer than its grid: read it bilinearly.
+        let mut out = vec![0u8; w * h];
+        out.par_chunks_mut(w).enumerate().for_each(|(y, line)| {
+            let fy = ((y as f32 + 0.5) * ch as f32 / h as f32 - 0.5).clamp(0.0, (ch - 1) as f32);
+            let (y0, ty) = (fy as usize, fy.fract());
+            let y1 = (y0 + 1).min(ch - 1);
+            for (x, o) in line.iter_mut().enumerate() {
+                let fx =
+                    ((x as f32 + 0.5) * cw as f32 / w as f32 - 0.5).clamp(0.0, (cw - 1) as f32);
+                let (x0, tx) = (fx as usize, fx.fract());
+                let x1 = (x0 + 1).min(cw - 1);
+                let v = |xx: usize, yy: usize| c.data[yy * cw + xx].clamp(0.0, 1.0);
+                let top = v(x0, y0) + (v(x1, y0) - v(x0, y0)) * tx;
+                let bot = v(x0, y1) + (v(x1, y1) - v(x0, y1)) * tx;
+                *o = ((top + (bot - top) * ty) * 255.0).round() as u8;
+            }
+        });
+        return Ok(out);
+    }
+    // The guide on the coarse grid: the picture area-averaged.
+    let span =
+        |o: usize, n: usize, m: usize| (o * n / m)..((o + 1) * n).div_ceil(m).max(o * n / m + 1);
+    let lo: Vec<[f32; 3]> = (0..cw * ch)
+        .into_par_iter()
+        .map(|i| {
+            let (xs, ys) = (span(i % cw, w, cw), span(i / cw, h, ch));
+            let n = (xs.len() * ys.len()) as f32;
+            let mut s = [0f32; 3];
+            for y in ys {
+                for x in xs.clone() {
+                    for (s, p) in s.iter_mut().zip(at(x, y)) {
+                        *s += p / n;
+                    }
+                }
+            }
+            s
+        })
+        .collect();
+    Ok(fine::upsample(&coarse, (cw, ch), &lo, (w, h), &|y, row| {
+        for (x, o) in row.iter_mut().enumerate() {
+            *o = at(x, y);
+        }
+    }))
+}
+
 /// Find `what` with the registered finder (or read what it found before
 /// from the [`store`]).
 pub fn find(rgb: &[u8], w: usize, h: usize, what: Find) -> Result<Vec<u8>, String> {
     use crate::edit::FacePart as P;
+    use crate::edit::LandscapePart as L;
     let kind = match what {
         Find::Subject => "subject",
         Find::Person => "person",
@@ -146,6 +246,22 @@ pub fn find(rgb: &[u8], w: usize, h: usize, what: Find) -> Result<Vec<u8>, Strin
         Find::Face(P::Teeth) => "face-teeth",
         // Objects are the segmenter's (their clicks are its key).
         Find::Object(_) => "",
+        Find::Landscape(part) => {
+            let kind = match part {
+                L::Sky => "landscape-sky",
+                L::Vegetation => "landscape-vegetation",
+                L::Water => "landscape-water",
+                L::Mountains => "landscape-mountains",
+                L::Buildings => "landscape-buildings",
+                L::Ground => "landscape-ground",
+            };
+            return match SCENE.get() {
+                Some(f) => store::through(&f.id, kind, &[], rgb, w, h, || {
+                    landscape(rgb, w, h, &(f.run)(rgb, w, h, part)?)
+                }),
+                None => Err("no landscape finder in this build".into()),
+            };
+        }
     };
     match FINDER.get() {
         Some(f) if !kind.is_empty() => {
@@ -163,6 +279,7 @@ pub fn find_of(shape: &Shape) -> Option<Find> {
         Shape::Person => Find::Person,
         Shape::Object { clicks } => Find::Object(object_key(clicks)),
         Shape::Face { part } => Find::Face(*part),
+        Shape::Landscape { part } => Find::Landscape(*part),
         _ => return None,
     })
 }
@@ -200,6 +317,7 @@ pub fn finds(locals: &[&Local]) -> Vec<(Find, Vec<crate::edit::ObjectClick>)> {
                     (Find::Object(object_key(clicks)), clicks.clone())
                 }
                 Shape::Face { part } => (Find::Face(*part), Vec::new()),
+                Shape::Landscape { part } => (Find::Landscape(*part), Vec::new()),
                 _ => continue,
             };
             if !out.iter().any(|o| o.0 == f.0) {
@@ -398,9 +516,11 @@ pub(crate) fn shape_rows(
             })
         }
         // Read from what was found (see `rasterise_with`).
-        Shape::Subject | Shape::Person | Shape::Object { .. } | Shape::Face { .. } => {
-            vec![0.0; n]
-        }
+        Shape::Subject
+        | Shape::Person
+        | Shape::Object { .. }
+        | Shape::Face { .. }
+        | Shape::Landscape { .. } => vec![0.0; n],
     }
 }
 

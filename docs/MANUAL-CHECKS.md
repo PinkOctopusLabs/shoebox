@@ -186,7 +186,6 @@ together at the end, before the release.
   ("Finding it…" no more than flickers), and `<cache>/ai-masks` holds a PNG per mask. After a
   macOS update, Subject and People are found again (once).
 
-
 ## Phase 4 (as features land)
 
 - [ ] **Control points** (K) on landscapes and portraits: a point on a
@@ -196,3 +195,16 @@ together at the end, before the release.
   colour part) still takes it. The default size and softness feel like
   PhotoLab's U Point (or say which way they should go), and the edge of
   the effect isn't visible as a circle.
+- [ ] **Sky and landscape masks** (from 2026-10-22; download the
+  landscape model from the panel once): on real photos (a clear sky
+  over a city, a cloudy sky behind bare trees, a sunset over the sea, a
+  mountain lake, a forest path, a night sky, an interior with a window,
+  a portrait with no sky): Sky takes the whole sky (clouds and the sun's
+  glow included) and stops at the horizon, roofs and branches without a
+  halo when darkened by 2 stops, at fit, at 100% and in a full-size
+  export; Vegetation, Water, Mountains, Buildings and Ground each take
+  what they name and little else (note where a lake's reflection of the
+  sky goes, whether snow lands in Mountains or Ground, and whether
+  Buildings taking indoor walls is a nuisance); a photo with no sky gets
+  an empty Sky mask; a photo turned 90° works. Note the time to the
+  first part on a new photo, and that a second part of it is immediate.

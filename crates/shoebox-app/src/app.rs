@@ -263,6 +263,8 @@ pub struct AppPaths {
     pub objects: (PathBuf, PathBuf),
     /// The AI raw denoise model (RawNIND), likewise.
     pub denoise: (PathBuf, PathBuf),
+    /// The landscape model (UperNet on ConvNeXt-B, ADE20K), likewise.
+    pub landscape: (PathBuf, PathBuf),
     /// Names given to people.
     pub people: PathBuf,
     /// Develop's caches (DNGs of High efficiency NEFs, under `dng/`).
@@ -309,6 +311,10 @@ impl AppPaths {
             ),
             denoise: (
                 shoebox_core::paths::models_dir(&data).join("rawnind-utnet2"),
+                cache.join("model-download"),
+            ),
+            landscape: (
+                shoebox_core::paths::models_dir(&data).join("upernet-convnext-base-ade20k"),
                 cache.join("model-download"),
             ),
             people: shoebox_core::paths::people_file(&data),
@@ -469,6 +475,8 @@ pub struct ShoeboxApp {
     pub(crate) objects: std::sync::Arc<crate::objects::Objects>,
     /// The AI raw denoise model.
     pub(crate) denoiser: std::sync::Arc<crate::models::Model>,
+    /// The landscape model (sky and landscape masks).
+    pub(crate) landscape: std::sync::Arc<crate::models::Model>,
     /// Edited photos: photo path → its preview's key.
     pub(crate) edited: HashMap<PathBuf, String>,
     /// Edited photos' edit documents (for export).
@@ -545,6 +553,8 @@ impl ShoeboxApp {
             crate::objects::Objects::register(paths.objects.0.clone(), paths.objects.1.clone());
         let denoiser =
             crate::models::register_denoiser(paths.denoise.0.clone(), paths.denoise.1.clone());
+        let landscape =
+            crate::models::register_landscape(paths.landscape.0.clone(), paths.landscape.1.clone());
         let display = crate::display::DisplayTagger::new(cc);
         let target = crate::display::DisplayTagger::target(display.as_ref());
         tracing::info!("rendering images in {target:?}");
@@ -627,6 +637,7 @@ impl ShoeboxApp {
             developer,
             objects,
             denoiser,
+            landscape,
             edited: HashMap::new(),
             edited_json: HashMap::new(),
             export: Default::default(),

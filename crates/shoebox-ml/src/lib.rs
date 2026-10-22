@@ -16,6 +16,7 @@ pub mod faces;
 pub mod onnx;
 pub mod rawnind;
 pub mod sam;
+pub mod scene;
 pub mod vision;
 
 use std::path::PathBuf;

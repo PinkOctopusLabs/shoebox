@@ -507,8 +507,11 @@ fn worker(
                         .map(|c| c.data)
                         .map_err(|e| e.to_string());
                 }
-                // Objects go to the segmenter (`objects`), not here.
-                Find::Object(_) => return Err("not a Vision search".into()),
+                // Objects go to the segmenter (`objects`), landscape to the
+                // scene model (`models::register_landscape`), not here.
+                Find::Object(_) | Find::Landscape(_) => {
+                    return Err("not a Vision search".into());
+                }
             };
             shoebox_ml::vision::segment(rgb, w, h, find)
                 .map(|c| c.data)
