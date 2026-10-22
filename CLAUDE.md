@@ -49,6 +49,7 @@ A Rust + egui photo library app for macOS. **`docs/SPEC.md` is the source of tru
 ## Working rules
 - One milestone at a time, in order, each as a reviewable chunk.
 - Before finishing any task: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
+- `target/` grows without bound (Cargo keeps every old build; macOS keeps debug info in each `.o`): a clean build with all tests is about 7 GB and 3 minutes, so `cargo clean` once it passes about 30 GB. `cargo sweep --time` doesn't work here (macOS access times are unreliable, so it deletes current builds). Agent worktrees build with `CARGO_INCREMENTAL=0` and are `cargo clean`ed once merged.
 - `thiserror` in library crates, `anyhow` in binaries. No `unwrap()`/`expect()` outside tests (enforced by workspace clippy lints).
 - No `unsafe` except in thin FFI wrappers (`shoebox-core/src/fileops/sys.rs`, `shoebox-decode/src/imageio.rs`, `shoebox-ml/src/vision.rs`, and the app's `display.rs`, `platform.rs`, `updater.rs`, `menu.rs`).
 - `shoebox-core` must not depend on egui. Every file operation goes through `shoebox_core::fileops`.
