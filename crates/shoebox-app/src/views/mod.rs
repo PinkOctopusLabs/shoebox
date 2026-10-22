@@ -10,6 +10,7 @@ pub mod filmstrip;
 pub mod grading;
 pub mod grid;
 pub mod guided;
+pub mod lens_blur;
 pub mod local;
 pub mod look;
 pub mod loupe;

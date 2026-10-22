@@ -44,6 +44,7 @@ pub fn set_active(app: &mut ShoeboxApp, on: bool) {
         st.local.placing = false;
         st.points.picking = false;
         st.picking = false;
+        st.lens_blur.picking = false;
         st.zoom = None;
     }
     app.develop.guided = Tool {

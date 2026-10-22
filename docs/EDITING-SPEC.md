@@ -457,7 +457,7 @@ A comparison with Lightroom Classic's Develop module and darktable 5.x (October 
 **Phase 4 additions**
 
 - **Photo merges.** HDR (bracketed raws aligned and merged into one linear DNG-like source with extended range), panorama (feature matching, a spherical, cylindrical or perspective projection, seam blending) and focus stacking (aligned frames combined by local sharpness). Each makes a new file next to the sources, through `fileops` (journaled), whose edit starts from defaults. Read darktable-adjacent tools (Hugin, enfuse) for the algorithms; these need safety rule 3 to cover merge results.
-- **Lens Blur.** A depth estimate (a monocular depth model on candle, or Apple's depth data where a photo has it) drives a synthetic depth of field with a focus point and range, bokeh shape and highlight boost. A local adjustment can refine the depth map.
+- **Lens Blur.** A depth estimate (a monocular depth model on candle, or Apple's depth data where a photo has it) drives a synthetic depth of field with a focus point and range, bokeh shape and highlight boost. A local adjustment can refine the depth map. As built (2026-10-22, DECISIONS "Lens Blur"): Depth Anything V2 Small (Apache 2.0) ported to candle; the blur in the source stage, in scene-linear light, gathered on a working copy of at most 1024 px in two layers and mixed back per pixel by its circle of confusion; a circle or six blades; a mask's Depth slider refines the map. Apple's depth data (HEIC portraits) is a later item.
 
 ## Develop view
 

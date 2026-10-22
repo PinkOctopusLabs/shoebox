@@ -154,6 +154,8 @@ pub struct State {
     pub smart: super::smart::Tool,
     /// Volume deformation: its faces shown, and a face search.
     pub volume: super::volume::Tool,
+    /// Lens Blur: picking the focus, the depth map shown.
+    pub lens_blur: super::lens_blur::Tool,
     /// The frame the edit was last rendered with (handles are placed
     /// through it).
     pub(super) frame: Option<Frame>,
@@ -206,6 +208,7 @@ impl State {
             gamut: self.gamut_warning,
             mask,
             point: self.points.selected.filter(|_| self.points.show),
+            depth: self.lens_blur.show_depth,
         }
     }
 
@@ -220,6 +223,11 @@ impl State {
     /// deformation), if it had one (tests).
     pub fn lens_zoom(&self) -> Option<f32> {
         self.frame.as_ref()?.lens.as_ref().map(|g| g.zoom)
+    }
+
+    /// Whether the last render was blurred by Lens Blur (tests).
+    pub fn lens_blurred(&self) -> bool {
+        self.frame.as_ref().is_some_and(|f| f.lens_blur.is_some())
     }
 
     /// The local adjustment layers in the last render (tests).
@@ -1059,7 +1067,8 @@ fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_w
     // Not short-circuited: every flag is taken.
     let mask_model_arrived = app.objects.model.take_arrived()
         | app.landscape.take_arrived()
-        | app.inpainter.take_arrived();
+        | app.inpainter.take_arrived()
+        | app.depth.take_arrived();
     let st = &mut app.develop;
     let (Some(ready), Some(doc)) = (&st.ready, &st.doc) else {
         return;
@@ -1554,6 +1563,7 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
         super::spots::on_photo(app, ui, &resp, &painter, target);
         super::smart::on_photo(app, ui, &resp, &painter, target);
         super::volume::on_photo(app, &painter, target);
+        super::lens_blur::on_photo(app, ui, &resp, &painter, target);
     }
     // Guided upright: the guides over the photo, as it is before rotation
     // and perspective.

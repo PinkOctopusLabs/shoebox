@@ -71,6 +71,13 @@ fn paths(tmp: &Path, roots: &[PathBuf]) -> AppPaths {
                 .map_or_else(|| tmp.join("data/models/inpaint"), PathBuf::from),
             tmp.join("cache/model-download"),
         ),
+        // The depth model: a real one when SHOEBOX_DEPTH_MODEL names it,
+        // else an empty folder.
+        depth: (
+            std::env::var_os("SHOEBOX_DEPTH_MODEL")
+                .map_or_else(|| tmp.join("data/models/depth"), PathBuf::from),
+            tmp.join("cache/model-download"),
+        ),
         people: tmp.join("data/people.json"),
         raw_cache: tmp.join("cache"),
         export_presets: tmp.join("data/export-presets.json"),
@@ -5695,6 +5702,114 @@ fn develop_landscape_mask() {
     let (cover, _) = h.state().develop_mask_coverage();
     assert!((cover - 0.4).abs() < 0.05, "{cover}");
     snapshot(&mut h, "develop-landscape-mask");
+}
+
+/// Lens Blur: Apply turns it on (the depth model offered when it isn't
+/// there), Set focus then a click on the photo sets the focus there, Show
+/// depth and Nearest; a mask's Depth slider shows while it's on. With the
+/// model (`SHOEBOX_DEPTH_MODEL`), the depth is found and the photo
+/// blurred.
+#[test]
+fn develop_lens_blur() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(&root).unwrap();
+    // A red ball near the camera on a chequered floor under a sky.
+    let img = image::RgbImage::from_fn(640, 480, |x, y| {
+        let (fx, fy) = (x as f32, y as f32);
+        if (fx - 220.0).hypot(fy - 330.0) < 80.0 {
+            image::Rgb([200, 40, 30])
+        } else if y < 160 {
+            image::Rgb([110, 160, 235])
+        } else {
+            let z = 40.0 / (fy - 159.0);
+            let c = (((fx - 320.0) * z / 40.0).floor() as i64 + (z * 4.0).floor() as i64) & 1;
+            let g = if c == 0 { 200 } else { 70 };
+            image::Rgb([g, g, g])
+        }
+    });
+    std::fs::write(
+        root.join("ball.jpg"),
+        shoebox_fixtures::jpeg(&img, 92).unwrap(),
+    )
+    .unwrap();
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let with_model = std::env::var_os("SHOEBOX_DEPTH_MODEL").is_some();
+    let mut h = harness(p, egui::vec2(1400.0, 2600.0));
+    settle(&mut h, Duration::from_secs(60));
+    h.get_by_label("ball.jpg").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(30), "develop", |a| {
+        a.develop_ready()
+    });
+    h.run_steps(3);
+    h.get_by_label("Lens Blur").click();
+    h.run_steps(2);
+    h.get_by_label("Apply").click();
+    h.run_steps(3);
+    let doc = h.state().develop_doc().unwrap();
+    assert!(doc.settings().modules.lens_blur.enabled);
+    assert_eq!(doc.history().last().unwrap().label, "Lens Blur on");
+    if !with_model {
+        assert!(
+            h.query_by_label_contains("Download the depth model")
+                .is_some(),
+            "the download is offered"
+        );
+    }
+    // Set focus, then a click on the ball.
+    h.get_by_label("Set focus").click();
+    h.run_steps(2);
+    let photo = h.state().develop_photo_rect().unwrap();
+    let at = photo.min
+        + egui::vec2(
+            photo.width() * 220.0 / 640.0,
+            photo.height() * 330.0 / 480.0,
+        );
+    h.event(egui::Event::PointerMoved(at));
+    h.run_steps(1);
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.event(button(at, true));
+    h.event(button(at, false));
+    h.run_steps(3);
+    let doc = h.state().develop_doc().unwrap();
+    let focus = doc.settings().modules.lens_blur.focus.unwrap();
+    assert!(
+        (focus[0] - 220.0 / 640.0).abs() < 0.02 && (focus[1] - 330.0 / 640.0).abs() < 0.02,
+        "{focus:?}"
+    );
+    assert_eq!(doc.history().last().unwrap().label, "Focus set");
+    h.get_by_label("Show depth").click();
+    h.run_steps(2);
+    if with_model {
+        wait_for(&mut h, Duration::from_secs(120), "depth found", |a| {
+            let (blurred, finding) = a.develop_lens_blur();
+            blurred && !finding
+        });
+        snapshot(&mut h, "develop-lens-blur-depth");
+        h.get_by_label("Show depth").click();
+        h.run_steps(3);
+        snapshot(&mut h, "develop-lens-blur");
+    } else {
+        assert_eq!(h.state().develop_lens_blur(), (false, false));
+        snapshot(&mut h, "develop-lens-blur");
+    }
+    h.get_by_label("Nearest").click();
+    h.run_steps(2);
+    let doc = h.state().develop_doc().unwrap();
+    assert_eq!(doc.settings().modules.lens_blur.focus, None);
+    // A mask has a Depth slider while Lens Blur is on.
+    h.get_by_label("New mask").click();
+    h.run_steps(2);
+    h.get_by_label("Radial gradient").click();
+    h.run_steps(3);
+    assert!(h.query_by_label("Depth").is_some(), "the Depth slider");
 }
 
 /// AI denoise on a raw photo: without the model the panel offers it; with

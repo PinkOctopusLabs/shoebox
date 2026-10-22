@@ -538,6 +538,33 @@ fn gpu_matches_the_cpu() {
     }
 }
 
+/// An export's whole render on the CPU at 24 MP (timings; run in release
+/// with `--ignored`).
+#[test]
+#[ignore = "timing: a 24 MP render on the CPU"]
+fn a_full_size_render_on_the_cpu() {
+    let (_one, _dir) = fresh();
+    let src = source(picture(6048, 4032, true));
+    for amount in [100.0, 50.0, 10.0] {
+        let s = blurred(amount);
+        let t = std::time::Instant::now();
+        let f = cpu::frame(&raw(), &src, &s, &Options::default());
+        let depth = t.elapsed();
+        let none = Settings::default();
+        let pf = cpu::frame(&raw(), &src, &none, &Options::default());
+        let t = std::time::Instant::now();
+        let plain = cpu::apply_from(&src, &none, &pf, true);
+        let without = t.elapsed();
+        let t = std::time::Instant::now();
+        let out = cpu::apply_from(&src, &s, &f, true);
+        eprintln!(
+            "amount {amount}: depth map {depth:?}; render {:?} (without Lens Blur {without:?})",
+            t.elapsed()
+        );
+        assert_eq!((out.width, plain.width), (6048, 6048));
+    }
+}
+
 /// A 2560×1707 proxy with Lens Blur strong, middling and light: both
 /// passes and the develop pass, per frame.
 #[test]

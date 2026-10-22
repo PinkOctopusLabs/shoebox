@@ -66,6 +66,7 @@ pub fn modules(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &Settings) {
     black_and_white(app, ui, &s.modules.black_and_white);
     calibration(app, ui, &s.modules.calibration);
     effects(app, ui, &s.modules.effects);
+    super::lens_blur::section(app, ui, &s.modules.lens_blur);
 }
 
 /// A look (`.cube`) from the looks folder, and its Amount.

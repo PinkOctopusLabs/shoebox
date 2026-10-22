@@ -3238,3 +3238,176 @@ library".
   --test inpaint -- --ignored`); `examples/remove_probe.rs` times it on a
   real raw and writes the crop before and after. Real photos:
   `docs/MANUAL-CHECKS.md`.
+
+## Lens Blur (2026-10-22)
+
+**The depth model.**
+
+- **Depth Anything V2 Small** (Yang et al., 2024). Its Hugging Face page
+  (depth-anything/Depth-Anything-V2-Small, revision 03876f86) says
+  `license: apache-2.0`, and the authors' README (DepthAnything/
+  Depth-Anything-V2) says "Depth-Anything-V2-Small model is under the
+  Apache-2.0 license. Depth-Anything-V2-Base/Large/Giant models are under
+  the CC-BY-NC-4.0 license": only Small is ever fetched. The authors' own
+  `depth_anything_v2_vits.pth` (99 MB, f32, 25 M parameters), SHA-256
+  pinned (`download::DEPTH`), read directly by candle's PyTorch reader;
+  downloaded from the Lens Blur section when first wanted, into
+  `<models>/depth-anything-v2-small`.
+- **A port, not `candle-transformers`' `depth_anything_v2`.** That one
+  differs from the authors' model where it shows: every resize in the
+  DPT head is nearest-neighbour (the authors' are bilinear, corners
+  aligned), the head only takes square pictures (a 3:2 photo would be
+  squashed), its DINOv2 layer norms use ε 1e-5 (1e-6), and its DINOv2
+  wants an ImageNet classifier head the checkpoint hasn't got.
+  `shoebox-ml::depth` ports the authors' code (at a561b849: `dpt.py`,
+  `dinov2.py`, `util/blocks.py`, `util/transform.py`) in about 400
+  lines: ViT-S/14 with LayerScale and exact GELU, the position embedding
+  interpolated bicubically as DINOv2 does (its scale factor, with the
+  0.1 it adds), the DPT head. No new crates.
+- **Input:** the picture as the frame shows it on the masks' grid,
+  upright (as the AI masks get it), resized so the short side is 518 and
+  the long one in proportion, both multiples of 14 (the authors' "lower
+  bound" resize), area-averaged (the authors use OpenCV's bicubic, which
+  aliases when shrinking a large picture); ImageNet's normalisation. Out
+  comes relative inverse depth at that size.
+- **Checked** without PyTorch: on a drawn scene (a ball on a chequered
+  floor under a sky) the ball and the near floor come out nearer than
+  the far floor, the sky farthest (`SHOEBOX_DEPTH_MODEL=<folder> cargo
+  test -p shoebox-ml --test depth -- --ignored`); on two real fixtures
+  (the night beach's crowd, the van's seats and pillars) the maps are
+  right, with crisp edges round people and seats.
+- **Timings** (M2 Max, Metal, release): load 0.17 s; a picture 0.22–0.34
+  s (0.77 s the first time in a process, while Metal compiles candle's
+  kernels); then the guided upsampling to the grid, about 0.15 s at
+  2560 px.
+- **Apple's depth data:** Z f NEFs have none; HEIC portrait depth
+  (AVDepthData) is a later item, to stand in for the model where a photo
+  has it.
+
+**The depth map** (`shoebox_develop::depth`).
+
+- The model's output normalised (its 0.5th percentile to 0, its 99.5th
+  to 1, so a stray pixel doesn't set the range), kept on disk by
+  `mask::store` as a 16-bit PNG at the model's size (keyed, as the AI
+  masks are, by a BLAKE3 of the exact picture and the model's identity),
+  then upsampled to the grid by the colour guided filter `mask::fine`
+  uses (`mask::guided`, now shared with the landscape parts), so the
+  blur's edges land on the picture's, and turned back to the stored
+  image's orientation. In memory per source and orientation, as subjects
+  are; found on a thread of its own for the live view, inline for 100%
+  regions, previews and exports.
+- **Refining:** local adjustments gain a **Depth** slider (−100 to +100,
+  shown while Lens Blur is on): inside the mask the depth map is pushed
+  nearer or farther (+100 a whole map nearer), layer by layer, kept to
+  0–1. The simplest thing that fixes a missed subject: a Subject or brush
+  mask with Depth up brings it into the focus range, and a push keeps the
+  model's detail inside the mask (painting depth values would flatten
+  it). Refined on the CPU (a few ms on the grid), kept while the masks and
+  pushes are the same.
+
+**Rendering** (`cpu::lens_blur`).
+
+- **Where:** in the source stage, after the detail stage, spots and the
+  layers' source mixing, as each source pixel is read: in scene-referred
+  linear light (the colour matrix, tone and display transform come
+  after, so highlights bloom as through a lens), in the source's pixels
+  (crop, rotation and lens corrections apply to the blurred scene).
+- **Circle of confusion:** a lens's blur circle grows with the
+  difference in inverse depth from the focus, which is what the map
+  holds: `c = amount · max(|d − focus| − range/2, 0)`, signed (positive
+  nearer), 4% of the long edge at Amount 100 a whole map from the focus.
+  The focus is the depth at a point clicked on the photo (stored as mask
+  positions are, so it follows a changed or refined map), or with none,
+  the nearest tenth's (the map's 90th percentile).
+- **A working copy:** the blur is gathered on a copy whose long edge
+  puts the largest circle at 16 of its pixels (256–1024 px: 400 at
+  Amount 100, 800 at 50), so a pixel gathers at most about 850 taps
+  whatever the photo's size, on the proxy and in a 45 MP export alike.
+  Each working pixel takes its nearest source pixel's circle (the
+  largest signed circle in its box) and averages the source, highlights
+  boosted, each source pixel weighted by how like that its own circle
+  is: on a depth edge it is one side, not a mix at a depth neither has.
+  (The circle at its centre, then the box's most typical one, came
+  first: they flip between the sides as the depth moves a hair, which
+  spread the subject's colour onto the background, and the GPU and CPU
+  disagreed where they flipped.)
+- **Gathered as if scattered, in two layers** (after Jimenez's and
+  Sousa's game renderers): each neighbour within its own circle covers
+  the pixel, weighted by one over its circle's area (an area table per
+  shape, from the taps themselves). Neighbours nearer and blurrier by
+  more than half the pixel's circle (at least a pixel) go, over a
+  one-pixel ramp, to a front layer whose coverage is its alpha; in the
+  back, a neighbour farther than the pixel reaches it no further than the
+  pixel's own circle. So a sharp subject never takes the background's
+  blur, the background never takes the subject's colour, and a blurred
+  foreground spreads over what's behind it.
+- **Back to the source's pixels:** each source pixel mixes the sharp
+  source with the back layer by its own circle (in working pixels: none
+  under a quarter, all from one; a circle smaller than a working pixel is
+  a mix of sharp and the copy's softness), the four working pixels read
+  bilaterally (weighted by how like the pixel's circle theirs are, so
+  across a depth edge the other side doesn't bleed in), then the front
+  layer over it. A pixel in focus is the source exactly.
+- **Bokeh:** a circle, or six straight blades (a hexagon with a corner
+  up): the taps' distances are measured in the aperture's shape, the
+  edge antialiased over a working pixel. Cat's eyes and onion rings
+  aren't modelled.
+- **Highlight boost:** source pixels from 40% of clipping up gain up to
+  ×5 at full boost (a smoothstep) before averaging into the working
+  copy, so clipped lights carry more light into their discs, as their
+  unclipped brightness would. Pixels in focus never use the copy, so
+  they aren't brightened.
+- **Show depth:** the map (near light) with the focus range tinted
+  amber, instead of the photo; the focus point is drawn while choosing
+  it or showing the map. **Set focus** then a click (Escape stops; one
+  tool on the photo at a time), **Nearest** forgets the point.
+- **Measured** on synthetic scenes (`tests/lens_blur.rs`, a fake depth
+  model): the subject unchanged within 1e-6 a few pixels in from its
+  edge; a background checker's contrast 0.427 → 0.003; no red from a red
+  disc on the background 2–40 px beside it (0.0500 against 0.0500 far
+  away, also with a working copy a third of the source's size); the proxy
+  and a render twice its size agree within 0.0004 (mean, after
+  downscaling); boost 100 brings 1.7× the light round a clipped point;
+  the hexagon reaches 9 px up and 8 across.
+
+**GPU** (`gpu/lens_blur.wgsl`).
+
+- Two compute passes of their own before the develop pass (`prepare`:
+  the working copy and circles; `gather`: the two layers into a
+  two-layer array), each with its own bind group, so the develop pass
+  gains only two sampled textures (binding 11 the refined depth map,
+  R32Float; 12 the layers' array) and no storage buffers (seven of its
+  eight are used). Its `texel` mixes them in as `cpu::Source` does, after
+  the layers' aux images. The depth map is uploaded once per map (copied
+  in by the encoder, so `Pipe::encode` keeps its signature), the working
+  textures are kept by size, and the taps and area table are one storage
+  buffer of the gather pass's own.
+- Within 1e-4 of the CPU (display and linear output) for the circle and
+  the blades with boost, a refined map, a working copy a third of the
+  source's size and the depth shown; 1e-3 on a turned frame, as for the
+  develop pipe. The ramps (the front share; the largest circle rather
+  than a choice) keep float rounding from flipping a decision.
+- **Timings** (M2 Max, a 2560×1707 proxy, release, all passes; other
+  builds were loading the machine, so the higher figures are under
+  load): 7–10.5 ms a frame at Amount 100 (working copy 400 px, 861
+  taps), 10.5–21 ms at 50 (800 px), 7 ms at 10 (1024 px, 69 taps); the
+  develop pass alone is 1.4 ms. The CPU's blur of the same proxy takes
+  60–510 ms (100% regions, the CPU fallback), kept on the source between
+  renders. A 24 MP export's whole CPU render goes from 0.8 s to 1.1–2.0 s
+  (`a_full_size_render_on_the_cpu`, ignored; the working copy's
+  averaging reads every source pixel's depth).
+
+**The edit.** `modules.lens_blur: {enabled, amount, focus, range, bokeh,
+boost}` (off, 50, none, 10, circle, 0) and `locals[].adjust.depth`,
+stored as differences from the defaults, so old edits read and render as
+before (no process version change); the render hash covers them.
+History: "Lens Blur on", "Lens Blur amount 60", "Focus range 20",
+"Highlight boost 40", "Bokeh Six blades", "Focus set", "Focus on the
+nearest", "Mask depth +30". Presets, copy and paste: a part of its own,
+"Lens Blur" (on, Amount, range, bokeh, boost; not the focus point, as
+Smart Lighting's spot isn't carried), not ticked when copying by default
+(a depth effect is the photo's own).
+
+**Open:** HEIC portrait depth; refining on the GPU (the refined map is
+re-uploaded per Depth drag: 17 MB at 2560 px, fine so far); focusing on
+Vision's subject by default instead of the nearest tenth.

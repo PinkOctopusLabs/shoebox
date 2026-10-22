@@ -314,6 +314,7 @@ pub fn set_placing(app: &mut ShoeboxApp, on: bool) {
         app.develop.local.picking = false;
         app.develop.points.picking = false;
         app.develop.picking = false;
+        app.develop.lens_blur.picking = false;
         app.develop.guided = Default::default();
     }
 }
@@ -467,7 +468,7 @@ pub fn section(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &Settings) {
     }
 }
 
-const ADJUST_KEYS: [&str; 11] = [
+const ADJUST_KEYS: [&str; 12] = [
     "l-exposure",
     "l-contrast",
     "l-highlights",
@@ -479,6 +480,7 @@ const ADJUST_KEYS: [&str; 11] = [
     "l-dehaze",
     "l-sharpness",
     "l-denoise-ai",
+    "l-depth",
 ];
 
 fn layer_controls(app: &mut ShoeboxApp, ui: &mut egui::Ui, l: &Local) {
@@ -605,6 +607,13 @@ fn layer_controls(app: &mut ShoeboxApp, ui: &mut egui::Ui, l: &Local) {
         .as_ref()
         .is_some_and(|r| r.src.referred == cpu::Referred::Scene && r.meta.is_mosaic());
     let model = app.denoiser.ready();
+    // Lens Blur's Depth, while it's on (or the layer already has one).
+    let depth = a.depth != 0.0
+        || app
+            .develop
+            .doc
+            .as_ref()
+            .is_some_and(|d| d.settings().modules.lens_blur.enabled);
     egui::Grid::new(("mask-sliders", &id))
         .num_columns(2)
         .show(ui, |ui| {
@@ -613,7 +622,7 @@ fn layer_controls(app: &mut ShoeboxApp, ui: &mut egui::Ui, l: &Local) {
                     l.amount = v
                 });
             }
-            let rows: [(&str, f64, f64, usize); 11] = [
+            let rows: [(&str, f64, f64, usize); 12] = [
                 ("Exposure", a.exposure, 4.0, 2),
                 ("Contrast", a.contrast, 100.0, 0),
                 ("Highlights", a.highlights, 100.0, 0),
@@ -625,9 +634,10 @@ fn layer_controls(app: &mut ShoeboxApp, ui: &mut egui::Ui, l: &Local) {
                 ("Dehaze", a.dehaze, 100.0, 0),
                 ("Sharpness", a.sharpness, 100.0, 0),
                 ("AI denoise", a.denoise_ai, 100.0, 0),
+                ("Depth", a.depth, 100.0, 0),
             ];
             for (k, (name, v, max, dp)) in rows.into_iter().enumerate() {
-                if k == 10 && !raw {
+                if (k == 10 && !raw) || (k == 11 && !depth) {
                     continue;
                 }
                 if let Some(v) = slider(ui, name, v, -max..=max, 0.0, dp) {
@@ -670,7 +680,8 @@ fn set_adjust(a: &mut LocalAdjust, k: usize, v: f64) {
         7 => &mut a.clarity,
         8 => &mut a.dehaze,
         9 => &mut a.sharpness,
-        _ => &mut a.denoise_ai,
+        10 => &mut a.denoise_ai,
+        _ => &mut a.depth,
     };
     *f = v;
 }

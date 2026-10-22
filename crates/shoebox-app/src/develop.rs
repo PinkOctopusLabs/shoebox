@@ -149,6 +149,8 @@ pub struct Overlays {
     pub mask: Option<(usize, bool)>,
     /// A Point Color point's reach shown (its index).
     pub point: Option<usize>,
+    /// Lens Blur's depth map shown.
+    pub depth: bool,
 }
 
 impl Overlays {
@@ -161,6 +163,7 @@ impl Overlays {
             Some((at, only))
         });
         f.point_view = self.point.filter(|&k| k < f.look.point_count);
+        f.depth_view = self.depth;
     }
 
     /// Keys renders made with them.

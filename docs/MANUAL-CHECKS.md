@@ -349,3 +349,25 @@ never the library itself.
 
   Note where it fails (regular patterns through wide holes are its weak
   spot) and how big an object can go before the fill looks smeared.
+
+### Lens Blur
+
+- [ ] **Lens Blur on real photos** (from 2026-10-22). Download the depth
+  model from the Lens Blur section, then on a portrait, a street scene
+  with depth, a close-up of flowers and a night shot with point lights:
+  - Show depth: near things light, far dark, edges of people, hair and
+    branches following the photo; the focus range tinted where clicked.
+  - Set focus on the subject: it stays exactly as sharp as with Lens Blur
+    off; the background blurs more the farther it is; no bright or
+    coloured outline round the subject, and no sharp "cut-out" edge
+    against the blur (look at hair and shoulders at 100%).
+  - Something nearer than the focus (a foreground branch) blurs over
+    what's behind it, softly.
+  - Highlight boost makes the night lights' bokeh discs brighter and
+    rounder; Six blades makes them hexagons.
+  - A mask over a wrongly placed part (a hand the model put too far, say)
+    with Depth +30 brings it into focus.
+  - Drag Amount and Focus range: the view keeps up (expected about 10 ms a
+    frame on the GPU, 10–20 under load); note the time to the first blur after opening a
+    photo.
+  - Export at full size and compare with Develop at 100%: the same blur.

@@ -267,6 +267,8 @@ pub struct AppPaths {
     pub landscape: (PathBuf, PathBuf),
     /// The object removal model (MI-GAN), likewise.
     pub inpaint: (PathBuf, PathBuf),
+    /// Lens Blur's depth model (Depth Anything V2 Small), likewise.
+    pub depth: (PathBuf, PathBuf),
     /// Names given to people.
     pub people: PathBuf,
     /// Develop's caches (DNGs of High efficiency NEFs, under `dng/`).
@@ -321,6 +323,10 @@ impl AppPaths {
             ),
             inpaint: (
                 shoebox_core::paths::models_dir(&data).join("migan-512-places2"),
+                cache.join("model-download"),
+            ),
+            depth: (
+                shoebox_core::paths::models_dir(&data).join("depth-anything-v2-small"),
                 cache.join("model-download"),
             ),
             people: shoebox_core::paths::people_file(&data),
@@ -485,6 +491,8 @@ pub struct ShoeboxApp {
     pub(crate) landscape: std::sync::Arc<crate::models::Model>,
     /// The object removal model.
     pub(crate) inpainter: std::sync::Arc<crate::models::Model>,
+    /// The depth model (Lens Blur).
+    pub(crate) depth: std::sync::Arc<crate::models::Model>,
     /// Edited photos: photo path → its preview's key.
     pub(crate) edited: HashMap<PathBuf, String>,
     /// Edited photos' edit documents (for export).
@@ -565,6 +573,7 @@ impl ShoeboxApp {
             crate::models::register_landscape(paths.landscape.0.clone(), paths.landscape.1.clone());
         let inpainter =
             crate::models::register_inpainter(paths.inpaint.0.clone(), paths.inpaint.1.clone());
+        let depth = crate::models::register_depth(paths.depth.0.clone(), paths.depth.1.clone());
         let display = crate::display::DisplayTagger::new(cc);
         let target = crate::display::DisplayTagger::target(display.as_ref());
         tracing::info!("rendering images in {target:?}");
@@ -649,6 +658,7 @@ impl ShoeboxApp {
             denoiser,
             landscape,
             inpainter,
+            depth,
             edited: HashMap::new(),
             edited_json: HashMap::new(),
             export: Default::default(),
@@ -1112,6 +1122,16 @@ impl ShoeboxApp {
             m.iter().map(|&v| f32::from(v)).sum::<f32>() / (255.0 * m.len().max(1) as f32)
         });
         (cover, finding)
+    }
+
+    /// Develop's Lens Blur: blurring in the last render (its depth map
+    /// found), and a depth search still running (tests).
+    pub fn develop_lens_blur(&self) -> (bool, bool) {
+        let st = &self.develop;
+        (
+            st.lens_blurred(),
+            st.ready.as_ref().is_some_and(|r| r.src.cache.depthing().0),
+        )
     }
 
     /// Develop's AI denoise: arrived, how far, and why not (tests).
@@ -4205,6 +4225,12 @@ impl ShoeboxApp {
             {
                 // Escape stops placing a control point first.
                 self.develop.local.placing = false;
+            } else if pressed(egui::Key::Escape)
+                && self.develop.lens_blur.picking
+                && !ctx.any_popup_open()
+            {
+                // Escape stops picking Lens Blur's focus first.
+                self.develop.lens_blur.picking = false;
             } else if pressed(egui::Key::Escape)
                 && self.develop.spots.active
                 && !ctx.any_popup_open()

@@ -221,6 +221,41 @@ pub fn register_inpainter(dir: PathBuf, staging: PathBuf) -> Arc<Model> {
     model
 }
 
+/// Lens Blur's depth maps (Depth Anything V2 Small, `shoebox_ml::depth`):
+/// the model in `dir` (downloaded through `staging`), registered as
+/// Develop's depth model and loaded on first use.
+pub fn register_depth(dir: PathBuf, staging: PathBuf) -> Arc<Model> {
+    let model = Model::new(&shoebox_ml::download::DEPTH, dir, staging);
+    let net: Mutex<Option<shoebox_ml::depth::DepthModel>> = Mutex::new(None);
+    let m = model.clone();
+    shoebox_develop::depth::register(
+        shoebox_ml::depth::MODEL_ID,
+        Box::new(move |rgb, w, h| {
+            if !m.ready() {
+                return Err("the depth model isn't downloaded yet".into());
+            }
+            let mut net = net.lock().map_err(|e| e.to_string())?;
+            if net.is_none() {
+                let path = m.dir.join(shoebox_ml::depth::FILE);
+                *net = Some(
+                    shoebox_ml::depth::DepthModel::load(&path, &shoebox_ml::device())
+                        .map_err(|e| e.to_string())?,
+                );
+            }
+            let Some(n) = net.as_ref() else {
+                return Err("no depth model".into());
+            };
+            let d = n.estimate(rgb, w, h).map_err(|e| e.to_string())?;
+            Ok(shoebox_develop::mask::Coarse {
+                width: d.width,
+                height: d.height,
+                data: d.data,
+            })
+        }),
+    );
+    model
+}
+
 /// AI raw denoise (RawNIND, `shoebox_ml::rawnind`): its model in `dir`
 /// (downloaded through `staging`), registered as Develop's denoiser and
 /// loaded on first use.
