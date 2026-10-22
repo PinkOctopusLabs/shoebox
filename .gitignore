@@ -1,3 +1,6 @@
 /target
 /tests/fixtures/real/
 .DS_Store
+
+# Agents' git worktrees
+.claude/worktrees/
