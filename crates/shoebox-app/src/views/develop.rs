@@ -1747,7 +1747,12 @@ fn pick_neutral(app: &mut ShoeboxApp, at: egui::Pos2) {
         return;
     }
     let patch = sum.map(|v| v / n);
-    let (temp, tint) = shoebox_develop::wb::neutral_at(&ready.meta, &ready.src, patch);
+    // Through the profile's calibration, and as colour calibration sees
+    // the light when that's on.
+    let s = doc.settings();
+    let cam = shoebox_develop::wb::camera_for(&ready.meta, s);
+    let adaptation = s.modules.white_balance.adaptation;
+    let (temp, tint) = shoebox_develop::wb::neutral_with(&cam, &ready.src, patch, adaptation);
     // Within the sliders' ranges, so the result can be adjusted from there.
     let (temp, tint) = (
         temp.round().clamp(2000.0, 12000.0),
@@ -1762,6 +1767,7 @@ fn pick_neutral(app: &mut ShoeboxApp, at: egui::Pos2) {
                 mode: WbMode::Custom,
                 temp: Some(temp),
                 tint: Some(tint),
+                adaptation: s.modules.white_balance.adaptation,
             };
         },
     );
@@ -2282,6 +2288,34 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                         {
                             app.develop.picking = picking;
                         }
+                        // Colour calibration: the same controls name the
+                        // scene's light, taken out by CAT16.
+                        {
+                            use shoebox_develop::edit::Adaptation;
+                            let mut cat = wb.adaptation == Adaptation::Cat16;
+                            if ui
+                                .checkbox(&mut cat, "Colour calibration (CAT16)")
+                                .on_hover_text(
+                                    "Render with the camera's daylight colour, then adapt from the light chosen here with CAT16, as darktable does: for difficult or mixed light. Local adjustments' temperature and tint adapt the same way, for a second light",
+                                )
+                                .changed()
+                            {
+                                let a = if cat {
+                                    Adaptation::Cat16
+                                } else {
+                                    Adaptation::Camera
+                                };
+                                edit(
+                                    app,
+                                    "wb-adapt",
+                                    format!(
+                                        "Colour calibration {}",
+                                        if cat { "on" } else { "off" }
+                                    ),
+                                    |s| s.modules.white_balance.adaptation = a,
+                                );
+                            }
+                        }
                         egui::Grid::new("wb-grid").num_columns(2).show(ui, |ui| {
                             if let Some(t) =
                                 slider(ui, "Temperature", temp.round(), 2000.0..=12000.0, temp, 0)
@@ -2292,6 +2326,7 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                                         mode: WbMode::Custom,
                                         temp: Some(t),
                                         tint: Some(tint),
+                                        adaptation: s.modules.white_balance.adaptation,
                                     };
                                 });
                             }
@@ -2304,6 +2339,7 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                                         mode: WbMode::Custom,
                                         temp: Some(temp),
                                         tint: Some(n),
+                                        adaptation: s.modules.white_balance.adaptation,
                                     };
                                 });
                             }

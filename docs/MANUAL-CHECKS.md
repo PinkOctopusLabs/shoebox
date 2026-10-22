@@ -230,3 +230,11 @@ together at the end, before the release.
   camera JPEG: plausible, no hue jumps in skies or skin, no banding in
   smooth gradients; a missing profile (move the file out, read again)
   shows the warning and renders as the matrix.
+- [ ] **Colour calibration (CAT16) in mixed light**: an interior lit by
+  tungsten lamps with daylight from a window, and an LED-lit stage or
+  street at night. Turn on Colour calibration, pick the main light with
+  the eyedropper: neutrals neutral, skin and saturated colours natural
+  (compare with the same pick without it). Then a radial or brush layer
+  over the window with Temperature/Tint to take the second light out:
+  no hue shift at the mask's edge beyond the light's own. Deep blue or
+  violet LEDs shouldn't go to flat or negative-looking blotches.

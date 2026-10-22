@@ -481,6 +481,7 @@ fn the_eyedropper_makes_its_patch_neutral() {
             mode: WbMode::Custom,
             temp: Some(temp),
             tint: Some(tint),
+            ..Default::default()
         };
         let f = cpu::frame(&raw, &src, &s, &Options::default());
         let m = f.colour;

@@ -2692,3 +2692,41 @@ Face parts, Object), from EDITING-SPEC's "Rendering masks".
 - **Process version untouched:** the profile choice is new and off by
   default, so old edits render as before (the synthetic goldens are
   unchanged).
+
+### Colour calibration (CAT16)
+
+- **What it is:** the spec's Phase 4 option, darktable's "modern" scheme
+  (`src/iop/channelmixerrgb.c`; no code ported, the CAT16 matrix is
+  CAM16's): the camera renders as for daylight (its D65 multipliers and
+  D65 calibration, a DNG profile's too), then CAT16, fully adapted,
+  takes the scene's illuminant to D65 in the working space.
+- **Where it lives: white balance.** It's
+  `white_balance.adaptation: "cat16"` (default `"camera"`: the matrices
+  interpolated for the white, then Bradford, as before), behind a
+  "Colour calibration (CAT16)" switch in the White balance section. The
+  same controls then name the illuminant: As shot (the as-shot white as
+  the daylight rendering shows it), the presets, Temperature and Tint, and
+  the eyedropper (the patch's colour in the daylight rendering), so
+  there's one place for the light, not two modules fighting over it. It
+  travels in presets' White balance part.
+- **The Calibration section** (primaries' hue and saturation, shadows
+  tint) is darktable's mixer part of the same module in Lightroom's
+  terms; it stays as it is and applies after the adaptation, as before.
+- **Mixed light:** under colour calibration, local adjustments'
+  Temperature and Tint adapt by CAT16 as well, so a masked layer takes a
+  second light out the same way (darktable does this with a second,
+  masked instance). Without it they stay Bradford.
+- **Cost:** none per pixel. It's a 3×3 matrix folded into the colour
+  matrix (and each layer's), so the GPU needs nothing new; the parity
+  test covers it (custom illuminant with layers, and as shot).
+  darktable's gamut compression and clipping of negatives aren't
+  ported: Shoebox's display transform already rolls saturated colours
+  off; revisit if deep-blue LED shots show artefacts.
+- **Brightness:** the white still comes out at the same Y as without it
+  (von Kries keeps a white's luminance), and the as-shot temperature
+  reads close to the plain one (within a few hundred kelvin on the Z f's
+  matrices).
+- **Old edits:** the field is absent unless set, so they read and render
+  as before; no process version change. A DNG profile's tables blend for
+  the temperature the camera's calibration is blended at
+  (`Resolved::calibrated_at`: the white's, or D65 under calibration).

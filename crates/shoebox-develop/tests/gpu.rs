@@ -181,6 +181,17 @@ fn gpu_matches_the_cpu_reference() {
     cases.push(("local adjustments", s.clone(), o));
     cases.push(("local adjustments, mask shown", s.clone(), o));
     cases.push(("local adjustments, mask alone", s.clone(), o));
+    // Colour calibration: CAT16 from a custom illuminant, layers' tints
+    // adapting by CAT16 too.
+    s.modules.white_balance.adaptation = shoebox_develop::edit::Adaptation::Cat16;
+    s.modules.white_balance.mode = WbMode::Custom;
+    s.modules.white_balance.temp = Some(3600.0);
+    s.modules.white_balance.tint = Some(12.0);
+    cases.push(("local adjustments, colour calibration", s.clone(), o));
+    s.modules.white_balance = Default::default();
+    let mut c = base.clone();
+    c.modules.white_balance.adaptation = shoebox_develop::edit::Adaptation::Cat16;
+    cases.push(("colour calibration, as shot", c, o));
     s.geometry.rotate = 2.5;
     s.geometry.crop = [0.05, 0.1, 0.9, 0.95];
     cases.push((

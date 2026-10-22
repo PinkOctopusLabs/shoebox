@@ -937,7 +937,7 @@ pub fn frame(raw: &RawImage, src: &Demosaiced, s: &Settings, o: &Options) -> Fra
                 colour::mul(&w.cam_to_rec2020, &colour::diag(ratio)),
                 BASELINE_EV + slider + dcp.as_ref().map_or(0.0, |d| d.exposure_offset),
                 Display::new(&s.modules.display_transform, o.target),
-                w.temp,
+                w.calibrated_at,
             )
         }
         Referred::Display => (

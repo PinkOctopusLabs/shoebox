@@ -78,7 +78,13 @@ pub fn wants(src: &Demosaiced, s: &Settings) -> Wants {
         sharpen: ((s.modules.sharpening.amount / 100.0) as f32).clamp(0.0, MAX_SHARPEN),
         ..Default::default()
     };
-    for l in active(s).0.iter().map(|l| layer(l)).filter(|l| l.active) {
+    let cat = cat16(s);
+    for l in active(s)
+        .0
+        .iter()
+        .map(|l| layer(l, cat))
+        .filter(|l| l.active)
+    {
         // Without the AI's result, its strength does nothing.
         if ai.is_some() {
             w.more_ai |= l.denoise_ai > 0.0 && w.ai < 1.0;
@@ -264,7 +270,8 @@ pub fn layers(
             None => mask::rasterise_with(&locals, gw, gh, units, t.as_ref(), &lookup),
         }
     });
-    let list: Vec<Layer> = locals.iter().map(|l| layer(l)).collect();
+    let cat = cat16(s);
+    let list: Vec<Layer> = locals.iter().map(|l| layer(l, cat)).collect();
     Layers {
         wants: wants(src, s),
         list,
@@ -423,12 +430,24 @@ fn undo_orientation(o: u16) -> u16 {
     }
 }
 
-fn layer(l: &Local) -> Layer {
+/// Under colour calibration, a layer's temperature and tint adapt by CAT16
+/// too (a second light, masked).
+fn cat16(s: &Settings) -> bool {
+    s.modules.white_balance.adaptation == crate::edit::Adaptation::Cat16
+}
+
+fn layer(l: &Local, cat16: bool) -> Layer {
     let a = &l.adjust;
     let unit = |v: f64| (v / 100.0) as f32;
     Layer {
         active: l.amount > 0.0 && *a != Default::default(),
-        matrix: super::f32m(&matrix(a.exposure, a.temperature, a.tint, a.saturation)),
+        matrix: super::f32m(&matrix(
+            a.exposure,
+            a.temperature,
+            a.tint,
+            a.saturation,
+            cat16,
+        )),
         contrast: unit(a.contrast),
         shadows: unit(a.shadows),
         highlights: unit(a.highlights),
@@ -442,7 +461,7 @@ fn layer(l: &Local) -> Layer {
 /// Exposure (stops), temperature and tint (−100 to +100: warmer, more
 /// magenta) and saturation (−100 to +100) as one matrix on linear
 /// Rec.2020.
-fn matrix(exposure: f64, temperature: f64, tint: f64, saturation: f64) -> M3 {
+fn matrix(exposure: f64, temperature: f64, tint: f64, saturation: f64, cat16: bool) -> M3 {
     let mut m = colour::diag([2f64.powf(exposure); 3]);
     if temperature != 0.0 || tint != 0.0 {
         // Adapt from a light as much warmer or cooler than daylight; at
@@ -453,7 +472,11 @@ fn matrix(exposure: f64, temperature: f64, tint: f64, saturation: f64) -> M3 {
         let wb = colour::mul(
             &colour::xyz_to_rgb(&colour::REC2020, colour::D65),
             &colour::mul(
-                &colour::bradford(from, to),
+                &if cat16 {
+                    colour::cat16(from, to)
+                } else {
+                    colour::bradford(from, to)
+                },
                 &colour::rgb_to_xyz(&colour::REC2020, colour::D65),
             ),
         );

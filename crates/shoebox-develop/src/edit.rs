@@ -127,6 +127,9 @@ pub struct WhiteBalance {
     /// Green–magenta, for [`WbMode::Custom`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tint: Option<f64>,
+    /// How the light is taken out: through the camera's matrices, or by
+    /// colour calibration (CAT16).
+    pub adaptation: Adaptation,
 }
 
 impl Default for WhiteBalance {
@@ -135,8 +138,23 @@ impl Default for WhiteBalance {
             mode: WbMode::AsShot,
             temp: None,
             tint: None,
+            adaptation: Adaptation::Camera,
         }
     }
+}
+
+/// White balance's adaptation (see `wb`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Adaptation {
+    /// The camera's matrices interpolated for the white, which Bradford
+    /// adapts to the working space's (as Lightroom does).
+    #[default]
+    Camera,
+    /// Colour calibration (darktable's modern scheme): the camera's
+    /// daylight (D65) rendering, then CAT16 from the scene's illuminant in
+    /// the working space. Temperature and tint name that illuminant.
+    Cat16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

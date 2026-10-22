@@ -11,7 +11,7 @@
 use shoebox_decode::raw::{ColorMatrix, RawImage};
 
 use crate::colour::{self, M3, Xy};
-use crate::edit::{WbMode, WhiteBalance};
+use crate::edit::{Adaptation, WbMode, WhiteBalance};
 
 /// Temperature and tint of the presets (Lightroom's values).
 pub fn preset(mode: WbMode) -> Option<(f64, f64)> {
@@ -140,9 +140,9 @@ impl Camera {
 
 /// White balance for a finished image (JPEG and the like), relative to
 /// how it was shot: as shot is no change (shown as D65's temperature and
-/// tint); another white is adapted (Bradford) to D65, so "Tungsten"
-/// neutralises a warm light. Returns the temperature, tint and the
-/// Rec.2020 matrix.
+/// tint); another white is adapted (Bradford, or CAT16 under colour
+/// calibration) to D65, so "Tungsten" neutralises a warm light. Returns
+/// the temperature, tint and the Rec.2020 matrix.
 pub fn relative(wb: &WhiteBalance) -> (f64, f64, M3) {
     let (t, tint) = match wb.mode {
         WbMode::AsShot => {
@@ -153,13 +153,16 @@ pub fn relative(wb: &WhiteBalance) -> (f64, f64, M3) {
         mode => preset(mode).unwrap_or((6504.0, 0.0)),
     };
     let xy = colour::temp_tint_to_xy(t, tint);
-    let m = colour::mul(
-        &colour::xyz_to_rgb(&colour::REC2020, colour::D65),
-        &colour::mul(
-            &colour::bradford(xy, colour::D65),
-            &colour::rgb_to_xyz(&colour::REC2020, colour::D65),
+    let m = match wb.adaptation {
+        Adaptation::Cat16 => cat16_rec2020(xy),
+        Adaptation::Camera => colour::mul(
+            &colour::xyz_to_rgb(&colour::REC2020, colour::D65),
+            &colour::mul(
+                &colour::bradford(xy, colour::D65),
+                &colour::rgb_to_xyz(&colour::REC2020, colour::D65),
+            ),
         ),
-    );
+    };
     (t, tint, m)
 }
 
@@ -168,17 +171,30 @@ pub fn relative(wb: &WhiteBalance) -> (f64, f64, M3) {
 /// mean around the point clicked: for a raw, camera RGB balanced at
 /// `as_shot`; for a finished image, linear Rec.2020.
 pub fn neutral_at(raw: &RawImage, src: &crate::cpu::Demosaiced, patch: [f64; 3]) -> (f64, f64) {
-    neutral_with(&Camera::new(&raw.matrices), src, patch)
+    neutral_with(&Camera::new(&raw.matrices), src, patch, Adaptation::Camera)
 }
 
-/// [`neutral_at`] through another calibration (see [`camera_for`]).
-pub fn neutral_with(cam: &Camera, src: &crate::cpu::Demosaiced, patch: [f64; 3]) -> (f64, f64) {
+/// [`neutral_at`] through another calibration (see [`camera_for`]); under
+/// colour calibration, the illuminant as the camera's daylight rendering
+/// shows it.
+pub fn neutral_with(
+    cam: &Camera,
+    src: &crate::cpu::Demosaiced,
+    patch: [f64; 3],
+    adaptation: Adaptation,
+) -> (f64, f64) {
     let xy = match src.referred {
         crate::cpu::Referred::Scene => {
             // Undo the as-shot balance: the patch's raw camera RGB is the
             // white's neutral.
             let n = [0, 1, 2].map(|c| patch[c].max(1e-9) / f64::from(src.as_shot[c]));
-            cam.xy_of(n)
+            match adaptation {
+                Adaptation::Camera => cam.xy_of(n),
+                Adaptation::Cat16 => {
+                    let r = reference(cam);
+                    seen(&r, [0, 1, 2].map(|c| n[c] * f64::from(r.multipliers[c])))
+                }
+            }
         }
         crate::cpu::Referred::Display => colour::xyz_to_xy(colour::mulv(
             &colour::rgb_to_xyz(&colour::REC2020, colour::D65),
@@ -196,6 +212,10 @@ pub struct Resolved {
     /// The white's temperature and tint, for the sliders.
     pub temp: f64,
     pub tint: f64,
+    /// The temperature the camera's calibration (matrices, a DNG
+    /// profile's tables) is blended for: the white's, or D65's under
+    /// colour calibration.
+    pub calibrated_at: f64,
     /// White-balanced camera RGB → linear Rec.2020 (D65): a white-balanced
     /// (1, 1, 1) is neutral, at Y = 1 / green neutral.
     pub cam_to_rec2020: M3,
@@ -224,6 +244,9 @@ pub fn resolve(raw: &RawImage, wb: &WhiteBalance) -> Resolved {
 /// [`resolve`] against another calibration (a DNG camera profile's), with
 /// the photo's as-shot multipliers.
 pub fn resolve_with(cam: &Camera, as_shot: Option<[f32; 3]>, wb: &WhiteBalance) -> Resolved {
+    if wb.adaptation == Adaptation::Cat16 {
+        return calibrated(cam, as_shot, wb);
+    }
     let fallback = || {
         let n = cam.neutral_of(colour::D65);
         let xy = colour::D65;
@@ -232,20 +255,89 @@ pub fn resolve_with(cam: &Camera, as_shot: Option<[f32; 3]>, wb: &WhiteBalance) 
     let (xy, neutral) = match wb.mode {
         WbMode::AsShot => match as_shot {
             Some(m) => {
-                let n = [1.0 / f64::from(m[0]), 1.0, 1.0 / f64::from(m[2])];
+                let n = raw_neutral(m);
                 (cam.xy_of(n), n)
             }
             None => fallback(),
         },
         mode => {
-            let (t, tint) = match preset(mode) {
-                Some(p) => p,
-                None => (wb.temp.unwrap_or(5500.0), wb.tint.unwrap_or(0.0)),
-            };
-            let xy = colour::temp_tint_to_xy(t, tint);
+            let xy = chosen_xy(wb, mode);
             (xy, cam.neutral_of(xy))
         }
     };
+    balance(cam, xy, neutral)
+}
+
+/// A preset's or custom white balance's white.
+fn chosen_xy(wb: &WhiteBalance, mode: WbMode) -> Xy {
+    let (t, tint) = match preset(mode) {
+        Some(p) => p,
+        None => (wb.temp.unwrap_or(5500.0), wb.tint.unwrap_or(0.0)),
+    };
+    colour::temp_tint_to_xy(t, tint)
+}
+
+/// The camera RGB of the as-shot white, from the as-shot multipliers.
+fn raw_neutral(m: [f32; 3]) -> [f64; 3] {
+    [1.0 / f64::from(m[0]), 1.0, 1.0 / f64::from(m[2])]
+}
+
+/// The camera's daylight rendering (balanced for D65), which colour
+/// calibration starts from.
+fn reference(cam: &Camera) -> Resolved {
+    balance(cam, colour::D65, cam.neutral_of(colour::D65))
+}
+
+/// A colour in white-balanced camera RGB (as `r` balances it) as a
+/// chromaticity.
+fn seen(r: &Resolved, balanced: [f64; 3]) -> Xy {
+    colour::xyz_to_xy(colour::mulv(
+        &colour::mul(
+            &colour::rgb_to_xyz(&colour::REC2020, colour::D65),
+            &r.cam_to_rec2020,
+        ),
+        balanced,
+    ))
+}
+
+/// Linear Rec.2020 adapted by CAT16 from the white `from` to D65.
+pub fn cat16_rec2020(from: Xy) -> M3 {
+    colour::mul(
+        &colour::xyz_to_rgb(&colour::REC2020, colour::D65),
+        &colour::mul(
+            &colour::cat16(from, colour::D65),
+            &colour::rgb_to_xyz(&colour::REC2020, colour::D65),
+        ),
+    )
+}
+
+/// Colour calibration (darktable's modern scheme, `src/iop/channelmixerrgb.c`;
+/// no code ported): the camera's daylight rendering, then CAT16 in the
+/// working space from the scene's illuminant to D65. As shot, the
+/// illuminant is the as-shot white as the daylight rendering shows it.
+fn calibrated(cam: &Camera, as_shot: Option<[f32; 3]>, wb: &WhiteBalance) -> Resolved {
+    let r = reference(cam);
+    let xy = match wb.mode {
+        WbMode::AsShot => match as_shot {
+            Some(m) => {
+                let n = raw_neutral(m);
+                seen(&r, [0, 1, 2].map(|c| n[c] * f64::from(r.multipliers[c])))
+            }
+            None => colour::D65,
+        },
+        mode => chosen_xy(wb, mode),
+    };
+    let (temp, tint) = colour::xy_to_temp_tint(xy);
+    Resolved {
+        temp,
+        tint,
+        cam_to_rec2020: colour::mul(&cat16_rec2020(xy), &r.cam_to_rec2020),
+        ..r
+    }
+}
+
+/// White balance for a white `xy` whose camera RGB is `neutral`.
+fn balance(cam: &Camera, xy: Xy, neutral: [f64; 3]) -> Resolved {
     let (temp, tint) = colour::xy_to_temp_tint(xy);
     let cam_to_xyz = colour::inv(&cam.xyz_to_cam(temp)).unwrap_or(colour::IDENTITY);
     // Scale the neutral so the white it stands for has Y = 1.
@@ -289,6 +381,7 @@ pub fn resolve_with(cam: &Camera, as_shot: Option<[f32; 3]>, wb: &WhiteBalance) 
         multipliers,
         temp,
         tint,
+        calibrated_at: temp,
         cam_to_rec2020,
     }
 }
@@ -339,6 +432,7 @@ mod tests {
                 mode: WbMode::Custom,
                 temp: Some(4300.0),
                 tint: Some(-12.0),
+                ..Default::default()
             },
         ] {
             let r = resolve(&raw, &wb);
@@ -361,6 +455,7 @@ mod tests {
                 mode: WbMode::Custom,
                 temp: Some(shot.temp),
                 tint: Some(shot.tint),
+                ..Default::default()
             },
         );
         for c in 0..3 {

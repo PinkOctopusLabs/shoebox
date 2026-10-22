@@ -111,11 +111,30 @@ pub fn bradford(from: Xy, to: Xy) -> M3 {
         [-0.7502, 1.7135, 0.0367],
         [0.0389, -0.0685, 1.0296],
     ];
-    let Some(bi) = inv(&B) else { return IDENTITY };
-    let s = mulv(&B, xy_to_xyz(from));
-    let d = mulv(&B, xy_to_xyz(to));
+    von_kries(&B, from, to)
+}
+
+/// CAT16 chromatic adaptation of XYZ from one white to another, fully
+/// adapted (CAM16's cone space, Li et al. 2017), as darktable's colour
+/// calibration uses it.
+pub fn cat16(from: Xy, to: Xy) -> M3 {
+    const M16: M3 = [
+        [0.401288, 0.650173, -0.051461],
+        [-0.250268, 1.204414, 0.045854],
+        [-0.002079, 0.048952, 0.953127],
+    ];
+    von_kries(&M16, from, to)
+}
+
+/// Scale the cone responses `cones` (from XYZ) of one white to another's.
+fn von_kries(cones: &M3, from: Xy, to: Xy) -> M3 {
+    let Some(ci) = inv(cones) else {
+        return IDENTITY;
+    };
+    let s = mulv(cones, xy_to_xyz(from));
+    let d = mulv(cones, xy_to_xyz(to));
     let scale = [d[0] / s[0], d[1] / s[1], d[2] / s[2]];
-    mul(&bi, &mul(&diag(scale), &B))
+    mul(&ci, &mul(&diag(scale), cones))
 }
 
 /// Robertson's isotemperature lines: (mired, u, v, slope).
