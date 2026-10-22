@@ -206,16 +206,18 @@ pub struct Group {
 fn format_rank(f: Format) -> u8 {
     match f {
         Format::Nef => 0,
-        Format::Tiff => 1,
+        // Raw data too (a camera's DNG, or a NEF converted).
+        Format::Dng => 1,
+        Format::Tiff => 2,
         // HEIC is a camera original (phone), so it ranks with the JPG.
-        Format::Jpeg | Format::Heic => 2,
-        Format::Png => 3,
-        Format::Mov | Format::Mp4 => 4,
+        Format::Jpeg | Format::Heic => 3,
+        Format::Png | Format::Avif => 4,
+        Format::Mov | Format::Mp4 => 5,
     }
 }
 
-/// Keeper preference: reference copy, then NEF > TIFF > JPG > PNG, then the
-/// highest resolution, then scan order.
+/// Keeper preference: reference copy, then NEF > DNG > TIFF > JPG > PNG,
+/// then the highest resolution, then scan order.
 fn keeper_key(items: &[Item], i: usize) -> (bool, u8, std::cmp::Reverse<u64>, usize) {
     let it = &items[i];
     (

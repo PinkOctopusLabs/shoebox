@@ -8,7 +8,7 @@ Shoebox is a fast, local-first macOS app, written in Rust with egui, for browsin
 
 **Goals**
 
-- Browse large folder trees of NEF, JPEG, TIFF, PNG and HEIC files instantly, with Lightroom-style grid, loupe, compare and survey views.
+- Browse large folder trees of NEF, DNG, JPEG, TIFF, PNG, HEIC and AVIF files instantly, with Lightroom-style grid, loupe, compare and survey views.
 - Cull and organise with ratings, pick/reject flags, colour labels and keywords, written to XMP sidecars.
 - Treat a NEF and its JPEG and TIFF siblings as one stack.
 - Find exact and visually similar duplicates across folders, including against the previews embedded in NEFs, and review them side by side.
@@ -30,7 +30,7 @@ The app is built for one photographer's library first, and its defaults come fro
 | Item | Detail |
 | --- | --- |
 | Camera | Nikon Z f, shooting RAW + JPEG, so most frames have a NEF and a JPG with the same capture time |
-| File types | NEF masters; camera JPGs; TIFF exports from Lightroom (mostly 2560 px long edge, including virtual-copy variants); JPEG previews carved from NEFs during card recovery (no EXIF); PNG |
+| File types | NEF masters; camera JPGs; TIFF exports from Lightroom (mostly 2560 px long edge, including virtual-copy variants); JPEG previews carved from NEFs during card recovery (no EXIF); PNG. Also read: HEIC and AVIF (through macOS ImageIO), DNG (a camera's or a converter's, and Shoebox's own linear DNG exports; shown from its previews or rendered from the raw data) |
 | Duplicates today | NEF, JPG and TIFF of one frame share a base name; extra copies carry `-1`, `-2` suffixes |
 | Scale | About 10,000 files today; design for 200,000 |
 | Other tools | DxO PhotoLab 9 for RAW development, digiKam as the catalog; XMP sidecars are the contract between all three |
@@ -44,7 +44,7 @@ Everything in the app is one of these eight things, and all of them except colle
 | --- | --- |
 | Library root | A folder the user adds to the app; any number of roots can be added, and stacks, events, search and duplicate checks work across all of them. Scanned recursively and watched for changes. A root can be marked **Reference**: read-only, never moved, renamed or written to, and used as the "keep" side in duplicate detection. |
 | File | One file on disk: image, sidecar or other. |
-| Stack | All files of one frame. Grouped by capture time (DateTimeOriginal + SubSecTimeOriginal) plus camera serial, or by matching base name in the same folder. One **primary** member is shown in the grid (default order NEF, TIFF, JPG, PNG) with a badge listing the members, such as `NEF+JPG+TIF`. |
+| Stack | All files of one frame. Grouped by capture time (DateTimeOriginal + SubSecTimeOriginal) plus camera serial, or by matching base name in the same folder. One **primary** member is shown in the grid (default order NEF, DNG, TIFF, JPG, PNG, HEIC, AVIF) with a badge listing the members, such as `NEF+JPG+TIF`. |
 | Variant | A stack member with different pixels from the primary, such as a Lightroom virtual-copy export (`-2`). Shown when the stack is expanded. |
 | Sidecar | `<filename>.<ext>.xmp` next to a file, holding ratings, flags, labels and keywords. |
 | Collection | A named virtual set of stacks. No files move. Stored in the cache and mirrored to `<root>/.shoebox/collections.json`, so collections survive a cache rebuild. |
@@ -223,7 +223,7 @@ Only the core touches the library on disk; both caches can be deleted and rebuil
 | Crate | Responsibility |
 | --- | --- |
 | `shoebox-core` | Library model, scanner, metadata, XMP, stacks, hashing, duplicate index, file operations and journal, SQLite cache. No UI dependencies. |
-| `shoebox-decode` | Decoding and thumbnails: JPEG (DCT-scaled decode for thumbnails), TIFF including 16-bit, PNG, HEIC through macOS ImageIO, NEF embedded-preview extraction by walking the TIFF IFDs, ICC conversion. |
+| `shoebox-decode` | Decoding and thumbnails: JPEG (DCT-scaled decode for thumbnails), TIFF including 16-bit, PNG, HEIC and AVIF through macOS ImageIO, NEF embedded-preview extraction by walking the TIFF IFDs, DNG previews (or the raw data rendered, when they're too small), ICC conversion. |
 | `shoebox-app` | The eframe/egui application. |
 | `shoebox-cli` | Headless `scan`, `dupes`, `import` and `rename` commands. |
 

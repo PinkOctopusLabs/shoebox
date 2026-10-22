@@ -816,7 +816,7 @@ pub fn run_auto(app: &mut ShoeboxApp) {
     let ai_from = app
         .settings
         .ai_denoise_from_iso
-        .filter(|_| ready.src.referred == cpu::Referred::Scene);
+        .filter(|_| ready.src.referred == cpu::Referred::Scene && ready.meta.is_mosaic());
     edit(app, "auto", "Auto".into(), |s| {
         *s = shoebox_develop::auto::settings(s, &stats, iso, lens, ai_from);
         // A DNG camera profile someone chose stays.
@@ -1000,6 +1000,7 @@ fn follow(app: &mut ShoeboxApp) {
     if wanted
         && app.denoiser.ready()
         && ready.src.referred == cpu::Referred::Scene
+        && ready.meta.is_mosaic()
         && ready.src.cache.ai().is_none()
         && st.ai_requested.as_ref() != Some(&(id, raw.clone()))
     {
@@ -2554,11 +2555,23 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 }
                 // Raw: how the sensor data becomes RGB (prepared again on change).
                 let r = &s.modules.raw;
+                // A linear DNG is demosaiced already: only its levels apply.
+                let mosaic = app
+                    .develop
+                    .ready
+                    .as_ref()
+                    .is_none_or(|r| r.meta.is_mosaic());
                 let reset =
                     super::look::section(ui, "Raw", *r != defaults.modules.raw, false, |ui| {
                         let mut hl = r.highlights;
                         let mut dm = r.demosaic;
+                        if !mosaic {
+                            ui.weak("A linear DNG: demosaiced already.");
+                        }
                         egui::Grid::new("raw-grid").num_columns(2).show(ui, |ui| {
+                            if !mosaic {
+                                return;
+                            }
                             ui.label("Highlights");
                             egui::ComboBox::from_id_salt("raw-highlights")
                                 .selected_text(match hl {
@@ -2597,7 +2610,7 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                             });
                         }
                         let mut hot = r.hot_pixels;
-                        if ui.checkbox(&mut hot, "Fix hot and dead pixels").changed() {
+                        if mosaic && ui.checkbox(&mut hot, "Fix hot and dead pixels").changed() {
                             let label = format!("Hot pixels {}", if hot { "on" } else { "off" });
                             edit(app, "raw", label, |s| s.modules.raw.hot_pixels = hot);
                         }

@@ -23,6 +23,7 @@ fn zf() -> RawImage {
         }],
         make: "Nikon".into(),
         model: "Z f".into(),
+        linear: None,
     }
 }
 

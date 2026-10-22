@@ -171,6 +171,36 @@ impl<'a> Tiff<'a> {
             .collect()
     }
 
+    /// Numeric values of an entry as floats: integers, RATIONAL and
+    /// SRATIONAL (a zero denominator gives None for that value).
+    pub fn numbers(&self, e: &Entry) -> Result<Vec<Option<f64>>, DecodeError> {
+        match e.typ {
+            5 | 10 => {
+                let count = e.count as usize;
+                if count > MAX_VALUES {
+                    return Err(DecodeError::Format(format!(
+                        "tag {:#x} has an implausible {count} values",
+                        e.tag
+                    )));
+                }
+                self.bytes(e.value_at, 8usize.saturating_mul(count))?;
+                (0..count)
+                    .map(|i| {
+                        let at = e.value_at + i * 8;
+                        let (n, d) = (self.u32_at(at)?, self.u32_at(at + 4)?);
+                        let (n, d) = if e.typ == 10 {
+                            (f64::from(n as i32), f64::from(d as i32))
+                        } else {
+                            (f64::from(n), f64::from(d))
+                        };
+                        Ok((d != 0.0).then(|| n / d))
+                    })
+                    .collect()
+            }
+            _ => Ok(self.uints(e)?.into_iter().map(|v| Some(v as f64)).collect()),
+        }
+    }
+
     /// The raw value bytes of an entry (for UNDEFINED/BYTE blobs such as an
     /// ICC profile or an MPF index).
     pub fn raw(&self, e: &Entry) -> Result<&'a [u8], DecodeError> {

@@ -5871,3 +5871,110 @@ fn develop_volume_deformation() {
     assert_eq!(volume(&h), shoebox_develop::edit::Volume::default());
     assert_eq!(last(&h).as_deref(), Some("Reset volume deformation"));
 }
+
+/// AVIF and linear DNG beside the original: AVIF picked in the export
+/// dialog's preset editor, with Beside the original (offered for both
+/// formats), lands in the library in the camera DNG's stack; so does a
+/// linear DNG. That opens in Develop past demosaic (no AI denoise to run),
+/// and the AVIF as a finished image.
+#[test]
+fn avif_and_dng_beside_the_original() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(&root).unwrap();
+    let preview = shoebox_fixtures::jpeg(&shoebox_fixtures::scene(6, 600, 400), 90).unwrap();
+    let dng = shoebox_fixtures::Dng {
+        preview: Some(preview),
+        shot: Some(shoebox_fixtures::Shot {
+            datetime: "2026:05:01 09:00:00",
+            subsec: "10",
+            orientation: 1,
+            serial: "7001234",
+        }),
+        ..shoebox_fixtures::Dng::new(600, 400)
+    };
+    let original = dng.write(|x, y| 1500 + ((x * 7 + y * 13) % 600) as u16 * 15);
+    std::fs::write(root.join("DSC_0300.dng"), &original).unwrap();
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let mut h = harness(p, egui::vec2(1400.0, 1100.0));
+    settle(&mut h, Duration::from_secs(60));
+    wait_for(&mut h, Duration::from_secs(10), "presets", |a| {
+        a.export_state().0 > 0
+    });
+    h.get_by_label("DSC_0300.dng").click();
+    h.run_steps(2);
+    h.key_press_modifiers(
+        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+        egui::Key::E,
+    );
+    h.run_steps(3);
+    // The first preset's editor: AVIF, beside the original.
+    h.get_by_label("JPEG · Full size").click();
+    h.run_steps(3);
+    h.get_by_value("JPEG").click();
+    h.run_steps(3);
+    h.get_by_label("AVIF").click();
+    h.run_steps(3);
+    h.get_by_value("A folder outside the library").click();
+    h.run_steps(3);
+    h.get_by_label("Beside the original, in the library")
+        .click();
+    h.run_steps(3);
+    assert!(
+        h.query_by_value("Beside the original, in the library")
+            .is_some()
+    );
+    snapshot(&mut h, "export-avif-beside");
+    h.get_all_by_label("Export").last().unwrap().click();
+    let avif = root.join("DSC_0300_JPEG · Full size.avif");
+    wait_for(&mut h, Duration::from_secs(60), "AVIF beside", |_| {
+        avif.exists()
+    });
+    wait_for(&mut h, Duration::from_secs(30), "in its stack", |a| {
+        a.photo_count() == 2 && a.shown_names() == ["DSC_0300.dng"]
+    });
+    wait_for(&mut h, Duration::from_secs(10), "listed", |a| {
+        a.export_state().2 == Some(1)
+    });
+
+    // A linear DNG beside it too, with the same preset (no dialog).
+    h.state_mut().edit_export_presets(|p| {
+        p.format = shoebox_develop::export::FileFormat::LinearDng;
+    });
+    h.key_press_modifiers(
+        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT | egui::Modifiers::ALT,
+        egui::Key::E,
+    );
+    let linear = root.join("DSC_0300_JPEG · Full size.dng");
+    wait_for(&mut h, Duration::from_secs(60), "DNG beside", |_| {
+        linear.exists()
+    });
+    wait_for(&mut h, Duration::from_secs(30), "in its stack", |a| {
+        a.photo_count() == 3 && a.shown_names() == ["DSC_0300.dng"]
+    });
+    assert_eq!(std::fs::read(root.join("DSC_0300.dng")).unwrap(), original);
+    let back = shoebox_decode::raw::decode(&std::fs::read(&linear).unwrap()).unwrap();
+    assert!(back.linear.is_some());
+
+    // The linear DNG in Develop: past demosaic, nothing for AI denoise.
+    h.state_mut()
+        .select_names(&["DSC_0300_JPEG · Full size.dng"]);
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(30), "develop", |a| {
+        a.develop_ready()
+    });
+    assert_eq!(h.state().develop_linear(), Some(Some(0.0)));
+    snapshot(&mut h, "develop-linear-dng");
+    // The AVIF: a finished image.
+    h.key_press(egui::Key::G);
+    h.run_steps(2);
+    h.state_mut()
+        .select_names(&["DSC_0300_JPEG · Full size.avif"]);
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(30), "develop AVIF", |a| {
+        a.develop_ready() && a.develop_linear().is_none()
+    });
+    assert_eq!(h.state().develop_ai(), (false, None, None));
+}

@@ -194,6 +194,7 @@ fn a_layer_changes_only_what_its_mask_covers() {
         matrices: Vec::new(),
         make: String::new(),
         model: String::new(),
+        linear: None,
     };
     let src = source();
     let o = Options::default();
@@ -248,6 +249,7 @@ fn a_control_point_picks_the_colour_and_brightness_where_its_clicked() {
         matrices: Vec::new(),
         make: String::new(),
         model: String::new(),
+        linear: None,
     };
     // Bright red, with dark red below it and a blue band to its right,
     // then bright red again far away.
@@ -412,6 +414,7 @@ fn local_sharpness_sharpens_and_softens() {
         matrices: Vec::new(),
         make: String::new(),
         model: String::new(),
+        linear: None,
     };
     // A fine checker.
     let mut img = Rgb::new(64, 48);
@@ -492,6 +495,7 @@ fn noisy_raw() -> shoebox_decode::raw::RawImage {
         ],
         make: "Nikon".into(),
         model: "Z f".into(),
+        linear: None,
     }
 }
 
@@ -684,6 +688,7 @@ fn a_layers_sharpening_matches_the_global_modules() {
         matrices: Vec::new(),
         make: String::new(),
         model: String::new(),
+        linear: None,
     };
     let o = Options::default();
     // The left half (the photo is 1 × 3/4 long edges), hard-edged.

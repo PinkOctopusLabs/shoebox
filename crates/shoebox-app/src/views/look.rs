@@ -434,6 +434,12 @@ fn detail(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &Settings) {
         .ready
         .as_ref()
         .is_some_and(|r| r.src.referred == shoebox_develop::cpu::Referred::Scene);
+    // A linear DNG: AI denoise ran before it was written (or not at all).
+    let linear = app
+        .develop
+        .ready
+        .as_ref()
+        .and_then(|r| r.meta.linear.filter(|_| raw));
     let reset = section(ui, "Detail", changed, false, |ui| {
         ui.weak("Best judged at 100% (Z).");
         ui.label(RichText::new("Sharpening").small().strong());
@@ -462,8 +468,17 @@ fn detail(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &Settings) {
                 }
             });
         ui.label(RichText::new("Noise reduction").small().strong());
-        if raw {
-            ai_denoise(app, ui, ai);
+        match linear {
+            Some(l) => {
+                ui.weak(match l.noise_reduction {
+                    Some(v) if v > 0.0 => {
+                        format!("AI denoise: in this linear DNG ({:.0}%)", v * 100.0)
+                    }
+                    _ => "AI denoise: not for a linear DNG (it's demosaiced)".to_owned(),
+                });
+            }
+            None if raw => ai_denoise(app, ui, ai),
+            None => {}
         }
         egui::Grid::new("nr-grid").num_columns(2).show(ui, |ui| {
             if let Some(v) = slider(ui, "Luminance", nr.luminance, 0.0..=100.0, 0.0, 0) {

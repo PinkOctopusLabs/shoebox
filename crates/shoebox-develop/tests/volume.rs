@@ -250,6 +250,7 @@ fn raw() -> shoebox_decode::raw::RawImage {
         matrices: Vec::new(),
         make: String::new(),
         model: String::new(),
+        linear: None,
     }
 }
 

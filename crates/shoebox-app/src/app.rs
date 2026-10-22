@@ -1115,6 +1115,13 @@ impl ShoeboxApp {
         )
     }
 
+    /// The photo in Develop is a linear DNG: the AI denoise it records
+    /// (tests).
+    pub fn develop_linear(&self) -> Option<Option<f32>> {
+        let ready = self.develop.ready.as_ref()?;
+        ready.meta.linear.map(|l| l.noise_reduction)
+    }
+
     /// Develop's spot tool: on, and the spot selected (tests).
     pub fn develop_spots(&self) -> (bool, Option<usize>) {
         (self.develop.spots.active, self.develop.spots.selected)

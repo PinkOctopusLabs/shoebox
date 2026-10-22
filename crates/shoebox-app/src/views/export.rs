@@ -260,18 +260,20 @@ fn summary(p: &Preset) -> String {
         OutputSize::LongEdge { px } => format!("{px} px"),
         OutputSize::Megapixels { mp } => format!("{mp} MP"),
     };
-    if p.format == FileFormat::LinearDng {
+    let mut out = if p.format == FileFormat::LinearDng {
         // The source as it is: no space, size or overlays.
-        return format!("{format} · camera colour · full size");
-    }
-    let mut out = format!("{format} · {} · {size}", p.space.label());
+        format!("{format} · camera colour · full size")
+    } else {
+        format!("{format} · {} · {size}", p.space.label())
+    };
     if p.destination == Destination::Library {
         out.push_str(" · in library");
     }
-    if p.border.is_some() {
+    let rendered = p.format != FileFormat::LinearDng;
+    if rendered && p.border.is_some() {
         out.push_str(" · border");
     }
-    if p.watermark.is_some() {
+    if rendered && p.watermark.is_some() {
         out.push_str(" · watermark");
     }
     out
@@ -531,9 +533,6 @@ fn editor(ui: &mut egui::Ui, p: &mut Preset) {
                             if !spaces.is_empty() && !spaces.contains(&p.space) {
                                 p.space = Space::Srgb;
                             }
-                            if !f.into_library() {
-                                p.destination = Destination::Folder;
-                            }
                         }
                     }
                 });
@@ -633,21 +632,15 @@ fn editor(ui: &mut egui::Ui, p: &mut Preset) {
                 .selected_text(destination_label(p.destination))
                 .show_ui(ui, |ui| {
                     for d in [Destination::Folder, Destination::Library] {
-                        let allowed = d == Destination::Folder || p.format.into_library();
-                        ui.add_enabled_ui(allowed, |ui| {
-                            ui.selectable_value(&mut p.destination, d, destination_label(d))
-                                .on_hover_text(match d {
-                                    Destination::Folder => {
-                                        "Files for elsewhere; Shoebox doesn't keep track of them"
-                                    }
-                                    Destination::Library => {
-                                        "An edited version in the photo's stack, flagged when the edit changes and re-exported in place"
-                                    }
-                                })
-                                .on_disabled_hover_text(
-                                    "The library doesn't show AVIF or DNG files yet",
-                                );
-                        });
+                        ui.selectable_value(&mut p.destination, d, destination_label(d))
+                            .on_hover_text(match d {
+                                Destination::Folder => {
+                                    "Files for elsewhere; Shoebox doesn't keep track of them"
+                                }
+                                Destination::Library => {
+                                    "An edited version in the photo's stack, flagged when the edit changes and re-exported in place"
+                                }
+                            });
                     }
                 });
             ui.end_row();

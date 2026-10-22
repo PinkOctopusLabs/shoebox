@@ -172,3 +172,51 @@ fn avif_round_trips_through_imageio() {
         &srgb.px[i..i + 3]
     );
 }
+
+/// The library reads Shoebox's AVIFs: its size from the boxes, its pixels
+/// (through ImageIO, as HEIC) in the space they were written in.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_library_reads_shoebox_avifs() {
+    use shoebox_decode::Format;
+    use shoebox_develop::encode::{Avif, avif};
+    let (w, h) = (96usize, 64usize);
+    let img = patches(w, h);
+    let bytes = avif(&img, Target::DisplayP3, Avif::default()).unwrap();
+    assert_eq!(shoebox_decode::heif::dimensions(&bytes).unwrap(), (96, 64));
+    assert_eq!(
+        shoebox_decode::dimensions(Format::Avif, &bytes).unwrap(),
+        (96, 64)
+    );
+    let p3 = shoebox_decode::render(
+        Format::Avif,
+        &bytes,
+        None,
+        1,
+        shoebox_decode::Target::DisplayP3,
+    )
+    .unwrap();
+    let srgb = shoebox_decode::render(
+        Format::Avif,
+        &bytes,
+        Some(48),
+        1,
+        shoebox_decode::Target::Srgb,
+    )
+    .unwrap();
+    assert_eq!((srgb.width, srgb.height), (48, 32));
+    let i = (16 * w + 16) * 3;
+    for c in 0..3 {
+        let want = (img.data[i + c] * 255.0).round();
+        assert!(
+            (want - f32::from(p3.px[i + c])).abs() <= 4.0,
+            "{:?}",
+            &p3.px[i..i + 3]
+        );
+    }
+    // The P3 red, seen in sRGB, has no green left.
+    let j = (8 * 48 + 8) * 3;
+    assert!(srgb.px[j + 1] < 12, "{:?}", &srgb.px[j..j + 3]);
+    let g = shoebox_decode::luma_thumbnail(Format::Avif, &bytes, 32).unwrap();
+    assert_eq!(g.width, 32);
+}

@@ -62,12 +62,21 @@ fn dims_from(format: Format, data: &[u8]) -> Option<(u32, u32)> {
         Format::Tiff => shoebox_decode::nef::ifd0_dimensions(data).ok().flatten(),
         // The largest image described in any IFD (the raw or JpgFromRaw).
         Format::Nef => shoebox_decode::nef::max_dimensions(data).ok().flatten(),
+        // The raw image's default crop.
+        Format::Dng => shoebox_decode::dng::dimensions(data).ok(),
+        // The primary image's, turned by its own rotation (`irot`).
+        Format::Avif => shoebox_decode::heif::dimensions(data).ok(),
         Format::Heic | Format::Mov | Format::Mp4 => None,
     }
 }
 
 fn from_bytes(format: Format, data: &[u8]) -> (Meta, bool) {
-    let exif = exif::read(data);
+    let mut exif = exif::read(data);
+    if format == Format::Avif {
+        // An AVIF turns by its own `irot`, which ImageIO applies (and the
+        // size above has): an EXIF orientation would turn it twice.
+        exif.orientation = None;
+    }
     let dims = dims_from(format, data);
     let (width, height) = upright(dims, exif.orientation);
     // Complete if we found dimensions (HEIC: EXIF is enough).

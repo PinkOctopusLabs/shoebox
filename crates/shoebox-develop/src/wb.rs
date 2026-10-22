@@ -416,6 +416,7 @@ mod tests {
             ],
             make: "Nikon".into(),
             model: "Z f".into(),
+            linear: None,
         }
     }
 
@@ -542,6 +543,7 @@ mod brightness {
             ],
             make: "Nikon".into(),
             model: "Z f".into(),
+            linear: None,
         }
     }
 }

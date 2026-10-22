@@ -455,7 +455,11 @@ pub fn srgb_eotf(v: f32) -> f32 {
 
 /// The raw stages: balance the mosaic at as shot, rebuild clipped
 /// highlights, demosaic, and downscale to `long_edge` (the proxy) if given.
+/// A linear DNG is demosaiced already (see [`linear`]).
 pub fn demosaic(raw: &RawImage, r: &Raw, long_edge: Option<u32>) -> Demosaiced {
+    if raw.linear.is_some() {
+        return linear(raw, r, long_edge);
+    }
     let mult = wb::resolve(raw, &Default::default()).multipliers;
     let levelled = levelled(raw, r);
     let balanced: Vec<f32> = levelled
@@ -491,12 +495,37 @@ pub fn demosaic(raw: &RawImage, r: &Raw, long_edge: Option<u32>) -> Demosaiced {
     Demosaiced::new(rgb, mult, Referred::Scene).with_scale(scale)
 }
 
+/// A linear DNG's source (Shoebox's own exports): its pixels balanced at as
+/// shot, with the edit's black and white points; no hot pixels, highlight
+/// reconstruction or demosaic, which are done (DECISIONS, "DNG and AVIF in
+/// the library"). Values the export clipped stay at white.
+fn linear(raw: &RawImage, r: &Raw, long_edge: Option<u32>) -> Demosaiced {
+    let mult = wb::resolve(raw, &Default::default()).multipliers;
+    let levelled = levelled(raw, r);
+    let mut rgb = Rgb::new(raw.width, raw.height);
+    rgb.data
+        .par_chunks_mut(3)
+        .zip(levelled.par_chunks(3))
+        .for_each(|(o, p)| {
+            for c in 0..3 {
+                o[c] = p.get(c).copied().unwrap_or(0.0) * mult[c];
+            }
+        });
+    let rgb = match long_edge {
+        Some(l) => downscale(&rgb, l as usize),
+        None => rgb,
+    };
+    let scale = rgb.width as f32 / raw.width.max(1) as f32;
+    Demosaiced::new(rgb, mult, Referred::Scene).with_scale(scale)
+}
+
 /// The mosaic with hot and dead photosites fixed and the raw black and
-/// white points applied, not yet white-balanced.
+/// white points applied, not yet white-balanced (a linear DNG's samples:
+/// just the points).
 pub fn levelled(raw: &RawImage, r: &Raw) -> Vec<f32> {
     // Hot and dead photosites, then the black and white points (the
     // decoder already put them at 0 and 1; these move them).
-    let fixed = r.hot_pixels.then(|| {
+    let fixed = (r.hot_pixels && raw.is_mosaic()).then(|| {
         raw::hot_pixels(&raw::Mosaic {
             width: raw.width,
             height: raw.height,

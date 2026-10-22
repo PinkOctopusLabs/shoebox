@@ -4,7 +4,9 @@
 //! (`x.nef`, `x.jpg`, `x.tif`, `x-1.tif`), or the same capture time
 //! including sub-seconds plus camera serial (so an export in another folder
 //! joins its NEF, but burst frames a fraction of a second apart don't).
-//! The primary is the NEF, else TIFF, JPG, PNG, HEIC. A **variant** is a
+//! The primary is the NEF, else a DNG, TIFF, JPG, PNG, HEIC, AVIF. A
+//! camera DNG beside a NEF of the same name (one converted from it) stacks
+//! with it, the NEF first. A **variant** is a
 //! member carrying a `-N` suffix whose format another member already has
 //! (Lightroom's `-1`/`-2` virtual-copy exports): different pixels, shown
 //! only when the stack is expanded.
@@ -86,12 +88,14 @@ impl Stack {
 fn rank(f: Format) -> u8 {
     match f {
         Format::Nef => 0,
-        Format::Tiff => 1,
-        Format::Jpeg => 2,
-        Format::Png => 3,
-        Format::Heic => 4,
+        Format::Dng => 1,
+        Format::Tiff => 2,
+        Format::Jpeg => 3,
+        Format::Png => 4,
+        Format::Heic => 5,
+        Format::Avif => 6,
         // A Live Photo's video is never the photo shown.
-        Format::Mov | Format::Mp4 => 5,
+        Format::Mov | Format::Mp4 => 7,
     }
 }
 

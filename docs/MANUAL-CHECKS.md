@@ -286,3 +286,44 @@ together at the end, before the release.
 
   Note the file size, and how bright it looks next to the NEF in each
   editor (no BaselineExposure is written).
+
+### DNG and AVIF in the library
+
+Real files go in `tests/fixtures/real/` or an APFS clone of the library,
+never the library itself.
+
+- [ ] **A camera DNG from another app** (from 2026-10-22): a DNG from
+  Adobe DNG Converter (of a Z f NEF, with its default medium preview) and
+  one from a phone or another camera (a Pixel or iPhone ProRAW, a Leica or
+  Ricoh), each in a folder with its JPEG if it has one.
+  - The grid shows each at once (from its preview), upright; the loupe at
+    100% is sharp (rendered from the raw data where the preview is
+    smaller), with colours like Preview's.
+  - Info shows the date, camera, lens and the full size.
+  - The converted DNG stacks under its NEF (NEF primary, `NEF+DNG`); the
+    phone's makes a `DNG+JPG` stack.
+  - Develop opens each as a raw (Raw section with Highlights and
+    Demosaic, AI denoise offered); a default render looks like the
+    NEF's. Note anything rawler refuses (the message in Develop).
+  - Duplicates: copy the DNG to another folder and change its rating in
+    another app: found as the same image data.
+- [ ] **A Shoebox linear DNG reopened** (from 2026-10-22). Export a high-ISO
+  NEF as a linear DNG beside the original, once with AI denoise at 100
+  and once at 40:
+  - Each joins the NEF's stack as a variant, listed in the Info panel;
+    changing the edit flags it stale, and Re-export replaces it (⌘Z
+    brings the old one back).
+  - Its thumbnail and loupe look like the NEF's default rendering.
+  - In Develop it renders like the NEF at the same settings, the noise
+    as clean as the NEF's with AI denoise; Detail says "AI denoise: in
+    this linear DNG (100%)" (or 40%), and Raw offers only the levels.
+  - Exported again (JPEG, and linear DNG), the files match a JPEG
+    exported from the NEF with AI denoise at the same strength.
+- [ ] **An AVIF from an iPhone or elsewhere** (from 2026-10-22): an AVIF from
+  an iPhone (or one saved by Photoshop, Squoosh or a browser), one
+  in Display P3 and one turned (portrait), and Shoebox's
+  own AVIF export beside the original.
+  - Grid and loupe show them upright, with Preview's colours (the P3 one
+    keeps its saturated reds and greens).
+  - Info shows the date, camera and size.
+  - Develop opens each as a finished image; an export from it matches.

@@ -5,7 +5,6 @@
 //! search look at every member (so "TIF" finds stacks with a TIFF export).
 
 use serde::{Deserialize, Serialize};
-use shoebox_decode::Format;
 
 use crate::catalog::Catalog;
 use crate::marks::{Label, Pick};
@@ -67,7 +66,7 @@ pub struct Filter {
     pub camera: Option<String>,
     #[serde(default)]
     pub lens: Option<String>,
-    /// Stacks without a NEF.
+    /// Stacks without a NEF (or other raw file: a DNG counts).
     #[serde(default)]
     pub nef_missing: bool,
     /// Stacks whose primary has no capture time.
@@ -165,7 +164,7 @@ pub fn matches(c: &Catalog, s: usize, f: &Filter) -> bool {
     {
         return false;
     }
-    if f.nef_missing && st.all().any(|i| c.photos[i].format == Format::Nef) {
+    if f.nef_missing && st.all().any(|i| c.photos[i].format.is_raw()) {
         return false;
     }
     if f.undated && p.meta.capture_seconds().is_some() {
@@ -294,6 +293,7 @@ mod tests {
     use crate::catalog::Photo;
     use crate::marks::Marks;
     use crate::meta::Meta;
+    use shoebox_decode::Format;
 
     fn photo(path: &str, rating: u8, pick: Option<Pick>, kw: &[&str], dated: bool) -> Photo {
         let p = std::path::PathBuf::from(path);

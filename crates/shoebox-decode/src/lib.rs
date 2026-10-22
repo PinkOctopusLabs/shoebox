@@ -1,11 +1,14 @@
-//! Shoebox decoding: JPEG, TIFF, PNG and NEF embedded previews, and movie
-//! poster frames.
+//! Shoebox decoding: JPEG, TIFF, PNG, NEF embedded previews, DNG previews
+//! (or the raw data, when they're too small), HEIC and AVIF through the
+//! platform, and movie poster frames.
 //!
 //! Everything here is read-only. Images decode from in-memory bytes; movies
 //! from their path ([`render_path`]), since a poster frame shouldn't need the
 //! whole file.
 
+pub mod dng;
 pub mod gray;
+pub mod heif;
 #[cfg(target_os = "macos")]
 pub mod imageio;
 pub mod jpeg;
@@ -51,12 +54,18 @@ pub enum DecodeError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Format {
     Nef,
+    /// Any DNG: a camera's, Adobe DNG Converter's, or Shoebox's own linear
+    /// DNG exports. Shown from its previews, or rendered from the raw data
+    /// (see [`dng`]).
+    Dng,
     Jpeg,
     Tiff,
     Png,
     /// HEIC/HEIF: decoded by the platform (ImageIO on macOS); unsupported
     /// elsewhere until a libheif backend exists.
     Heic,
+    /// AVIF: like HEIC, decoded by the platform (ImageIO on macOS).
+    Avif,
     /// QuickTime movie (a Live Photo's video, or a clip): a poster frame
     /// through AVFoundation on macOS; see [`render_path`].
     Mov,
@@ -70,10 +79,12 @@ impl Format {
         let ext = path.extension()?.to_str()?.to_ascii_lowercase();
         Some(match ext.as_str() {
             "nef" => Format::Nef,
+            "dng" => Format::Dng,
             "jpg" | "jpeg" => Format::Jpeg,
             "tif" | "tiff" => Format::Tiff,
             "png" => Format::Png,
             "heic" | "heif" | "hif" => Format::Heic,
+            "avif" => Format::Avif,
             "mov" => Format::Mov,
             "mp4" | "m4v" => Format::Mp4,
             _ => return None,
@@ -83,10 +94,12 @@ impl Format {
     pub fn label(self) -> &'static str {
         match self {
             Format::Nef => "NEF",
+            Format::Dng => "DNG",
             Format::Jpeg => "JPG",
             Format::Tiff => "TIF",
             Format::Png => "PNG",
             Format::Heic => "HEIC",
+            Format::Avif => "AVIF",
             Format::Mov => "MOV",
             Format::Mp4 => "MP4",
         }
@@ -96,10 +109,23 @@ impl Format {
     pub fn is_movie(self) -> bool {
         matches!(self, Format::Mov | Format::Mp4)
     }
+
+    /// Raw data from a camera (NEF or DNG): Develop decodes it rather than
+    /// a finished image.
+    pub fn is_raw(self) -> bool {
+        matches!(self, Format::Nef | Format::Dng)
+    }
+
+    /// Decoded by the platform (HEIC, AVIF): ImageIO applies the file's own
+    /// rotation and colour.
+    pub fn is_platform(self) -> bool {
+        matches!(self, Format::Heic | Format::Avif)
+    }
 }
 
-/// The bytes whose pixels represent the file: the file itself, or for a NEF
-/// its embedded full-size JPEG (`JpgFromRaw`).
+/// The bytes whose pixels represent the file: the file itself, for a NEF
+/// its embedded full-size JPEG (`JpgFromRaw`), for a DNG its largest JPEG
+/// preview (the DNG itself if it has none).
 pub fn display_source(format: Format, data: &[u8]) -> Result<(Format, &[u8]), DecodeError> {
     match format {
         Format::Nef => {
@@ -107,15 +133,29 @@ pub fn display_source(format: Format, data: &[u8]) -> Result<(Format, &[u8]), De
                 .ok_or_else(|| DecodeError::Format("NEF has no embedded JPEG".into()))?;
             Ok((Format::Jpeg, &data[r]))
         }
+        Format::Dng => {
+            let largest = dng::previews(data)?
+                .into_iter()
+                .filter_map(|f| match f.preview {
+                    dng::Preview::Jpeg(r) => Some(r),
+                    dng::Preview::Rgb(_) => None,
+                })
+                .max_by_key(|r| r.len());
+            Ok(match largest {
+                Some(r) => (Format::Jpeg, &data[r]),
+                None => (Format::Dng, data),
+            })
+        }
         f => Ok((f, data)),
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn heic_unsupported() -> DecodeError {
-    DecodeError::Unsupported(
-        "HEIC decoding needs macOS ImageIO (libheif backend not built yet)".into(),
-    )
+fn platform_unsupported(format: Format) -> DecodeError {
+    DecodeError::Unsupported(format!(
+        "{} decoding needs macOS ImageIO (no other backend is built yet)",
+        format.label()
+    ))
 }
 
 /// Full-resolution 8-bit luma of a file's display source (orientation not applied).
@@ -125,7 +165,9 @@ pub fn decode_luma(format: Format, data: &[u8]) -> Result<Gray, DecodeError> {
         Format::Jpeg | Format::Nef => jpeg::decode_luma(data),
         Format::Tiff => tiff::decode_luma(data),
         Format::Png => png::decode_luma(data),
-        Format::Heic => heic_luma(data, 1 << 14),
+        // No JPEG preview: from the raw data.
+        Format::Dng => Ok(dng_render(data, None, 1, Target::Srgb)?.to_gray()),
+        Format::Heic | Format::Avif => platform_luma(format, data, 1 << 14),
         Format::Mov | Format::Mp4 => Err(video_from_bytes()),
     }
 }
@@ -135,28 +177,32 @@ fn video_from_bytes() -> DecodeError {
 }
 
 #[cfg(target_os = "macos")]
-fn heic_luma(data: &[u8], max: u32) -> Result<Gray, DecodeError> {
-    imageio::thumbnail_luma(data, max, false, Some(imageio::type_hint(Format::Heic)))
+fn platform_luma(format: Format, data: &[u8], max: u32) -> Result<Gray, DecodeError> {
+    imageio::thumbnail_luma(data, max, false, Some(imageio::type_hint(format)))
 }
 
 #[cfg(not(target_os = "macos"))]
-fn heic_luma(_data: &[u8], _max: u32) -> Result<Gray, DecodeError> {
-    Err(heic_unsupported())
+fn platform_luma(format: Format, _data: &[u8], _max: u32) -> Result<Gray, DecodeError> {
+    Err(platform_unsupported(format))
 }
 
 /// Luma thumbnail with the given long edge (orientation not applied).
 pub fn luma_thumbnail(format: Format, data: &[u8], long_edge: u32) -> Result<Gray, DecodeError> {
-    if format == Format::Heic {
-        return heic_luma(data, long_edge);
+    match format {
+        f if f.is_platform() => platform_luma(format, data, long_edge),
+        // The smallest preview big enough, or the raw data at that size.
+        Format::Dng => Ok(dng_render(data, Some(long_edge), 1, Target::Srgb)?
+            .to_gray()
+            .fit_long_edge(long_edge)),
+        _ => Ok(decode_luma(format, data)?.fit_long_edge(long_edge)),
     }
-    Ok(decode_luma(format, data)?.fit_long_edge(long_edge))
 }
 
 /// Concatenation order of byte ranges that make up the image data, without
 /// metadata: JPEG SOS..EOI, TIFF strips/tiles, PNG IDAT payloads. For a NEF this
 /// is the image data of its embedded JPEG, so a byte-identical carved preview
-/// produces the same hash. `None` for formats without a defined image-data hash
-/// (HEIC).
+/// produces the same hash; for a DNG, its raw image's strips or tiles.
+/// `None` for formats without a defined image-data hash (HEIC, AVIF).
 pub fn image_data_ranges(
     format: Format,
     data: &[u8],
@@ -170,14 +216,26 @@ pub fn image_data_ranges(
             let abs = outer.start + inner.start..outer.start + inner.end;
             std::iter::once(abs).collect()
         }
+        Format::Dng => dng::raw_data_ranges(data)?,
         Format::Tiff => tiff::image_data_ranges(data)?,
         Format::Png => png::idat_ranges(data)?,
-        Format::Heic | Format::Mov | Format::Mp4 => return Ok(None),
+        Format::Heic | Format::Avif | Format::Mov | Format::Mp4 => return Ok(None),
     }))
 }
 
-/// Pixel dimensions of the display source, from headers only where possible.
+/// Pixel dimensions of the display source, from headers only where possible
+/// (orientation not applied). A DNG's are its raw image's default crop; an
+/// AVIF's its primary image's stored size.
 pub fn dimensions(format: Format, data: &[u8]) -> Result<(u32, u32), DecodeError> {
+    match format {
+        Format::Dng => return dng::dimensions(data),
+        Format::Avif => {
+            if let Ok((size, _)) = heif::primary(data) {
+                return Ok(size);
+            }
+        }
+        _ => {}
+    }
     let (format, data) = display_source(format, data)?;
     match format {
         Format::Jpeg | Format::Nef => jpeg::dimensions(data),
@@ -190,8 +248,9 @@ pub fn dimensions(format: Format, data: &[u8]) -> Result<(u32, u32), DecodeError
                 u32::from_be_bytes([d[4], d[5], d[6], d[7]]),
             ))
         }
-        Format::Heic => {
-            let g = heic_luma(data, 1 << 14)?;
+        Format::Dng => dng::dimensions(data),
+        Format::Heic | Format::Avif => {
+            let g = platform_luma(format, data, 1 << 14)?;
             Ok((g.width, g.height))
         }
         Format::Mov | Format::Mp4 => {
@@ -268,7 +327,10 @@ pub fn render(
         }
         Format::Tiff => tiff::decode_rgb(data)?,
         Format::Png => png::decode_rgb(data)?,
-        Format::Heic => return heic_render(data, long_edge.unwrap_or(1 << 14), target),
+        Format::Dng => return dng_render(data, long_edge, orientation, target),
+        Format::Heic | Format::Avif => {
+            return platform_render(format, data, long_edge.unwrap_or(1 << 14), target);
+        }
         Format::Mov | Format::Mp4 => return Err(video_from_bytes()),
     };
     if let Some(l) = long_edge {
@@ -320,21 +382,82 @@ fn jpeg_icc(data: &[u8]) -> Option<Vec<u8>> {
     d.icc_profile()
 }
 
-/// HEIC through ImageIO, which also applies orientation and colour management.
+/// HEIC and AVIF through ImageIO, which also applies the file's rotation
+/// and colour management (an ICC profile or nclx colour).
 #[cfg(target_os = "macos")]
-fn heic_render(data: &[u8], max: u32, target: Target) -> Result<Rgb8, DecodeError> {
-    imageio::thumbnail_rgb(
-        data,
-        max,
-        true,
-        Some(imageio::type_hint(Format::Heic)),
-        target,
-    )
+fn platform_render(
+    format: Format,
+    data: &[u8],
+    max: u32,
+    target: Target,
+) -> Result<Rgb8, DecodeError> {
+    imageio::thumbnail_rgb(data, max, true, Some(imageio::type_hint(format)), target)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn heic_render(_data: &[u8], _max: u32, _target: Target) -> Result<Rgb8, DecodeError> {
-    Err(heic_unsupported())
+fn platform_render(
+    format: Format,
+    _data: &[u8],
+    _max: u32,
+    _target: Target,
+) -> Result<Rgb8, DecodeError> {
+    Err(platform_unsupported(format))
+}
+
+/// A DNG: its smallest preview that's big enough (the size wanted, or the
+/// image's own for full size, give or take 5%), else rendered from the raw
+/// data. Previews and the raw data are stored unrotated: `orientation`
+/// (IFD 0's) turns them upright.
+fn dng_render(
+    data: &[u8],
+    long_edge: Option<u32>,
+    orientation: u16,
+    target: Target,
+) -> Result<Rgb8, DecodeError> {
+    let full = dng::dimensions(data).ok().map(|(w, h)| w.max(h));
+    let want = match (long_edge, full) {
+        (Some(l), Some(f)) => l.min(f),
+        (Some(l), None) => l,
+        (None, f) => f.unwrap_or(u32::MAX),
+    };
+    let previews = dng::previews(data).unwrap_or_default();
+    let best = previews
+        .iter()
+        .filter(|p| u64::from(p.long_edge()) * 20 >= u64::from(want) * 19)
+        .min_by_key(|p| p.long_edge());
+    let mut img = match best {
+        Some(p) => {
+            let (img, icc) = dng::decode_preview(data, p)?;
+            let mut img = match long_edge {
+                Some(l) => img.fit_long_edge(l),
+                None => img,
+            };
+            rgb::convert(&mut img, icc.as_deref(), target);
+            img
+        }
+        None => dng_from_raw(data, long_edge, target)?,
+    };
+    if let Some(l) = long_edge {
+        img = img.fit_long_edge(l);
+    }
+    Ok(img.orient(orientation))
+}
+
+/// A DNG rendered from its raw data, not oriented: by ImageIO (Apple's raw
+/// engine) where it can, else by rawler ([`raw::render`]).
+fn dng_from_raw(data: &[u8], long_edge: Option<u32>, target: Target) -> Result<Rgb8, DecodeError> {
+    #[cfg(target_os = "macos")]
+    {
+        let max = long_edge.unwrap_or(1 << 14);
+        let hint = Some(imageio::type_hint(Format::Dng));
+        match imageio::thumbnail_rgb(data, max, false, hint, target) {
+            Ok(img) => return Ok(img),
+            Err(e) => tracing::debug!("ImageIO couldn't render a DNG ({e}): trying rawler"),
+        }
+    }
+    let mut img = raw::render(data, long_edge)?;
+    rgb::convert(&mut img, None, target);
+    Ok(img)
 }
 
 /// Byte range of the XMP packet embedded in the file itself, if any: JPEG
@@ -347,7 +470,7 @@ pub fn embedded_xmp(format: Format, data: &[u8]) -> Option<std::ops::Range<usize
             (m == 0xE1 && data[r.clone()].starts_with(JPEG_XMP))
                 .then(|| r.start + JPEG_XMP.len()..r.end)
         }),
-        Format::Tiff | Format::Nef => {
+        Format::Tiff | Format::Nef | Format::Dng => {
             let t = tiffparse::Tiff::parse(data).ok()?;
             let ifd0 = t.ifd0().ok()?;
             let raw = t.raw(ifd0.get(0x02BC)?).ok()?;
@@ -355,7 +478,7 @@ pub fn embedded_xmp(format: Format, data: &[u8]) -> Option<std::ops::Range<usize
             Some(start..start + raw.len())
         }
         Format::Png => png::itxt_xmp(data),
-        Format::Heic | Format::Mov | Format::Mp4 => None,
+        Format::Heic | Format::Avif | Format::Mov | Format::Mp4 => None,
     }
 }
 
@@ -373,5 +496,15 @@ mod tests {
         assert!(f("a.mp4").is_some_and(Format::is_movie));
         assert!(!Format::Heic.is_movie());
         assert_eq!(Format::Mp4.label(), "MP4");
+    }
+
+    #[test]
+    fn dng_and_avif() {
+        let f = |p: &str| Format::from_path(Path::new(p));
+        assert_eq!(f("a.DNG"), Some(Format::Dng));
+        assert_eq!(f("a.avif"), Some(Format::Avif));
+        assert!(Format::Dng.is_raw() && Format::Nef.is_raw() && !Format::Tiff.is_raw());
+        assert!(Format::Avif.is_platform() && !Format::Avif.is_raw());
+        assert_eq!((Format::Dng.label(), Format::Avif.label()), ("DNG", "AVIF"));
     }
 }

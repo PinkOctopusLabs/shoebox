@@ -672,8 +672,10 @@ fn filters_button(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         .show(|ui| {
             ui.set_min_width(260.0);
             ui.weak("File type");
-            ui.horizontal(|ui| {
-                for t in ["NEF", "JPG", "TIF", "PNG", "HEIC", "MOV", "MP4"] {
+            ui.horizontal_wrapped(|ui| {
+                for t in [
+                    "NEF", "DNG", "JPG", "TIF", "PNG", "HEIC", "AVIF", "MOV", "MP4",
+                ] {
                     let mut on = app.filter.types.iter().any(|x| x == t);
                     if ui.toggle_value(&mut on, t).changed() {
                         if on {

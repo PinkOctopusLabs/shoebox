@@ -258,6 +258,12 @@ pub struct Dng {
     pub model: String,
     /// ISO, in an Exif IFD, if any.
     pub iso: Option<u16>,
+    /// A JPEG preview (NewSubFileType 1, in a SubIFD, as Adobe DNG
+    /// Converter writes them), if any.
+    pub preview: Option<Vec<u8>>,
+    /// Capture metadata (an Exif IFD, and IFD 0's orientation), if any;
+    /// it replaces `iso`.
+    pub shot: Option<Shot>,
 }
 
 impl Dng {
@@ -287,6 +293,8 @@ impl Dng {
             make: "Shoebox".into(),
             model: "Test Sensor".into(),
             iso: None,
+            preview: None,
+            shot: None,
         }
     }
 
@@ -317,7 +325,10 @@ impl Dng {
             (0x010F, Val::Ascii(self.make.clone())),
             (0x0110, Val::Ascii(self.model.clone())),
             (0x0111, Val::Long(vec![strip])),
-            (0x0112, Val::Short(vec![1])),
+            (
+                0x0112,
+                Val::Short(vec![self.shot.as_ref().map_or(1, |s| s.orientation)]),
+            ),
             (0x0115, Val::Short(vec![1])),
             (0x0116, Val::Long(vec![self.height])),
             (0x0117, Val::Long(vec![pixels.len() as u32])),
@@ -360,9 +371,33 @@ impl Dng {
             entries.push((0xC61F, Val::Long(vec![ox, oy])));
             entries.push((0xC620, Val::Long(vec![cw, ch])));
         }
-        if let Some(iso) = self.iso {
+        if let Some(shot) = &self.shot {
+            let exif = exif_entries(&mut w, shot);
+            entries.push((0x8769, Val::Long(vec![exif])));
+        } else if let Some(iso) = self.iso {
             let exif = w.ifd(vec![(0x8827, Val::Short(vec![iso]))], 0);
             entries.push((0x8769, Val::Long(vec![exif])));
+        }
+        if let Some(jpeg) = &self.preview {
+            let at = w.blob(jpeg);
+            let (pw, ph) =
+                image::load_from_memory(jpeg).map_or((0, 0), |i| (i.width(), i.height()));
+            let sub = w.ifd(
+                vec![
+                    (0x00FE, Val::Long(vec![1])),
+                    (0x0100, Val::Long(vec![pw])),
+                    (0x0101, Val::Long(vec![ph])),
+                    (0x0102, Val::Short(vec![8, 8, 8])),
+                    (0x0103, Val::Short(vec![7])),
+                    (0x0106, Val::Short(vec![6])),
+                    (0x0111, Val::Long(vec![at])),
+                    (0x0115, Val::Short(vec![3])),
+                    (0x0116, Val::Long(vec![ph])),
+                    (0x0117, Val::Long(vec![jpeg.len() as u32])),
+                ],
+                0,
+            );
+            entries.push((0x014A, Val::Long(vec![sub])));
         }
         let ifd0 = w.ifd(entries, 0);
         w.finish(ifd0)

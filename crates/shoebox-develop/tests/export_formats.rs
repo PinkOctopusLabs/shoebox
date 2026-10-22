@@ -56,10 +56,7 @@ fn presets_name_the_new_formats_and_old_ones_still_load() {
         };
         let back: Preset = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert_eq!(back, p);
-        // Neither goes into the library until it reads them.
-        assert!(!format.into_library());
     }
-    assert!(starters()[0].format.into_library());
 }
 
 #[test]
@@ -278,4 +275,77 @@ fn imageio_renders_a_linear_dng() {
     );
     let red = at(450, 200);
     assert!(red[0] > red[1] + 60 && red[0] > red[2] + 60, "{red:?}");
+}
+
+/// Shoebox's linear DNGs open in Develop as raws past demosaic: the source
+/// comes back as it was written (within 16-bit steps), balanced at the
+/// same as-shot white, so a render at the defaults matches; hot pixels and
+/// AI denoise don't apply; a DNG exported from it carries its AI denoise.
+#[test]
+fn a_linear_dng_opens_without_demosaic() {
+    use shoebox_decode::raw::Linear;
+    let raw = two_patches(96, 64, 0.3);
+    let mut s = Settings::default();
+    let src = cpu::demosaic(&raw, &s.modules.raw, None);
+    let bytes = linear_dng(&raw, &src, &s, 1).unwrap();
+    let back = shoebox_decode::raw::decode(&bytes).unwrap();
+    assert_eq!(
+        back.linear,
+        Some(Linear {
+            noise_reduction: Some(0.0)
+        })
+    );
+    assert!(!back.is_mosaic() && raw.is_mosaic());
+    assert_eq!((back.width, back.height), (96, 64));
+    assert_eq!(back.data.len(), 96 * 64 * 3);
+    assert_eq!(back.matrices.len(), raw.matrices.len());
+    for (a, b) in back.as_shot.unwrap().iter().zip(raw.as_shot.unwrap()) {
+        assert!((a - b).abs() < 1e-4);
+    }
+    let reopened = cpu::demosaic(&back, &s.modules.raw, None);
+    assert_eq!(reopened.referred, cpu::Referred::Scene);
+    assert_eq!((reopened.rgb.width, reopened.rgb.height), (96, 64));
+    let worst = src
+        .rgb
+        .data
+        .iter()
+        .zip(&reopened.rgb.data)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0f32, f32::max);
+    // 16 bits of camera RGB, times the as-shot multipliers (at most 2).
+    assert!(worst < 4.0 / 65535.0, "worst {worst}");
+    let o = cpu::Options::default();
+    let a = cpu::render_from(&raw, &src, &s, &o, true);
+    let b = cpu::render_from(&back, &reopened, &s, &o, true);
+    let diff = a
+        .data
+        .iter()
+        .zip(&b.data)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0f32, f32::max);
+    assert!(diff < 1e-3, "rendered {diff}");
+    // Hot pixels are fixed on a mosaic only.
+    let mut r = s.modules.raw.clone();
+    r.hot_pixels = true;
+    assert_eq!(cpu::demosaic(&back, &r, None).rgb.data, reopened.rgb.data);
+    // The proxy.
+    let proxy = cpu::demosaic(&back, &s.modules.raw, Some(48));
+    assert_eq!(proxy.rgb.width, 48);
+    assert!((proxy.scale - 0.5).abs() < 1e-6);
+
+    // With AI denoise at 40: recorded, read back, and carried into a DNG
+    // exported from the reopened one (whose edit can't run it again).
+    let mut ai = src.rgb.clone();
+    ai.data.iter_mut().for_each(|v| *v *= 0.5);
+    src.cache.set_ai(std::sync::Arc::new(ai));
+    s.modules.denoise_ai.enabled = true;
+    s.modules.denoise_ai.strength = 40.0;
+    let bytes = linear_dng(&raw, &src, &s, 1).unwrap();
+    let back = shoebox_decode::raw::decode(&bytes).unwrap();
+    let nr = back.linear.and_then(|l| l.noise_reduction).unwrap();
+    assert!((nr - 0.4).abs() < 1e-6);
+    let reopened = cpu::demosaic(&back, &s.modules.raw, None);
+    assert!(reopened.ai_ready().is_none());
+    let again = linear_dng(&back, &reopened, &s, 1).unwrap();
+    assert!((noise_reduction(&again) - 0.4).abs() < 1e-6);
 }

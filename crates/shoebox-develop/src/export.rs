@@ -137,13 +137,6 @@ impl FileFormat {
             ],
         }
     }
-
-    /// Whether files in this format can go beside the original. The
-    /// library doesn't read AVIF or DNG yet, so such a file there would be
-    /// one Shoebox doesn't show (DECISIONS, "AVIF and linear DNG export").
-    pub fn into_library(self) -> bool {
-        !matches!(self, FileFormat::Avif { .. } | FileFormat::LinearDng)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -417,7 +410,8 @@ pub fn encode(img: &Rgb, preset: &Preset) -> Result<Vec<u8>, String> {
 /// renders it from scratch. Nothing after that is baked in: no detail
 /// stage, spots, lens corrections, geometry or look (DECISIONS, "AVIF and
 /// linear DNG export"). Turned upright (Orientation 1), as every export is;
-/// clipped at the sensor's white.
+/// clipped at the sensor's white. From a linear DNG (an earlier export), the
+/// AI denoise it records is carried over: there's none to add.
 pub fn linear_dng(
     meta: &RawImage,
     src: &Demosaiced,
@@ -428,7 +422,8 @@ pub fn linear_dng(
         return Err("a linear DNG is made from a raw photo".into());
     }
     let ai = &s.modules.denoise_ai;
-    if ai.enabled && src.ai_ready().is_none() {
+    let carried = meta.linear.map(|l| l.noise_reduction.unwrap_or(0.0));
+    if carried.is_none() && ai.enabled && src.ai_ready().is_none() {
         return Err("AI denoise hasn't run on this photo (is its model downloaded?)".into());
     }
     let base = src.base(s);
@@ -465,8 +460,9 @@ pub fn linear_dng(
         model: &meta.model,
         neutral: mult.map(|m| 1.0 / m.max(1e-6)),
         matrices: &meta.matrices,
-        noise_reduction: match src.ai_strength(s) {
-            Some(k) if ai.enabled => k,
+        noise_reduction: match (carried, src.ai_strength(s)) {
+            (Some(v), _) => v,
+            (None, Some(k)) if ai.enabled => k,
             _ => 0.0,
         },
         thumbnail: Some((preview.width, preview.height, &thumb)),

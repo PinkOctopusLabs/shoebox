@@ -5,13 +5,16 @@
 //! from: crop to the image area, subtract black, normalise to white.
 //!
 //! The data stays mosaiced and un-white-balanced: white balance,
-//! highlight reconstruction and demosaic belong to the pipe.
+//! highlight reconstruction and demosaic belong to the pipe. A linear DNG
+//! (LinearRaw, as Shoebox exports) is already demosaiced: its three samples
+//! a pixel are kept as they are ([`RawImage::linear`]).
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 
 use rawler::decoders::RawDecodeParams;
 use rawler::imgop::xyz::Illuminant;
+use rawler::rawimage::RawPhotometricInterpretation;
 use rawler::rawsource::RawSource;
 
 use crate::DecodeError;
@@ -53,6 +56,17 @@ pub struct RawImage {
     pub matrices: Vec<ColorMatrix>,
     pub make: String,
     pub model: String,
+    /// Set for a linear DNG: `data` is already demosaiced, three samples a
+    /// pixel (camera RGB, not white-balanced), and `cfa` means nothing.
+    pub linear: Option<Linear>,
+}
+
+/// What a linear DNG says about its data.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Linear {
+    /// NoiseReductionApplied (0–1), when the file records it: Shoebox's
+    /// exports record their AI denoise in it.
+    pub noise_reduction: Option<f32>,
 }
 
 impl RawImage {
@@ -61,11 +75,23 @@ impl RawImage {
         self.cfa[y % 2][x % 2]
     }
 
-    /// Whether photosite `(x, y)` is clipped (see [`CLIP`]).
+    /// Whether photosite `(x, y)` is clipped (see [`CLIP`]); for a linear
+    /// DNG, whether any of the pixel's samples is.
     pub fn clipped(&self, x: usize, y: usize) -> bool {
-        self.data
-            .get(y * self.width + x)
-            .is_some_and(|&v| v >= CLIP)
+        let i = y * self.width + x;
+        if self.linear.is_some() {
+            return self
+                .data
+                .get(i * 3..i * 3 + 3)
+                .is_some_and(|p| p.iter().any(|&v| v >= CLIP));
+        }
+        self.data.get(i).is_some_and(|&v| v >= CLIP)
+    }
+
+    /// Mosaiced (a colour filter array), so demosaic and AI denoise apply:
+    /// anything but a linear DNG.
+    pub fn is_mosaic(&self) -> bool {
+        self.linear.is_none()
     }
 }
 
@@ -88,7 +114,24 @@ pub fn decode(data: &[u8]) -> Result<RawImage, DecodeError> {
     }))
     .map_err(|_| DecodeError::Format("the raw decoder failed on this file".into()))?
     .map_err(|e| DecodeError::Unsupported(e.to_string()))?;
+    if raw.cpp == 3 && raw.photometric == RawPhotometricInterpretation::LinearRaw {
+        let linear = Linear {
+            noise_reduction: crate::dng::noise_reduction_applied(data),
+        };
+        return prepare_linear(&raw, linear);
+    }
     prepare(&raw)
+}
+
+/// The image area: the default crop, else the active area, else all of it.
+fn area(raw: &rawler::RawImage) -> (usize, usize, usize, usize) {
+    let (full_w, full_h) = (raw.width, raw.height);
+    match raw.crop_area.or(raw.active_area) {
+        Some(r) if r.p.x + r.d.w <= full_w && r.p.y + r.d.h <= full_h && r.d.w > 1 && r.d.h > 1 => {
+            (r.p.x, r.p.y, r.d.w, r.d.h)
+        }
+        _ => (0, 0, full_w, full_h),
+    }
 }
 
 /// Crop, black-subtract and normalise rawler's output.
@@ -102,13 +145,7 @@ fn prepare(raw: &rawler::RawImage) -> Result<RawImage, DecodeError> {
     if full_w == 0 || full_h == 0 {
         return Err(DecodeError::Format("empty raw image".into()));
     }
-    let area = raw.crop_area.or(raw.active_area);
-    let (x0, y0, w, h) = match area {
-        Some(r) if r.p.x + r.d.w <= full_w && r.p.y + r.d.h <= full_h && r.d.w > 1 && r.d.h > 1 => {
-            (r.p.x, r.p.y, r.d.w, r.d.h)
-        }
-        _ => (0, 0, full_w, full_h),
-    };
+    let (x0, y0, w, h) = area(raw);
     // Black levels repeat from the active area's corner (DNG's rule).
     let (bx, by) = raw.active_area.map_or((0, 0), |r| (r.p.x, r.p.y));
 
@@ -170,6 +207,75 @@ fn prepare(raw: &rawler::RawImage) -> Result<RawImage, DecodeError> {
         }
     }
 
+    let (as_shot, matrices) = colour(raw)?;
+    Ok(RawImage {
+        width: w,
+        height: h,
+        cfa: pattern,
+        data,
+        as_shot,
+        matrices,
+        make: raw.clean_make.clone(),
+        model: raw.clean_model.clone(),
+        linear: None,
+    })
+}
+
+/// A linear DNG's three samples a pixel, cropped, black-subtracted and
+/// normalised per channel, as [`prepare`] does photosites.
+fn prepare_linear(raw: &rawler::RawImage, linear: Linear) -> Result<RawImage, DecodeError> {
+    let (full_w, full_h) = (raw.width, raw.height);
+    if full_w == 0 || full_h == 0 {
+        return Err(DecodeError::Format("empty raw image".into()));
+    }
+    let (x0, y0, w, h) = area(raw);
+    let src = raw.data.as_f32();
+    if src.len() < full_w * full_h * 3 {
+        return Err(DecodeError::Truncated);
+    }
+    // A black and a white level a channel (linear files have no repeating
+    // black pattern).
+    let levels: Vec<f32> = raw.blacklevel.levels.iter().map(|l| l.as_f32()).collect();
+    let black = [0, 1, 2].map(|c| levels.get(c).or(levels.first()).copied().unwrap_or(0.0));
+    let whites = &raw.whitelevel.0;
+    let white = [0, 1, 2].map(|c| {
+        whites
+            .get(c)
+            .or(whites.first())
+            .copied()
+            .unwrap_or(u32::from(u16::MAX)) as f32
+    });
+    let mut data = vec![0.0f32; w * h * 3];
+    for (y, out) in data.chunks_exact_mut(w * 3).enumerate() {
+        let at = ((y0 + y) * full_w + x0) * 3;
+        for (i, (o, &v)) in out.iter_mut().zip(&src[at..at + w * 3]).enumerate() {
+            let c = i % 3;
+            let range = white[c] - black[c];
+            *o = if range > 0.0 {
+                ((v - black[c]) / range).max(0.0)
+            } else {
+                0.0
+            };
+        }
+    }
+    let (as_shot, matrices) = colour(raw)?;
+    Ok(RawImage {
+        width: w,
+        height: h,
+        cfa: [[RED, GREEN], [GREEN, BLUE]],
+        data,
+        as_shot,
+        matrices,
+        make: raw.clean_make.clone(),
+        model: raw.clean_model.clone(),
+        linear: Some(linear),
+    })
+}
+
+/// As-shot multipliers and the colour matrices, lowest temperature first.
+type Colour = (Option<[f32; 3]>, Vec<ColorMatrix>);
+
+fn colour(raw: &rawler::RawImage) -> Result<Colour, DecodeError> {
     let wb = raw.wb_coeffs;
     let as_shot = (wb[..3].iter().all(|v| v.is_finite() && *v > 0.0))
         .then(|| [wb[0] / wb[1], 1.0, wb[2] / wb[1]]);
@@ -192,16 +298,43 @@ fn prepare(raw: &rawler::RawImage) -> Result<RawImage, DecodeError> {
             raw.make, raw.model
         )));
     }
+    Ok((as_shot, matrices))
+}
 
-    Ok(RawImage {
-        width: w,
-        height: h,
-        cfa: pattern,
-        data,
-        as_shot,
-        matrices,
-        make: raw.clean_make.clone(),
-        model: raw.clean_model.clone(),
+/// A plain sRGB rendering of a raw file by rawler's own developer (PPG
+/// demosaic, the D65 matrix, as-shot white, the sRGB curve, no tone curve):
+/// for a DNG with no preview big enough when ImageIO can't render it. Long
+/// edge at most `long_edge`; not oriented.
+pub fn render(data: &[u8], long_edge: Option<u32>) -> Result<crate::Rgb8, DecodeError> {
+    use rawler::imgop::develop::{Intermediate, RawDevelop};
+    let developed = catch_unwind(AssertUnwindSafe(|| {
+        let raw = rawler::decode(
+            &RawSource::new_from_slice(data),
+            &RawDecodeParams::default(),
+        )?;
+        if crate::check_dimensions(raw.width as u32, raw.height as u32).is_err() {
+            return Err(rawler::RawlerError::DecoderFailed(
+                "the image is too large".into(),
+            ));
+        }
+        RawDevelop::default().develop_intermediate(&raw)
+    }))
+    .map_err(|_| DecodeError::Format("the raw decoder failed on this file".into()))?
+    .map_err(|e| DecodeError::Unsupported(e.to_string()))?;
+    let Intermediate::ThreeColor(px) = developed else {
+        return Err(DecodeError::Unsupported(
+            "a raw file that doesn't develop to RGB".into(),
+        ));
+    };
+    let rgb = px
+        .data
+        .iter()
+        .flat_map(|p| p.map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8))
+        .collect();
+    let img = crate::Rgb8::new(px.width as u32, px.height as u32, rgb)?;
+    Ok(match long_edge {
+        Some(l) => img.fit_long_edge(l),
+        None => img,
     })
 }
 

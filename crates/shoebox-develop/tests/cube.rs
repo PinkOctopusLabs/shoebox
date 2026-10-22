@@ -182,6 +182,7 @@ fn renders_find_looks_by_contents() {
         matrices: Vec::new(),
         make: String::new(),
         model: String::new(),
+        linear: None,
     };
     let src = Demosaiced::new(Rgb::new(8, 8), [1.0; 3], Referred::Scene);
     let mut s = Settings::default();

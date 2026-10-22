@@ -2902,6 +2902,10 @@ Face parts, Object), from EDITING-SPEC's "Rendering masks".
   demosaic), with ImageIO for thumbnails. AVIF would go through ImageIO,
   as HEIC does.
 
+  **Lifted the same day** ("DNG and AVIF in the library", below): the
+  library reads both, and both export beside the original like every
+  other format. A folder inside the library is still refused.
+
 **Presets.** `FileFormat::Avif { quality, ten_bit, speed }` and
 `FileFormat::LinearDng` are stored as `{"kind":"avif",…}` and
 `{"kind":"linear_dng"}`. `ten_bit` and `speed` take their defaults when
@@ -3000,3 +3004,114 @@ ViewPoint's wide-angle fix (EDITING-SPEC, Optics and geometry), in
   ticked, Find again, Show faces draws their boxes, Face fix). History:
   "Volume deformation: Spherical", "Volume amount 60%", "Fix faces on",
   "Faces found: 2", "Face fix 80%", "Reset volume deformation".
+
+## DNG and AVIF in the library (2026-10-22)
+
+Decided in "Wave 1 follow-ups": the library reads both formats, Shoebox's
+own linear DNGs open in Develop as raws past demosaic and AI denoise, and
+both formats export beside the original.
+
+**File kinds.** `Format::Dng` (`.dng`) and `Format::Avif` (`.avif`).
+`Format::is_raw` (NEF, DNG) is what Develop decodes as raw data;
+`Format::is_platform` (HEIC, AVIF) is what ImageIO decodes. The file-type
+filter offers both. The scanner, the watcher, import and the CLI take
+every `Format`, so a camera's DNGs on a card are imported like NEFs.
+
+**DNG in the library.**
+
+- **Shown from its previews.** `dng::previews` lists every
+  reduced-resolution image (NewSubFileType 1, in IFD 0's chain and the
+  SubIFDs) stored as baseline JPEG (Adobe DNG Converter's) or uncompressed
+  8-bit RGB (IFD 0 thumbnails; Shoebox's own is at most 256 px). `render`
+  takes the smallest that's big enough, as for NEFs: the size asked for,
+  or the image's own for full size, within 5%. Previews are taken as sRGB
+  unless they embed a profile (PreviewColorSpace isn't read; Adobe's and
+  Shoebox's are sRGB).
+- **Else rendered from the raw data**, by ImageIO (Apple's raw engine,
+  what Preview and Finder show), and by rawler's own developer (PPG, the
+  D65 matrix, the sRGB curve; flatter) where ImageIO fails, and off macOS.
+  The brief said rawler; ImageIO comes first because its rendering is the
+  one people see elsewhere on the Mac, it reads more DNGs (JPEG XL DNGs
+  from recent phones), and it was already checked on Shoebox's linear
+  DNGs. This happens for a linear DNG past 256 px, an Adobe "medium"
+  preview in the loupe, or a DNG with no preview. Thumbnails are cached as
+  for any file, so it's once per size.
+- **Metadata** as for NEFs: EXIF from the TIFF container. The size is the
+  main image's DefaultCropSize (or its whole size), turned by IFD 0's
+  Orientation, which also turns its previews and renders. rawler's writer
+  puts a linear DNG's IFDs after the data, so its first scan reads the
+  whole file for them (the hash reads it anyway).
+- **Image-data hash**, adding to M1's rules (JPEG: SOS..EOI; TIFF: IFD 0's
+  strips; NEF: its JpgFromRaw's scan data): BLAKE3 of the main image's
+  strips or tiles (NewSubFileType 0, the largest), in file order. Two DNGs
+  of the same raw data with other metadata or previews match exactly; a
+  NEF and the DNG converted from it hold different encodings, so they
+  match perceptually only. Perceptual hashes come from the 256 px render.
+- **Stacks:** primary order NEF, DNG, TIFF, JPG, PNG, HEIC, AVIF, movies.
+  A camera DNG beside a NEF of the same name (one converted from it)
+  stacks with it by name, the NEF primary; a phone's DNG and JPG make a
+  `DNG+JPG` stack, the DNG primary. Duplicate keepers: NEF > DNG > TIFF >
+  JPG and HEIC > PNG and AVIF.
+- **"NEF missing"** counts any raw file in the stack: a DNG is the raw.
+  The label stays as SPEC names it.
+- **Sidecars:** `x.dng.xmp`. The per-stem `x.xmp` that Settings adds for
+  raw files stays NEF only: Lightroom reads a DNG's marks from inside it,
+  which Shoebox never writes, so a stem sidecar would be one more file
+  nothing reads, shared with a NEF of the same name.
+
+**AVIF in the library.** As HEIC: ImageIO decodes it (thumbnails, loupe,
+perceptual hashes), from its nclx colour or ICC profile into the display's
+space, and applies its rotation. Its size comes from the HEIF boxes
+(`heif`: the primary item's `ispe`, turned by its `irot`), not a decode.
+EXIF (kamadak reads AVIF as HEIF) gives the date and camera; its
+Orientation is set aside, since `irot` is what turns an AVIF. No
+image-data hash, as for HEIC. Develop opens it as a finished image.
+
+**Develop.**
+
+- **Camera DNGs are raws.** rawler decodes CFA DNGs, the path High
+  efficiency NEFs already take through their converted DNGs; nothing to
+  convert. The camera's own lens data is read from NEFs only; Lensfun works
+  from EXIF as for any raw.
+- **Linear DNGs** (LinearRaw, three samples): `raw::decode` keeps the
+  samples (`RawImage::linear`, with NoiseReductionApplied) and
+  `cpu::demosaic` skips hot pixels, highlight reconstruction and demosaic:
+  the pixels balanced at as shot, with the edit's raw black and white
+  points. Matrices and as-shot white come from the file. The source comes
+  back within 16-bit steps of what was exported, and a render at the
+  defaults matches the original's (test).
+- **No AI denoise.** Detail says what the DNG records ("AI denoise: in
+  this linear DNG (40%)") instead of offering it, and Raw offers only the
+  levels. Auto's AI from ISO, local AI strength and the AI thread leave it
+  alone. A linear DNG exported from one carries its NoiseReductionApplied
+  over.
+- It starts from default settings, like any photo.
+
+**Exports beside the original.** The folder-only rule in "AVIF and linear
+DNG export" is lifted: the dialog offers Beside the original for every
+format, and the export thread no longer refuses it. AVIF and DNG exports
+there go as the others do: written in the cache, copied in as one
+journaled batch that never replaces (`-1` when the name is taken), linked
+into the photo's stack as variants, listed in the Info panel, flagged
+stale when the edit changes, and replaced only by re-exporting them (the
+old file to the Trash, ⌘Z brings it back). A folder inside the library is
+still refused. A linear DNG goes stale on any change to the edit, though
+only its raw settings and AI denoise are in it: the same rule as every
+export, at the cost of a flag after a look-only change (open choice).
+
+**Caches.** No schema or version bump: earlier scans skipped `.dng` and
+`.avif` files altogether, so a rescan adds them as new files and no cached
+row changes meaning.
+
+**SPEC.** Its file types, the decode crate's line and the stack's primary
+order now include DNG and AVIF. Nothing conflicts.
+
+**Checked by:** decode tests (preview choice, the raw rendered without
+one, the hash's ranges, orientation, AVIF made by `sips` through ImageIO),
+core (scan, metadata, stacks, an export linked as a variant, hashes, the
+cache reused), develop (a linear DNG reopened without demosaic, AI denoise
+carried over; Shoebox's P3 AVIFs read in P3), app (both formats exported
+beside a NEF and beside a linear DNG, never replacing; a UI test choosing
+AVIF and Beside the original in the dialog, both joining the stack and
+opening in Develop). Real files: MANUAL-CHECKS, "DNG and AVIF in the
+library".

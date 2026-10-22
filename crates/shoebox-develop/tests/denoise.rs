@@ -49,6 +49,7 @@ fn raw(cfa: [[u8; 2]; 2]) -> RawImage {
         ],
         make: "Nikon".into(),
         model: "Z f".into(),
+        linear: None,
     }
 }
 

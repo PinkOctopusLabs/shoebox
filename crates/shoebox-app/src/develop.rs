@@ -816,7 +816,7 @@ fn preview(
             }
         }
     };
-    if ai && ready.src.cache.ai().is_none() {
+    if ai && ready.meta.is_mosaic() && ready.src.cache.ai().is_none() {
         // Kept from Develop without the AI's result: make it now.
         let r = Request {
             id: p.id,
@@ -880,7 +880,7 @@ fn prepare(
     emit: &dyn Fn(Event),
     ai: bool,
 ) -> Result<Option<Ready>, String> {
-    if r.format != shoebox_decode::Format::Nef {
+    if !r.format.is_raw() {
         return finished(r, long_edge).map(Some);
     }
     let bytes = std::fs::read(&r.path).map_err(|e| format!("{}: {e}", r.path.display()))?;
@@ -895,21 +895,16 @@ fn prepare(
             ..(**shot).clone()
         })
     });
-    // For Auto (when preparing for Develop): the camera's own JPEG.
+    // For Auto (when preparing for Develop): the camera's own JPEG (a
+    // DNG's preview).
     let camera_jpeg = long_edge.and_then(|_| {
-        shoebox_decode::render(
-            shoebox_decode::Format::Nef,
-            &bytes,
-            Some(512),
-            1,
-            shoebox_decode::Target::Srgb,
-        )
-        .ok()
+        shoebox_decode::render(r.format, &bytes, Some(512), 1, shoebox_decode::Target::Srgb).ok()
     });
     drop(bytes);
     let mut raw = shoebox_decode::raw::decode_path(&source).map_err(|e| e.to_string())?;
     let src = cpu::demosaic(&raw, &r.raw, long_edge).with_lens(lens);
-    if ai && shoebox_develop::denoise::model().is_some() {
+    // A linear DNG's AI denoise is in it already.
+    if ai && raw.is_mosaic() && shoebox_develop::denoise::model().is_some() {
         match ai_denoised(&raw, &r.raw, &file_hash, &|_| {}, &AtomicBool::new(false)) {
             Ok(full) => {
                 let img = match long_edge {
@@ -994,7 +989,7 @@ fn ai_for_view(
     emit: &dyn Fn(Event),
     cancel: &AtomicBool,
 ) -> Result<cpu::Rgb, String> {
-    if r.format != shoebox_decode::Format::Nef {
+    if !r.format.is_raw() {
         return Err("AI denoise works on raw files".into());
     }
     let bytes = std::fs::read(&r.path).map_err(|e| format!("{}: {e}", r.path.display()))?;
@@ -1004,6 +999,9 @@ fn ai_for_view(
     let file_hash = blake3::hash(&bytes).to_hex().to_string();
     drop(bytes);
     let raw = shoebox_decode::raw::decode_path(&source).map_err(|e| e.to_string())?;
+    if !raw.is_mosaic() {
+        return Err("this linear DNG is demosaiced and denoised already".into());
+    }
     let full = ai_denoised(
         &raw,
         &r.raw,
@@ -1024,7 +1022,7 @@ fn finished(r: &Request, long_edge: Option<u32>) -> Result<Ready, String> {
 }
 
 fn finished_image(r: &Request, long_edge: Option<u32>) -> Result<Ready, String> {
-    use shoebox_decode::{Format, Target};
+    use shoebox_decode::Target;
     let data = std::fs::read(&r.path).map_err(|e| format!("{}: {e}", r.path.display()))?;
     // 16-bit TIFFs and PNGs keep their precision.
     let deep = shoebox_decode::rgb16::render16(r.format, &data, long_edge, 1, Target::DisplayP3)
@@ -1069,9 +1067,11 @@ fn finished_image(r: &Request, long_edge: Option<u32>) -> Result<Ready, String> 
             matrices: Vec::new(),
             make: String::new(),
             model: String::new(),
+            linear: None,
         }),
         src: Arc::new(src),
-        upright: r.format == Format::Heic,
+        // ImageIO turned it upright.
+        upright: r.format.is_platform(),
         auto: None,
     })
 }
@@ -1139,14 +1139,6 @@ fn destination(
     seq: usize,
 ) -> Result<(PathBuf, String), String> {
     use shoebox_develop::export::Destination;
-    // The library doesn't read AVIF or DNG yet: such files stay outside it.
-    let outside_only = !preset.format.into_library();
-    if outside_only && preset.destination == Destination::Library {
-        return Err(format!(
-            "{} files go to a folder outside the library, which doesn't show them yet",
-            preset.format.label()
-        ));
-    }
     let folder = match preset.destination {
         // Beside the original.
         Destination::Library => item
@@ -1169,18 +1161,10 @@ fn destination(
         ));
     }
     if preset.destination == Destination::Folder && in_library(job, &folder) {
-        return Err(if outside_only {
-            format!(
-                "{} is in the library, which doesn't show {} files yet: choose a folder outside it",
-                folder.display(),
-                preset.format.label()
-            )
-        } else {
-            format!(
-                "{} is in the library: to export into it, set the preset to go beside the original",
-                folder.display()
-            )
-        });
+        return Err(format!(
+            "{} is in the library: to export into it, set the preset to go beside the original",
+            folder.display()
+        ));
     }
     let mut name = item
         .path
@@ -1715,8 +1699,10 @@ mod tests {
     }
 
     /// AVIF and linear DNG exports: written outside the library under
-    /// names that never replace a file, refused beside the original (the
-    /// library doesn't show them yet), and a DNG only from a raw photo.
+    /// names that never replace a file, or beside the original (staged for
+    /// the library worker, which adds them to the photo's stack), a DNG
+    /// only from a raw photo, and a linear DNG in the library exported again
+    /// beside itself.
     #[test]
     #[allow(clippy::unwrap_used)]
     fn avif_and_dng_exports() {
@@ -1777,12 +1763,15 @@ mod tests {
             });
             match events.into_inner().unwrap().pop() {
                 Some(Event::ExportDone {
-                    written, errors, ..
-                }) => (written, errors),
+                    written,
+                    errors,
+                    into_library,
+                    ..
+                }) => (written, errors, into_library),
                 _ => panic!("no ExportDone"),
             }
         };
-        let (written, errors) = run(&job);
+        let (written, errors, _) = run(&job);
         let names: Vec<_> = written
             .iter()
             .map(|w| w.file.file_name().unwrap().to_string_lossy().into_owned())
@@ -1800,36 +1789,75 @@ mod tests {
         assert_eq!(&std::fs::read(out.join("two.dng")).unwrap()[..4], b"II*\0");
         // Again: new names, nothing replaced.
         let before = std::fs::read(out.join("two.dng")).unwrap();
-        let (written, _) = run(&job);
+        let (written, _, _) = run(&job);
         let names: Vec<_> = written
             .iter()
             .map(|w| w.file.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, ["one-1.avif", "two-1.avif", "two-1.dng"]);
         assert_eq!(std::fs::read(out.join("two.dng")).unwrap(), before);
-        // Beside the original, or a folder in the library: refused.
-        for p in [
-            Preset {
-                destination: Destination::Library,
-                ..avif.clone()
-            },
-            Preset {
+        // A folder in the library: refused, as for every format.
+        let refused = ExportJob {
+            presets: vec![Preset {
                 folder: Some(lib.join("exports")),
                 ..preset(FileFormat::LinearDng)
-            },
-        ] {
-            let refused = ExportJob {
-                presets: vec![p],
-                ..job.clone()
-            };
-            assert!(
-                plan_names(&refused)
-                    .values()
-                    .all(|r| r.as_ref().is_err_and(|e| e.contains("library"))),
-                "{:?}",
-                plan_names(&refused)
-            );
+            }],
+            ..job.clone()
+        };
+        assert!(
+            plan_names(&refused)
+                .values()
+                .all(|r| r.as_ref().is_err_and(|e| e.contains("library"))),
+            "{:?}",
+            plan_names(&refused)
+        );
+        // Beside the original: the NEF, and a linear DNG already in the
+        // library (opened past demosaic), whose name is taken by itself.
+        let three = lib.join("three.dng");
+        std::fs::write(&three, &before).unwrap();
+        let beside = |p: Preset| Preset {
+            destination: Destination::Library,
+            ..p
+        };
+        let job = ExportJob {
+            items: vec![
+                item(1, raw.clone(), shoebox_decode::Format::Nef),
+                item(2, three.clone(), shoebox_decode::Format::Dng),
+            ],
+            presets: vec![beside(avif.clone()), beside(preset(FileFormat::LinearDng))],
+            ..job.clone()
+        };
+        let (written, errors, staged) = run(&job);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(written.iter().all(|w| w.tracked));
+        let mut dsts: Vec<_> = staged
+            .iter()
+            .map(|e| {
+                e.copy
+                    .dst
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        dsts.sort();
+        assert_eq!(dsts, ["three-1.dng", "three.avif", "two.avif", "two.dng"]);
+        for e in &staged {
+            // In the cache until the library worker copies it in; nothing
+            // in the library yet, and nothing replaced.
+            assert!(e.copy.src.is_file() && !e.copy.dst.exists() && e.replaces.is_none());
+            assert_eq!(e.copy.dst.parent(), Some(lib.as_path()));
+            let bytes = std::fs::read(&e.copy.src).unwrap();
+            assert_eq!(*blake3::hash(&bytes).as_bytes(), e.copy.hash);
+            if e.copy.dst.extension().is_some_and(|x| x == "dng") {
+                let back = shoebox_decode::raw::decode(&bytes).unwrap();
+                assert!(back.linear.is_some());
+            } else {
+                assert_eq!(&bytes[4..12], b"ftypavif");
+            }
         }
+        assert_eq!(std::fs::read(&three).unwrap(), before);
     }
 
     /// "All but location" leaves nothing that says where: coordinates or

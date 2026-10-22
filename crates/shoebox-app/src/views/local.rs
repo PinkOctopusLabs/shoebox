@@ -598,11 +598,12 @@ fn layer_controls(app: &mut ShoeboxApp, ui: &mut egui::Ui, l: &Local) {
     }
     // The sliders (AI denoise strength for raw photos only).
     let a = &l.adjust;
+    // Raw data AI denoise can run on (not a linear DNG, which has it).
     let raw = app
         .develop
         .ready
         .as_ref()
-        .is_some_and(|r| r.src.referred == cpu::Referred::Scene);
+        .is_some_and(|r| r.src.referred == cpu::Referred::Scene && r.meta.is_mosaic());
     let model = app.denoiser.ready();
     egui::Grid::new(("mask-sliders", &id))
         .num_columns(2)

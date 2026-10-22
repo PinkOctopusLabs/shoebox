@@ -69,6 +69,9 @@ pub fn run(
     if w < 32 || h < 32 {
         return Err("too small".into());
     }
+    if !raw.is_mosaic() {
+        return Err("a linear DNG is demosaiced and denoised already".into());
+    }
     // Where red is: packing from there makes any 2×2 Bayer layout RGGB.
     let Some((dy, dx)) = (0..2)
         .flat_map(|y| (0..2).map(move |x| (y, x)))

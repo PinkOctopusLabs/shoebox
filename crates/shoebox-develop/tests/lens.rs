@@ -143,6 +143,7 @@ fn barrel_lines_come_out_straight() {
         matrices: Vec::new(),
         make: String::new(),
         model: String::new(),
+        linear: None,
     };
     let mut s = Settings::default();
     s.modules.lens.enabled = true;
