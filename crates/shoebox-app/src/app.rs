@@ -258,6 +258,9 @@ pub struct AppPaths {
     pub model: crate::semantic::ModelSource,
     /// The face models: downloaded on first use, or a test model.
     pub faces: crate::people::FaceSource,
+    /// The object model (SAM 2.1): downloaded when first asked for, into
+    /// `dir`, through `staging`.
+    pub objects: (PathBuf, PathBuf),
     /// Names given to people.
     pub people: PathBuf,
     /// Develop's caches (DNGs of High efficiency NEFs, under `dng/`).
@@ -298,6 +301,10 @@ impl AppPaths {
                 dir: shoebox_core::paths::models_dir(&data).join("faces-yunet-sface"),
                 staging: cache.join("model-download"),
             },
+            objects: (
+                shoebox_core::paths::models_dir(&data).join("sam2.1-hiera-tiny"),
+                cache.join("model-download"),
+            ),
             people: shoebox_core::paths::people_file(&data),
             raw_cache: cache.clone(),
             export_presets: data.join("export-presets.json"),
@@ -452,6 +459,8 @@ pub struct ShoeboxApp {
     pub(crate) develop: views::develop::State,
     /// The develop thread (prepares raw photos).
     pub(crate) developer: crate::develop::Develop,
+    /// The object model (SAM 2.1) for click masks.
+    pub(crate) objects: std::sync::Arc<crate::objects::Objects>,
     /// Edited photos: photo path → its preview's key.
     pub(crate) edited: HashMap<PathBuf, String>,
     /// Edited photos' edit documents (for export).
@@ -524,6 +533,8 @@ impl ShoeboxApp {
         crate::platform::own_titlebar_clicks(cc);
         crate::theme::install(ctx);
         let tile_cache = paths.tile_cache.clone();
+        let objects =
+            crate::objects::Objects::register(paths.objects.0.clone(), paths.objects.1.clone());
         let display = crate::display::DisplayTagger::new(cc);
         let target = crate::display::DisplayTagger::target(display.as_ref());
         tracing::info!("rendering images in {target:?}");
@@ -604,6 +615,7 @@ impl ShoeboxApp {
             target,
             develop: Default::default(),
             developer,
+            objects,
             edited: HashMap::new(),
             edited_json: HashMap::new(),
             export: Default::default(),

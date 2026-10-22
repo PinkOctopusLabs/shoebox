@@ -63,6 +63,7 @@ pub(super) enum Handle {
 pub enum Kind {
     Subject,
     Person,
+    Object,
     Linear,
     Radial,
     Brush,
@@ -71,9 +72,10 @@ pub enum Kind {
 }
 
 impl Kind {
-    pub const ALL: [Kind; 7] = [
+    pub const ALL: [Kind; 8] = [
         Kind::Subject,
         Kind::Person,
+        Kind::Object,
         Kind::Linear,
         Kind::Radial,
         Kind::Brush,
@@ -90,6 +92,7 @@ impl Kind {
             Kind::Colour => "Colour range",
             Kind::Subject => "Subject",
             Kind::Person => "People",
+            Kind::Object => "Object (click)",
         }
     }
 
@@ -120,6 +123,7 @@ impl Kind {
             },
             Kind::Subject => Shape::Subject,
             Kind::Person => Shape::Person,
+            Kind::Object => Shape::Object { clicks: Vec::new() },
         }
     }
 }
@@ -133,6 +137,7 @@ fn kind_of(s: &Shape) -> Kind {
         Shape::Colour { .. } => Kind::Colour,
         Shape::Subject => Kind::Subject,
         Shape::Person => Kind::Person,
+        Shape::Object { .. } => Kind::Object,
     }
 }
 
@@ -581,6 +586,57 @@ fn part_controls(app: &mut ShoeboxApp, ui: &mut egui::Ui, id: &str, i: usize, p:
                 ui.weak("Drag the lines on the photo.");
                 ui.end_row();
             }
+            Shape::Object { clicks } => {
+                let objects = app.objects.clone();
+                if !objects.ready() {
+                    match objects.fetch_state() {
+                        crate::objects::Fetch::Downloading(done, total) => {
+                            ui.add(
+                                egui::ProgressBar::new(done as f32 / total.max(1) as f32)
+                                    .text("Downloading the object model…"),
+                            );
+                        }
+                        state => {
+                            if let crate::objects::Fetch::Failed(e) = state {
+                                ui.weak(format!("Download failed: {e}"));
+                                ui.end_row();
+                            }
+                            let mb = crate::objects::Objects::bytes() / 1_000_000;
+                            if ui
+                                .button(format!("Download the object model ({mb} MB)"))
+                                .on_hover_text(
+                                    "Meta's SAM 2.1, once, from Hugging Face; it runs on this Mac",
+                                )
+                                .clicked()
+                            {
+                                objects.download(ui.ctx().clone());
+                            }
+                        }
+                    }
+                    ui.end_row();
+                } else {
+                    let (finding, failed) = app
+                        .develop
+                        .ready
+                        .as_ref()
+                        .map_or((false, None), |r| r.src.cache.finding());
+                    if finding {
+                        ui.weak("Finding it…");
+                    } else if let Some(e) = failed {
+                        ui.weak(format!("Couldn't: {e}"));
+                    } else if clicks.is_empty() {
+                        ui.weak("Click the object on the photo.");
+                    } else {
+                        ui.weak("Click to add; Option-click to take away.");
+                    }
+                    ui.end_row();
+                    if !clicks.is_empty() && ui.button("Clear clicks").clicked() {
+                        let shape = Shape::Object { clicks: Vec::new() };
+                        set(app, "m-clicks", "Clear object clicks".into(), shape);
+                    }
+                    ui.end_row();
+                }
+            }
             Shape::Subject | Shape::Person => {
                 let (finding, failed) = app
                     .develop
@@ -824,6 +880,33 @@ pub fn on_photo(
         Shape::Brush { .. } if !read_only => {
             brush(app, ui, painter, &map, &id, i, target);
         }
+        Shape::Object { clicks } if !read_only => {
+            for c in clicks {
+                let at = map.to_screen(c.at);
+                let colour = if c.add {
+                    Color32::from_rgb(60, 200, 90)
+                } else {
+                    Color32::from_rgb(230, 70, 70)
+                };
+                painter.circle(at, 5.0, colour, Line::new(1.5, Color32::WHITE));
+            }
+            if photo.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+            }
+            if photo.clicked()
+                && let Some(pos) = photo.interact_pointer_pos()
+                && target.contains(pos)
+            {
+                let add = !ui.input(|i| i.modifiers.alt);
+                let mut list = clicks.clone();
+                list.push(shoebox_develop::edit::ObjectClick {
+                    at: map.to_units(pos),
+                    add,
+                });
+                new = Some(Shape::Object { clicks: list });
+                app.develop.last_step_done();
+            }
+        }
         Shape::Luminance { .. } | Shape::Colour { .. } if app.develop.local.picking => {
             if photo.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
@@ -845,7 +928,13 @@ pub fn on_photo(
         app.develop.local.drag = None;
     }
     if let Some(shape) = new {
-        let label = format!("Move {}", kind_of(&shape).label().to_lowercase());
+        let label = match &shape {
+            Shape::Object { clicks } => match clicks.last() {
+                Some(c) if !c.add => "Object: take away".to_owned(),
+                _ => "Object: add".to_owned(),
+            },
+            s => format!("Move {}", kind_of(s).label().to_lowercase()),
+        };
         let part = MaskPart { shape, ..p };
         edit_layer(app, "mask-drag", label, &id, |l| {
             if i < l.mask.parts.len() {

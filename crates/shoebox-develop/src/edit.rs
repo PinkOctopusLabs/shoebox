@@ -785,6 +785,25 @@ pub enum Shape {
     Subject,
     /// People (with hair and clothes), found by Apple's Vision.
     Person,
+    /// The object at these clicks, found by SAM 2.1: clicks that add it,
+    /// and clicks that take parts away.
+    Object {
+        #[serde(default)]
+        clicks: Vec<ObjectClick>,
+    },
+}
+
+/// A click for an object part: where (as other positions) and whether it
+/// adds (else takes away).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ObjectClick {
+    pub at: [f64; 2],
+    #[serde(default = "yes")]
+    pub add: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn half() -> f64 {

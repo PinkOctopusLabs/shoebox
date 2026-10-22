@@ -2048,3 +2048,36 @@ stay. To come back to with Linux:
   Mask2Former person class for people. SAM 2.1 (next) is portable and can
   make a subject mask from a click meanwhile.
 - The local Docker check (in CLAUDE.md) and CI's Linux job as a gate.
+
+## Object masks: SAM 2.1 on candle (2026-10-22)
+
+- **The port:** `shoebox-ml::sam`, from Meta's reference code
+  (facebookresearch/sam2 at 2b90b9f5; Apache 2.0): Hiera-T (stages 1, 2,
+  7, 2; windows 8, 4, 14, 7; global attention at blocks 5, 7, 9; queries
+  pooled where stages begin), the FPN neck (top-down into the two
+  coarsest levels, the coarsest dropped), the decoder's high-resolution
+  projections, `no_mem_embed` added as the image predictor does, the
+  prompt encoder (random-frequency position encoding) and the two-way
+  mask decoder with its high-resolution upscaling. The windowed position
+  embedding is interpolated bicubically (PyTorch's A = −0.75) once at
+  load. f32, on Metal. No memory attention or tracking: stills only.
+- **Weights:** Meta's own `sam2.1_hiera_tiny.pt` (156 MB, Apache 2.0)
+  from facebook/sam2.1-hiera-tiny at revision de431c40, SHA-256 pinned,
+  read directly by candle's PyTorch reader (the parameter names match
+  Meta's code). Downloaded when someone first adds an Object part (the
+  panel offers it, with progress), into the models folder.
+- **Checked** without PyTorch to compare against: on a drawn picture, a
+  click on a ball gives the ball (IoU 0.998) and on a square the square
+  (0.996), each untouched by the other; a negative click takes away.
+  Encoding takes about a second, a click a fraction of one (first runs
+  include Metal's shader compilation).
+- **In masks:** an Object part holds its clicks (stored-image units; ⌥
+  takes away). The app registers SAM as the masks' segmenter (as Vision
+  is their finder); the picture is the masks' grid as shown, upright, and
+  the clicks are turned with it. One click picks the best of SAM's three
+  masks by predicted quality; several use the single mask unless it's
+  unstable (Meta's dynamic multimask). The last picture's encoding is
+  kept, so each further click only runs the decoder. Two objects need two
+  parts (one prompt finds one object).
+- Not yet: the spec's on-disk mask cache, and guided-filter upsampling to
+  full resolution.

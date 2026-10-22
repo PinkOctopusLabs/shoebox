@@ -96,6 +96,20 @@ pub const FACES: Spec = Spec {
     convert: false,
 };
 
+/// SAM 2.1 Tiny (Meta, Apache 2.0): masks of objects clicked on.
+pub const SAM: Spec = Spec {
+    id: crate::sam::MODEL_ID,
+    files: &[Remote {
+        repo: "facebook/sam2.1-hiera-tiny",
+        revision: "de431c4043854a71d8101e17995dfe596bf101a5",
+        name: crate::sam::FILE,
+        size: 156_008_466,
+        sha256: "7402e0d864fa82708a20fbd15bc84245c2f26dff0eb43a4b5b93452deb34be69",
+    }],
+    ready: &[crate::sam::FILE],
+    convert: false,
+};
+
 impl Spec {
     /// Bytes to download.
     pub fn bytes(&self) -> u64 {

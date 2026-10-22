@@ -43,6 +43,13 @@ fn paths(tmp: &Path, roots: &[PathBuf]) -> AppPaths {
             dir: tmp.join("data/models/faces"),
             staging: tmp.join("cache/model-download"),
         },
+        // The object model: a real one when SHOEBOX_SAM_MODEL names it,
+        // else an empty folder (never downloaded in tests).
+        objects: (
+            std::env::var_os("SHOEBOX_SAM_MODEL")
+                .map_or_else(|| tmp.join("data/models/sam"), PathBuf::from),
+            tmp.join("cache/model-download"),
+        ),
         people: tmp.join("data/people.json"),
         raw_cache: tmp.join("cache"),
         export_presets: tmp.join("data/export-presets.json"),
@@ -4881,4 +4888,72 @@ fn develop_subject_mask() {
     let (cover, _) = h.state().develop_mask_coverage();
     // The ball is about a fifth of the frame.
     assert!(cover > 0.08 && cover < 0.4, "{cover}");
+}
+
+/// An Object mask: without the model, its part offers the download; with
+/// it (`SHOEBOX_SAM_MODEL`), a click on the ball makes a mask of the ball.
+#[test]
+fn develop_object_mask() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(&root).unwrap();
+    let img = image::RgbImage::from_fn(640, 480, |x, y| {
+        let (dx, dy) = (x as f32 - 220.0, y as f32 - 240.0);
+        let r = (dx * dx + dy * dy).sqrt() / 110.0;
+        if r < 1.0 {
+            let s = 1.0 - 0.45 * r * r;
+            image::Rgb([(235.0 * s) as u8, (125.0 * s) as u8, (35.0 * s) as u8])
+        } else {
+            image::Rgb([140, 140, 135])
+        }
+    });
+    std::fs::write(
+        root.join("object.jpg"),
+        shoebox_fixtures::jpeg(&img, 92).unwrap(),
+    )
+    .unwrap();
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let with_model = std::env::var_os("SHOEBOX_SAM_MODEL").is_some();
+    let mut h = harness(p, egui::vec2(1400.0, 2600.0));
+    settle(&mut h, Duration::from_secs(60));
+    h.get_by_label("object.jpg").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(30), "develop", |a| {
+        a.develop_ready()
+    });
+    h.run_steps(3);
+    h.get_by_label("New mask").click();
+    h.run_steps(2);
+    h.get_by_label("Object (click)").click();
+    h.run_steps(3);
+    if !with_model {
+        assert!(
+            h.query_by_label_contains("Download the object model")
+                .is_some(),
+            "the download is offered"
+        );
+        return;
+    }
+    // A click on the ball.
+    let photo = h.state().develop_photo_rect().unwrap();
+    let at = photo.min + egui::vec2(220.0 / 640.0 * photo.width(), 0.5 * photo.height());
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.event(egui::Event::PointerMoved(at));
+    h.run_steps(1);
+    h.event(button(at, true));
+    h.event(button(at, false));
+    h.run_steps(2);
+    wait_for(&mut h, Duration::from_secs(60), "object found", |a| {
+        let (cover, finding) = a.develop_mask_coverage();
+        !finding && cover > 0.0
+    });
+    let (cover, _) = h.state().develop_mask_coverage();
+    // The ball: π·110² of 640×480, about 0.12.
+    assert!((cover - 0.124).abs() < 0.03, "{cover}");
 }

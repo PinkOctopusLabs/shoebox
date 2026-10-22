@@ -14,6 +14,7 @@ pub mod download;
 mod encoder;
 pub mod faces;
 pub mod onnx;
+pub mod sam;
 pub mod vision;
 
 use std::path::PathBuf;

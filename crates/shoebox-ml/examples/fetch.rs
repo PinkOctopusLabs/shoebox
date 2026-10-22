@@ -1,5 +1,5 @@
 //! Download the model into a folder, as the app does when semantic search is
-//! turned on: `cargo run --release -p shoebox-ml --example fetch -- <dir> <staging dir> [faces]`.
+//! turned on: `cargo run --release -p shoebox-ml --example fetch -- <dir> <staging dir> [faces|sam]`.
 
 use std::sync::atomic::AtomicBool;
 
@@ -10,6 +10,7 @@ fn main() -> anyhow::Result<()> {
     let staging = std::path::PathBuf::from(std::env::args().nth(2).context("staging folder")?);
     let spec = match std::env::args().nth(3).as_deref() {
         Some("faces") => &shoebox_ml::download::FACES,
+        Some("sam") => &shoebox_ml::download::SAM,
         _ => &shoebox_ml::download::SIGLIP,
     };
     let t = std::time::Instant::now();

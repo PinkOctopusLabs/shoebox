@@ -122,6 +122,14 @@ impl Cache {
         inner.found_generation += 1;
     }
 
+    /// Forget searches that failed (a model has arrived since), so they're
+    /// tried again.
+    pub fn forget_failed(&self) {
+        let mut inner = self.lock();
+        inner.found.retain(|_, f| !matches!(f, Found::Failed(_)));
+        inner.found_generation += 1;
+    }
+
     /// Changes whenever a search finishes (renders key on it).
     pub fn found_generation(&self) -> u64 {
         self.lock().found_generation

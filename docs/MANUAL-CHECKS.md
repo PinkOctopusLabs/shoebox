@@ -120,3 +120,7 @@ together at the end, before the release.
   group, a busy street, a landscape with no subject): the mask follows
   the subject's outline (hair is the hard part), arrives within a second
   or so, stays right after rotating 90°, and the export matches Develop.
+- [ ] **Object masks (SAM 2.1)**: download the model from the panel
+  once; on real photos click a person, a car, a tree, a cup: the mask
+  takes the object, ⌥-clicks trim it, and a photo turned 90° still
+  works. Note how long the first click and later clicks take.

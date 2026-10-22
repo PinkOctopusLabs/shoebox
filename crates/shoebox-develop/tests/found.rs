@@ -134,3 +134,60 @@ fn in_the_background_it_arrives_later() {
     );
     let _ = Find::Person;
 }
+
+#[test]
+fn objects_are_found_where_clicked() {
+    let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
+    // A disc of radius 6 around the first click, in the picture it's
+    // given (upright).
+    mask::register_segmenter(Box::new(|_rgb, w, h, clicks| {
+        let (cx, cy, _) = clicks[0];
+        Ok((0..w * h)
+            .map(|i| {
+                let (x, y) = ((i % w) as f32, (i / w) as f32);
+                if (x - cx).hypot(y - cy) < 6.0 { 255 } else { 0 }
+            })
+            .collect())
+    }));
+    // A click at stored pixel (90, 60) of the 120×80 source.
+    let at = [(90.0 + 0.5) / 120.0, (60.0 + 0.5) / 120.0];
+    let s = Settings {
+        locals: vec![Local {
+            id: "l1".into(),
+            mask: Mask {
+                parts: vec![Part::Known(MaskPart {
+                    op: Op::Add,
+                    invert: false,
+                    shape: Shape::Object {
+                        clicks: vec![shoebox_develop::edit::ObjectClick { at, add: true }],
+                    },
+                })],
+            },
+            adjust: LocalAdjust {
+                exposure: 1.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    for orientation in [1u16, 6, 8, 3] {
+        let src = source();
+        let o = Options {
+            orientation,
+            ..Default::default()
+        };
+        let f = cpu::frame(&raw(), &src, &s, &o);
+        let m = f.layers.masks.as_ref().unwrap();
+        assert_eq!(
+            mask::sample(m, 0, 90.0, 60.0),
+            1.0,
+            "orientation {orientation}"
+        );
+        assert_eq!(
+            mask::sample(m, 0, 30.0, 20.0),
+            0.0,
+            "orientation {orientation}"
+        );
+    }
+}

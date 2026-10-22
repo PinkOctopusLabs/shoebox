@@ -84,7 +84,12 @@ pub fn layers(
     let finds = mask::finds(&locals);
     let found: Vec<(mask::Find, Arc<Vec<u8>>)> = finds
         .iter()
-        .filter_map(|&f| Some((f, found(src, colour, display, f, orientation, gw, gh)?)))
+        .filter_map(|(f, clicks)| {
+            Some((
+                *f,
+                found(src, colour, display, *f, clicks, orientation, gw, gh)?,
+            ))
+        })
         .collect();
     let key = {
         use std::hash::{Hash, Hasher};
@@ -128,11 +133,13 @@ pub fn layers(
 /// orientation, once found. The search runs once per source (and
 /// orientation): on its own thread for the live view, which redraws when
 /// it's done; otherwise here.
+#[allow(clippy::too_many_arguments)]
 fn found(
     src: &Demosaiced,
     colour: &[[f32; 3]; 3],
     display: &Display,
     what: mask::Find,
+    clicks: &[crate::edit::ObjectClick],
     orientation: u16,
     gw: usize,
     gh: usize,
@@ -156,8 +163,26 @@ fn found(
     let upright = super::orient(&shown, orientation);
     let bytes: Vec<u8> = super::to_u8(&upright);
     let (uw, uh) = (upright.width, upright.height);
+    // An object's clicks, in the upright picture's pixels.
+    let points: Vec<(f32, f32, bool)> = {
+        let (m, _, _) = super::geometry_map(gw, gh, orientation, &crate::edit::Geometry::default());
+        let to_upright = crate::colour::inv(&m).unwrap_or(crate::colour::IDENTITY);
+        let glong = gw.max(gh) as f64;
+        clicks
+            .iter()
+            .map(|c| {
+                let s = [c.at[0] * glong - 0.5, c.at[1] * glong - 0.5, 1.0];
+                let u = crate::colour::mulv(&to_upright, s);
+                ((u[0] / u[2]) as f32, (u[1] / u[2]) as f32, c.add)
+            })
+            .collect()
+    };
     let work = move || -> maps::Found {
-        match mask::find(&bytes, uw, uh, what) {
+        let result = match what {
+            mask::Find::Object(_) => mask::segment(&bytes, uw, uh, &points),
+            _ => mask::find(&bytes, uw, uh, what),
+        };
+        match result {
             Ok(m) if m.len() == uw * uh => {
                 // Back to the stored image's orientation.
                 let mut img = Rgb::new(uw, uh);

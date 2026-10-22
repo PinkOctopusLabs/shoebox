@@ -47,11 +47,50 @@ pub struct Tones {
     pub chroma: Vec<f32>,
 }
 
-/// What an AI part finds.
+/// What an AI part finds (an object by a hash of its clicks).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Find {
     Subject,
     Person,
+    Object(u64),
+}
+
+/// Finds the object at clicks in an upright 8-bit sRGB image (`rgb`,
+/// width, height; clicks in its pixels, true to add): coverage per pixel.
+pub type Segmenter =
+    dyn Fn(&[u8], usize, usize, &[(f32, f32, bool)]) -> Result<Vec<u8>, String> + Send + Sync;
+
+static SEGMENTER: std::sync::OnceLock<Box<Segmenter>> = std::sync::OnceLock::new();
+
+/// Give the masks a way to find objects at clicks (the app registers SAM
+/// 2.1). Once.
+pub fn register_segmenter(f: Box<Segmenter>) {
+    let _ = SEGMENTER.set(f);
+}
+
+/// Find the object at `clicks` with the registered segmenter.
+pub fn segment(
+    rgb: &[u8],
+    w: usize,
+    h: usize,
+    clicks: &[(f32, f32, bool)],
+) -> Result<Vec<u8>, String> {
+    match SEGMENTER.get() {
+        Some(f) => f(rgb, w, h, clicks),
+        None => Err("no object finder in this build".into()),
+    }
+}
+
+/// An object part's key: a hash of its clicks.
+pub fn object_key(clicks: &[crate::edit::ObjectClick]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for c in clicks {
+        c.at[0].to_bits().hash(&mut h);
+        c.at[1].to_bits().hash(&mut h);
+        c.add.hash(&mut h);
+    }
+    h.finish()
 }
 
 /// Finds a [`Find`] in an upright 8-bit sRGB image (`rgb`, width, height):
@@ -74,20 +113,21 @@ pub fn find(rgb: &[u8], w: usize, h: usize, what: Find) -> Result<Vec<u8>, Strin
     }
 }
 
-/// The AI parts these layers have.
-pub fn finds(locals: &[&Local]) -> Vec<Find> {
-    let mut out = Vec::new();
+/// The AI parts these layers have (with an object's clicks).
+pub fn finds(locals: &[&Local]) -> Vec<(Find, Vec<crate::edit::ObjectClick>)> {
+    let mut out: Vec<(Find, Vec<crate::edit::ObjectClick>)> = Vec::new();
     for l in locals {
         for p in &l.mask.parts {
-            let f = match p {
-                Part::Known(m) => match m.shape {
-                    Shape::Subject => Find::Subject,
-                    Shape::Person => Find::Person,
-                    _ => continue,
-                },
-                Part::Other(_) => continue,
+            let Part::Known(m) = p else { continue };
+            let f = match &m.shape {
+                Shape::Subject => (Find::Subject, Vec::new()),
+                Shape::Person => (Find::Person, Vec::new()),
+                Shape::Object { clicks } if !clicks.is_empty() => {
+                    (Find::Object(object_key(clicks)), clicks.clone())
+                }
+                _ => continue,
             };
-            if !out.contains(&f) {
+            if !out.iter().any(|o| o.0 == f.0) {
                 out.push(f);
             }
         }
@@ -144,12 +184,13 @@ pub fn rasterise_with(
         let mut m = vec![0f32; n];
         for part in &l.mask.parts {
             let Part::Known(p) = part else { continue };
-            let v = match p.shape {
-                Shape::Subject | Shape::Person => {
-                    let f = if p.shape == Shape::Subject {
-                        Find::Subject
-                    } else {
-                        Find::Person
+            let v = match &p.shape {
+                Shape::Subject | Shape::Person | Shape::Object { .. } => {
+                    let f = match &p.shape {
+                        Shape::Subject => Find::Subject,
+                        Shape::Person => Find::Person,
+                        Shape::Object { clicks } => Find::Object(object_key(clicks)),
+                        _ => Find::Subject,
                     };
                     match found(f).filter(|c| c.len() == n) {
                         Some(c) => c.iter().map(|&b| f32::from(b) / 255.0).collect(),
@@ -262,7 +303,7 @@ fn shape(s: &Shape, w: usize, h: usize, units: [f64; 2], tones: Option<&Tones>) 
             })
         }
         // Read from what was found (see `rasterise_with`).
-        Shape::Subject | Shape::Person => vec![0.0; w * h],
+        Shape::Subject | Shape::Person | Shape::Object { .. } => vec![0.0; w * h],
     }
 }
 

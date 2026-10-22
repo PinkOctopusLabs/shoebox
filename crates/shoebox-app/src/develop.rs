@@ -433,6 +433,8 @@ fn worker(
         let find = match what {
             shoebox_develop::mask::Find::Subject => shoebox_ml::vision::Find::Subject,
             shoebox_develop::mask::Find::Person => shoebox_ml::vision::Find::Person,
+            // Objects go to the segmenter (`objects`), not here.
+            shoebox_develop::mask::Find::Object(_) => return Err("not a Vision search".into()),
         };
         shoebox_ml::vision::segment(rgb, w, h, find)
             .map(|c| c.data)
