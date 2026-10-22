@@ -153,3 +153,8 @@ together at the end, before the release.
   portraits, a group and a profile view: each lands on its part, follows
   a turned photo, and skin smoothing through Face skin leaves the eyes
   sharp. **Background** is the subject's inverse.
+- [ ] **Smart Lighting, spot weighted**: on backlit portraits, Face puts
+  the box on the largest face (also on a photo turned 90°) and the face
+  comes up towards a natural brightness while the bright background
+  holds; a box dragged over a dark subject does the same; no halos round
+  the subject, and the export matches Develop.

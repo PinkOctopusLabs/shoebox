@@ -191,3 +191,45 @@ fn objects_are_found_where_clicked() {
         );
     }
 }
+
+/// Smart Lighting's Face: boxes found upright land on the stored image,
+/// the largest first.
+#[test]
+fn faces_are_boxes_in_the_stored_image() {
+    // A "face": the red pixels' box in the upright picture, after a
+    // smaller one.
+    mask::register_face_finder(Box::new(|rgb, w, _h| {
+        let mut b = [f32::MAX, f32::MAX, 0.0f32, 0.0f32];
+        for (i, p) in rgb.as_chunks::<3>().0.iter().enumerate() {
+            if p[0] > 150 && p[1] < 80 {
+                let (x, y) = ((i % w) as f32, (i / w) as f32);
+                b = [
+                    b[0].min(x),
+                    b[1].min(y),
+                    b[2].max(x + 1.0),
+                    b[3].max(y + 1.0),
+                ];
+            }
+        }
+        Ok(vec![[1.0, 1.0, 3.0, 3.0], b])
+    }));
+    let s = Settings::default();
+    for orientation in [1u16, 6, 3, 8] {
+        let src = source();
+        let o = Options {
+            orientation,
+            ..Default::default()
+        };
+        let f = cpu::frame(&raw(), &src, &s, &o);
+        let faces = cpu::layers::faces(&src, &f.colour, &f.display, orientation).unwrap();
+        assert_eq!(faces.len(), 2);
+        let want = [0.0, 0.0, 30.0 / 120.0, 20.0 / 120.0];
+        for (a, b) in faces[0].iter().zip(want) {
+            assert!(
+                (a - b).abs() < 1e-9,
+                "orientation {orientation}: {:?}",
+                faces[0]
+            );
+        }
+    }
+}

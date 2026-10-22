@@ -114,6 +114,26 @@ pub fn find(rgb: &[u8], w: usize, h: usize, what: Find) -> Result<Vec<u8>, Strin
     }
 }
 
+/// Finds the faces in an upright 8-bit sRGB image (`rgb`, width, height):
+/// their boxes `[x0, y0, x1, y1]` in its pixels.
+pub type FaceFinder = dyn Fn(&[u8], usize, usize) -> Result<Vec<[f32; 4]>, String> + Send + Sync;
+
+static FACES: std::sync::OnceLock<Box<FaceFinder>> = std::sync::OnceLock::new();
+
+/// Give Develop a way to find faces' boxes (Smart Lighting's spot; the app
+/// registers Apple's Vision). Once.
+pub fn register_face_finder(f: Box<FaceFinder>) {
+    let _ = FACES.set(f);
+}
+
+/// Find faces' boxes with the registered face finder.
+pub fn find_faces(rgb: &[u8], w: usize, h: usize) -> Result<Vec<[f32; 4]>, String> {
+    match FACES.get() {
+        Some(f) => f(rgb, w, h),
+        None => Err("no face finder in this build".into()),
+    }
+}
+
 /// The AI parts these layers have (with an object's clicks).
 pub fn finds(locals: &[&Local]) -> Vec<(Find, Vec<crate::edit::ObjectClick>)> {
     let mut out: Vec<(Find, Vec<crate::edit::ObjectClick>)> = Vec::new();

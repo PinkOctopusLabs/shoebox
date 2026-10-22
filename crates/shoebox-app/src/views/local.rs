@@ -754,9 +754,9 @@ impl<'a> Mapping<'a> {
     }
 }
 
-const HANDLE: f32 = 6.0;
+pub(super) const HANDLE: f32 = 6.0;
 
-fn outline(painter: &egui::Painter, pts: &[Pos2], width: f32) {
+pub(super) fn outline(painter: &egui::Painter, pts: &[Pos2], width: f32) {
     painter.add(egui::Shape::line(
         pts.to_vec(),
         Line::new(width + 2.0, Color32::from_black_alpha(140)),
@@ -767,7 +767,7 @@ fn outline(painter: &egui::Painter, pts: &[Pos2], width: f32) {
     ));
 }
 
-fn knob(painter: &egui::Painter, at: Pos2, active: bool) {
+pub(super) fn knob(painter: &egui::Painter, at: Pos2, active: bool) {
     let fill = if active {
         Color32::from_rgb(70, 140, 255)
     } else {

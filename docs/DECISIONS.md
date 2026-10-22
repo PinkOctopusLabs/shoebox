@@ -2147,7 +2147,7 @@ below). Existing Linux branches stay. To come back to with Linux:
 - **Auto** now sets it as the spec asks (slight, uniform): 25, or 40 when
   over 30% of the frame is four stops under mid grey. That replaces the
   Shadows +15 it stood in with.
-- Not yet: the spot-weighted mode (a box or a detected face).
+- The spot-weighted mode came later ("Smart Lighting, spot weighted").
 
 ## Colour grading (2026-10-22)
 
@@ -2275,3 +2275,36 @@ below). Existing Linux branches stay. To come back to with Linux:
   recover the camera within 0.3° and 2 units), and in the app on a grid
   turned 3°: two guides level it (3.0°), a moved end is one more step,
   removing one takes the correction away.
+
+## Smart Lighting, spot weighted (2026-10-22)
+
+- **`SmartLighting.spot`:** a box `[x0, y0, x1, y1]` in the stored image,
+  in units of its long edge, as other positions are (None: uniform).
+  Presets and copied settings carry Tone's Strength and Bias but not the
+  box: a box on one photo's face means nothing on another's, so the photo
+  pasted onto keeps its own (or stays uniform).
+- **How it weights:** the uniform filter runs as before; then the spot's
+  mean tone (after it, stops from mid grey) is brought into −0.5 to +1
+  stop (a light face sits about a stop over mid grey), by at most 2
+  stops. The shift is whole for every tone up to a stop past the spot's
+  (on its side) and fades out by three stops, so a dark face's lift
+  reaches the shadows but not the bright background, and a bright spot's
+  cut holds the shadows. It's a tone weighting, not a spatial one: no
+  gradient across a plain sky, and no halo round the box. Strength and
+  Bias scale it with the rest of the gain.
+- **Still a map change:** the shifted gain is fitted by the same guided
+  filter into map slots 6–7, so the shader is unchanged (a GPU case
+  checks it). The spot is in the maps' key; the uniform gain is cached on
+  the source by colour matrix and dehaze, so dragging the box redoes only
+  the shift and the fit, not the pyramid.
+- **Face:** `mask::register_face_finder` (the app registers Vision's face
+  rectangles, from the landmarks request the face masks use);
+  `cpu::layers::faces` shows it the picture as the frame shows it,
+  upright on the masks' grid, and turns the boxes back to the stored
+  image, largest first. The app runs it on a thread of its own when Face
+  is clicked and sets the box to the largest; without a face (or on
+  another system) it says so.
+- **Panel:** under the Smart Lighting sliders, Uniform / Spot weighted;
+  Spot weighted starts with a box in the middle (30% of the long edge)
+  and shows it on the photo (Edit box): corners resize, inside moves,
+  a drag outside draws a new one (fitted only: zoomed, a drag pans).

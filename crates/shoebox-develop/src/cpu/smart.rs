@@ -5,6 +5,11 @@
 //! maps' small copy at full strength; the difference it makes (stops) is
 //! the gain map the live pipe scales by the Strength slider (see
 //! [`super::maps`]).
+//!
+//! Spot weighted (PhotoLab's other mode): the same filter, then a shift
+//! that brings a box's tone (a face, say) towards mid grey, whole for
+//! tones on the spot's side and fading out a few stops away, so the rest
+//! of the frame keeps its compressed tone around it ([`spotted`]).
 
 use rayon::prelude::*;
 
@@ -15,6 +20,16 @@ const SIGMA: f32 = 1.0;
 const BETA: f32 = 0.35;
 /// Reference levels sampled across the image's range.
 const LEVELS: usize = 12;
+/// Spot weighted: the tones (stops from mid grey) a spot is brought into
+/// at full strength (a light face sits about a stop over mid grey), and
+/// the most it's moved.
+const SPOT_LOW: f32 = -0.5;
+const SPOT_HIGH: f32 = 1.0;
+const SPOT_MAX: f32 = 2.0;
+/// The shift is whole up to this far (stops) past the spot's tone, and
+/// gone by [`SPOT_FADE`].
+const SPOT_HOLD: f32 = 1.0;
+const SPOT_FADE: f32 = 3.0;
 
 /// A plane.
 #[derive(Clone)]
@@ -177,9 +192,103 @@ pub fn gain(l: &[f32], w: usize, h: usize) -> Vec<f32> {
     r.v.par_iter().zip(l).map(|(o, i)| o - i).collect()
 }
 
+fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Spot weighted: the uniform gain `g` for a `w`×`h` image of log
+/// luminance `l`, shifted so the spot `[x0, y0, x1, y1]` (pixels, clipped
+/// to the image) comes out between [`SPOT_LOW`] and [`SPOT_HIGH`] (its
+/// mean, after `g`). A dark spot's lift reaches every tone up to
+/// [`SPOT_HOLD`] over it and fades by [`SPOT_FADE`], so a brighter
+/// background is held; a bright spot's cut reaches down likewise, holding
+/// the shadows. An empty spot changes nothing.
+pub fn spotted(l: &[f32], g: &[f32], w: usize, h: usize, spot: [f32; 4]) -> Vec<f32> {
+    let clip = |v: f32, n: usize| {
+        if v.is_finite() {
+            v.clamp(0.0, n as f32)
+        } else {
+            0.0
+        }
+    };
+    let (x0, x1) = (clip(spot[0], w), clip(spot[2], w));
+    let (y0, y1) = (clip(spot[1], h), clip(spot[3], h));
+    let (x0, x1) = (x0.min(x1).floor() as usize, x0.max(x1).ceil() as usize);
+    let (y0, y1) = (y0.min(y1).floor() as usize, y0.max(y1).ceil() as usize);
+    let tone = |i: usize| l[i] + g[i];
+    let (mut sum, mut n) = (0f64, 0usize);
+    for y in y0..y1.min(h) {
+        for x in x0..x1.min(w) {
+            sum += f64::from(tone(y * w + x));
+            n += 1;
+        }
+    }
+    if n == 0 {
+        return g.to_vec();
+    }
+    let at = (sum / n as f64) as f32;
+    let shift = if at < SPOT_LOW {
+        SPOT_LOW - at
+    } else if at > SPOT_HIGH {
+        SPOT_HIGH - at
+    } else {
+        0.0
+    }
+    .clamp(-SPOT_MAX, SPOT_MAX);
+    if shift == 0.0 {
+        return g.to_vec();
+    }
+    (0..w * h)
+        .into_par_iter()
+        .map(|i| {
+            let t = tone(i);
+            let reach = if shift > 0.0 {
+                1.0 - smoothstep(at + SPOT_HOLD, at + SPOT_FADE, t)
+            } else {
+                smoothstep(at - SPOT_FADE, at - SPOT_HOLD, t)
+            };
+            g[i] + shift * reach
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dark_spot_is_lifted_and_the_bright_side_held() {
+        // Dark (−4 stops) on the left, bright (+4) on the right.
+        let (w, h) = (128, 96);
+        let l: Vec<f32> = (0..w * h)
+            .map(|i| if i % w < w / 2 { -4.0 } else { 4.0 })
+            .collect();
+        let g = gain(&l, w, h);
+        let mean = |v: &[f32], x0: usize, x1: usize| {
+            let mut s = 0.0;
+            for y in 0..h {
+                for x in x0..x1 {
+                    s += v[y * w + x];
+                }
+            }
+            s / ((x1 - x0) * h) as f32
+        };
+        let spot = spotted(&l, &g, w, h, [8.0, 8.0, 40.0, 88.0]);
+        let lift = mean(&spot, 4, 40) - mean(&g, 4, 40);
+        assert!(lift > 1.0, "{lift}");
+        let held = mean(&spot, 88, 124) - mean(&g, 88, 124);
+        assert!(held.abs() < 0.05, "{held}");
+        // A bright spot is brought down (here with no uniform gain under
+        // it), the dark side held.
+        let zero = vec![0.0; w * h];
+        let spot = spotted(&l, &zero, w, h, [88.0, 8.0, 120.0, 88.0]);
+        assert!((mean(&spot, 88, 124) + SPOT_MAX).abs() < 1e-4);
+        assert!(mean(&spot, 4, 40).abs() < 1e-4);
+        // An empty spot, or nonsense, changes nothing.
+        assert_eq!(spotted(&l, &g, w, h, [200.0, 10.0, 300.0, 80.0]), g);
+        assert_eq!(spotted(&l, &g, w, h, [f32::NAN, 0.0, f32::NAN, 1.0]), g);
+    }
 
     #[test]
     fn lifts_dark_halves_and_tames_bright_ones_keeping_detail() {

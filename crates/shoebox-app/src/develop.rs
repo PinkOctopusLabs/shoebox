@@ -506,6 +506,20 @@ fn worker(
             .map(|c| c.data)
             .map_err(|e| e.to_string())
     }));
+    // Faces' boxes for Smart Lighting's spot (Vision's are x, y, w, h).
+    shoebox_develop::mask::register_face_finder(Box::new(|rgb, w, h| {
+        shoebox_ml::vision::faces(rgb, w, h)
+            .map(|faces| {
+                faces
+                    .iter()
+                    .map(|f| {
+                        let b = f.bounds;
+                        [b[0], b[1], b[0] + b[2], b[1] + b[3]]
+                    })
+                    .collect()
+            })
+            .map_err(|e| e.to_string())
+    }));
     // Camera match profiles (`<data>/profiles/*.json`).
     let n = shoebox_develop::profile::load_dir(&presets_file.with_file_name("profiles"));
     if n > 0 {

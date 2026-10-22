@@ -272,6 +272,11 @@ pub struct HighlightsShadows {
 pub struct SmartLighting {
     pub strength: f64,
     pub bias: f64,
+    /// Spot weighted: a box `[x0, y0, x1, y1]` whose tone it favours (a
+    /// face, say), in the stored image (before the file's orientation, the
+    /// edit's turns and crop), in units of its long edge. None: uniform.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spot: Option<[f64; 4]>,
 }
 
 /// Clarity and texture (module 8): local contrast at a coarse scale

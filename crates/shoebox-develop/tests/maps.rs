@@ -270,3 +270,37 @@ fn smart_lighting_lifts_shadows_and_tames_highlights() {
         b.local.maps.as_ref().unwrap()
     ));
 }
+
+#[test]
+fn smart_lighting_spot_weighted_lifts_the_spot_more() {
+    let (w, h) = (256, 192);
+    let d = src(halves(w, h));
+    let plain = render(&d, &Settings::default());
+    let mut s = Settings::default();
+    s.modules.smart_lighting.strength = 60.0;
+    let uniform = render(&d, &s);
+    // A box in the dark half (stored image, long edges).
+    let long = w as f64;
+    s.modules.smart_lighting.spot = Some([20.0 / long, 30.0 / long, 100.0 / long, 160.0 / long]);
+    let spot = render(&d, &s);
+    let (dark, bright) = ((10..100, 20..170), (160..250, 20..170));
+    let ratio = |a: &Rgb, (xs, ys): &(std::ops::Range<usize>, std::ops::Range<usize>)| {
+        green_mean(a, xs.clone(), ys.clone()) / green_mean(&plain, xs.clone(), ys.clone())
+    };
+    let (u, sp) = (ratio(&uniform, &dark), ratio(&spot, &dark));
+    assert!(sp > u * 1.3, "the spot's half lifted more: ×{u} → ×{sp}");
+    // The bright half is held where uniform mode put it.
+    let (u, sp) = (ratio(&uniform, &bright), ratio(&spot, &bright));
+    assert!((sp / u - 1.0).abs() < 0.03, "bright half: ×{u} → ×{sp}");
+    // The spot is part of the maps' key; strength still only scales.
+    let a = cpu::frame(&zf(), &d, &s, &Options::default());
+    s.modules.smart_lighting.strength = 80.0;
+    let b = cpu::frame(&zf(), &d, &s, &Options::default());
+    assert!(std::sync::Arc::ptr_eq(
+        a.local.maps.as_ref().unwrap(),
+        b.local.maps.as_ref().unwrap()
+    ));
+    s.modules.smart_lighting.spot = Some([0.5, 0.1, 0.9, 0.6]);
+    let c = cpu::frame(&zf(), &d, &s, &Options::default());
+    assert_ne!(a.local.maps, c.local.maps);
+}

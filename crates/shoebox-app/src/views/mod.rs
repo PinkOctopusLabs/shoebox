@@ -18,6 +18,7 @@ pub mod masonry;
 pub mod point_colour;
 pub mod presets;
 pub mod settings;
+pub mod smart;
 pub mod spots;
 pub mod survey;
 pub mod timeline;

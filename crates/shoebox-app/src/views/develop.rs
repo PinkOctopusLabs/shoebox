@@ -150,6 +150,8 @@ pub struct State {
     pub points: super::point_colour::Tool,
     /// Spot removal: the tool, the spot selected, settings for new ones.
     pub spots: super::spots::Tool,
+    /// Smart Lighting's spot: its box shown, and a face search.
+    pub smart: super::smart::Tool,
     /// The frame the edit was last rendered with (handles are placed
     /// through it).
     pub(super) frame: Option<Frame>,
@@ -1141,6 +1143,7 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
     let ctx = ui.ctx().clone();
     render(app, &ctx, gpu);
     tick_saving(app, &ctx);
+    super::smart::poll(app);
 
     let rect = ui.available_rect_before_wrap();
     let resp = ui.allocate_rect(rect, egui::Sense::click_and_drag());
@@ -1368,6 +1371,7 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
         super::local::on_photo(app, ui, &resp, &painter, target);
         super::point_colour::on_photo(app, ui, &resp, target);
         super::spots::on_photo(app, ui, &resp, &painter, target);
+        super::smart::on_photo(app, ui, &resp, &painter, target);
     }
     // Guided upright: the guides over the photo, as it is before rotation
     // and perspective.
@@ -2235,6 +2239,10 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                             );
                         }
                     });
+                    // Uniform or spot weighted (a box, or a face).
+                    if sl.strength > 0.0 {
+                        super::smart::controls(app, ui, sl);
+                    }
                     let mut hue = t.preserve_hue;
                     if ui.checkbox(&mut hue, "Preserve hue").changed() {
                         edit(

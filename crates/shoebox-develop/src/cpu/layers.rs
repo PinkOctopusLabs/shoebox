@@ -157,19 +157,7 @@ fn found(
         Some(_) => return None,
         None => {}
     }
-    // The picture as shown, upright, in 8 bits.
-    let small = src.cache.mask_source(&src.rgb, gw, gh);
-    let mut shown = Rgb::new(gw, gh);
-    shown
-        .data
-        .as_chunks_mut::<3>()
-        .0
-        .par_iter_mut()
-        .zip(small.data.as_chunks::<3>().0.par_iter())
-        .for_each(|(o, p)| *o = super::display_pixel(display, super::mul3(colour, *p)));
-    let upright = super::orient(&shown, orientation);
-    let bytes: Vec<u8> = super::to_u8(&upright);
-    let (uw, uh) = (upright.width, upright.height);
+    let (bytes, uw, uh) = shown_upright(src, colour, display, orientation, gw, gh);
     // An object's clicks, in the upright picture's pixels.
     let points: Vec<(f32, f32, bool)> = {
         let (m, _, _) = super::geometry_map(gw, gh, orientation, &crate::edit::Geometry::default());
@@ -222,6 +210,69 @@ fn found(
         maps::Found::Done(m) => Some(m),
         _ => None,
     }
+}
+
+/// The picture as shown on the masks' `gw`×`gh` grid, upright, in 8
+/// bits, and its size.
+fn shown_upright(
+    src: &Demosaiced,
+    colour: &[[f32; 3]; 3],
+    display: &Display,
+    orientation: u16,
+    gw: usize,
+    gh: usize,
+) -> (Vec<u8>, usize, usize) {
+    let small = src.cache.mask_source(&src.rgb, gw, gh);
+    let mut shown = Rgb::new(gw, gh);
+    shown
+        .data
+        .as_chunks_mut::<3>()
+        .0
+        .par_iter_mut()
+        .zip(small.data.as_chunks::<3>().0.par_iter())
+        .for_each(|(o, p)| *o = super::display_pixel(display, super::mul3(colour, *p)));
+    let upright = super::orient(&shown, orientation);
+    (super::to_u8(&upright), upright.width, upright.height)
+}
+
+/// The faces in `src` as the frame shows it (colour matrix and display),
+/// found upright (`orientation`: the file's, then the edit's turns and
+/// mirror) by the registered face finder: boxes `[x0, y0, x1, y1]` in the
+/// stored image, in units of its long edge, the largest first. It waits
+/// for the search (the app runs it on a thread of its own).
+pub fn faces(
+    src: &Demosaiced,
+    colour: &[[f32; 3]; 3],
+    display: &Display,
+    orientation: u16,
+) -> Result<Vec<[f64; 4]>, String> {
+    let (gw, gh) = mask::grid(src.rgb.width, src.rgb.height);
+    let (bytes, uw, uh) = shown_upright(src, colour, display, orientation, gw, gh);
+    let found = mask::find_faces(&bytes, uw, uh)?;
+    // Upright pixels → the grid's (the frame's map with no crop), then
+    // long edges.
+    let (m, _, _) = super::geometry_map(gw, gh, orientation, &crate::edit::Geometry::default());
+    let glong = gw.max(gh) as f64;
+    let mut boxes: Vec<[f64; 4]> = found
+        .iter()
+        .filter(|b| b.iter().all(|v| v.is_finite()))
+        .map(|b| {
+            let corners = [[b[0], b[1]], [b[2], b[1]], [b[0], b[3]], [b[2], b[3]]];
+            let mut out = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
+            for c in corners {
+                // Pixel edges to pixel centres and back.
+                let u = [f64::from(c[0]) - 0.5, f64::from(c[1]) - 0.5, 1.0];
+                let s = colour::mulv(&m, u);
+                let (x, y) = ((s[0] / s[2] + 0.5) / glong, (s[1] / s[2] + 0.5) / glong);
+                out = [out[0].min(x), out[1].min(y), out[2].max(x), out[3].max(y)];
+            }
+            out
+        })
+        .filter(|b| b[2] > b[0] && b[3] > b[1])
+        .collect();
+    let area = |b: &[f64; 4]| (b[2] - b[0]) * (b[3] - b[1]);
+    boxes.sort_by(|a, b| area(b).total_cmp(&area(a)));
+    Ok(boxes)
 }
 
 /// The orientation that turns an image in orientation `o` back.

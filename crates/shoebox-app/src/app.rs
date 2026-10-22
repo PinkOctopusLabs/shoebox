@@ -1033,6 +1033,13 @@ impl ShoeboxApp {
         (t.selected.clone(), t.part, self.develop.layers_rendered())
     }
 
+    /// Smart Lighting's spot: its box shown, a face search running, and
+    /// what the last search said (tests).
+    pub fn develop_smart(&self) -> (bool, bool, Option<String>) {
+        let t = &self.develop.smart;
+        (t.editing, t.searching(), t.message.clone())
+    }
+
     /// Develop's reference photo's file name (tests).
     pub fn develop_reference(&self) -> Option<String> {
         let i = self.index(self.develop.reference?)?;

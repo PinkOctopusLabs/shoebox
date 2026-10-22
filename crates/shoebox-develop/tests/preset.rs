@@ -67,3 +67,20 @@ fn copying_leaves_geometry_out_by_default() {
     assert_eq!(out.geometry.rotate, 0.0);
     assert_eq!(out.modules.exposure.ev, 1.0);
 }
+
+#[test]
+fn smart_lightings_spot_stays_with_its_photo() {
+    let mut s = Settings::default();
+    s.modules.smart_lighting.strength = 40.0;
+    s.modules.smart_lighting.spot = Some([0.1, 0.1, 0.3, 0.3]);
+    let p = Preset::from_settings("Lit", &s, &[Part::Tone]);
+    assert_eq!(p.parts(), [Part::Tone]);
+    // Another photo keeps its own box (or none); the strength comes over.
+    let mut other = Settings::default();
+    other.modules.smart_lighting.spot = Some([0.5, 0.5, 0.6, 0.6]);
+    let out = p.apply(&other, 1.0);
+    assert_eq!(out.modules.smart_lighting.strength, 40.0);
+    assert_eq!(out.modules.smart_lighting.spot, Some([0.5, 0.5, 0.6, 0.6]));
+    let out = p.apply(&Settings::default(), 1.0);
+    assert_eq!(out.modules.smart_lighting.spot, None);
+}

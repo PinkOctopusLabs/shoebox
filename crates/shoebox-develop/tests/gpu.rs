@@ -196,6 +196,9 @@ fn gpu_matches_the_cpu_reference() {
     s.modules.smart_lighting.strength = 70.0;
     s.modules.smart_lighting.bias = 40.0;
     cases.push(("smart lighting", s.clone(), o));
+    let mut spot = s.clone();
+    spot.modules.smart_lighting.spot = Some([0.1, 0.1, 0.4, 0.5]);
+    cases.push(("smart lighting, spot weighted", spot, o));
     s.modules.smart_lighting.bias = -60.0;
     s.modules.highlights_shadows.shadows = 30.0;
     s.modules.dehaze.amount = 25.0;

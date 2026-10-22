@@ -4554,6 +4554,133 @@ fn develop_local_adjustments() {
     assert_eq!(h.state().view_name(), shoebox_app::app::View::Develop);
 }
 
+/// Smart Lighting, spot weighted: Spot weighted puts a box in the middle,
+/// a corner dragged grows it (one step), a drag outside it draws a new
+/// one; Face looks for a face (none in a synthetic scene: it says so);
+/// Uniform takes the box away.
+#[test]
+fn develop_smart_lighting_spot() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(&root).unwrap();
+    let img = shoebox_fixtures::scene(9, 800, 600);
+    std::fs::write(
+        root.join("spot.jpg"),
+        shoebox_fixtures::jpeg(&img, 92).unwrap(),
+    )
+    .unwrap();
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let mut h = harness(p, egui::vec2(1400.0, 2600.0));
+    settle(&mut h, Duration::from_secs(60));
+    h.get_by_label("spot.jpg").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(30), "develop", |a| {
+        a.develop_ready()
+    });
+    wait_for(&mut h, Duration::from_secs(30), "histogram", |a| {
+        a.develop_histogram().0.is_some()
+    });
+    h.run_steps(3);
+    let smart = |h: &Harness<'_, ShoeboxApp>| {
+        h.state()
+            .develop_doc()
+            .unwrap()
+            .settings()
+            .modules
+            .smart_lighting
+            .clone()
+    };
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    // Some Smart Lighting (Auto may have set it already).
+    if smart(&h).strength == 0.0 {
+        let s = h.get_by_label("Smart Lighting").rect();
+        let on_rail = egui::pos2(s.right() + 60.0, s.center().y);
+        h.event(egui::Event::PointerMoved(on_rail));
+        h.run_steps(1);
+        h.event(button(on_rail, true));
+        h.event(button(on_rail, false));
+        h.run_steps(3);
+    }
+    assert!(smart(&h).strength > 0.0);
+    assert_eq!(smart(&h).spot, None);
+
+    h.get_by_label("Spot weighted").click();
+    h.run_steps(3);
+    let b = smart(&h).spot.expect("a box");
+    assert!(
+        (b[0] - 0.35).abs() < 1e-9 && (b[2] - 0.65).abs() < 1e-9,
+        "{b:?}"
+    );
+    assert!(h.state().develop_smart().0, "the box is shown");
+    let label = |h: &Harness<'_, ShoeboxApp>| {
+        let doc = h.state().develop_doc().unwrap();
+        (
+            doc.history().len(),
+            doc.history().last().unwrap().label.clone(),
+        )
+    };
+    assert_eq!(label(&h).1, "Smart Lighting spot weighted");
+
+    // Drag the bottom right corner out: one step.
+    let photo = h.state().develop_photo_rect().unwrap();
+    // Stored-image units → screen (800×600, upright: [1, 0.75]).
+    let at = |u: [f64; 2]| {
+        egui::pos2(
+            photo.left() + u[0] as f32 * photo.width(),
+            photo.top() + (u[1] / 0.75) as f32 * photo.height(),
+        )
+    };
+    let drag = |h: &mut Harness<'_, ShoeboxApp>, from: egui::Pos2, by: egui::Vec2| {
+        h.event(egui::Event::PointerMoved(from));
+        h.run_steps(1);
+        h.event(button(from, true));
+        h.run_steps(1);
+        for k in 1..=6 {
+            h.event(egui::Event::PointerMoved(from + by * (k as f32 / 6.0)));
+            h.run_steps(1);
+        }
+        h.event(button(from + by, false));
+        h.run_steps(3);
+    };
+    let steps = label(&h).0;
+    drag(&mut h, at([b[2], b[3]]), egui::vec2(60.0, 40.0));
+    let moved = smart(&h).spot.unwrap();
+    assert!(
+        moved[2] > b[2] + 0.02 && moved[3] > b[3] + 0.02,
+        "{moved:?}"
+    );
+    assert_eq!(moved[0], b[0], "the opposite corner stays");
+    assert_eq!(label(&h), (steps + 1, "Move Smart Lighting spot".into()));
+    snapshot(&mut h, "develop-smart-spot");
+
+    // A drag outside the box draws a new one.
+    drag(&mut h, at([0.05, 0.05]), egui::vec2(80.0, 60.0));
+    let drawn = smart(&h).spot.unwrap();
+    assert!(drawn[0] < 0.08 && drawn[2] < 0.3, "{drawn:?}");
+
+    // Face: nothing like one here, and it says so.
+    h.get_by_label("Face").click();
+    h.run_steps(2);
+    wait_for(&mut h, Duration::from_secs(30), "the face search", |a| {
+        !a.develop_smart().1
+    });
+    h.run_steps(2);
+    assert!(h.state().develop_smart().2.is_some());
+    assert_eq!(smart(&h).spot, Some(drawn));
+
+    // Uniform: no box.
+    h.get_by_label("Uniform").click();
+    h.run_steps(3);
+    assert_eq!(smart(&h).spot, None);
+    assert!(!h.state().develop_smart().0);
+}
+
 /// Point Color: pick a colour on the photo (a point with that colour),
 /// widen its range, show what it reaches; Reset takes the points away.
 #[test]

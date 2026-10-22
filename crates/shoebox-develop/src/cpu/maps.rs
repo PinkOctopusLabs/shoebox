@@ -17,8 +17,9 @@
 //! channel prior (He, Sun and Tang, 2009) for airlight and transmission,
 //! the transmission refined by a guided filter on luminance.
 //!
-//! The maps depend on the colour matrix and the dehaze amount, not on the
-//! slider amounts, so dragging highlights, shadows or clarity reuses them.
+//! The maps depend on the colour matrix and the dehaze amount (and Smart
+//! Lighting's spot), not on the slider amounts, so dragging highlights,
+//! shadows or clarity reuses them.
 
 use std::sync::{Arc, Mutex};
 
@@ -74,6 +75,9 @@ pub struct Cache(Arc<Mutex<Inner>>);
 struct Inner {
     small: Option<Arc<Rgb>>,
     maps: Option<(u64, Arc<Maps>)>,
+    /// Smart Lighting's uniform gain on the small copy (keyed by what the
+    /// luminance depends on), so moving a spot doesn't run the filter again.
+    smart: Option<(u64, Arc<Vec<f32>>)>,
     noise: Option<super::detail::Noise>,
     detailed: Option<(super::detail::Detail, Option<Arc<Rgb>>, Arc<Rgb>)>,
     masks: Option<(u64, Arc<crate::mask::Masks>)>,
@@ -337,12 +341,17 @@ pub fn local(src: &Demosaiced, colour: &[[f32; 3]; 3], s: &Settings) -> Local {
         clarity: clarity || l.clarity != 0.0,
         haze: haze || l.dehaze != 0.0,
         smart: l.smart != 0.0,
+        spot: m
+            .smart_lighting
+            .spot
+            .filter(|b| b.iter().all(|v| v.is_finite()))
+            .map(|b| b.map(|v| v as f32)),
         dehaze: l.dehaze,
     };
     if !need.tones && !need.clarity && !need.haze && !need.smart {
         return l;
     }
-    let key = {
+    let hash = |extra: &dyn Fn(&mut std::collections::hash_map::DefaultHasher)| {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for r in colour {
@@ -350,16 +359,18 @@ pub fn local(src: &Demosaiced, colour: &[[f32; 3]; 3], s: &Settings) -> Local {
                 v.to_bits().hash(&mut h);
             }
         }
-        (
-            need.tones,
-            need.clarity,
-            need.haze,
-            need.smart,
-            need.dehaze.to_bits(),
-        )
-            .hash(&mut h);
+        (need.haze, need.dehaze.to_bits()).hash(&mut h);
+        extra(&mut h);
         h.finish()
     };
+    // What the luminance depends on (Smart Lighting's uniform gain), and
+    // everything the maps do.
+    let base = hash(&|_| {});
+    let key = hash(&|h| {
+        use std::hash::Hash;
+        (need.tones, need.clarity, need.smart).hash(h);
+        need.spot.map(|b| b.map(f32::to_bits)).hash(h);
+    });
     let mut cache = src.cache.lock();
     let small = cache
         .small
@@ -368,7 +379,15 @@ pub fn local(src: &Demosaiced, colour: &[[f32; 3]; 3], s: &Settings) -> Local {
     let maps = match &cache.maps {
         Some((k, maps)) if *k == key => maps.clone(),
         _ => {
-            let maps = Arc::new(analyse(&small, colour, &need));
+            let uniform = match &cache.smart {
+                Some((k, g)) if *k == base => Some(g.clone()),
+                _ => None,
+            };
+            let (maps, uniform) = analyse(&small, colour, &need, uniform);
+            let maps = Arc::new(maps);
+            if let Some(g) = uniform {
+                cache.smart = Some((base, g));
+            }
             cache.maps = Some((key, maps.clone()));
             maps
         }
@@ -388,6 +407,8 @@ struct Need {
     haze: bool,
     /// Smart Lighting's gain map (at full strength: the slider scales it).
     smart: bool,
+    /// Its spot (stored image, long edges); None: uniform.
+    spot: Option<[f32; 4]>,
     /// The global dehaze, applied before the tone maps are analysed.
     dehaze: f32,
 }
@@ -472,7 +493,14 @@ pub(crate) fn stops(y: f32) -> f32 {
     (y.max(1e-6) / super::MID_GREY).log2()
 }
 
-fn analyse(small: &Rgb, colour: &[[f32; 3]; 3], need: &Need) -> Maps {
+/// The maps for `small`, and Smart Lighting's uniform gain (`uniform` if
+/// given: it depends only on the colour matrix and dehaze).
+fn analyse(
+    small: &Rgb,
+    colour: &[[f32; 3]; 3],
+    need: &Need,
+    uniform: Option<Arc<Vec<f32>>>,
+) -> (Maps, Option<Arc<Vec<f32>>>) {
     let (w, h) = (small.width, small.height);
     let long = w.max(h) as f32;
     let radius = |f: f32| ((f * long).round() as usize).max(1);
@@ -540,20 +568,31 @@ fn analyse(small: &Rgb, colour: &[[f32; 3]; 3], need: &Need) -> Maps {
             });
         }
     }
+    let mut uniform = uniform.filter(|g| g.len() == w * h);
     if need.smart {
-        let g = super::smart::gain(&l, w, h);
+        let g = uniform
+            .get_or_insert_with(|| Arc::new(super::smart::gain(&l, w, h)))
+            .clone();
+        // Spot weighted: its box in the small copy's pixels.
+        let g = match need.spot {
+            Some(b) => Arc::new(super::smart::spotted(&l, &g, w, h, b.map(|v| v * long))),
+            None => g,
+        };
         let (a, b) = guided(&l, &g, w, h, radius(SMART_RADIUS), SMART_EPS);
         data.par_chunks_mut(STRIDE).enumerate().for_each(|(i, d)| {
             d[6] = a[i];
             d[7] = b[i];
         });
     }
-    Maps {
-        width: w,
-        height: h,
-        data,
-        airlight,
-    }
+    (
+        Maps {
+            width: w,
+            height: h,
+            data,
+            airlight,
+        },
+        uniform,
+    )
 }
 
 fn haze_guide(y: f32, airlight_y: f32) -> f32 {

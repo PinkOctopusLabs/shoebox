@@ -90,7 +90,10 @@ impl Part {
             Part::Tone => &[
                 &["modules", "display_transform"],
                 &["modules", "highlights_shadows"],
-                &["modules", "smart_lighting"],
+                // Not its spot: a box on this photo's face means nothing
+                // on another's.
+                &["modules", "smart_lighting", "strength"],
+                &["modules", "smart_lighting", "bias"],
             ],
             Part::Presence => &[&["modules", "clarity"], &["modules", "dehaze"]],
             Part::ToneCurve => &[&["modules", "tone_curve"]],
