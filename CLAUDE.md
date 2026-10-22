@@ -1,6 +1,6 @@
 # Shoebox
 
-A Rust + egui photo library app for macOS. **`docs/SPEC.md` is the source of truth**: read the relevant section before changing behaviour, and flag any conflict rather than silently diverging. For photo editing (the Develop view, raw decoding, export), **`docs/EDITING-SPEC.md`** is the source of truth in the same way; its *Before Phase 1* tasks come first. Checks that need new photos or a person's eye (deferred gates, real-file verifications) are listed in **`docs/MANUAL-CHECKS.md`**: add to it rather than leaving them only in DECISIONS.
+A Rust + egui photo library app for macOS. **`docs/SPEC.md` is the source of truth**: read the relevant section before changing behaviour, and flag any conflict rather than silently diverging. For photo editing (the Develop view, raw decoding, export), **`docs/EDITING-SPEC.md`** is the source of truth in the same way; its *Before Phase 1* tasks come first. Checks that need new photos or a person's eye (deferred gates, real-file verifications) are in **`docs/MANUAL-CHECKS.md`**, a runbook (shot list, gates, checks by area of the app): add new ones to the right section rather than leaving them only in DECISIONS.
 
 ## Layout
 - `crates/shoebox-core`: library model, scanning, hashing, duplicate index, SQLite cache, and `fileops` (the only module that moves, renames, copies or writes files; it journals everything). No egui.
