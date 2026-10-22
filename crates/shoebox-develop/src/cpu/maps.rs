@@ -45,6 +45,14 @@ const HAZE_EPS: f32 = 1e-3;
 const HAZE_OMEGA: f32 = 0.95;
 const HAZE_FLOOR: f32 = 0.1;
 
+fn same(a: Option<&Arc<Rgb>>, b: Option<&Arc<Rgb>>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+        _ => false,
+    }
+}
+
 /// The maps, `width`×`height`, [`STRIDE`] floats each.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Maps {
@@ -64,8 +72,12 @@ struct Inner {
     small: Option<Arc<Rgb>>,
     maps: Option<(u64, Arc<Maps>)>,
     noise: Option<super::detail::Noise>,
-    detailed: Option<(super::detail::Detail, Arc<Rgb>)>,
+    detailed: Option<(super::detail::Detail, Option<Arc<Rgb>>, Arc<Rgb>)>,
     masks: Option<(u64, Arc<crate::mask::Masks>)>,
+    /// The AI-denoised source (as `rgb`), once it's arrived, and the last
+    /// blend with `rgb` (strength bits).
+    ai: Option<Arc<Rgb>>,
+    blended: Option<(u32, Arc<Rgb>)>,
     /// The healed source: what it was made from, the spots' key, and it.
     healed: Option<(Option<Arc<Rgb>>, u64, Arc<Rgb>)>,
     mask_source: Option<Arc<Rgb>>,
@@ -201,15 +213,52 @@ impl Cache {
         img
     }
 
-    /// The detail stage's result for `d` (`make` runs on a miss).
-    pub fn detailed(&self, d: &super::detail::Detail, make: impl FnOnce() -> Rgb) -> Arc<Rgb> {
-        if let Some((k, img)) = &self.lock().detailed
+    /// The detail stage's result for `d` on `base` (None: the source;
+    /// `make` runs on a miss).
+    pub fn detailed(
+        &self,
+        d: &super::detail::Detail,
+        base: Option<&Arc<Rgb>>,
+        make: impl FnOnce() -> Rgb,
+    ) -> Arc<Rgb> {
+        if let Some((k, b, img)) = &self.lock().detailed
             && k == d
+            && same(b.as_ref(), base)
         {
             return img.clone();
         }
         let img = Arc::new(make());
-        self.lock().detailed = Some((*d, img.clone()));
+        self.lock().detailed = Some((*d, base.cloned(), img.clone()));
+        img
+    }
+
+    /// The AI-denoised source arrived (as the source's size): renders
+    /// redraw with it.
+    pub fn set_ai(&self, img: Arc<Rgb>) {
+        let mut inner = self.lock();
+        inner.ai = Some(img);
+        inner.blended = None;
+        inner.found_generation += 1;
+    }
+
+    pub fn ai(&self) -> Option<Arc<Rgb>> {
+        self.lock().ai.clone()
+    }
+
+    /// The source and the AI's blended at `strength` (0–1), kept.
+    pub fn blended(&self, src: &Rgb, ai: &Rgb, strength: f32) -> Arc<Rgb> {
+        if let Some((k, img)) = &self.lock().blended
+            && *k == strength.to_bits()
+        {
+            return img.clone();
+        }
+        let mut out = src.clone();
+        out.data
+            .par_iter_mut()
+            .zip(&ai.data)
+            .for_each(|(o, a)| *o += (a - *o) * strength);
+        let img = Arc::new(out);
+        self.lock().blended = Some((strength.to_bits(), img.clone()));
         img
     }
 }

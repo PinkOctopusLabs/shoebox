@@ -587,33 +587,14 @@ fn part_controls(app: &mut ShoeboxApp, ui: &mut egui::Ui, id: &str, i: usize, p:
                 ui.end_row();
             }
             Shape::Object { clicks } => {
-                let objects = app.objects.clone();
-                if !objects.ready() {
-                    match objects.fetch_state() {
-                        crate::objects::Fetch::Downloading(done, total) => {
-                            ui.add(
-                                egui::ProgressBar::new(done as f32 / total.max(1) as f32)
-                                    .text("Downloading the object model…"),
-                            );
-                        }
-                        state => {
-                            if let crate::objects::Fetch::Failed(e) = state {
-                                ui.weak(format!("Download failed: {e}"));
-                                ui.end_row();
-                            }
-                            let mb = crate::objects::Objects::bytes() / 1_000_000;
-                            if ui
-                                .button(format!("Download the object model ({mb} MB)"))
-                                .on_hover_text(
-                                    "Meta's SAM 2.1, once, from Hugging Face; it runs on this Mac",
-                                )
-                                .clicked()
-                            {
-                                objects.download(ui.ctx().clone());
-                            }
-                        }
-                    }
-                    ui.end_row();
+                let model = app.objects.model.clone();
+                if !model.ready() {
+                    crate::models::download_ui(
+                        ui,
+                        &model,
+                        "the object model",
+                        "Meta's SAM 2.1, once, from Hugging Face; it runs on this Mac",
+                    );
                 } else {
                     let (finding, failed) = app
                         .develop

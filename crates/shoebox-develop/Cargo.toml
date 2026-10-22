@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 blake3 = { version = "1.8.7", features = ["rayon"] }
+half = "2.7.1"
 jiff = "0.2.38"
 jpeg-encoder = "0.7.1"
 lensfun = "0.7.0"
@@ -36,6 +37,7 @@ epaint_default_fonts = "0.37.0"
 png = "0.18.1"
 serde_json = "1.0.154"
 shoebox-fixtures = { path = "../shoebox-fixtures" }
+shoebox-ml.workspace = true
 tempfile = "3.27.0"
 tiff = "0.11.3"
 wgpu = "30.0.1"

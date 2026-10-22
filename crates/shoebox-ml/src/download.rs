@@ -28,14 +28,20 @@ pub struct Remote {
     name: &'static str,
     size: u64,
     sha256: &'static str,
+    /// Fetched from here instead of Hugging Face (`repo` then names where
+    /// it's from, for the settings window).
+    direct: Option<&'static str>,
 }
 
 impl Remote {
     fn url(&self) -> String {
-        format!(
-            "https://huggingface.co/{}/resolve/{}/{}",
-            self.repo, self.revision, self.name
-        )
+        match self.direct {
+            Some(u) => u.to_owned(),
+            None => format!(
+                "https://huggingface.co/{}/resolve/{}/{}",
+                self.repo, self.revision, self.name
+            ),
+        }
     }
 }
 
@@ -60,6 +66,7 @@ pub const SIGLIP: Spec = Spec {
             name: TOKENIZER_FILE,
             size: 34_363_039,
             sha256: "cb9140fae3ac5122c972d37adf83e1248471a38147ad76f8215c8872c6fd8322",
+            direct: None,
         },
         Remote {
             repo: "google/siglip2-base-patch16-224",
@@ -67,6 +74,7 @@ pub const SIGLIP: Spec = Spec {
             name: CHECKPOINT,
             size: 1_500_800_904,
             sha256: "612923381c76ec5a9bed335d1c48827e3f2e506ac31b044b63b2031fadee6a0b",
+            direct: None,
         },
     ],
     ready: &[VISION_FILE, TEXT_FILE, TOKENIZER_FILE],
@@ -83,6 +91,7 @@ pub const FACES: Spec = Spec {
             name: YUNET_FILE,
             size: 232_589,
             sha256: "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4",
+            direct: None,
         },
         Remote {
             repo: "opencv/face_recognition_sface",
@@ -90,6 +99,7 @@ pub const FACES: Spec = Spec {
             name: SFACE_FILE,
             size: 38_696_353,
             sha256: "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79",
+            direct: None,
         },
     ],
     ready: &[YUNET_FILE, SFACE_FILE],
@@ -105,8 +115,29 @@ pub const SAM: Spec = Spec {
         name: crate::sam::FILE,
         size: 156_008_466,
         sha256: "7402e0d864fa82708a20fbd15bc84245c2f26dff0eb43a4b5b93452deb34be69",
+        direct: None,
     }],
     ready: &[crate::sam::FILE],
+    convert: false,
+};
+
+/// RawNIND's UtNet2 Bayer denoiser (Brummer and De Vleeschouwer; GPL-3.0
+/// and CC BY 4.0): AI raw denoise. Only on the authors' Google Drive
+/// (the 2024-02-21 Bayer checkpoint darktable-ai uses), checked by its
+/// SHA-256.
+pub const RAWNIND: Spec = Spec {
+    id: crate::rawnind::MODEL_ID,
+    files: &[Remote {
+        repo: "trougnouf/rawnind_jddc",
+        revision: "2024-02-21",
+        name: crate::rawnind::FILE,
+        size: 31_059_270,
+        sha256: "c1f7de3de24cb12f4803ee65e11cfb467e9a5b80c3cb7126746ef026106c15e0",
+        direct: Some(
+            "https://drive.usercontent.google.com/download?id=1dFTLeljWi9wwojcZUsam8bE31JdYy3oM&export=download&confirm=t",
+        ),
+    }],
+    ready: &[crate::rawnind::FILE],
     convert: false,
 };
 
@@ -118,6 +149,9 @@ impl Spec {
 
     /// Where it comes from, for the settings window.
     pub fn source(&self) -> String {
+        if let Some(f) = self.files.iter().find(|f| f.direct.is_some()) {
+            return format!("github.com/{} (the authors' Google Drive)", f.repo);
+        }
         let mut repos: Vec<&str> = self.files.iter().map(|f| f.repo).collect();
         repos.dedup();
         format!("huggingface.co/{}", repos.join(" and huggingface.co/"))

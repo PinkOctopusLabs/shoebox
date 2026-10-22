@@ -2081,3 +2081,47 @@ stay. To come back to with Linux:
   parts (one prompt finds one object).
 - Not yet: the spec's on-disk mask cache, and guided-filter upsampling to
   full resolution.
+
+## AI raw denoise: RawNIND on candle (2026-10-22)
+
+- **The model:** RawNIND's UtNet2 Bayer denoiser (Brummer and De
+  Vleeschouwer, 2025; code GPL-3.0, weights GPL-3.0 and CC BY 4.0), the
+  canonical 2024-02-21 checkpoint darktable-ai packages, ported to candle
+  from the authors' `raw_denoiser.py` (rawnind_jddc at e80fb7b1): a
+  four-level U-Net, LeakyReLU 0.2, a 1×1 head and pixel shuffle. Packed
+  RGGB at half resolution in, camera RGB at full resolution out, at an
+  arbitrary gain; f32 (it overflows f16).
+- **Where the weights come from** (changing the 2026-10-19 plan): candle
+  reads the authors' PyTorch checkpoint directly, so there's nothing to
+  convert, and Google Drive's direct download endpoint
+  (`drive.usercontent.google.com/download?id=…&confirm=t`) serves it
+  fine through the app's downloader, pinned by SHA-256 (31 MB). That
+  replaces publishing a converted copy on a `models-rawnind-1` release.
+  If Drive stops serving it, mirroring it on a release (with the user's
+  go-ahead, as it's public) is the fallback.
+- **Feeding it** (darktable-ai's notes, checked on the Z f's files): the
+  mosaic with levels and hot pixels as RCD gets it, not white-balanced,
+  packed from wherever red is (any 2×2 Bayer becomes RGGB; rows and
+  columns skipped copy their neighbours), tiles of 512 with 32 of
+  context each side, mirrored at the edges. The output is camera RGB:
+  balanced at as shot it matches RCD's colour channel for channel. Its
+  gain is matched to RCD's demosaic of the same mosaic, away from
+  clipping (matching overall left it 5% bright, as highlights pulled the
+  match). From 75% of clipping up, RCD's highlight reconstruction takes
+  over (the model's channels clip unevenly).
+- **Measured:** a 24 MP Z f frame takes 12–18 s on an M2 Max (the spec
+  allows 30); colour within 1% of RCD; on a synthetic noisy mosaic,
+  noise falls about fourteen-fold and tile seams don't show. Bright thin
+  lights in a night shot pick up coloured edges: a model limitation, for
+  the manual checks.
+- **In the app:** Detail → AI denoise (raw photos) with Strength (a blend
+  with RCD's result, live). Results are kept on disk by the file's
+  content, raw settings and model (`<cache>/ai-denoise`, half floats, 3
+  GB, oldest removed). The view gets it on a thread of its own and
+  redraws when it lands (RCD's until then, with progress shown);
+  regions at 100%, previews and exports make or load it inline. The
+  model downloads from the panel when first wanted.
+- Not yet: per-layer AI denoise strength (local adjustments) and the
+  spec's "AI denoise per mask".
+- UI tests now run at most half the cores' worth of apps at once: as the
+  suite grew, whichever was slowest missed its settle timeout.

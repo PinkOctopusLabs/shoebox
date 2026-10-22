@@ -261,6 +261,8 @@ pub struct AppPaths {
     /// The object model (SAM 2.1): downloaded when first asked for, into
     /// `dir`, through `staging`.
     pub objects: (PathBuf, PathBuf),
+    /// The AI raw denoise model (RawNIND), likewise.
+    pub denoise: (PathBuf, PathBuf),
     /// Names given to people.
     pub people: PathBuf,
     /// Develop's caches (DNGs of High efficiency NEFs, under `dng/`).
@@ -303,6 +305,10 @@ impl AppPaths {
             },
             objects: (
                 shoebox_core::paths::models_dir(&data).join("sam2.1-hiera-tiny"),
+                cache.join("model-download"),
+            ),
+            denoise: (
+                shoebox_core::paths::models_dir(&data).join("rawnind-utnet2"),
                 cache.join("model-download"),
             ),
             people: shoebox_core::paths::people_file(&data),
@@ -461,6 +467,8 @@ pub struct ShoeboxApp {
     pub(crate) developer: crate::develop::Develop,
     /// The object model (SAM 2.1) for click masks.
     pub(crate) objects: std::sync::Arc<crate::objects::Objects>,
+    /// The AI raw denoise model.
+    pub(crate) denoiser: std::sync::Arc<crate::models::Model>,
     /// Edited photos: photo path → its preview's key.
     pub(crate) edited: HashMap<PathBuf, String>,
     /// Edited photos' edit documents (for export).
@@ -535,6 +543,8 @@ impl ShoeboxApp {
         let tile_cache = paths.tile_cache.clone();
         let objects =
             crate::objects::Objects::register(paths.objects.0.clone(), paths.objects.1.clone());
+        let denoiser =
+            crate::models::register_denoiser(paths.denoise.0.clone(), paths.denoise.1.clone());
         let display = crate::display::DisplayTagger::new(cc);
         let target = crate::display::DisplayTagger::target(display.as_ref());
         tracing::info!("rendering images in {target:?}");
@@ -616,6 +626,7 @@ impl ShoeboxApp {
             develop: Default::default(),
             developer,
             objects,
+            denoiser,
             edited: HashMap::new(),
             edited_json: HashMap::new(),
             export: Default::default(),
@@ -1050,6 +1061,18 @@ impl ShoeboxApp {
             m.iter().map(|&v| f32::from(v)).sum::<f32>() / (255.0 * m.len().max(1) as f32)
         });
         (cover, finding)
+    }
+
+    /// Develop's AI denoise: arrived, how far, and why not (tests).
+    pub fn develop_ai(&self) -> (bool, Option<f32>, Option<String>) {
+        let st = &self.develop;
+        (
+            st.ready
+                .as_ref()
+                .is_some_and(|r| r.src.cache.ai().is_some()),
+            st.ai_progress,
+            st.ai_error.clone(),
+        )
     }
 
     /// Develop's spot tool: on, and the spot selected (tests).

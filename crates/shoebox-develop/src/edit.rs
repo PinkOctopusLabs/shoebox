@@ -317,6 +317,24 @@ impl Default for NoiseReduction {
     }
 }
 
+/// AI raw denoise (tier 2): the model's denoised mosaic in place of RCD's
+/// demosaic, blended with it by `strength` (0–100). Raw photos only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DenoiseAi {
+    pub enabled: bool,
+    pub strength: f64,
+}
+
+impl Default for DenoiseAi {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            strength: 100.0,
+        }
+    }
+}
+
 /// Dehaze (module 5): −100 (add haze) to +100.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -530,6 +548,7 @@ pub struct Modules {
     pub defringe: Defringe,
     pub heal: Heal,
     pub noise_reduction: NoiseReduction,
+    pub denoise_ai: DenoiseAi,
     pub sharpening: Sharpening,
     pub dehaze: Dehaze,
     pub highlights_shadows: HighlightsShadows,

@@ -14,6 +14,7 @@ pub mod download;
 mod encoder;
 pub mod faces;
 pub mod onnx;
+pub mod rawnind;
 pub mod sam;
 pub mod vision;
 

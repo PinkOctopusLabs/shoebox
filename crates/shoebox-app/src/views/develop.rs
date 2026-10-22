@@ -136,6 +136,11 @@ pub struct State {
     /// the point being dragged.
     pub(super) curve_channel: usize,
     pub(super) curve_drag: Option<usize>,
+    /// AI raw denoise: what was asked for (photo, raw settings), how far
+    /// it is, and why it failed.
+    ai_requested: Option<(PhotoId, shoebox_develop::edit::Raw)>,
+    pub(crate) ai_progress: Option<f32>,
+    pub(crate) ai_error: Option<String>,
     /// Local adjustments: the mask selected, its tool and handles.
     pub local: super::local::Tool,
     /// Point Color: picking, the point selected, its reach shown.
@@ -731,6 +736,19 @@ pub fn poll(app: &mut ShoeboxApp) {
             Event::Converting(id) if Some(id) == st.photo => st.status = Status::Converting,
             Event::NeedsConverter(id) if Some(id) == st.photo => st.status = Status::NeedsConverter,
             Event::Failed(id, e) if Some(id) == st.photo => st.status = Status::Failed(e),
+            Event::AiProgress(id, f) if Some(id) == st.photo => st.ai_progress = Some(f),
+            Event::Ai(id, raw, img) if Some(id) == st.photo => {
+                st.ai_progress = None;
+                if let Some(r) = &st.ready
+                    && r.raw == raw
+                {
+                    r.src.cache.set_ai(img);
+                }
+            }
+            Event::AiFailed(id, e) if Some(id) == st.photo => {
+                st.ai_progress = None;
+                st.ai_error = Some(e);
+            }
             _ => {}
         }
     }
@@ -801,6 +819,30 @@ fn follow(app: &mut ShoeboxApp) {
             raw,
             lens: crate::develop::shot(p),
         });
+        return;
+    }
+    // AI raw denoise, once the photo's prepared and the model's here.
+    let st = &mut app.develop;
+    let Some(doc) = &st.doc else { return };
+    let wanted = doc.settings().modules.denoise_ai.enabled;
+    let Some(ready) = &st.ready else { return };
+    if wanted
+        && app.denoiser.ready()
+        && ready.src.referred == cpu::Referred::Scene
+        && ready.src.cache.ai().is_none()
+        && st.ai_requested.as_ref() != Some(&(id, raw.clone()))
+    {
+        st.ai_requested = Some((id, raw.clone()));
+        st.ai_progress = Some(0.0);
+        st.ai_error = None;
+        let p = &app.catalog.photos[idx];
+        app.developer.ai(Request {
+            id,
+            path: p.path.clone(),
+            format: p.format,
+            raw,
+            lens: crate::develop::shot(p),
+        });
     }
 }
 
@@ -840,10 +882,7 @@ fn original_settings(doc: &EditDoc) -> Settings {
 /// Render the edit (and the original when it's shown) if they changed.
 fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_wgpu::RenderState>) {
     let o = options(app);
-    let app_objects_arrived = app
-        .objects
-        .arrived
-        .swap(false, std::sync::atomic::Ordering::SeqCst);
+    let app_objects_arrived = app.objects.model.take_arrived();
     let st = &mut app.develop;
     let (Some(ready), Some(doc)) = (&st.ready, &st.doc) else {
         return;

@@ -169,11 +169,38 @@ impl Demosaiced {
         detail::Detail::new(s, self.cache.noise(&self.rgb), self.scale)
     }
 
-    /// The source after the detail stage: None when it does nothing (use
-    /// `rgb`). The last result is kept, so other sliders don't redo it.
+    /// The source before the detail stage: `rgb`, or (None) blended with
+    /// the AI-denoised source when that's on and has arrived.
+    pub fn base(&self, s: &Settings) -> Option<std::sync::Arc<Rgb>> {
+        let a = &s.modules.denoise_ai;
+        if !a.enabled || self.referred != Referred::Scene {
+            return None;
+        }
+        let ai = self.cache.ai()?;
+        if (ai.width, ai.height) != (self.rgb.width, self.rgb.height) {
+            return None;
+        }
+        let k = (a.strength / 100.0).clamp(0.0, 1.0) as f32;
+        Some(if k >= 1.0 {
+            ai
+        } else {
+            self.cache.blended(&self.rgb, &ai, k)
+        })
+    }
+
+    /// The source after the detail stage: None when neither it nor the AI
+    /// denoise does anything (use `rgb`). The last result is kept, so
+    /// other sliders don't redo it.
     pub fn detailed(&self, s: &Settings) -> Option<std::sync::Arc<Rgb>> {
-        let d = self.detail(s)?;
-        Some(self.cache.detailed(&d, || detail::process(&self.rgb, &d)))
+        let base = self.base(s);
+        let Some(d) = self.detail(s) else {
+            return base;
+        };
+        let from = base.as_deref().unwrap_or(&self.rgb);
+        Some(
+            self.cache
+                .detailed(&d, base.as_ref(), || detail::process(from, &d)),
+        )
     }
 
     /// The source the live pipe reads: after the detail stage and spot
@@ -251,33 +278,14 @@ pub fn srgb_eotf(v: f32) -> f32 {
 /// highlights, demosaic, and downscale to `long_edge` (the proxy) if given.
 pub fn demosaic(raw: &RawImage, r: &Raw, long_edge: Option<u32>) -> Demosaiced {
     let mult = wb::resolve(raw, &Default::default()).multipliers;
-    // Hot and dead photosites, then the black and white points (the
-    // decoder already put them at 0 and 1; these move them).
-    let fixed = r.hot_pixels.then(|| {
-        raw::hot_pixels(&raw::Mosaic {
-            width: raw.width,
-            height: raw.height,
-            cfa: raw.cfa,
-            data: &raw.data,
-        })
-        .0
-    });
-    let data = fixed.as_deref().unwrap_or(&raw.data);
-    let (black, white) = (r.black as f32, r.white.max(0.1) as f32);
-    let levels = |v: f32| {
-        if black == 0.0 && white == 1.0 {
-            v
-        } else {
-            ((v - black) / (white - black)).min(1.0)
-        }
-    };
-    let balanced: Vec<f32> = data
-        .par_chunks(raw.width)
+    let levelled = levelled(raw, r);
+    let balanced: Vec<f32> = levelled
+        .par_chunks(raw.width.max(1))
         .enumerate()
         .flat_map_iter(|(row, line)| {
             line.iter()
                 .enumerate()
-                .map(move |(col, v)| levels(*v) * mult[usize::from(raw.cfa[row % 2][col % 2])])
+                .map(move |(col, v)| v * mult[usize::from(raw.cfa[row % 2][col % 2])])
         })
         .collect();
     let clips = mult.map(|m| m * raw::OPPOSED_CLIP);
@@ -302,6 +310,32 @@ pub fn demosaic(raw: &RawImage, r: &Raw, long_edge: Option<u32>) -> Demosaiced {
     };
     let scale = rgb.width as f32 / raw.width.max(1) as f32;
     Demosaiced::new(rgb, mult, Referred::Scene).with_scale(scale)
+}
+
+/// The mosaic with hot and dead photosites fixed and the raw black and
+/// white points applied, not yet white-balanced.
+pub fn levelled(raw: &RawImage, r: &Raw) -> Vec<f32> {
+    // Hot and dead photosites, then the black and white points (the
+    // decoder already put them at 0 and 1; these move them).
+    let fixed = r.hot_pixels.then(|| {
+        raw::hot_pixels(&raw::Mosaic {
+            width: raw.width,
+            height: raw.height,
+            cfa: raw.cfa,
+            data: &raw.data,
+        })
+        .0
+    });
+    let data = fixed.as_deref().unwrap_or(&raw.data);
+    let (black, white) = (r.black as f32, r.white.max(0.1) as f32);
+    let levels = |v: f32| {
+        if black == 0.0 && white == 1.0 {
+            v
+        } else {
+            ((v - black) / (white - black)).min(1.0)
+        }
+    };
+    data.par_iter().map(|v| levels(*v)).collect()
 }
 
 /// Box-filter downscale by a whole factor so the long edge fits `long_edge`.

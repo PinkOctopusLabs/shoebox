@@ -7,6 +7,7 @@
 //! few results are kept so stepping back and forth is instant.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::{Receiver, Sender};
@@ -98,6 +99,9 @@ enum Message {
     /// High efficiency NEFs to convert in the background (replaces the last
     /// list).
     ConvertAhead(Vec<PathBuf>),
+    /// AI raw denoise for the photo open in Develop, at the proxy's size
+    /// (on its own thread; a newer one stops the last).
+    Ai(Request),
 }
 
 /// What's drawn over a render: clipping (J), soft proofing in an export
@@ -275,6 +279,11 @@ pub enum Event {
     /// High efficiency, and Adobe DNG Converter isn't installed.
     NeedsConverter(PhotoId),
     Failed(PhotoId, String),
+    /// AI raw denoise: how far (0–1); done (at the proxy's size, for these
+    /// raw settings); or why not.
+    AiProgress(PhotoId, f32),
+    Ai(PhotoId, Raw, Arc<cpu::Rgb>),
+    AiFailed(PhotoId, String),
 }
 
 pub struct Develop {
@@ -337,6 +346,11 @@ impl Develop {
 
     pub fn open(&self, r: Request) {
         let _ = self.requests.send(Message::Open(r));
+    }
+
+    /// AI raw denoise for the photo open (answered by `Ai` or `AiFailed`).
+    pub fn ai(&self, r: Request) {
+        let _ = self.requests.send(Message::Ai(r));
     }
 
     /// Where the converter is (None: the usual place), and the cache limit.
@@ -426,6 +440,43 @@ fn worker(
             tracing::error!("could not start the convert-ahead thread: {e}");
         }
     }
+    let _ = AI_CACHE.set(shoebox_develop::denoise::Cache::new(
+        &cache_dir.join("ai-denoise"),
+        shoebox_develop::denoise::DEFAULT_LIMIT,
+    ));
+    // AI raw denoise for Develop, on a thread of its own: the newest
+    // request, the last one stopped.
+    let (ai_tx, ai_rx) =
+        crossbeam_channel::unbounded::<(Request, Option<PathBuf>, Arc<AtomicBool>)>();
+    let mut ai_cancel = Arc::new(AtomicBool::new(false));
+    {
+        let (dngs, events, repaint) = (dngs.clone(), events.clone(), repaint.clone());
+        let spawned = std::thread::Builder::new()
+            .name("ai-denoise".into())
+            .spawn(move || {
+                let emit = |e: Event| {
+                    let _ = events.send(e);
+                    repaint();
+                };
+                while let Ok(mut job) = ai_rx.recv() {
+                    // Only the newest.
+                    while let Ok(newer) = ai_rx.try_recv() {
+                        job = newer;
+                    }
+                    let (r, converter, cancel) = job;
+                    match ai_for_view(&r, converter.as_deref(), &dngs, &emit, &cancel) {
+                        Ok(img) => emit(Event::Ai(r.id, r.raw.clone(), Arc::new(img))),
+                        Err(e) if cancel.load(Ordering::Relaxed) => {
+                            tracing::debug!("AI denoise stopped: {e}")
+                        }
+                        Err(e) => emit(Event::AiFailed(r.id, e)),
+                    }
+                }
+            });
+        if let Err(e) = spawned {
+            tracing::error!("could not start the AI denoise thread: {e}");
+        }
+    }
     let previews = cache_dir.join("edited");
     // Subject and person masks come from Apple's Vision (macOS only; a
     // portable model is a later phase).
@@ -493,6 +544,11 @@ fn worker(
                 Message::ConvertAhead(list) => {
                     let _ = ahead.send((converter.clone(), list));
                 }
+                Message::Ai(r) => {
+                    ai_cancel.store(true, Ordering::Relaxed);
+                    ai_cancel = Arc::new(AtomicBool::new(false));
+                    let _ = ai_tx.send((r, converter.clone(), ai_cancel.clone()));
+                }
                 Message::LoadPresets => emit(Event::Presets(load_presets(presets_file))),
                 Message::LoadLooks => emit(Event::Looks(shoebox_develop::preset::load(
                     &looks_file(presets_file),
@@ -522,7 +578,7 @@ fn worker(
                     let k = kept.remove(hit);
                     Ok(Some(k))
                 }
-                None => prepare(&r, Some(PROXY), converter.as_deref(), &dngs, &emit),
+                None => prepare(&r, Some(PROXY), converter.as_deref(), &dngs, &emit, false),
             };
             match ready {
                 Ok(Some(ready)) => {
@@ -539,9 +595,12 @@ fn worker(
         }
         if let Some(job) = region.take() {
             let r = &job.request;
-            if full.as_ref().is_none_or(|f| f.id != r.id || f.raw != r.raw) {
+            let ai = job.settings.modules.denoise_ai.enabled;
+            if full.as_ref().is_none_or(|f| {
+                f.id != r.id || f.raw != r.raw || (ai && f.src.cache.ai().is_none())
+            }) {
                 full = None;
-                match prepare(r, None, converter.as_deref(), &dngs, &|_| {}) {
+                match prepare(r, None, converter.as_deref(), &dngs, &|_| {}, ai) {
                     Ok(Some(k)) => full = Some(k),
                     Ok(None) => continue,
                     Err(e) => {
@@ -642,6 +701,7 @@ fn preview(
         return Ok(true);
     }
     let raw = p.settings.modules.raw.clone();
+    let ai = p.settings.modules.denoise_ai.enabled;
     let ready = match kept.iter().find(|k| k.id == p.id && k.raw == raw) {
         Some(k) => k.clone(),
         None => {
@@ -652,12 +712,35 @@ fn preview(
                 raw,
                 lens: p.lens.clone(),
             };
-            match prepare(&r, Some(PROXY), converter, dngs, &|_| {})? {
+            match prepare(&r, Some(PROXY), converter, dngs, &|_| {}, ai)? {
                 Some(k) => k,
                 None => return Ok(false),
             }
         }
     };
+    if ai && ready.src.cache.ai().is_none() {
+        // Kept from Develop without the AI's result: make it now.
+        let r = Request {
+            id: p.id,
+            path: p.path.clone(),
+            format: p.format,
+            raw: p.settings.modules.raw.clone(),
+            lens: p.lens.clone(),
+        };
+        if let Some(k) = prepare(&r, Some(PROXY), converter, dngs, &|_| {}, true)? {
+            return finish_preview(p, &k, dir, &out);
+        }
+    }
+    finish_preview(p, &ready, dir, &out)
+}
+
+/// Render and write the preview from a prepared photo.
+fn finish_preview(
+    p: &PreviewJob,
+    ready: &Ready,
+    dir: &std::path::Path,
+    out: &std::path::Path,
+) -> Result<bool, String> {
     let o = cpu::Options {
         long_edge: None,
         orientation: if ready.upright { 1 } else { p.orientation },
@@ -666,11 +749,14 @@ fn preview(
     let src = if ready.src.rgb.width.max(ready.src.rgb.height) > PREVIEW as usize {
         let small = cpu::downscale(&ready.src.rgb, PREVIEW as usize);
         let scale = ready.src.scale * small.width as f32 / ready.src.rgb.width as f32;
-        Arc::new(
-            Demosaiced::new(small, ready.src.as_shot, ready.src.referred)
-                .with_scale(scale)
-                .with_lens(ready.src.lens.clone()),
-        )
+        let d = Demosaiced::new(small, ready.src.as_shot, ready.src.referred)
+            .with_scale(scale)
+            .with_lens(ready.src.lens.clone());
+        if let Some(ai) = ready.src.cache.ai() {
+            d.cache
+                .set_ai(Arc::new(cpu::downscale(&ai, PREVIEW as usize)));
+        }
+        Arc::new(d)
     } else {
         ready.src.clone()
     };
@@ -681,39 +767,29 @@ fn preview(
     // The app's own cache: written whole, then renamed into place.
     let tmp = dir.join(format!(".{}.tmp", p.key));
     std::fs::write(&tmp, &bytes).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, &out).map_err(|e| format!("{}: {e}", out.display()))?;
+    std::fs::rename(&tmp, out).map_err(|e| format!("{}: {e}", out.display()))?;
     Ok(true)
 }
 
 /// Decode and demosaic one photo; None if it needs the converter and it
 /// isn't installed.
+/// With `ai`, the AI-denoised source (kept on disk) is attached too.
 fn prepare(
     r: &Request,
     long_edge: Option<u32>,
     converter: Option<&std::path::Path>,
     dngs: &DngCache,
     emit: &dyn Fn(Event),
+    ai: bool,
 ) -> Result<Option<Ready>, String> {
     if r.format != shoebox_decode::Format::Nef {
         return finished(r, long_edge).map(Some);
     }
     let bytes = std::fs::read(&r.path).map_err(|e| format!("{}: {e}", r.path.display()))?;
-    let source = if shoebox_develop::dng::needs_dng(&bytes) {
-        let Some(conv) = Converter::find(converter) else {
-            return Ok(None);
-        };
-        let key = DngCache::key(&bytes);
-        match dngs.get(&key) {
-            Some(p) => p,
-            None => {
-                emit(Event::Converting(r.id));
-                dngs.get_or_convert(&conv, &r.path, &bytes)
-                    .map_err(|e| e.to_string())?
-            }
-        }
-    } else {
-        r.path.clone()
+    let Some(source) = raw_source(r, &bytes, converter, dngs, emit)? else {
+        return Ok(None);
     };
+    let file_hash = blake3::hash(&bytes).to_hex().to_string();
     // The camera's own lens data, from the NEF itself.
     let lens = r.lens.as_ref().map(|shot| {
         Arc::new(Shot {
@@ -735,6 +811,20 @@ fn prepare(
     drop(bytes);
     let mut raw = shoebox_decode::raw::decode_path(&source).map_err(|e| e.to_string())?;
     let src = cpu::demosaic(&raw, &r.raw, long_edge).with_lens(lens);
+    if ai && shoebox_develop::denoise::model().is_some() {
+        match ai_denoised(&raw, &r.raw, &file_hash, &|_| {}, &AtomicBool::new(false)) {
+            Ok(full) => {
+                let img = match long_edge {
+                    Some(l) => cpu::downscale(&full, l as usize),
+                    None => full,
+                };
+                if (img.width, img.height) == (src.rgb.width, src.rgb.height) {
+                    src.cache.set_ai(Arc::new(img));
+                }
+            }
+            Err(e) => tracing::warn!("AI denoise of {}: {e}", r.path.display()),
+        }
+    }
     raw.data = Vec::new();
     let auto = long_edge.map(|_| shoebox_develop::auto::measure(&raw, &src, camera_jpeg.as_ref()));
     Ok(Some(Ready {
@@ -745,6 +835,85 @@ fn prepare(
         upright: false,
         auto,
     }))
+}
+
+/// The file to decode a NEF's raw data from: itself, or its DNG (converted
+/// now if need be). None if it needs the converter and there isn't one.
+fn raw_source(
+    r: &Request,
+    bytes: &[u8],
+    converter: Option<&std::path::Path>,
+    dngs: &DngCache,
+    emit: &dyn Fn(Event),
+) -> Result<Option<PathBuf>, String> {
+    if !shoebox_develop::dng::needs_dng(bytes) {
+        return Ok(Some(r.path.clone()));
+    }
+    let Some(conv) = Converter::find(converter) else {
+        return Ok(None);
+    };
+    let key = DngCache::key(bytes);
+    Ok(Some(match dngs.get(&key) {
+        Some(p) => p,
+        None => {
+            emit(Event::Converting(r.id));
+            dngs.get_or_convert(&conv, &r.path, bytes)
+                .map_err(|e| e.to_string())?
+        }
+    }))
+}
+
+/// AI raw denoise results on disk (set when the develop thread starts).
+static AI_CACHE: std::sync::OnceLock<shoebox_develop::denoise::Cache> = std::sync::OnceLock::new();
+
+/// The AI-denoised source at full size: kept on disk, or made (seconds).
+fn ai_denoised(
+    raw: &RawImage,
+    settings: &Raw,
+    file_hash: &str,
+    progress: &dyn Fn(f32),
+    cancel: &AtomicBool,
+) -> Result<cpu::Rgb, String> {
+    let key = shoebox_develop::denoise::key(file_hash, settings);
+    if let Some(img) = AI_CACHE.get().and_then(|c| c.get(&key)) {
+        return Ok(img);
+    }
+    let img = shoebox_develop::denoise::run(raw, settings, progress, cancel)?;
+    if let Some(c) = AI_CACHE.get()
+        && let Err(e) = c.put(&key, &img)
+    {
+        tracing::warn!("keeping the AI denoise result: {e}");
+    }
+    Ok(img)
+}
+
+/// The AI-denoised source of the photo open in Develop, at the proxy's
+/// size.
+fn ai_for_view(
+    r: &Request,
+    converter: Option<&std::path::Path>,
+    dngs: &DngCache,
+    emit: &dyn Fn(Event),
+    cancel: &AtomicBool,
+) -> Result<cpu::Rgb, String> {
+    if r.format != shoebox_decode::Format::Nef {
+        return Err("AI denoise works on raw files".into());
+    }
+    let bytes = std::fs::read(&r.path).map_err(|e| format!("{}: {e}", r.path.display()))?;
+    let Some(source) = raw_source(r, &bytes, converter, dngs, &|_| {})? else {
+        return Err("needs Adobe DNG Converter".into());
+    };
+    let file_hash = blake3::hash(&bytes).to_hex().to_string();
+    drop(bytes);
+    let raw = shoebox_decode::raw::decode_path(&source).map_err(|e| e.to_string())?;
+    let full = ai_denoised(
+        &raw,
+        &r.raw,
+        &file_hash,
+        &|f| emit(Event::AiProgress(r.id, f)),
+        cancel,
+    )?;
+    Ok(cpu::downscale(&full, PROXY as usize))
 }
 
 /// A finished image: decoded (colour-managed to Display P3, the widest the
@@ -1078,7 +1247,8 @@ fn export_item(
         raw: item.settings.modules.raw.clone(),
         lens: item.lens.clone(),
     };
-    let failed = match prepare(&r, None, converter, dngs, &|_| {}) {
+    let ai = item.settings.modules.denoise_ai.enabled;
+    let failed = match prepare(&r, None, converter, dngs, &|_| {}, ai) {
         Ok(Some(ready)) => {
             for (k, preset) in job.presets.iter().enumerate() {
                 let result = (|| -> Result<PathBuf, String> {

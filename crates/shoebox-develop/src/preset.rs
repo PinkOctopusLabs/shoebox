@@ -97,7 +97,11 @@ impl Part {
             ],
             Part::BlackAndWhite => &[&["modules", "black_and_white"]],
             Part::Calibration => &[&["modules", "calibration"]],
-            Part::Detail => &[&["modules", "sharpening"], &["modules", "noise_reduction"]],
+            Part::Detail => &[
+                &["modules", "sharpening"],
+                &["modules", "noise_reduction"],
+                &["modules", "denoise_ai"],
+            ],
             Part::Lens => &[&["modules", "lens"], &["modules", "defringe"]],
             Part::Transform => &[&["geometry", "transform"]],
             Part::Crop => &[

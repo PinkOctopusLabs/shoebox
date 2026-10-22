@@ -124,3 +124,8 @@ together at the end, before the release.
   once; on real photos click a person, a car, a tree, a cup: the mask
   takes the object, ⌥-clicks trim it, and a photo turned 90° still
   works. Note how long the first click and later clicks take.
+- [ ] **AI denoise** on the 10 highest-ISO NEFs (Detail → AI denoise,
+  download the model once): noise clearly lower than the classic noise
+  reduction, detail (hair, foliage, text) kept, colours unchanged, no
+  tile seams; look at bright lights in night shots for coloured edges;
+  note the time per photo. Export one and check it matches Develop.

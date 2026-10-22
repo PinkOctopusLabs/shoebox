@@ -243,7 +243,15 @@ fn presence(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &Settings) {
 /// judged at 100%).
 fn detail(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &Settings) {
     let (sh, nr) = (&s.modules.sharpening, &s.modules.noise_reduction);
-    let changed = *sh != Sharpening::default() || *nr != NoiseReduction::default();
+    let ai = &s.modules.denoise_ai;
+    let changed = *sh != Sharpening::default()
+        || *nr != NoiseReduction::default()
+        || *ai != shoebox_develop::edit::DenoiseAi::default();
+    let raw = app
+        .develop
+        .ready
+        .as_ref()
+        .is_some_and(|r| r.src.referred == shoebox_develop::cpu::Referred::Scene);
     let reset = section(ui, "Detail", changed, false, |ui| {
         ui.weak("Best judged at 100% (Z).");
         ui.label(RichText::new("Sharpening").small().strong());
@@ -272,6 +280,9 @@ fn detail(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &Settings) {
                 }
             });
         ui.label(RichText::new("Noise reduction").small().strong());
+        if raw {
+            ai_denoise(app, ui, ai);
+        }
         egui::Grid::new("nr-grid").num_columns(2).show(ui, |ui| {
             if let Some(v) = slider(ui, "Luminance", nr.luminance, 0.0..=100.0, 0.0, 0) {
                 edit(app, "nr-lum", format!("Noise reduction {v:.0}"), |s| {
@@ -304,8 +315,57 @@ fn detail(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &Settings) {
         edit(app, "detail", "Reset detail".into(), |s| {
             s.modules.sharpening = Sharpening::default();
             s.modules.noise_reduction = NoiseReduction::default();
+            s.modules.denoise_ai = Default::default();
         });
     }
+}
+
+/// AI raw denoise: on or off, its strength, and how it's getting on.
+fn ai_denoise(app: &mut ShoeboxApp, ui: &mut egui::Ui, ai: &shoebox_develop::edit::DenoiseAi) {
+    let mut on = ai.enabled;
+    if ui
+        .checkbox(&mut on, "AI denoise")
+        .on_hover_text(
+            "Denoise and demosaic the raw data with RawNIND's model \
+             (Benoit Brummer, CC BY 4.0): best on high-ISO photos. \
+             Takes several seconds the first time; the photo shows as it was until then.",
+        )
+        .changed()
+    {
+        edit(
+            app,
+            "ai-on",
+            format!("AI denoise {}", if on { "on" } else { "off" }),
+            |s| s.modules.denoise_ai.enabled = on,
+        );
+    }
+    if !ai.enabled {
+        return;
+    }
+    let model = app.denoiser.clone();
+    if !model.ready() {
+        egui::Grid::new("ai-dl").num_columns(1).show(ui, |ui| {
+            crate::models::download_ui(
+                ui,
+                &model,
+                "the AI denoise model",
+                "RawNIND's UtNet2, once, from the authors' Google Drive; it runs on this Mac",
+            );
+        });
+        return;
+    }
+    if let Some(f) = app.develop.ai_progress {
+        ui.add(egui::ProgressBar::new(f).text("Denoising…"));
+    } else if let Some(e) = &app.develop.ai_error {
+        ui.weak(format!("AI denoise couldn't run: {e}"));
+    }
+    egui::Grid::new("ai-grid").num_columns(2).show(ui, |ui| {
+        if let Some(v) = slider(ui, "Strength", ai.strength, 0.0..=100.0, 100.0, 0) {
+            edit(app, "ai-strength", format!("AI denoise {v:.0}"), |s| {
+                s.modules.denoise_ai.strength = v;
+            });
+        }
+    });
 }
 
 /// Distortion, vignetting and chromatic aberration, from the camera's own

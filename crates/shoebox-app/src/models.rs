@@ -1,0 +1,165 @@
+//! Models Develop downloads when first asked for (the object model, AI raw
+//! denoise): pinned and checked by `shoebox_ml::download`, fetched on a
+//! thread of their own, their progress for the panel.
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+use shoebox_ml::download::Spec;
+
+/// Where a model's download is.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Fetch {
+    Idle,
+    /// Bytes so far of the whole.
+    Downloading(u64, u64),
+    Failed(String),
+}
+
+pub struct Model {
+    spec: &'static Spec,
+    pub dir: PathBuf,
+    staging: PathBuf,
+    fetch: Mutex<Fetch>,
+    /// Set when a download finishes (taken by [`Model::take_arrived`]).
+    arrived: AtomicBool,
+}
+
+impl Model {
+    pub fn new(spec: &'static Spec, dir: PathBuf, staging: PathBuf) -> Arc<Self> {
+        Arc::new(Self {
+            spec,
+            dir,
+            staging,
+            fetch: Mutex::new(Fetch::Idle),
+            arrived: AtomicBool::new(false),
+        })
+    }
+
+    /// Downloaded and ready to use.
+    pub fn ready(&self) -> bool {
+        self.spec.is_ready(&self.dir)
+    }
+
+    pub fn fetch_state(&self) -> Fetch {
+        self.fetch.lock().map_or(Fetch::Idle, |f| f.clone())
+    }
+
+    /// The download's size in bytes.
+    pub fn bytes(&self) -> u64 {
+        self.spec.bytes()
+    }
+
+    /// A download finished since last asked.
+    pub fn take_arrived(&self) -> bool {
+        self.arrived.swap(false, Ordering::SeqCst)
+    }
+
+    /// Start downloading (on its own thread).
+    pub fn download(self: &Arc<Self>, ctx: eframe::egui::Context) {
+        if matches!(self.fetch_state(), Fetch::Downloading(..)) || self.ready() {
+            return;
+        }
+        let total = self.bytes();
+        if let Ok(mut f) = self.fetch.lock() {
+            *f = Fetch::Downloading(0, total);
+        }
+        let me = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("model-download".into())
+            .spawn(move || {
+                let cancel = AtomicBool::new(false);
+                let r = shoebox_ml::download::fetch(
+                    me.spec,
+                    &me.dir,
+                    &me.staging,
+                    &|s| {
+                        if let shoebox_ml::download::Stage::Downloading { done } = s
+                            && let Ok(mut f) = me.fetch.lock()
+                        {
+                            *f = Fetch::Downloading(done, total);
+                            ctx.request_repaint();
+                        }
+                    },
+                    &cancel,
+                );
+                if let Ok(mut f) = me.fetch.lock() {
+                    *f = match r {
+                        Ok(()) => Fetch::Idle,
+                        Err(e) => Fetch::Failed(e.to_string()),
+                    };
+                }
+                me.arrived.store(true, Ordering::SeqCst);
+                ctx.request_repaint();
+            });
+        if let Err(e) = spawned
+            && let Ok(mut f) = self.fetch.lock()
+        {
+            *f = Fetch::Failed(e.to_string());
+        }
+    }
+}
+
+/// A download button, or its progress, for `model` (`what`: "the object
+/// model"); nothing once it's there.
+pub fn download_ui(ui: &mut eframe::egui::Ui, model: &Arc<Model>, what: &str, hint: &str) {
+    use eframe::egui;
+    if model.ready() {
+        return;
+    }
+    match model.fetch_state() {
+        Fetch::Downloading(done, total) => {
+            ui.add(
+                egui::ProgressBar::new(done as f32 / total.max(1) as f32)
+                    .text(format!("Downloading {what}…")),
+            );
+        }
+        state => {
+            if let Fetch::Failed(e) = state {
+                ui.weak(format!("Download failed: {e}"));
+                ui.end_row();
+            }
+            let mb = (model.bytes() / 1_000_000).max(1);
+            if ui
+                .button(format!("Download {what} ({mb} MB)"))
+                .on_hover_text(hint)
+                .clicked()
+            {
+                model.download(ui.ctx().clone());
+            }
+        }
+    }
+    ui.end_row();
+}
+
+/// AI raw denoise (RawNIND, `shoebox_ml::rawnind`): its model in `dir`
+/// (downloaded through `staging`), registered as Develop's denoiser and
+/// loaded on first use.
+pub fn register_denoiser(dir: PathBuf, staging: PathBuf) -> Arc<Model> {
+    let model = Model::new(&shoebox_ml::download::RAWNIND, dir, staging);
+    let net: Mutex<Option<shoebox_ml::rawnind::RawDenoiser>> = Mutex::new(None);
+    let m = model.clone();
+    shoebox_develop::denoise::register(
+        shoebox_ml::rawnind::MODEL_ID,
+        Box::new(move |packed, h, w, progress, cancel| {
+            if !m.ready() {
+                return Err("the AI denoise model isn't downloaded yet".into());
+            }
+            let mut net = net.lock().map_err(|e| e.to_string())?;
+            if net.is_none() {
+                let path = m.dir.join(shoebox_ml::rawnind::FILE);
+                *net = Some(
+                    shoebox_ml::rawnind::RawDenoiser::load(&path, &shoebox_ml::device())
+                        .map_err(|e| e.to_string())?,
+                );
+            }
+            let Some(n) = net.as_ref() else {
+                return Err("no AI denoise model".into());
+            };
+            n.denoise(packed, h, w, progress, cancel)
+                .map_err(|e| e.to_string())
+        }),
+    );
+    model
+}

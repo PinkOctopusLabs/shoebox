@@ -50,13 +50,59 @@ fn paths(tmp: &Path, roots: &[PathBuf]) -> AppPaths {
                 .map_or_else(|| tmp.join("data/models/sam"), PathBuf::from),
             tmp.join("cache/model-download"),
         ),
+        // The AI denoise model: a real one when SHOEBOX_RAWNIND_MODEL names
+        // it, else an empty folder.
+        denoise: (
+            std::env::var_os("SHOEBOX_RAWNIND_MODEL")
+                .map_or_else(|| tmp.join("data/models/rawnind"), PathBuf::from),
+            tmp.join("cache/model-download"),
+        ),
         people: tmp.join("data/people.json"),
         raw_cache: tmp.join("cache"),
         export_presets: tmp.join("data/export-presets.json"),
     }
 }
 
+/// At most this many apps at once (half the cores, at least four): every
+/// test runs a GPU renderer, worker threads and a library, and with all of
+/// them at once the slowest missed its timeouts.
+fn slots() -> usize {
+    std::thread::available_parallelism().map_or(4, |n| (n.get() / 2).max(4))
+}
+
+static RUNNING: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+static FREED: std::sync::Condvar = std::sync::Condvar::new();
+
+/// A running app's slot, given back when its test's thread ends.
+struct Slot;
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        *RUNNING.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+        FREED.notify_one();
+    }
+}
+
+thread_local! {
+    static SLOT: std::cell::RefCell<Option<Slot>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Wait for a slot (once per test).
+fn take_slot() {
+    if SLOT.with(|s| s.borrow().is_some()) {
+        return;
+    }
+    let mut n = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+    while *n >= slots() {
+        n = FREED.wait(n).unwrap_or_else(|e| e.into_inner());
+    }
+    *n += 1;
+    drop(n);
+    SLOT.with(|s| *s.borrow_mut() = Some(Slot));
+}
+
 fn harness<'a>(paths: AppPaths, size: egui::Vec2) -> Harness<'a, ShoeboxApp> {
+    take_slot();
     Harness::builder()
         .with_size(size)
         .wgpu()
@@ -4956,4 +5002,48 @@ fn develop_object_mask() {
     let (cover, _) = h.state().develop_mask_coverage();
     // The ball: π·110² of 640×480, about 0.12.
     assert!((cover - 0.124).abs() < 0.03, "{cover}");
+}
+
+/// AI denoise on a raw photo: without the model the panel offers it; with
+/// it (`SHOEBOX_RAWNIND_MODEL`), the denoised source arrives and the photo
+/// redraws.
+#[test]
+fn develop_ai_denoise() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    let dng = shoebox_fixtures::Dng::new(600, 400);
+    let bytes = dng.write(|x, y| 1500 + ((x * 7 + y * 13) % 600) as u16 * 15);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("DSC_0002.NEF"), &bytes).unwrap();
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let with_model = std::env::var_os("SHOEBOX_RAWNIND_MODEL").is_some();
+    let mut h = harness(p, egui::vec2(1400.0, 2600.0));
+    settle(&mut h, Duration::from_secs(60));
+    h.get_by_label("DSC_0002.NEF").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(30), "develop", |a| {
+        a.develop_ready()
+    });
+    h.run_steps(3);
+    h.get_by_label("Detail").click();
+    h.run_steps(2);
+    h.get_by_label("AI denoise").click();
+    h.run_steps(3);
+    let doc = h.state().develop_doc().unwrap();
+    assert!(doc.settings().modules.denoise_ai.enabled);
+    assert_eq!(doc.history().last().unwrap().label, "AI denoise on");
+    if !with_model {
+        assert!(
+            h.query_by_label_contains("Download the AI denoise model")
+                .is_some(),
+            "the download is offered"
+        );
+        return;
+    }
+    wait_for(&mut h, Duration::from_secs(60), "AI denoise", |a| {
+        let (arrived, _, err) = a.develop_ai();
+        assert!(err.is_none(), "{err:?}");
+        arrived
+    });
 }

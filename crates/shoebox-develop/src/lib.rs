@@ -8,6 +8,7 @@
 pub mod auto;
 pub mod colour;
 pub mod cpu;
+pub mod denoise;
 pub mod dng;
 pub mod edit;
 pub mod encode;
