@@ -15,6 +15,9 @@
 //!   regions and export.
 //! - A zoom keeps the corrected frame filled (no blank corners), folded into
 //!   the geometry map.
+//! - Volume deformation ([`crate::volume`]) is folded into the same grid:
+//!   a node holds where the lens put the point the deformation shows there,
+//!   so it costs the live pipe nothing more.
 
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -39,6 +42,8 @@ pub const GRID_STRIDE: usize = 7;
 
 /// Nodes across the long edge.
 const GRID_LONG: usize = 65;
+/// With faces made round (see [`crate::volume`]).
+const GRID_LONG_FACES: usize = 129;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Grid {
@@ -127,13 +132,31 @@ pub fn lenses_for(shot: &Shot) -> Vec<String> {
 /// `width`×`height`: the frame's size (its aspect and the normalisation).
 /// Kept, so a slider elsewhere doesn't recompute it.
 pub fn grid(shot: &Shot, lc: &LensCorrection, width: usize, height: usize) -> Option<Arc<Grid>> {
-    if !lc.enabled {
+    grid_with(shot, lc, None, width, height)
+}
+
+/// [`grid`] with volume deformation folded in (see [`crate::volume`]): each
+/// node holds where the lens put the point the deformation shows there.
+pub fn grid_with(
+    shot: &Shot,
+    lc: &LensCorrection,
+    volume: Option<&crate::volume::Spec>,
+    width: usize,
+    height: usize,
+) -> Option<Arc<Grid>> {
+    if !lc.enabled && volume.is_none() {
         return None;
     }
-    type Key = (Shot, LensCorrection, usize, usize);
+    type Key = (
+        Shot,
+        LensCorrection,
+        Option<crate::volume::Spec>,
+        usize,
+        usize,
+    );
     type Kept = Mutex<Vec<(Key, Option<Arc<Grid>>)>>;
     static KEPT: OnceLock<Kept> = OnceLock::new();
-    let key = (shot.clone(), lc.clone(), width, height);
+    let key = (shot.clone(), lc.clone(), volume.cloned(), width, height);
     let kept = KEPT.get_or_init(Default::default);
     if let Some((_, g)) = kept
         .lock()
@@ -143,7 +166,7 @@ pub fn grid(shot: &Shot, lc: &LensCorrection, width: usize, height: usize) -> Op
     {
         return g.clone();
     }
-    let g = make(shot, lc, width, height).map(Arc::new);
+    let g = make(shot, lc, volume, width, height).map(Arc::new);
     let mut list = kept.lock().unwrap_or_else(|e| e.into_inner());
     list.push((key, g.clone()));
     if list.len() > 8 {
@@ -152,7 +175,97 @@ pub fn grid(shot: &Shot, lc: &LensCorrection, width: usize, height: usize) -> Op
     g
 }
 
-fn make(shot: &Shot, lc: &LensCorrection, width: usize, height: usize) -> Option<Grid> {
+/// The camera's crop factor, when Lensfun knows the camera.
+pub fn crop_factor(shot: &Shot) -> Option<f32> {
+    if shot.model.is_empty() {
+        return None;
+    }
+    let db = lensfun()?;
+    camera(db, shot).map(|c| c.crop_factor)
+}
+
+/// The lens's corrections at any point of the frame.
+struct Model {
+    modifier: Option<(lensfun::Modifier, bool, bool, bool)>,
+    by_camera: (Option<[f64; 3]>, Option<[f64; 3]>),
+    centre: (f32, f32),
+    half_diag: f32,
+    amount_d: f32,
+    amount_v: f32,
+    distortion: bool,
+    chromatic: bool,
+    source: String,
+}
+
+impl Model {
+    /// Where red, green and blue come from for the corrected point
+    /// `(px, py)`, and the vignetting gain: `[rx, ry, gx, gy, bx, by, gain]`
+    /// in the frame's pixels.
+    fn at(&self, px: f32, py: f32) -> [f32; GRID_STRIDE] {
+        let (cx, cy) = self.centre;
+        let half_diag = self.half_diag;
+        // Where green comes from: the camera's model first, else Lensfun.
+        let (mut qx, mut qy) = (px, py);
+        if let Some(k) = self.by_camera.0 {
+            let r2 = ((px - cx).hypot(py - cy) / half_diag).powi(2);
+            let f = 1.0 + r2 * (k[0] as f32 + r2 * (k[1] as f32 + r2 * k[2] as f32));
+            (qx, qy) = (cx + (px - cx) * f, cy + (py - cy) * f);
+        } else if let Some((m, true, _, _)) = &self.modifier {
+            let mut c = [0f32; 2];
+            m.apply_geometry_distortion(px, py, 1, 1, &mut c);
+            (qx, qy) = (c[0], c[1]);
+        }
+        let amount_d = self.amount_d;
+        let (gx, gy) = (px + amount_d * (qx - px), py + amount_d * (qy - py));
+        // Red and blue relative to green (Lensfun's TCA, at full strength).
+        let (mut dr, mut db_) = ((0.0, 0.0), (0.0, 0.0));
+        if let Some((m, _, true, _)) = &self.modifier {
+            let mut c = [0f32; 6];
+            m.apply_subpixel_distortion(px, py, 1, 1, &mut c);
+            dr = (c[0] - c[2], c[1] - c[3]);
+            db_ = (c[4] - c[2], c[5] - c[3]);
+        }
+        // Vignetting, where the light fell on the sensor.
+        let gain = if let Some(v) = self.by_camera.1 {
+            let r2 = ((gx - cx).hypot(gy - cy) / half_diag).powi(2);
+            1.0 + r2 * (v[0] as f32 + r2 * (v[1] as f32 + r2 * v[2] as f32))
+        } else if let Some((m, _, _, true)) = &self.modifier {
+            // With `reverse` set, Lensfun's colour pass *simulates* the
+            // falloff (the opposite of its geometry passes): the
+            // correction is its reciprocal.
+            let mut p = [1.0f32];
+            m.apply_color_modification_f32(&mut p, gx, gy, 1, 1, 1);
+            1.0 / p[0].max(1e-3)
+        } else {
+            1.0
+        };
+        let gain = gain.max(1e-3).powf(self.amount_v);
+        [gx + dr.0, gy + dr.1, gx, gy, gx + db_.0, gy + db_.1, gain]
+    }
+
+    /// The corrected point whose green comes from raw point `p` (by fixed
+    /// point iteration: the corrections move a point little).
+    fn unlens(&self, p: [f64; 2]) -> [f64; 2] {
+        if !self.distortion {
+            return p;
+        }
+        let mut q = p;
+        for _ in 0..30 {
+            let n = self.at(q[0] as f32, q[1] as f32);
+            let e = [p[0] - f64::from(n[2]), p[1] - f64::from(n[3])];
+            q = [q[0] + e[0], q[1] + e[1]];
+            if e[0].hypot(e[1]) < 1e-3 {
+                break;
+            }
+        }
+        q
+    }
+}
+
+fn model(shot: &Shot, lc: &LensCorrection, width: usize, height: usize) -> Option<Model> {
+    if !lc.enabled {
+        return None;
+    }
     let (w, h) = (width.max(2) as f32, height.max(2) as f32);
     let db = lensfun();
     let lens = db.and_then(|db| find(db, shot, lc.lens.as_deref()));
@@ -184,81 +297,96 @@ fn make(shot: &Shot, lc: &LensCorrection, width: usize, height: usize) -> Option
         parts.push(format!("Lensfun: {}", l.model));
     }
     let (cx, cy) = ((w - 1.0) / 2.0, (h - 1.0) / 2.0);
-    let half_diag = cx.hypot(cy);
-    let amount_d = (lc.distortion / 100.0) as f32;
-    let amount_v = (lc.vignetting / 100.0) as f32;
-    let (cols, rows) = if w >= h {
-        (
-            GRID_LONG,
-            ((GRID_LONG - 1) as f32 * h / w).round() as usize + 1,
-        )
+    Some(Model {
+        modifier,
+        by_camera,
+        centre: (cx, cy),
+        half_diag: cx.hypot(cy),
+        amount_d: (lc.distortion / 100.0) as f32,
+        amount_v: (lc.vignetting / 100.0) as f32,
+        distortion,
+        chromatic,
+        source: parts.join(" + "),
+    })
+}
+
+fn make(
+    shot: &Shot,
+    lc: &LensCorrection,
+    volume: Option<&crate::volume::Spec>,
+    width: usize,
+    height: usize,
+) -> Option<Grid> {
+    let (w, h) = (width.max(2) as f32, height.max(2) as f32);
+    let lens = model(shot, lc, width, height);
+    let deform = volume.map(|spec| {
+        let (f, _) = crate::volume::focal_px(shot, width, height);
+        crate::volume::Deform::new(spec, f, width, height, |p| {
+            lens.as_ref().map_or(p, |l| l.unlens(p))
+        })
+    });
+    if lens.is_none() && deform.is_none() {
+        return None;
+    }
+    // Faces bend within a few faces' widths: a finer mesh for them.
+    let long = if deform.as_ref().is_some_and(|d| d.has_faces()) {
+        GRID_LONG_FACES
     } else {
-        (
-            ((GRID_LONG - 1) as f32 * w / h).round() as usize + 1,
-            GRID_LONG,
-        )
+        GRID_LONG
+    };
+    let (cols, rows) = if w >= h {
+        (long, ((long - 1) as f32 * h / w).round() as usize + 1)
+    } else {
+        (((long - 1) as f32 * w / h).round() as usize + 1, long)
     };
     let mut data = Vec::with_capacity(cols * rows * GRID_STRIDE);
     for j in 0..rows {
         for i in 0..cols {
             let px = i as f32 / (cols - 1) as f32 * (w - 1.0);
             let py = j as f32 / (rows - 1) as f32 * (h - 1.0);
-            // Where green comes from: the camera's model first, else Lensfun.
-            let (mut qx, mut qy) = (px, py);
-            if let Some(k) = by_camera.0 {
-                let r2 = ((px - cx).hypot(py - cy) / half_diag).powi(2);
-                let f = 1.0 + r2 * (k[0] as f32 + r2 * (k[1] as f32 + r2 * k[2] as f32));
-                (qx, qy) = (cx + (px - cx) * f, cy + (py - cy) * f);
-            } else if let Some((m, true, _, _)) = &modifier {
-                let mut c = [0f32; 2];
-                m.apply_geometry_distortion(px, py, 1, 1, &mut c);
-                (qx, qy) = (c[0], c[1]);
-            }
-            let (gx, gy) = (px + amount_d * (qx - px), py + amount_d * (qy - py));
-            // Red and blue relative to green (Lensfun's TCA, at full strength).
-            let (mut dr, mut db_) = ((0.0, 0.0), (0.0, 0.0));
-            if let Some((m, _, true, _)) = &modifier {
-                let mut c = [0f32; 6];
-                m.apply_subpixel_distortion(px, py, 1, 1, &mut c);
-                dr = (c[0] - c[2], c[1] - c[3]);
-                db_ = (c[4] - c[2], c[5] - c[3]);
-            }
-            // Vignetting, where the light fell on the sensor.
-            let gain = if let Some(v) = by_camera.1 {
-                let r2 = ((gx - cx).hypot(gy - cy) / half_diag).powi(2);
-                1.0 + r2 * (v[0] as f32 + r2 * (v[1] as f32 + r2 * v[2] as f32))
-            } else if let Some((m, _, _, true)) = &modifier {
-                // With `reverse` set, Lensfun's colour pass *simulates* the
-                // falloff (the opposite of its geometry passes): the
-                // correction is its reciprocal.
-                let mut p = [1.0f32];
-                m.apply_color_modification_f32(&mut p, gx, gy, 1, 1, 1);
-                1.0 / p[0].max(1e-3)
-            } else {
-                1.0
+            // The lens-corrected point shown here.
+            let (rx, ry) = match &deform {
+                Some(d) => {
+                    let r = d.inverse([f64::from(px), f64::from(py)]);
+                    (r[0] as f32, r[1] as f32)
+                }
+                None => (px, py),
             };
-            let gain = gain.max(1e-3).powf(amount_v);
+            let n = match &lens {
+                Some(l) => l.at(rx, ry),
+                None => [rx, ry, rx, ry, rx, ry, 1.0],
+            };
             data.extend([
-                (gx + dr.0 - px) / w,
-                (gy + dr.1 - py) / h,
-                (gx - px) / w,
-                (gy - py) / h,
-                (gx + db_.0 - px) / w,
-                (gy + db_.1 - py) / h,
-                gain,
+                (n[0] - px) / w,
+                (n[1] - py) / h,
+                (n[2] - px) / w,
+                (n[3] - py) / h,
+                (n[4] - px) / w,
+                (n[5] - py) / h,
+                n[6],
             ]);
         }
+    }
+    let mut source = lens.as_ref().map(|l| l.source.clone()).unwrap_or_default();
+    if deform.is_some() {
+        if !source.is_empty() {
+            source.push_str(" + ");
+        }
+        source.push_str("volume deformation");
     }
     let mut grid = Grid {
         cols,
         rows,
         data,
         zoom: 1.0,
-        chromatic,
-        source: parts.join(" + "),
+        chromatic: lens.as_ref().is_some_and(|l| l.chromatic),
+        source,
     };
-    if distortion || chromatic {
-        grid.zoom = fill_zoom(&grid, w, h);
+    // The deformation draws the edges in further than any lens: more room.
+    if deform.is_some() {
+        grid.zoom = fill_zoom(&grid, w, h, 4.0);
+    } else if lens.as_ref().is_some_and(|l| l.distortion || l.chromatic) {
+        grid.zoom = fill_zoom(&grid, w, h, 2.0);
     }
     Some(grid)
 }
@@ -266,7 +394,7 @@ fn make(shot: &Shot, lc: &LensCorrection, width: usize, height: usize) -> Option
 /// The zoom (about the centre) at which every edge point of the corrected
 /// frame still comes from inside the raw: as far out as possible without
 /// blank corners.
-fn fill_zoom(g: &Grid, w: f32, h: f32) -> f32 {
+fn fill_zoom(g: &Grid, w: f32, h: f32, most: f32) -> f32 {
     let (cx, cy) = ((w - 1.0) / 2.0, (h - 1.0) / 2.0);
     let edge: Vec<(f32, f32)> = (0..=64)
         .flat_map(|k| {
@@ -292,7 +420,7 @@ fn fill_zoom(g: &Grid, w: f32, h: f32) -> f32 {
             })
         })
     };
-    let (mut lo, mut hi) = (0.5f32, 2.0f32);
+    let (mut lo, mut hi) = (0.5f32, most);
     if !inside(hi) {
         return 1.0;
     }

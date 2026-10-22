@@ -994,15 +994,28 @@ pub fn frame(raw: &RawImage, src: &Demosaiced, s: &Settings, o: &Options) -> Fra
     let dcp = dcp.and_then(|d| crate::dcp::Stage::new(d, temp, gain));
     let (mut map, width, height) =
         geometry_map(src.rgb.width, src.rgb.height, o.orientation, &s.geometry);
-    // Lens corrections, on the frame's own aspect; their zoom keeps the
-    // corrected frame filled.
-    let lens = src.lens.as_ref().and_then(|shot| {
+    // Lens corrections and volume deformation, on the frame's own aspect;
+    // their zoom keeps the corrected frame filled.
+    let volume = crate::volume::Spec::of(
+        &s.geometry.volume,
+        compose_orientation(o.orientation, s.geometry.quarter, s.geometry.flip),
+    );
+    let lens = {
         let (w, h) = match src.referred {
             Referred::Scene if raw.width > 0 => (raw.width, raw.height),
             _ => (src.rgb.width, src.rgb.height),
         };
-        crate::lens::grid(shot, &s.modules.lens, w, h)
-    });
+        match &src.lens {
+            Some(shot) => crate::lens::grid_with(shot, &s.modules.lens, volume.as_ref(), w, h),
+            None => volume.as_ref().and_then(|v| {
+                let off = crate::edit::LensCorrection {
+                    enabled: false,
+                    ..Default::default()
+                };
+                crate::lens::grid_with(&Default::default(), &off, Some(v), w, h)
+            }),
+        }
+    };
     if let Some(g) = &lens {
         let z = f64::from(g.zoom);
         let c = [
@@ -1094,6 +1107,31 @@ impl Frame {
             (m[0][0] * x + m[0][1] * y + m[0][2]) / w,
             (m[1][0] * x + m[1][1] * y + m[1][2]) / w,
         )
+    }
+
+    /// The source position before lens corrections (and volume
+    /// deformation) that shows source pixel `(sx, sy)`: the lens grid
+    /// undone (by iteration), so a point found in the source (a face) can
+    /// be drawn where it shows.
+    pub fn unlensed(&self, w: usize, h: usize, sx: f32, sy: f32) -> (f32, f32) {
+        let Some(g) = self.lens.as_deref() else {
+            return (sx, sy);
+        };
+        let (w, h) = (w.max(2) as f32, h.max(2) as f32);
+        let (mut px, mut py) = (sx, sy);
+        for _ in 0..50 {
+            let n = g.at(
+                px / (w - 1.0) * (g.cols - 1) as f32,
+                py / (h - 1.0) * (g.rows - 1) as f32,
+            );
+            let (ex, ey) = (sx - (px + n[2] * w), sy - (py + n[3] * h));
+            px += ex;
+            py += ey;
+            if ex.hypot(ey) < 1e-3 {
+                break;
+            }
+        }
+        (px, py)
     }
 
     /// Just the part `[x, y, width, height]` of this frame (clamped to it):

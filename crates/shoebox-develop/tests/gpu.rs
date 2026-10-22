@@ -299,6 +299,19 @@ fn gpu_matches_the_cpu_reference() {
     cases.push(("lens corrections", s.clone(), o));
     s.geometry.rotate = 2.0;
     cases.push(("lens corrections, rotated", s, o));
+    // Volume deformation rides on the lens grid: with and without lens
+    // corrections, and with a face (a finer grid).
+    let mut s = base.clone();
+    s.geometry.volume.mode = shoebox_develop::edit::VolumeMode::Spherical;
+    s.geometry.volume.amount = 70.0;
+    cases.push(("volume deformation", s.clone(), o));
+    s.geometry.volume.faces = true;
+    s.geometry.volume.boxes = vec![[0.7, 0.45, 0.85, 0.6]];
+    cases.push(("volume deformation with a face", s, o));
+    let mut s = base.clone();
+    s.modules.lens.enabled = true;
+    s.geometry.volume.mode = shoebox_develop::edit::VolumeMode::Horizontal;
+    cases.push(("lens corrections and volume deformation", s, o));
 
     for (name, s, o) in &cases {
         let src = if name.starts_with("lens") {
@@ -334,7 +347,14 @@ fn gpu_matches_the_cpu_reference() {
             // A rotated sample position differs by float rounding (the GPU
             // fuses the map's multiply-adds), and a checkerboard edge
             // amplifies that: 1e-3 there, a quarter of an 8-bit step.
-            let tolerance = if s.geometry.rotate != 0.0 || !s.geometry.transform.is_identity() {
+            // Volume deformation moves sample positions as much off the
+            // pixel grid: within 1e-4 (2e-6 measured) in scene values, but
+            // the display curve's toe magnifies the rounding on the dark
+            // saturated ramp (2e-4 measured).
+            let tolerance = if s.geometry.rotate != 0.0
+                || !s.geometry.transform.is_identity()
+                || (display && s.geometry.volume.is_active())
+            {
                 1e-3
             } else {
                 1e-4

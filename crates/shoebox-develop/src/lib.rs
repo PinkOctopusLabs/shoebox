@@ -24,6 +24,7 @@ pub mod overlay;
 pub mod preset;
 pub mod profile;
 pub mod upright;
+pub mod volume;
 pub mod wb;
 
 use std::path::PathBuf;

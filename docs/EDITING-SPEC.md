@@ -390,6 +390,7 @@ Lens corrections come from the Lensfun database through a pure-Rust crate. All g
 - **Model:** a 3 × 3 homography from rotation, vertical and horizontal keystone, and a scale that keeps the frame filled. Plus a crop rectangle and aspect lock.
 - **Auto-upright (ViewPoint replacement):** detect line segments with LSD on the proxy's luminance and classify them as near-vertical or near-horizontal. Then solve for the homography that makes them vertical or horizontal. "Guided" mode lets the user draw 2–4 lines that must become straight.
 - **Volume deformation** (ViewPoint's wide-angle face stretch fix) is a Phase 4 nice-to-have.
+  As built (2026-10-22, DECISIONS "Volume deformation"): Cylindrical (horizontal or vertical) or Spherical towards cylindrical or stereographic by Amount, from the EXIF focal length and crop factor; Fix faces makes faces Vision found round where they are (a stereographic patch per face, feathered; Shih et al. 2019 simplified), their boxes kept in the edit. Folded into the lens grid after lens corrections and before the perspective, so it adds no resample; the lens grid's fill zoom keeps the frame filled.
 - **Resampling:** bilinear for the proxy; Lanczos-3 for 100% zoom and export. Distortion, homography and crop compose into one per-pixel lookup.
 
 ## Local adjustments

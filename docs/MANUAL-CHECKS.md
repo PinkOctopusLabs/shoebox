@@ -209,6 +209,22 @@ together at the end, before the release.
   an empty Sky mask; a photo turned 90° works. Note the time to the
   first part on a new photo, and that a second part of it is immediate.
 
+### Wide-angle face fix
+
+- [ ] **Volume deformation** (from 2026-10-22) on real wide photos: a
+  14–20 mm group photo with faces at the edges and corners, a 24 mm
+  street scene with buildings at the sides, and a portrait-orientation
+  wide shot. Spherical at 100% makes corner faces and round things round
+  without the centre changing; Cylindrical (horizontal) keeps the
+  buildings' verticals straight; Fix faces finds every face (note any
+  missed or false ones), makes edge faces look natural, and leaves door
+  frames, horizons and walls away from faces straight (note any bend
+  where a line passes near a face). Compare with the camera's or
+  ViewPoint's output if there is one (no licensed editors needed: judge
+  against the subject). Check the zoom it takes to stay filled is
+  acceptable, a 100% region and a full-size export match the view, and
+  the field of view shown matches the lens.
+
 ### Colour: DCP profiles, calibration and looks
 
 - [ ] **A ColorChecker DCP with dcamprof, mean ΔE2000 ≤ 3** (the spec's

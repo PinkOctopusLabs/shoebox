@@ -152,6 +152,8 @@ pub struct State {
     pub spots: super::spots::Tool,
     /// Smart Lighting's spot: its box shown, and a face search.
     pub smart: super::smart::Tool,
+    /// Volume deformation: its faces shown, and a face search.
+    pub volume: super::volume::Tool,
     /// The frame the edit was last rendered with (handles are placed
     /// through it).
     pub(super) frame: Option<Frame>,
@@ -212,6 +214,12 @@ impl State {
         let m = self.frame.as_ref()?.layers.masks.as_ref()?;
         let n = m.width * m.height;
         m.data.get(k * n..(k + 1) * n)
+    }
+
+    /// The last render's lens grid zoom (lens corrections, volume
+    /// deformation), if it had one (tests).
+    pub fn lens_zoom(&self) -> Option<f32> {
+        self.frame.as_ref()?.lens.as_ref().map(|g| g.zoom)
     }
 
     /// The local adjustment layers in the last render (tests).
@@ -1038,6 +1046,8 @@ fn original_settings(doc: &EditDoc) -> Settings {
         geometry: s.geometry.clone(),
         ..Default::default()
     };
+    // Volume deformation is an adjustment, to compare like the rest.
+    o.geometry.volume = Default::default();
     o.modules.raw = s.modules.raw.clone();
     o
 }
@@ -1311,6 +1321,7 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
     render(app, &ctx, gpu);
     tick_saving(app, &ctx);
     super::smart::poll(app);
+    super::volume::poll(app);
 
     let rect = ui.available_rect_before_wrap();
     let resp = ui.allocate_rect(rect, egui::Sense::click_and_drag());
@@ -1539,6 +1550,7 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
         super::point_colour::on_photo(app, ui, &resp, target);
         super::spots::on_photo(app, ui, &resp, &painter, target);
         super::smart::on_photo(app, ui, &resp, &painter, target);
+        super::volume::on_photo(app, &painter, target);
     }
     // Guided upright: the guides over the photo, as it is before rotation
     // and perspective.
@@ -2462,10 +2474,15 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 // Geometry: crop, and rotation (with the largest crop that
                 // stays inside).
                 let g = &s.geometry;
+                // Volume deformation has a section (and a Reset) of its own.
+                let framed = shoebox_develop::edit::Geometry {
+                    volume: g.volume.clone(),
+                    ..defaults.geometry.clone()
+                };
                 let reset = super::look::section(
                     ui,
                     "Crop & rotate",
-                    *g != defaults.geometry,
+                    *g != framed,
                     true,
                     |ui| {
                         ui.horizontal(|ui| {
@@ -2521,7 +2538,10 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 );
                 if reset {
                     edit(app, "rotate", "Reset rotation".into(), |s| {
-                        s.geometry = Default::default()
+                        s.geometry = shoebox_develop::edit::Geometry {
+                            volume: std::mem::take(&mut s.geometry.volume),
+                            ..Default::default()
+                        }
                     });
                 }
 

@@ -22,6 +22,7 @@ pub mod smart;
 pub mod spots;
 pub mod survey;
 pub mod timeline;
+pub mod volume;
 
 use eframe::egui::{self, Color32, Rect, Stroke, StrokeKind, pos2, vec2};
 

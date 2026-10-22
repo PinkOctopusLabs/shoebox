@@ -112,7 +112,13 @@ impl Part {
                 &["modules", "denoise_ai"],
             ],
             Part::Lens => &[&["modules", "lens"], &["modules", "defringe"]],
-            Part::Transform => &[&["geometry", "transform"]],
+            Part::Transform => &[
+                &["geometry", "transform"],
+                // Volume deformation's projection, which suits a lens, not
+                // its faces, which are this photo's.
+                &["geometry", "volume", "mode"],
+                &["geometry", "volume", "amount"],
+            ],
             Part::Crop => &[
                 &["geometry", "quarter"],
                 &["geometry", "flip"],

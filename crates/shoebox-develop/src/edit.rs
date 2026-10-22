@@ -758,6 +758,8 @@ pub struct Geometry {
     /// Kept so they can be shown and moved again; the rotation and
     /// perspective they gave are stored as ever.
     pub guides: Vec<[[f64; 2]; 2]>,
+    /// The wide-angle fix (see [`Volume`]), before the perspective.
+    pub volume: Volume,
 }
 
 impl Default for Geometry {
@@ -770,6 +772,81 @@ impl Default for Geometry {
             aspect: "free".into(),
             transform: Transform::default(),
             guides: Vec::new(),
+            volume: Volume::default(),
+        }
+    }
+}
+
+/// Volume deformation (EDITING-SPEC, Optics and geometry; ViewPoint's
+/// wide-angle fix): a wide lens's rectilinear picture stretches what's near
+/// the edges and corners. A projection that bends less (`mode`, by
+/// `amount`), and round faces where they were found (`faces`), folded into
+/// the lens corrections' grid (`crate::volume`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Volume {
+    pub mode: VolumeMode,
+    /// How far towards the mode's projection, 0–100 (%).
+    pub amount: f64,
+    /// Faces made round where they are, the rest left rectilinear.
+    pub faces: bool,
+    /// How much, 0–100 (%).
+    pub face_amount: f64,
+    /// The faces found (`[x0, y0, x1, y1]` in the stored image, in units
+    /// of its long edge, as Smart Lighting's spot), kept so a render never
+    /// needs the face finder.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub boxes: Vec<[f64; 4]>,
+}
+
+impl Default for Volume {
+    fn default() -> Self {
+        Self {
+            mode: VolumeMode::Off,
+            amount: 100.0,
+            faces: false,
+            face_amount: 100.0,
+            boxes: Vec::new(),
+        }
+    }
+}
+
+impl Volume {
+    /// Anything to do.
+    pub fn is_active(&self) -> bool {
+        (self.mode != VolumeMode::Off && self.amount > 0.0)
+            || (self.faces && self.face_amount > 0.0 && !self.boxes.is_empty())
+    }
+}
+
+/// The projection volume deformation bends towards: cylindrical across
+/// (verticals stay vertical; what's at the left and right edges keeps its
+/// width) or down (the same, turned), or stereographic (round everywhere;
+/// lines through the centre stay straight).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VolumeMode {
+    #[default]
+    Off,
+    Horizontal,
+    Vertical,
+    Spherical,
+}
+
+impl VolumeMode {
+    pub const ALL: [VolumeMode; 4] = [
+        VolumeMode::Off,
+        VolumeMode::Horizontal,
+        VolumeMode::Vertical,
+        VolumeMode::Spherical,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            VolumeMode::Off => "Off",
+            VolumeMode::Horizontal => "Cylindrical (horizontal)",
+            VolumeMode::Vertical => "Cylindrical (vertical)",
+            VolumeMode::Spherical => "Spherical",
         }
     }
 }

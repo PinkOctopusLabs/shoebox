@@ -79,7 +79,7 @@ const LONG: usize = 1024;
 
 /// The lines of the photo as `s` frames it before any rotation or
 /// perspective: upright (orientation, quarter turns, mirror) and with its
-/// lens corrections.
+/// lens corrections and volume deformation.
 pub fn analyse(
     raw: &shoebox_decode::raw::RawImage,
     src: &Demosaiced,
@@ -106,6 +106,8 @@ pub fn analyse(
         geometry: Geometry {
             quarter: s.geometry.quarter,
             flip: s.geometry.flip,
+            // The perspective acts on the deformed picture.
+            volume: s.geometry.volume.clone(),
             ..Default::default()
         },
         ..Default::default()

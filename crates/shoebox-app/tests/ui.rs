@@ -5796,3 +5796,78 @@ fn develop_effects() {
             .starts_with("Vignette roundness")
     );
 }
+
+/// Volume deformation: Spherical folds into the render's lens grid (zoomed
+/// to stay filled) as one step; Fix faces looks for faces on a thread
+/// (none in this scene, and it says so); Reset takes it all away.
+#[test]
+fn develop_volume_deformation() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(&root).unwrap();
+    let img = shoebox_fixtures::scene(9, 800, 600);
+    std::fs::write(
+        root.join("wide.jpg"),
+        shoebox_fixtures::jpeg(&img, 92).unwrap(),
+    )
+    .unwrap();
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let mut h = harness(p, egui::vec2(1400.0, 2600.0));
+    settle(&mut h, Duration::from_secs(60));
+    h.get_by_label("wide.jpg").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(30), "develop", |a| {
+        a.develop_ready()
+    });
+    h.run_steps(3);
+    let volume = |h: &Harness<'_, ShoeboxApp>| {
+        h.state()
+            .develop_doc()
+            .unwrap()
+            .settings()
+            .geometry
+            .volume
+            .clone()
+    };
+    let last = |h: &Harness<'_, ShoeboxApp>| {
+        let doc = h.state().develop_doc().unwrap();
+        doc.history().last().map(|s| s.label.clone())
+    };
+    h.get_by_label("Volume deformation").click();
+    h.run_steps(2);
+    h.get_by_label("Spherical").click();
+    h.run_steps(3);
+    assert_eq!(
+        volume(&h).mode,
+        shoebox_develop::edit::VolumeMode::Spherical
+    );
+    assert_eq!(last(&h).as_deref(), Some("Volume deformation: Spherical"));
+    wait_for(
+        &mut h,
+        Duration::from_secs(30),
+        "the deformed render",
+        |a| a.develop_volume().3.is_some_and(|z| z > 1.01),
+    );
+    snapshot(&mut h, "develop-volume");
+
+    h.get_by_label("Fix faces").click();
+    h.run_steps(2);
+    assert!(volume(&h).faces);
+    wait_for(&mut h, Duration::from_secs(30), "the face search", |a| {
+        !a.develop_volume().1
+    });
+    h.run_steps(2);
+    assert!(h.state().develop_volume().2.is_some(), "it says none");
+    assert!(volume(&h).boxes.is_empty());
+
+    // The section's own Reset (on its header's line).
+    let header = h.get_by_label("Volume deformation").rect();
+    h.get_all_by_label("Reset")
+        .find(|n| (n.rect().center().y - header.center().y).abs() < 10.0)
+        .expect("the section's Reset")
+        .click();
+    h.run_steps(3);
+    assert_eq!(volume(&h), shoebox_develop::edit::Volume::default());
+    assert_eq!(last(&h).as_deref(), Some("Reset volume deformation"));
+}

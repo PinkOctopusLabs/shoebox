@@ -1051,6 +1051,18 @@ impl ShoeboxApp {
         (t.editing, t.searching(), t.message.clone())
     }
 
+    /// Develop's volume deformation: faces shown, a face search running,
+    /// what it said, and the last render's lens grid zoom (tests).
+    pub fn develop_volume(&self) -> (bool, bool, Option<String>, Option<f32>) {
+        let t = &self.develop.volume;
+        (
+            t.show,
+            t.searching(),
+            t.message.clone(),
+            self.develop.lens_zoom(),
+        )
+    }
+
     /// Develop's reference photo's file name (tests).
     pub fn develop_reference(&self) -> Option<String> {
         let i = self.index(self.develop.reference?)?;

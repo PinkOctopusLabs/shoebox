@@ -62,6 +62,7 @@ pub fn modules(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &Settings) {
     lens(app, ui, &s.modules.lens);
     defringe(app, ui, &s.modules.defringe);
     transform(app, ui, &s.geometry.transform);
+    super::volume::section(app, ui, &s.geometry.volume);
     black_and_white(app, ui, &s.modules.black_and_white);
     calibration(app, ui, &s.modules.calibration);
     effects(app, ui, &s.modules.effects);

@@ -2918,3 +2918,85 @@ presets.
   own linear DNGs open in Develop as raws past demosaic and AI denoise),
   and both formats can then be exported beside the original. Lifts the
   folder-only rule in "AVIF and linear DNG export".
+
+## Volume deformation (2026-10-22)
+
+ViewPoint's wide-angle fix (EDITING-SPEC, Optics and geometry), in
+`shoebox_develop::volume`.
+
+- **Settings:** `geometry.volume`: `mode` (off, horizontal, vertical,
+  spherical), `amount` (0–100, default 100), `faces` (Fix faces),
+  `face_amount` (0–100, default 100) and `boxes` (faces found, in the
+  stored image in long-edge units, as Smart Lighting's spot). Off by
+  default and stored as differences, so old edits are unchanged and
+  render exactly as before (no grid). Everything, boxes included, is in
+  the render hash: unlike guided upright's guides, the boxes decide the
+  render. At most 64 boxes count, and non-finite or inside-out ones are
+  skipped (an edit is JSON anyone could write).
+- **How wide:** the focal length in pixels from EXIF focal length × the
+  camera's crop factor (Lensfun's) over full frame's 43.27 mm diagonal. A
+  camera Lensfun doesn't know is full frame from 10 mm up; under 10 mm
+  (a phone or compact, sensor unknown) or no focal length, a 24 mm
+  equivalent (84° diagonal). Never wider than 150° diagonal. The panel
+  shows the field of view used.
+- **Global maps** (normalised `x = (p − c)/f`, so `|x| = tan θ`; the
+  centre keeps its place and scale, lines through it stay straight):
+  - Spherical: radius `(1 − a)·tan θ + a·2 tan(θ/2)`: stereographic at
+    100%, conformal, so a disc anywhere comes out round.
+  - Cylindrical: across the upright frame `u' = (1 − a)u + a·atan u`,
+    down `v' = v·((1 − a) + a·cos atan u)`: verticals stay vertical, what's
+    at the sides keeps its shape on the axis. Vertical is the same turned.
+    "Horizontal" follows the upright frame (file orientation and the
+    edit's turns: 5–8 swap the stored axes).
+  - Inverted by bisection on the radius (or the bending coordinate):
+    both are monotonic, bounded by the stereographic and `(1 − a)` limits.
+- **Faces:** Shih, Lai and Liang (SIGGRAPH 2019) simplified. Per face, the
+  stereographic projection moved and scaled by a similarity so the face
+  keeps its centre (where the global map puts it) and its area: the
+  similarity nearest the Jacobian of global ∘ inverse-stereographic at the
+  face, scaled to its determinant. Its weight is whole within 0.75 × the
+  box's longer side (the head, not just eyes to chin) and smoothsteps to
+  nothing by 2.5 times that; overlapping weights are normalised to sum
+  at most 1. Outside the feather nothing moves, so straight lines away
+  from faces stay straight; lines crossing a feather bend a little (Shih
+  et al.'s line and smoothness terms, solved over one mesh, would
+  spread that; not done). The forward map is inverted per node by Newton
+  from the global inverse. Boxes are found in the source (before lens
+  corrections), so each centre is taken back through the lens model by
+  fixed-point iteration before use.
+- **Where:** after lens corrections, before the Transform's perspective
+  (the projections are about the optical centre of a rectilinear picture,
+  which the perspective moves), folded into the lens grid: each node holds
+  where the lens put the point the deformation shows there, so the live
+  pipe still makes one resample and the shader is unchanged. The grid is
+  65 nodes on the long edge as before, 129 with faces (a face's feather
+  spans a few cells). A photo with no lens data gets a grid with no lens
+  part. CPU/GPU agree within 1e-4 in scene values (2e-6 measured); on
+  display values the gpu test allows 1e-3, as for rotation (2e-4 measured,
+  the display toe magnifying position rounding on a dark saturated ramp).
+- **Filled:** the lens grid's fill zoom covers the deformation too
+  (searched up to 4× instead of 2×), so the frame stays filled; Spherical
+  at 100% on a 24 mm equivalent zooms 1.17× (a face near a corner,
+  1.01×). No option to keep
+  the blank corners.
+- **Masks and spots:** read at the geometry map's position before the lens
+  grid, as before, which is now also before the deformation: they stay
+  where they were drawn on screen, and content moves under them when the
+  deformation changes (as with lens corrections). AI masks and spots were
+  already in source coordinates read at that position; near the corners of
+  a strongly deformed wide photo they can sit off what they covered, so
+  draw them after setting the deformation. Faces' boxes are drawn where
+  they show (`Frame::unlensed` undoes the grid).
+- **Auto-upright** analyses the picture with the deformation (the
+  perspective acts on it); Cylindrical keeps the verticals it needs.
+- **Presets and copied settings:** the Transform part carries the mode and
+  Amount (they suit a lens and a scene); Fix faces, its amount and boxes
+  stay with their photo, as Smart Lighting's spot does. Crop & rotate's
+  Reset leaves the deformation alone (it has its own section and Reset);
+  the Original view shows it undone, to compare.
+- **Panel:** a "Volume deformation" section after Transform: field of
+  view, Off / Cylindrical (horizontal) / Cylindrical (vertical) /
+  Spherical, Amount, Fix faces (looks for faces on a thread when first
+  ticked, Find again, Show faces draws their boxes, Face fix). History:
+  "Volume deformation: Spherical", "Volume amount 60%", "Fix faces on",
+  "Faces found: 2", "Face fix 80%", "Reset volume deformation".
