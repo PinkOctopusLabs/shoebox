@@ -136,6 +136,14 @@ Culling marks go into XMP; file changes always move whole stacks, sidecars inclu
 
 **Batch rename** uses the same template engine and dry-run table, inside or across folders.
 
+**Photo merges** (EDITING-SPEC, Phase 4 additions)
+
+- **Merge to HDR…** in the photo menu (Ctrl+H) merges 2–9 bracketed raw photos into one new raw photo, a floating-point DNG. Panorama and focus stacking will follow the same way.
+- The dialog is the dry run: it lists the photos (with each one's exposure), the options, why they can't be merged if they can't (not raw, a reference folder, cloud-only, different sizes or cameras), and the one file it will write: `<first photo's name>-HDR.dng` beside the first photo, `-1`, `-2` if that's taken.
+- The merge runs in the background (progress and Stop in the status bar). The file is added as one journaled batch, verified, never replacing anything; ⌘Z sends it to the Trash. The photos merged are only read, never changed or moved, and merges aren't made from or into reference folders.
+- The result is a photo of its own: it isn't stacked with its sources and is never suggested as their duplicate. Its Info panel lists what it was made from, and a source's lists the merges made from it. The record is in the DNG's XMP and in `<root>/.shoebox/merges.json`, which Shoebox's moves keep up to date.
+- Its edit starts from the defaults; it opens in Develop as a raw past demosaic.
+
 **Cloud drives**
 
 Google Drive (streaming), iCloud Drive (Optimise Mac Storage), Dropbox and OneDrive (online-only) leave placeholders for files that are in the cloud only; macOS marks them `SF_DATALESS`, and reading one downloads it. Shoebox never reads one by itself:
@@ -303,6 +311,7 @@ Shortcuts follow Lightroom wherever one exists, so existing muscle memory carrie
 | Z or Space | In Develop: fit / 100% (drag or scroll to pan; double-click zooms there) |
 | Cmd+[ / Cmd+] | In Develop: rotate left / right |
 | Shift+Cmd+E / Opt+Shift+Cmd+E | Export… / export again with the last presets |
+| Ctrl+H | Merge to HDR… (the selection) |
 
 ## Milestones
 

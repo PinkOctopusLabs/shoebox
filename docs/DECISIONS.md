@@ -3427,3 +3427,236 @@ Vision's subject by default instead of the nearest tenth.
   floating-point sample format), so HDR keeps values past the sensor's
   white; Shoebox writes it itself rather than through rawler's integer
   writer. Its edit starts from defaults.
+
+## Photo merges: groundwork (2026-10-22)
+
+What HDR, panorama and focus stacking share, in `shoebox_develop::merge`
+(the pixels), `shoebox_core::merges` and `FileOps::add_merge` (the
+library), and the app's `merge` and `views::merge`.
+
+**Sources** (`merge::load`).
+
+- Raw files only: a NEF (a High efficiency one through its converted DNG,
+  as Develop does), a camera DNG, or a linear DNG (Shoebox's exports and
+  merges, already linear). A JPEG or TIFF is refused: its tone curve
+  makes it non-linear, and HDR needs the sensor's range anyway.
+- Each is decoded and demosaiced at the **code defaults** (RCD, inpaint
+  opposed, no hot pixels, the camera's black and white), not at the
+  edit's raw settings, and **without AI denoise**: a merge is a new raw,
+  averaging frames already lowers the noise, and AI denoise on each
+  source would add minutes. The as-shot balance is undone, so pixels are
+  camera-native linear with the sensor's white at 1.0, as in a linear
+  DNG export; then turned upright.
+- Pixels the sensor clipped are marked: any photosite at or above 0.98
+  of white within two pixels (demosaic spreads them).
+- EXIF comes from rawler's reading of the file (exposure time, f-number,
+  ISO; and everything copied into the result).
+- **Lens corrections aren't applied** before merging, nor baked into the
+  result: Develop applies Lensfun to the DNG from its copied EXIF, as
+  for any raw. A NEF's own lens data (Nikon's, read from NEFs only) isn't
+  carried over. Fine for HDR (frames barely move); panorama should
+  correct before warping.
+
+**Alignment** (`merge::align`), pure Rust, no new crates.
+
+- Images are one channel (`Gray`), prepared by the caller; NaN leaves a
+  pixel out (clipped, lost in noise). Pyramids halve to 64 px.
+- **Features:** Harris corners (structure tensor over 5×5) on the level
+  no bigger than 1600 px, the strongest few in each cell of a 16×12 grid
+  (so a bright window's edges don't crowd out a dim room), sub-pixel
+  peaks. Each is described by 8×8 samples three pixels apart from a
+  blurred copy, zero mean and unit length (MOPS without its
+  orientation: rotations of a few degrees are fine). Matches are mutual
+  nearest neighbours passing Lowe's ratio (0.8); with `max_shift`, only
+  within that fraction of the long edge.
+- **RANSAC** (deterministic, 99.9% confidence, at most 4000 tries) fits a
+  translation, similarity, affine map or homography (normalised linear
+  least squares, Hartley's normalisation with one scale for both sides),
+  1.5 px at the feature level; refitted to its inliers twice.
+- **Direct refinement:** Gauss–Newton on the pixels, coarse to fine from
+  the feature level down to full size, on the 40% of the reference's
+  pixels with the strongest gradient (thinned to 160 000 a level), with
+  a gain and offset for what exposure normalising left, Huber weights
+  (scale from the residuals' MAD) for what moved, in normalised
+  coordinates; it stops when no corner moves by a thousandth of a pixel.
+  It takes the features' answer (about a pixel) to hundredths. If it
+  wanders more than 4 feature-level pixels from it, the features' answer
+  stands. Without enough matches, frames expected to overlap (`max_shift`)
+  are refined from no movement; others fail.
+- **Accuracy** (tests, 480×320 synthetic frames with noise): shifts and
+  turns recovered to 0.04 px at the worst of a 9×9 grid, rotation to
+  0.005°; a 1.5% scale (focus breathing) to under 0.1 px; a panorama pair
+  overlapping 40% and turned 0.8° matched by features alone to under
+  0.5 px.
+- **Warping:** Catmull–Rom, held within the four nearest values so
+  clipped edges don't ring; masks take the maximum of the 4×4 they're
+  sampled from.
+
+**The result** (`merge::dng`, `encode::float_dng`).
+
+- **Layout:** IFD 0 a 256 px uncompressed sRGB thumbnail (Finder, Quick
+  Look), the DNG and colour tags, EXIF and XMP; SubIFD 0 the image:
+  LinearRaw, three samples, **16-bit half floats** (SampleFormat 3), in
+  256 px tiles, Adobe Deflate (zlib, level 5) with the floating-point
+  predictor (TIFF predictor 3: each row's bytes in planes, most
+  significant first, then differenced a pixel apart), WhiteLevel 1;
+  SubIFD 1 a JPEG preview of at most 1024 px (sRGB, PreviewColorSpace
+  2), which the library shows up to that size. DNGBackwardVersion is
+  1.4 (DNGVersion reads 1.6: rawler's writer sets it).
+- Half rather than single floats: 11 significant bits (finer than any
+  sensor's noise at any level), a range to 65504 times white, and
+  subnormals reaching 24 stops under it; half the size. Predictor 3
+  rather than DNG 1.5's 34894: the older form every float reader takes
+  (rawler, ImageIO; tests).
+- **Units:** the reference frame's: its sensor white is 1.0, brighter is
+  kept. Size, matrices and as-shot white are the reference's.
+- **EXIF:** the reference's, copied by rawler's writer (camera, lens,
+  exposure, dates, GPS, serial), **without sub-seconds**: a merge is no one
+  exposure, and the stacks' capture-time rule needs them, so it never
+  joins its sources by time (the catalog keeps merges apart too). The
+  orientation is IFD 0's: 1.
+- **The record** of what it was made from: in the DNG's XMP
+  (`shoebox:Merge`, the kind, and `shoebox:Sources`, a sequence of file
+  names and BLAKE3s, in namespace
+  `https://github.com/PinkOctopusLabs/shoebox/ns/merge/1.0/`; nothing
+  the library reads as marks), and in `<root>/.shoebox/merges.json` in
+  every writable root (the file, its kind, each source's path and
+  BLAKE3, when). The XMP travels with the file and other tools read it;
+  the JSON is what the library reads (Info panel, stacks, duplicates)
+  without opening DNGs (rawler's writer puts IFDs at the end, beyond what
+  the scan reads for marks). Shoebox's moves rewrite it in the move's
+  batch, as for stack links and collections.
+- 3 × 24 MP: 87 MB (synthetic noise compresses worse than most photos).
+
+**The library side.**
+
+- `merges::plan`: refuses sources outside the library or in a reference
+  folder; hashes each source; the file goes beside the first source as
+  `<stem>-HDR.dng` (`-Pano`, `-Focus` reserved), `-1`, `-2` while taken.
+  Two merges of the same first photo (`-HDR`, `-HDR-1`) stack together
+  as variants by the name rule; left so (open choice).
+- `FileOps::add_merge`, one batch of kind `merge`: refused if the file's
+  place is taken, it or a source is in a reference root, or a source no
+  longer has the content the merge read; journaled, then the DNG copied
+  from the cache and verified against its BLAKE3, then `merges.json`.
+  Undo sends the DNG to the Trash and restores `merges.json` (emptied if
+  it was new).
+- **A photo of its own:** `stacks::build_apart` never joins a merge by
+  capture time; duplicate detection matches a merge only exactly or by
+  image data, never perceptually (it looks like its reference by
+  design).
+- **Dry run (SPEC safety rule 4):** a merge moves nothing and adds one
+  file; the dialog is its table: the sources, then the one file it will
+  write and where. No conflict with SPEC; noted here.
+
+**The app.** Merge to HDR… in the photo menu and Ctrl+H (Lightroom's
+key; ⌃ isn't in the bundled fonts, so the menu says Ctrl-H). The dialog
+checks from the catalog alone (the UI thread reads no files): 2–9
+photos, raw, not in a reference folder, not cloud-only, one size and
+camera. Merges run one at a time on the develop thread's merge thread
+(beside exports, so Develop never waits), with progress and Stop in the
+status bar; the DNG is written in `<cache>/merge-staging` and copied in
+by the library worker (`LibraryCommand::AddMerge`), which then rescans,
+and the new photo is selected (shown in All Photos if the view had it
+filtered out). Develop has no merge command of its own: the selection
+works there too (Ctrl+H, or the filmstrip's menu).
+
+**For panorama and focus stacking:** `merge::load`, `Merged`, `Record`
+and `dng` as they are (any size to 65535 a side); `align::features`,
+`matches` (with `near: None`) and `ransac` (`Model::Homography`) for
+the pairwise homographies of overlapping frames, and `refine` on each
+overlap (frames of different sizes, outside left out as NaN); `warp`
+takes a homography only, so a cylindrical or spherical projection needs
+its own map (or `warp` generalised to a closure). Focus stacking aligns
+with `align::align` and `Model::Similarity` (tested on a 1.5% scale),
+the gain and offset absorbing brightness changes. `merges::Kind`,
+`plan`, `add_merge`, the record, `merge::Job.kind` and
+`LibraryCommand::AddMerge` take the other kinds as they are; the dialog
+is HDR's.
+
+## HDR merge (2026-10-22)
+
+`shoebox_develop::merge::hdr`.
+
+- **2 to 9 raw frames** of one camera and size (otherwise refused).
+- **Reference: the middle exposure** by EXIF (the darker of the middle
+  two for an even count), or one the person picks. The brief said the
+  first (reference) source gives size, matrices and as-shot white; the
+  file still goes beside the first source and is named after it, but the
+  reference is the middle exposure, because the result is in its units:
+  a default render then looks like the frame the photographer metered,
+  and deghosting compares against the frame best exposed overall.
+  Without EXIF exposures the first is the reference.
+- **Exposure:** each frame's relative to the reference **measured** from
+  the pixels: the median ratio of luminance where both are exposed well
+  (not clipped, under 0.85 of white, over 1%), after alignment, from at
+  least 2000 pixels. EXIF (time × ISO ÷ f-number²) is the starting point
+  (for alignment's normalising) and the fallback; without either, the
+  merge is refused. The brief had EXIF first; measured is better because
+  EXIF's times are nominal (1/60 for 1/62.5), and a few percent off shows
+  as banding where frames hand over. A measured value more than ⅓ stop
+  from EXIF is logged.
+- **Weights:** each frame's estimate (its value ÷ its exposure) weighted
+  by inverse variance under a noise model of shot noise (a sensor holding
+  about 50 000 electrons at white at ISO 100) and read noise, scaled by
+  ISO: `e² / (a·v + b)`, so longer exposures count for more, by about
+  their exposure where shot noise rules and its square in deep shadow.
+  One weight per pixel for all three channels (no colour shifts),
+  tapering smoothly to nothing between 0.85 and 0.96 of white in the
+  brightest channel, and nothing where the sensor clipped. Every frame
+  also has a tiny weight growing as the fourth power of its shortness,
+  so where every frame clipped the shortest one's (highlight-
+  reconstructed) value stands.
+- **Alignment:** on by default (hand-held), a homography; off for a
+  tripod. The frames are encoded for it as the square root of their
+  exposure-normalised luminance, clipped and near-black pixels left
+  out, so a −2 and a +2 EV frame match on their mid-tones.
+- **Deghosting** (Off, Low, Medium (default), High): each frame against
+  the reference in 4×4 blocks both expose well; a block is movement when
+  the difference passes `n·σ + t·value` (σ from the noise model; n, t =
+  8, 0.25 / 5, 0.12 / 3.5, 0.06), the relative part allowing for
+  interpolation and demosaic. Flagged blocks are grown by the feather's
+  reach and feathered outward (a box blur of about 1/250 of the long
+  edge, at least 2 blocks), so inside a ghost the frame counts for
+  nothing and its edge blends. Basic, as decided: where the reference
+  clipped there's nothing to compare with, so a branch moving against a
+  bright sky can ghost there (MANUAL-CHECKS).
+- **Streaming:** the reference and running sums stay in memory; each
+  other frame is loaded, aligned, warped, compared and added, then
+  dropped, so memory doesn't grow with the frame count.
+- **Auto and the display transform:** the edit starts from the defaults
+  (as decided, no Auto-tone after merging). The display transform's
+  shoulder rolls the extra range off (a window four times white renders
+  below white and brighter than the room: test). Auto measures the 99.5th
+  percentile and brings exposure down for it, within its ±2 stops (test);
+  Highlights does the rest. Linear DNGs keep values above 1.0 through
+  the raw stage unless the person moves the raw white point (its levels
+  clip at 1.0 then; open choice).
+- **Timings,** 3 × 24 MP (6048×4032, a synthetic hand-held bracket from
+  `examples/merge_probe.rs`), M2 Max, 12 cores, release: loading a frame
+  (decode, demosaic, upright) 0.35–0.5 s; pyramids 0.07 s; alignment
+  0.3 s (1278 of 1280 matches agreeing, refined to an rms of 0.006); warp
+  0.12–0.16 s; the whole merge 2.25–2.4 s; the DNG 0.34–0.38 s (87 MB);
+  so about 3 s from Merge to a DNG in the cache. Peak memory 4.4 GB
+  resident (macOS keeps freed pages; it doesn't grow with more frames).
+- **Checked by:** `tests/merge.rs` (develop, 9): alignment (three models,
+  focus breathing, a panorama pair), a −2/0/+2 bracket of a window-lit
+  room (frames moved and turned, noise, clipping, a passer-by in the +2
+  frame) merged to within 0.1% of the true light in the room and the
+  window and 1% in a dark corner (the tests allow 3% and 6%), the window
+  past white recovered from
+  −2 EV, exposures measured within 0.1%, the passer-by gone with
+  deghosting and there without; a tripod bracket unaligned; Stop; the
+  refusals; the float DNG read back by rawler (values past white, colour,
+  previews, EXIF without sub-seconds, the XMP record), rendered by
+  Develop and Auto, and by ImageIO. Core (`tests/merges.rs`, 4): planned
+  beside the first source, journaled, sources byte-identical, a photo of
+  its own with its record, never overwriting, a failed verification
+  journaled and leaving nothing, refused in and from reference folders
+  and for a changed source, undo to the Trash, moves carrying the record,
+  no perceptual duplicates. UI (`hdr_merge_from_the_photo_menu`): the
+  dialog, the merge selected when done, Info's sources, Develop, ⌘Z.
+  Real brackets: MANUAL-CHECKS, "HDR merge".
+- **Open choices:** AI denoise of the sources (a dialog option, at the
+  cost of minutes); deghosting where the reference clipped (against the
+  next shorter frame); a single-float option.

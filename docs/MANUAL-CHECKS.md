@@ -371,3 +371,49 @@ never the library itself.
     frame on the GPU, 10–20 under load); note the time to the first blur after opening a
     photo.
   - Export at full size and compare with Develop at 100%: the same blur.
+
+### HDR merge
+
+Shoot these for it (the library has no brackets yet). Work in an APFS
+clone of the library, never the library itself.
+
+- [ ] **A hand-held 3-frame bracket of a window-lit interior** (from
+  2026-10-22): −2, 0, +2 EV (the Z f's AE bracketing), hand-held, a room
+  with a bright window and something dark in a corner. Select the three,
+  Merge to HDR… (Ctrl+H), defaults.
+  - The dialog lists the three with their exposures, the 0 EV one as the
+    reference, and names `<first>-HDR.dng` beside the first.
+  - Time from Merge to the new photo selected (expected about 3 s for
+    3 × 24 MP on an idle M2 Max; note it).
+  - At 100%: no double edges anywhere, corners included (alignment); the
+    window's view outside holds detail where the 0 EV NEF clipped; the
+    dark corner is cleaner than the 0 EV NEF's (compare at the same
+    exposure); no banding or seams where the frames hand over (the
+    window frame, a lamp's falloff).
+  - At the defaults it renders like the 0 EV NEF, the window rolled off;
+    Auto brings the window down (exposure no lower than −2) and Highlights
+    −100 shows the view outside.
+  - The three NEFs are unchanged (Finder dates, and duplicate review
+    doesn't pair the DNG with them); the DNG isn't stacked with them;
+    Info lists them; ⌘Z sends it to the Trash.
+- [ ] **A tripod bracket with a moving tree** (from 2026-10-22): five
+  frames ±2 EV in steps of 1 EV on a tripod, branches moving in wind, a
+  person walking through one frame if possible. Merge with Align off,
+  then again with Align on (both Deghost Medium), and once with Deghost
+  Off.
+  - Deghost Medium: the branches and the person come out once, from the
+    reference, without semi-transparent copies; the edge of the
+    deghosted area isn't visible (feathered). Off shows the ghosts (the
+    check works). Note any ghost left where the reference was clipped
+    (the sky behind the branches): the basic deghosting doesn't look
+    there.
+  - Align on doesn't move a tripod bracket (no softening against Align
+    off at 100%).
+- [ ] **The DNG in another raw editor** (from 2026-10-22): open a merged
+  DNG in darktable and in RawTherapee (never Lightroom or PhotoLab).
+  - It opens as a linear raw, upright, with the reference's camera and
+    lens in its metadata and colours like Shoebox's at the defaults.
+  - The window's highlights are there (lower exposure by 2–3 EV): note
+    whether either editor clips values above 1.0 before its own highlight
+    tools (darktable's highlight reconstruction should be off for it).
+  - `exiftool -XMP-shoebox:all` lists the sources and their BLAKE3s.
