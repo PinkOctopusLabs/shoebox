@@ -3792,3 +3792,172 @@ is HDR's.
   noise floor (2.5) and steepness (8) on real stacks; half-float range
   bounds (a third less of the Pyramid's memory) if 45 MP stacks press on
   16 GB Macs.
+
+## Panorama (2026-10-22)
+
+`shoebox_develop::merge::pano`, after Brown and Lowe, "Automatic
+Panoramic Image Stitching using Invariant Features" (2007), with Hugin's
+and OpenCV's stitching pipelines as the reference for each stage. No code
+is ported (the methods are the papers'); no new crates.
+
+- **2 to 60 raw frames** of one camera and sensor size (portrait and
+  landscape frames may mix); otherwise refused. The file goes beside the
+  first as `<stem>-Pano.dng`.
+- **Lens corrections first** (option, on): each frame's `lens` grid (the
+  NEF's own data, then Lensfun: distortion, vignetting, lateral CA), read
+  in the frame's upright pixels (`pano::optics`). Not a separate pre-warp:
+  the grid is folded into the one resample that projects the frame (output
+  pixel → direction → ideal frame pixel → the grid → where red, green and
+  blue are), so frames are resampled once; the previews matched and
+  measured on are corrected the same way. Without a profile the frame is
+  used as it is (a notice says so when no frame had one).
+- **The result's EXIF** is the reference frame's without lens or focal
+  length (a panorama has neither), so Develop never corrects its lens a
+  second time.
+- **Matching:** Harris features (`align::features`, 2000 a frame on a
+  ≤1600 px corrected copy, square-root encoded so a gain stays a gain) of
+  **every pair**, ratio-tested matches, a RANSAC homography, kept when
+  more than 8 + 0.3 × the features in the overlap agree (Brown and Lowe's
+  test) and at least 12. All pairs rather than neighbours in capture order:
+  multi-row and 360° sets aren't shot in a neat order, and it costs about
+  20 ms a pair (6 frames 0.35 s; 30 frames, 435 pairs, about 9 s). Each
+  kept pair's homography is then **refined on the pixels** (`align::refine`
+  on the ≤1024 px previews, from their quarter-size level) and its matches
+  taken from it on a 25 × 17 grid over the overlap: with the features'
+  matches alone frames came out up to 0.054° off; refined, at most 0.031° (0.011° for two rows without a lens).
+- **A frame that overlaps none** (not reached from the best-connected
+  frame) is refused by name ("DSC_0102.dng doesn't overlap the other
+  photos"); nothing is written. Brown and Lowe would make several
+  panoramas; one per merge is clearer here.
+- **A camera turning about one point:** a rotation per frame and **one
+  focal length** (one lens and zoom; per-frame focal lengths would let a
+  zoom change between frames, at the cost of conditioning), the principal
+  point the frame's centre (lens corrections put it there). Started from
+  EXIF and the crop factor (`volume::focal_px`), or without a focal length
+  in EXIF from the homographies (OpenCV's `focalsFromHomography`, median);
+  rotations from a maximum spanning tree of the links by agreeing points
+  (each relative rotation the nearest to `K⁻¹·H·K`). Then **bundle
+  adjustment**: Levenberg–Marquardt on every match's transfer error both
+  ways, Huber weights (scale from the residuals' MAD), numerical
+  derivatives per match (it touches two frames and the focal length), the
+  reference frame held still; then matches beyond 4 robust σ dropped and
+  adjusted again.
+- **The reference** (the result's units, colour, EXIF): the frame with the
+  most links, the middle of the capture order breaking ties, so a row's
+  middle frame. The brief's first-source rule is kept for where the file
+  goes and its name.
+- **Laid flat:** when the turning camera leaves more than about the
+  features' own error, the frames are also fitted as homographies onto
+  the reference's plane (the same adjustment, eight parameters a frame in
+  normalised coordinates); if that fits much better (median error under
+  0.6 of the camera's) the panorama is drawn flat, in the reference's
+  pixels (Perspective; a notice says so). Scans, murals, a poster walked
+  along. Rows of a few frames fit both alike and stay turning.
+- **Straightening** (Brown and Lowe's wave correction): up is the
+  eigenvector of the frames' x axes' scatter with the smallest eigenvalue
+  (a level row's x axes lie in the horizontal plane), down agreeing with
+  the frames' own; for a single column (x axes all alike) the frames' mean
+  up. The panorama's centre is the middle of the longitudes covered (the
+  largest gap behind); all round (no gap over 10°), the frames' mean view.
+- **Exposure:** a gain per frame (the reference's 1), from the median
+  ratio of corrected preview luminance over each link's overlap (well
+  exposed, not clipped, both sides), solved together by least squares on
+  their logarithms, held very lightly to EXIF's differences (so a frame
+  the overlaps can't measure takes EXIF's). Global per frame, as asked;
+  vignetting is the lens profile's job.
+- **Projections** (`pano::project`): Spherical (equirectangular, to
+  360° × 180°, a pole inside a frame reached), Cylindrical (heights beyond
+  ±75° left out), Perspective (refused beyond 120° across or all round:
+  "choose Cylindrical or Spherical"). One focal length of pixels per
+  radian (or unit) keeps the frames' own resolution at the centre. **Auto:**
+  Perspective up to 90° each way (within ±60° of the horizon),
+  Cylindrical up to 120° high (within ±75°), else Spherical. Each output
+  pixel's inverse map is evaluated directly per projection (`align::warp`
+  is left as it is).
+- **Seams** (`pano::seam`), on a canvas of about a megapixel: first
+  centre-weighted (each pixel to the frame it's furthest inside, by the
+  product of its distances from the frame's edges: a Voronoi diagram of
+  the centres, as Enblend starts from), preferring pixels a frame covers
+  well (one canvas pixel in from its edge, so a seam never sits where a
+  frame runs out); then for each overlapping pair a **graph cut** (Kwatra
+  et al. 2003, as OpenCV's `GraphCutSeamFinder`) over the pixels both
+  cover well: edge costs where the two differ (square-root, exposure
+  compensated, relative to the scene's typical level) plus a little for
+  length, a smaller bias to step one's choice; Dinic's max-flow,
+  iterative. A seam runs where frames agree, so it goes round a person who
+  moved rather than through them (test: without the cut 36% of a person
+  astride the seam shows; with it, all of them).
+- **Blending** (`pano::blend`): Burt and Adelson's multi-band blend in
+  linear camera space: each frame's Laplacian pyramid weighted by the
+  Gaussian pyramid of its seam mask (from the canvas labels, bilinear,
+  cut at ½), levels normalised by their summed weights, collapsed; bands
+  for a blend about 5% of the result's size (OpenCV's default), at most 7.
+  Before its pyramid each frame's box is filled beyond its edge
+  (push–pull), so no frame's edge rings into a seam.
+- **Streaming:** frames are read twice: once for previews and features
+  (then dropped), once to blend, each warped into its own box of the
+  result (aligned to the coarsest level), added to the accumulators and
+  dropped. Not tiled further: the accumulators hold the whole result
+  (about 21 bytes a pixel: three channels and a weight, a third more for
+  the coarser levels; the collapse expands in place, row by row), and the
+  float DNG writer takes the whole image. Hence **a cap of 150 MP** (and
+  65 000 px a side): a larger panorama is drawn smaller to fit, and the
+  notice says at what scale. Tiling the blend (and the writer) would lift
+  it; open choice.
+- **Edges:** cropped by default to the largest rectangle inside what's
+  covered (the histogram method on the canvas, one canvas pixel in); off
+  keeps the whole boundary, empty pixels 0 (black): LinearRaw has no
+  alpha. DNG's DefaultCrop could carry the inner rectangle over the full
+  boundary, and "Fill edges" could reuse object removal's MI-GAN later
+  (open choices). A 360° panorama's left and right edges continue each
+  other but aren't blended across.
+- **The dialog** is HDR's, generalised by kind (`views::merge`: the
+  title, the refusal's counts, a kind's options in a function of its own),
+  so focus stacking adds its options the same way; `merge::Job` gained a
+  `pano` field beside HDR's `options`.
+- **Timings,** 6 × 24 MP (6048×4032, a synthetic hand-held row through
+  the Nikkor Z 40 mm's distortion and vignetting, exposures ±15%,
+  `examples/pano_probe.rs`), M2 Max, 12 cores, release, files cached:
+  reading the frames (decode, demosaic, previews, features) 1.7 s;
+  matching and refining all 15 pairs 0.35 s; adjustment, straightening,
+  gains under 0.05 s; seams 0.6 s; blending (each frame read again,
+  warped, its pyramid added) 0.75 s a frame; collapse 0.25 s: **about
+  7.4 s** for an 81 MP result (23407×3465, Cylindrical; 13.8 s with the
+  files read cold); the DNG 1.0 s (238 MB). Focal length found within
+  0.02% of the truth (EXIF was 2% off), gains exact to 4 digits, transfer
+  error median 0.01 px. **Memory:** peak resident 5.2 GB while blending,
+  5.6 GB writing the DNG (the accumulators 1.7 GB, one frame's decode and
+  box about 1.5 GB at once; macOS keeps freed pages, so resident climbs
+  over the frames).
+- **Checked by:** `tests/panorama.rs` (develop, 7): a five-frame hand-held
+  row (600×400 frames, 47° each, turned by up to ±2° pitch and roll, the
+  Nikkor Z 40 mm's distortion and strong vignetting, gains 0.85–1.25,
+  noise): rotations within 0.05° (found at most 0.031°), focal length within 0.5%
+  (0.06%; EXIF 3% off), gains within 1%, the scene re-projected (32-pixel
+  blocks: median within 1%, 95% within 1%; full-height strips, where a
+  seam, an exposure or vignetting would show, within 0.6% and no step over
+  0.6% between neighbours; found 0.2–0.25%), no empty pixel after the
+  crop, the DNG read back (linear, its size, no lens or focal length, the
+  XMP record); a frame overlapping nothing named; too few; Perspective
+  refused at about 137° and drawn at 77°; Spherical uncropped keeps black
+  corners; a wall shot from three places laid flat and matching the wall;
+  a person astride a seam whole; two rows of three registered within
+  0.05° and straightened to within 0.1°; Stop. Units in the modules
+  (geometry, optics' orientations, the cut and the rectangle, the blend
+  giving one frame back exactly and two without a step, the fill). Core
+  (`tests/merges.rs`): a panorama planned as `-Pano` beside its first
+  source, journaled, its record's kind, a photo of its own, `-Pano-1`
+  next, undone to the Trash. UI (`panorama_from_the_photo_menu`): Ctrl+M,
+  the dialog's options, the result selected and wider than a frame,
+  Info's sources, Develop, ⌘Z. Real sets: MANUAL-CHECKS, "Panorama".
+- **Open choices:** a layout preview in the dialog (it needs every frame
+  decoded and matched, about 0.3 s a frame on the merge thread, so not
+  "cheap"; the embedded JPEGs could do it faster, without lens
+  corrections); a shared radial distortion term in the adjustment for
+  lenses no profile knows (Hugin's a, b, c), and vignetting estimated
+  from the overlaps (Goldman); per-frame focal lengths; candidate pairs
+  by a coarse match first for sets of 30 or more; seams at more than a
+  megapixel for very large panoramas; tiling the blend and the DNG writer
+  to lift the 150 MP cap; DNG DefaultCrop for the uncropped boundary; Fill
+  edges by MI-GAN; blending across a 360°'s back edge; several panoramas
+  from one selection (Brown and Lowe's connected components).

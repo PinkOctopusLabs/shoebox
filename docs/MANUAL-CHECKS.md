@@ -461,3 +461,48 @@ APFS clone of the library, never the library itself.
     shouldn't make the stack softer than it: compare the stack with the
     sharpest frame at 100% in the middle distance (the noise estimate
     comes from the reference; note if fine texture is lost).
+
+### Panorama
+
+Shoot these for it (the library has no panoramas yet). Work in an APFS
+clone of the library, never the library itself.
+
+- [ ] **A hand-held 5-frame landscape row** (from 2026-10-22): the Z f
+  and a lens Lensfun or the NEF knows (the 40 mm), portrait orientation,
+  turning about a third of a frame each time, AE on so exposures differ a
+  little, a horizon and some sky. Select the five, Merge to Panorama…
+  (Ctrl+M), defaults.
+  - The dialog lists the five and names `<first>-Pano.dng` beside the
+    first. Time from Merge to the new photo selected (expected about
+    7–10 s for 6 × 24 MP on an idle M2 Max; note it, and the size).
+  - At 100% along every seam: no double edges, no step in brightness or
+    colour (the sky especially: vignetting and exposure), no soft band.
+  - The horizon is level and straight (Auto chose Cylindrical); the crop
+    leaves no black corner. Try Spherical and Perspective (refused if it's
+    wider than 120°) and Crop off (black outside the boundary).
+  - The NEFs are unchanged, the DNG isn't stacked with them, Info lists
+    them, Develop opens it without lens corrections offered for a lens,
+    ⌘Z sends it to the Trash.
+- [ ] **A two-row 360°** (from 2026-10-22): hand-held or on a tripod
+  head, two rows (about +20° and −20°) all the way round, 16–24 frames,
+  in the order a person shoots them (along one row, back along the other).
+  - It joins as one (no frame named as overlapping nothing), Auto chooses
+    Spherical, the two ends meet at the back (the left and right edges
+    continue each other, though they're not blended across), the horizon
+    is level all round, no frame upside down or tilted.
+  - Note the time and the size (scaled to 150 MP if it would be larger:
+    the notice says so) and the memory the app reaches (Activity Monitor).
+- [ ] **A city scene with people moving** (from 2026-10-22): 3–4 frames of
+  a street with people walking through the overlaps.
+  - No half people, no ghosts: each person comes out whole from one frame
+    or not at all (the seams go round them). Note any cut through someone
+    (the seams are found on a canvas of about a megapixel, so small
+    figures in a huge panorama may still be cut).
+- [ ] **A flat thing from several places** (from 2026-10-22): a mural or
+  a long poster shot walking along it (3 frames), and a document scanned
+  in overlapping parts. The notice says it was laid flat; straight edges
+  stay straight; no seams.
+- [ ] **A lens Lensfun doesn't know** (from 2026-10-22): a row through an
+  adapted manual lens (no EXIF lens). It still stitches (the notice says
+  no lens profile was found); note any vignetting banding at the seams
+  and how far edges miss (no distortion correction).

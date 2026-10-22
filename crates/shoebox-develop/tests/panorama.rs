@@ -275,6 +275,7 @@ fn a_hand_held_row_is_registered_and_stitched_without_seams() {
         let est = relative(&p.frames[i].rotation.unwrap(), &r0);
         let tru = relative(&truth.rotations[i], &truth.rotations[root]);
         let err = angle_between(&tru, &est);
+        eprintln!("frame {i}: {err:.4}° off");
         assert!(err < 0.05, "frame {i}: {err:.3}° off");
     }
     // Exposure gains, to 1%.
@@ -566,6 +567,7 @@ fn two_rows_are_registered_and_straightened() {
         let est = relative(&p.frames[i].rotation.unwrap(), &r0);
         let tru = relative(&truth.rotations[i], &truth.rotations[root]);
         let err = angle_between(&tru, &est);
+        eprintln!("frame {i}: {err:.4}° off");
         assert!(err < 0.05, "frame {i}: {err:.3}° off");
     }
     // Down is down.
