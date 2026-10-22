@@ -4743,3 +4743,95 @@ fn develop_upright_levels_a_tilted_photo() {
     assert!(g.crop[0] > 0.0, "cropped to fit: {g:?}");
     assert_eq!(doc.history().last().unwrap().label, "Upright: Level");
 }
+
+/// Match Total Exposures and the reference view: a's Exposure raised in
+/// Develop, then matched onto b (taken with the same settings, so it gets
+/// the same Exposure); Shift-R makes a the reference, and moving to b
+/// keeps a beside it.
+#[test]
+fn develop_reference_and_matched_exposures() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(&root).unwrap();
+    for (name, n) in [("a.jpg", 1u64), ("b.jpg", 2)] {
+        let shot = shoebox_fixtures::Shot {
+            datetime: Box::leak(format!("2025:06:01 10:00:{n:02}").into_boxed_str()),
+            subsec: "",
+            orientation: 1,
+            serial: "1",
+        };
+        let img = shoebox_fixtures::jpeg(&shoebox_fixtures::scene(n + 10, 600, 400), 90).unwrap();
+        std::fs::write(root.join(name), shoebox_fixtures::with_exif(&img, &shot)).unwrap();
+    }
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let mut h = harness(p, egui::vec2(1400.0, 1400.0));
+    settle(&mut h, Duration::from_secs(60));
+    h.get_by_label("a.jpg").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(30), "develop", |a| {
+        a.develop_ready()
+    });
+    h.run_steps(3);
+    // a's Exposure, from its slider's rail.
+    let row = h.query_all_by_label("Exposure").last().unwrap().rect();
+    let rail = egui::pos2(row.right() + 30.0, row.center().y);
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.event(egui::Event::PointerMoved(rail));
+    h.run_steps(1);
+    h.event(button(rail, true));
+    h.event(button(rail, false));
+    h.run_steps(3);
+    let ev = h
+        .state()
+        .develop_doc()
+        .unwrap()
+        .settings()
+        .modules
+        .exposure
+        .ev;
+    assert_ne!(ev, 0.0);
+
+    // Shift-R: a is the reference; moving on keeps it.
+    h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::R);
+    h.run_steps(2);
+    assert_eq!(h.state().develop_reference().as_deref(), Some("a.jpg"));
+    assert_eq!(
+        h.state().develop_compare().0,
+        shoebox_app::views::develop::Compare::Reference
+    );
+
+    // Back to the grid (a's edit kept), both selected, a current: match.
+    h.key_press(egui::Key::G);
+    wait_for(&mut h, Duration::from_secs(10), "a's edit kept", |a| {
+        a.exposure_of("a.jpg") == Some(ev)
+    });
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(2);
+    shoebox_app::views::presets::match_exposures(h.state_mut());
+    wait_for(&mut h, Duration::from_secs(10), "b matched", |a| {
+        a.exposure_of("b.jpg") == Some((ev * 100.0).round() / 100.0)
+    });
+
+    // In Develop on b, a stays beside it.
+    h.get_by_label("b.jpg").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(30), "develop b", |a| {
+        a.develop_ready()
+    });
+    h.run_steps(3);
+    assert_eq!(h.state().develop_reference().as_deref(), Some("a.jpg"));
+    snapshot(&mut h, "develop-reference");
+    h.get_by_label("Edited").click();
+    h.run_steps(2);
+    assert_eq!(
+        h.state().develop_compare().0,
+        shoebox_app::views::develop::Compare::Edited
+    );
+}

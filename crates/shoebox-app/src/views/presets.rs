@@ -323,6 +323,7 @@ pub fn paste(app: &mut ShoeboxApp) {
             app.catalog.roots[p.root].path.clone(),
             p.rel.clone(),
             copy.to_owned(),
+            preset.clone(),
         ));
     }
     if here && !app.develop.read_only {
@@ -335,7 +336,6 @@ pub fn paste(app: &mut ShoeboxApp) {
     if !others.is_empty() {
         app.command(LibraryCommand::ApplyPreset {
             photos: others,
-            preset,
             label: "Paste settings".into(),
         });
     }
@@ -348,6 +348,92 @@ pub fn paste(app: &mut ShoeboxApp) {
         (n, s) => format!(
             "Pasted settings onto {n} photo{}; {s} in reference folders left alone.",
             if n == 1 { "" } else { "s" }
+        ),
+    });
+}
+
+/// Match Total Exposures (EDITING-SPEC, Tools beyond PhotoLab): the
+/// selection's Exposure set so each comes out as bright as the current
+/// photo, from how much light each let in (shutter, ISO, aperture) and the
+/// current photo's own Exposure. Photos without those in their EXIF, and
+/// reference photos, are left alone.
+pub fn match_exposures(app: &mut ShoeboxApp) {
+    let Some(current) = app.current else { return };
+    let Some(ci) = app.index(current) else { return };
+    let Some(target) = app.catalog.photos[ci].meta.exif.captured_stops() else {
+        app.notice = Some(
+            "This photo's EXIF doesn't say its shutter speed, ISO and aperture, so there's \
+             nothing to match to."
+                .into(),
+        );
+        return;
+    };
+    // The current photo's own Exposure (from Develop if it's open there).
+    let open = app
+        .develop
+        .doc
+        .as_ref()
+        .filter(|_| app.develop.photo == Some(current));
+    let ev = match open {
+        Some(d) => d.settings().modules.exposure.ev,
+        None => app
+            .edit_settings(current)
+            .map_or(0.0, |s| s.modules.exposure.ev),
+    };
+    let mut photos = Vec::new();
+    let mut skipped = 0;
+    for id in app.selected_in_order() {
+        if id == current {
+            continue;
+        }
+        let Some(i) = app.index(id) else { continue };
+        let p = &app.catalog.photos[i];
+        let Some(stops) = p.meta.exif.captured_stops() else {
+            skipped += 1;
+            continue;
+        };
+        if app.catalog.is_reference(i) || p.format.is_movie() {
+            skipped += 1;
+            continue;
+        }
+        // Brighter captures need less Exposure.
+        let v = ((ev + target - stops) * 100.0).round() / 100.0;
+        let mut s = shoebox_develop::edit::Settings::default();
+        s.modules.exposure.ev = v.clamp(-5.0, 5.0);
+        let preset = shoebox_develop::preset::Preset::from_settings(
+            "Match total exposures",
+            &s,
+            &[shoebox_develop::preset::Part::Exposure],
+        );
+        let copy = app.copy_of(id).unwrap_or(shoebox_core::edits::MAIN);
+        photos.push((
+            app.catalog.roots[p.root].path.clone(),
+            p.rel.clone(),
+            copy.to_owned(),
+            preset,
+        ));
+    }
+    let n = photos.len();
+    if n > 0 {
+        app.command(LibraryCommand::ApplyPreset {
+            photos,
+            label: "Match total exposures".into(),
+        });
+    }
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    app.notice = Some(match (n, skipped) {
+        (0, 0) => "Select the photos to match to this one first.".into(),
+        (0, s) => format!(
+            "Nothing matched: {s} photo{} without exposure data or read-only.",
+            plural(s)
+        ),
+        (n, 0) => format!(
+            "Matched the exposure of {n} photo{} to this one.",
+            plural(n)
+        ),
+        (n, s) => format!(
+            "Matched the exposure of {n} photo{} to this one; {s} without exposure data or read-only left alone.",
+            plural(n)
         ),
     });
 }

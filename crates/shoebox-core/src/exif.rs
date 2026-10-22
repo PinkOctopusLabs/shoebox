@@ -28,6 +28,34 @@ pub struct ExifInfo {
     pub nef_compression: Option<u16>,
 }
 
+impl ExifInfo {
+    /// The exposure time in seconds ("1/250", "2", "0.5", "1/250 s").
+    pub fn exposure_seconds(&self) -> Option<f64> {
+        let s = self
+            .exposure
+            .as_deref()?
+            .trim()
+            .trim_end_matches('s')
+            .trim();
+        let t = match s.split_once('/') {
+            Some((a, b)) => a.trim().parse::<f64>().ok()? / b.trim().parse::<f64>().ok()?,
+            None => s.parse().ok()?,
+        };
+        (t.is_finite() && t > 0.0).then_some(t)
+    }
+
+    /// How much light the camera let through, in stops: log2 of exposure
+    /// time × ISO ÷ f-number². Equal values make equally bright raw files
+    /// of the same scene.
+    pub fn captured_stops(&self) -> Option<f64> {
+        let t = self.exposure_seconds()?;
+        let iso = f64::from(self.iso?);
+        let n = self.fnumber.filter(|n| *n > 0.0)?;
+        let v = (t * iso / (n * n)).log2();
+        v.is_finite().then_some(v)
+    }
+}
+
 fn ascii(e: &exif::Exif, tag: Tag) -> Option<String> {
     match &e.get_field(tag, In::PRIMARY)?.value {
         Value::Ascii(parts) => {
@@ -291,5 +319,32 @@ mod tests {
         assert_eq!(read(&nef).nef_compression, Some(14));
         let jpg = std::fs::read(dir.join("20260501-203002-65.jpg")).unwrap();
         assert_eq!(read(&jpg).nef_compression, None);
+    }
+}
+
+#[cfg(test)]
+mod light_tests {
+    use super::ExifInfo;
+
+    #[test]
+    fn captured_stops() {
+        let e = |t: &str, iso, n| ExifInfo {
+            exposure: Some(t.into()),
+            iso: Some(iso),
+            fnumber: Some(n),
+            ..Default::default()
+        };
+        assert_eq!(e("1/250", 100, 4.0).exposure_seconds(), Some(0.004));
+        assert_eq!(e("2 s", 100, 4.0).exposure_seconds(), Some(2.0));
+        // Twice the time, or twice the ISO, is a stop more; a stop smaller
+        // aperture is a stop less.
+        let base = e("1/250", 100, 4.0).captured_stops().unwrap();
+        let more = e("1/125", 100, 4.0).captured_stops().unwrap();
+        let iso = e("1/250", 200, 4.0).captured_stops().unwrap();
+        let shut = e("1/250", 100, 5.656_854).captured_stops().unwrap();
+        assert!((more - base - 1.0).abs() < 1e-9);
+        assert!((iso - base - 1.0).abs() < 1e-9);
+        assert!((base - shut - 1.0).abs() < 1e-5);
+        assert_eq!(ExifInfo::default().captured_stops(), None);
     }
 }

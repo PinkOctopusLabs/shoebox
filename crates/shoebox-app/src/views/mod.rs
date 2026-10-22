@@ -496,6 +496,27 @@ pub fn photo_menu(app: &mut ShoeboxApp, resp: &egui::Response, pos: usize) {
             app.export.open = true;
             ui.close();
         }
+        if n > 1
+            && ui
+                .button("Match Total Exposures")
+                .on_hover_text(
+                    "Set the others' Exposure so they come out as bright as this photo \
+                     (from shutter speed, ISO and aperture)",
+                )
+                .clicked()
+        {
+            presets::match_exposures(app);
+            ui.close();
+        }
+        if let Some(t) = tile
+            && ui
+                .button("Use as Reference")
+                .on_hover_text("Show this photo beside the one you edit in Develop")
+                .clicked()
+        {
+            app.develop.reference = Some(t.id);
+            ui.close();
+        }
         let ids: Vec<crate::jobs::PhotoId> = app.selection.iter().copied().collect();
         let cloud = app.cloud_in(&ids);
         if cloud > 0 {

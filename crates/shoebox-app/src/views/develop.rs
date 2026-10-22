@@ -51,6 +51,9 @@ pub enum Compare {
     Edited,
     Original,
     Split,
+    /// The reference photo on the left, the edit on the right (Lightroom's
+    /// reference view).
+    Reference,
 }
 
 #[derive(Default)]
@@ -80,6 +83,9 @@ pub struct State {
     pub divider_x: Option<f32>,
     /// Where the photo was last drawn.
     pub photo_rect: Option<Rect>,
+    /// The photo shown beside the edit in the reference view (kept from
+    /// photo to photo).
+    pub reference: Option<PhotoId>,
     /// Show clipped highlights and shadows (J).
     pub warnings: bool,
     /// Soft proofing (S): the edit as `proof_space` would hold it, and
@@ -294,6 +300,7 @@ impl State {
             zoom: self.zoom,
             compare: self.compare,
             split_at: self.split_at,
+            reference: self.reference,
             looks: std::mem::take(&mut self.looks),
             local: super::local::Tool {
                 brush: self.local.brush,
@@ -910,7 +917,7 @@ fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_w
             st.histogram = h;
         }
     }
-    if st.compare != Compare::Edited && st.crop.is_none() {
+    if matches!(st.compare, Compare::Original | Compare::Split) && st.crop.is_none() {
         let s = original_settings(doc);
         let frame = cpu::frame(&ready.meta, &ready.src, &s, &o);
         let key = (
@@ -1075,10 +1082,35 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
         }
     };
     // The photo below a strip for the Edited / Original / Split bar.
-    let area = Rect::from_min_max(
+    let mut area = Rect::from_min_max(
         rect.min + egui::vec2(0.0, 36.0),
         rect.max - egui::vec2(0.0, 6.0),
     );
+    // The reference view: the reference photo in the left half, as the
+    // library shows it (edited if it is), the edit in the right.
+    if compare == Compare::Reference
+        && let Some(r) = app.develop.reference
+    {
+        let left = Rect::from_min_max(area.min, pos2(area.center().x - 4.0, area.max.y));
+        area = Rect::from_min_max(pos2(area.center().x + 4.0, area.min.y), area.max);
+        app.want_open(r, Size::Full);
+        if let Some(t) = app.textures.best(r, Size::Full) {
+            let ts = t.size_vec2();
+            let k = (left.width() / ts.x).min(left.height() / ts.y);
+            let at = Rect::from_center_size(left.center(), ts * k);
+            painter.image(
+                t.id(),
+                at,
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+            chip(
+                &painter,
+                at.left_top() + egui::vec2(10.0, 10.0),
+                "Reference",
+            );
+        }
+    }
     let fit = (area.width() / size[0]).min(area.height() / size[1]);
     let fit_target = Rect::from_center_size(area.center(), egui::vec2(size[0], size[1]) * fit);
     let full = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
@@ -1314,7 +1346,7 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
         // Edited / Original / Split, over the top of the photo.
         let bar = Rect::from_center_size(
             rect.center_top() + egui::vec2(0.0, 18.0),
-            egui::vec2(230.0, 26.0),
+            egui::vec2(330.0, 26.0),
         );
         ui.scope_builder(egui::UiBuilder::new().max_rect(bar), |ui| {
             ui.horizontal(|ui| {
@@ -1325,6 +1357,19 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
                     .on_hover_text("The photo before any edits (\\)");
                 ui.selectable_value(c, Compare::Split, "Split")
                     .on_hover_text("Original on the left, edited on the right; drag the line (Y)");
+                let on = *c == Compare::Reference;
+                if ui
+                    .selectable_label(on, "Reference")
+                    .on_hover_text(
+                        "Another photo beside this one, to match it (Shift-R). \
+                         The first time, this photo becomes the reference: move to \
+                         another to edit it beside this one. Use as Reference in a \
+                         photo's menu picks another.",
+                    )
+                    .clicked()
+                {
+                    toggle_reference(app);
+                }
             });
         });
     }
@@ -1373,6 +1418,24 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
     if let Some(pos) = app.current_pos() {
         super::photo_menu(app, &resp, pos);
     }
+}
+
+/// The reference view on or off (Shift-R); with no reference yet, the
+/// current photo becomes it.
+pub fn toggle_reference(app: &mut ShoeboxApp) {
+    let st = &mut app.develop;
+    if st.compare == Compare::Reference {
+        st.compare = Compare::Edited;
+        return;
+    }
+    if st.reference.is_none() {
+        st.reference = app.current;
+        app.notice = Some(
+            "This photo is the reference now: move to another photo to edit it beside this one."
+                .into(),
+        );
+    }
+    app.develop.compare = Compare::Reference;
 }
 
 /// A quarter turn (⌘] clockwise, ⌘[ anticlockwise).

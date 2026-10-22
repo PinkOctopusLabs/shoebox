@@ -1005,6 +1005,27 @@ impl ShoeboxApp {
         (t.selected.clone(), t.part, self.develop.layers_rendered())
     }
 
+    /// Develop's reference photo's file name (tests).
+    pub fn develop_reference(&self) -> Option<String> {
+        let i = self.index(self.develop.reference?)?;
+        self.catalog.photos[i]
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+    }
+
+    /// The Exposure of a photo's edit, by file name, as the catalog last
+    /// said (tests).
+    pub fn exposure_of(&self, file_name: &str) -> Option<f64> {
+        let (path, json) = self
+            .edited_json
+            .iter()
+            .find(|(p, _)| p.file_name().is_some_and(|n| n == file_name))?;
+        let _ = path;
+        let doc = shoebox_develop::edit::EditDoc::from_json(json).ok()?;
+        Some(doc.settings().modules.exposure.ev)
+    }
+
     /// Develop's spot tool: on, and the spot selected (tests).
     pub fn develop_spots(&self) -> (bool, Option<usize>) {
         (self.develop.spots.active, self.develop.spots.selected)
@@ -3405,6 +3426,15 @@ impl ShoeboxApp {
     /// Ask for an image this frame (no-op if loaded or failed).
     /// Photos' edits changed (or were listed): show their previews, made
     /// first if need be.
+    /// A photo's edited settings as the catalog last said (its master's
+    /// edit), if it has one.
+    pub fn edit_settings(&self, id: PhotoId) -> Option<shoebox_develop::edit::Settings> {
+        let i = self.index(id)?;
+        let json = self.edited_json.get(&self.catalog.photos[i].path)?;
+        let doc = shoebox_develop::edit::EditDoc::from_json(json).ok()?;
+        Some(doc.settings().clone())
+    }
+
     fn note_edits(&mut self, list: Vec<crate::jobs::EditInfo>) {
         for info in list {
             let id = crate::jobs::photo_id(&info.path);
@@ -4002,7 +4032,9 @@ impl ShoeboxApp {
                     None => Some(egui::pos2(0.5, 0.5)),
                 };
             }
-            if pressed(egui::Key::R) {
+            if pressed(egui::Key::R) && m.shift {
+                views::develop::toggle_reference(self);
+            } else if pressed(egui::Key::R) {
                 if self.develop.crop.is_some() {
                     views::develop::finish_crop(self, true);
                 } else {

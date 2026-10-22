@@ -112,3 +112,7 @@ together at the end, before the release.
   strong lines (a portrait, foliage): Auto straightens the first kind
   without looking stretched and leaves the second nearly alone; Level
   levels the horizon.
+- [ ] **Match Total Exposures** on a bracketed set or a series shot in
+  manual with changing light: matched photos look equally bright beside
+  the one matched to. **Reference view**: edit one photo beside another
+  from the same shoot and check the two halves don't flicker or lag.

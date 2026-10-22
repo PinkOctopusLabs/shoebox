@@ -396,12 +396,13 @@ pub enum LibraryCommand {
     },
     /// Write every edit changed since its last save to its `.shoebox` file.
     SaveEdits,
-    /// Apply a preset (or pasted settings) to these photos' edits, as one
-    /// step in each one's history, and write them as one batch.
+    /// Apply a preset (or pasted settings, or a matched exposure) to each
+    /// of these photos' edits, as one step in each one's history, and
+    /// write them as one batch.
     ApplyPreset {
-        /// (root, rel, copy): a virtual copy's tile pastes onto that copy.
-        photos: Vec<(PathBuf, String, String)>,
-        preset: shoebox_develop::preset::Preset,
+        /// (root, rel, copy, preset): a virtual copy's tile pastes onto
+        /// that copy.
+        photos: Vec<(PathBuf, String, String, shoebox_develop::preset::Preset)>,
         label: String,
     },
     /// Remember files just exported.
@@ -1656,15 +1657,11 @@ fn library_worker(
                 emit(LibraryEvent::Exports(photo, rows));
                 (false, false)
             }
-            LibraryCommand::ApplyPreset {
-                photos,
-                preset,
-                label,
-            } => {
+            LibraryCommand::ApplyPreset { photos, label } => {
                 use shoebox_develop::edit::{EditDoc, Source};
                 let mut infos = Vec::new();
                 let mut copied = Vec::new();
-                for (root, rel, copy) in photos {
+                for (root, rel, copy, preset) in photos {
                     let json = shoebox_core::edits::load(&cache, &root, &rel, &copy, render_hash)
                         .unwrap_or_default();
                     let mut doc = json

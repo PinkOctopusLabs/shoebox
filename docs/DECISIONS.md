@@ -1990,3 +1990,22 @@ masks; AI raw denoise (RawNIND); Smart-light tone; finer AI masks.
   (3.0°), and level again after the real render (mean lean under 0.5°).
 - Lightroom's Guided upright (drawing the lines) isn't built; it would
   feed hand-drawn segments to the same solver.
+
+## Reference view and Match Total Exposures (2026-10-22)
+
+- **Reference view** (Lightroom's): a fourth choice beside Edited,
+  Original and Split, and Shift-R. The reference photo shows in the left
+  half as the library shows it (its edited preview if it has one), the
+  edit in the right. The first time, with no reference yet, the current
+  photo becomes it; Use as Reference in any photo's menu picks another.
+  The reference stays while moving between photos.
+- **Match Total Exposures** (the photo menu, with several selected):
+  Lightroom's way, from metadata, not from rendering. Each photo's
+  captured light is log2(exposure time × ISO ÷ f-number²) from its EXIF;
+  its Exposure becomes the current photo's Exposure plus the difference
+  in captured light, so a bracketed or changing series comes out equally
+  bright. One step in each photo's history, written as one batch
+  (`ApplyPreset` now takes a preset per photo; Paste uses the same).
+  Photos without the EXIF, reference photos and movies are left alone and
+  counted in the notice. For a virtual copy's tile, the current photo's
+  Exposure is its master's.
