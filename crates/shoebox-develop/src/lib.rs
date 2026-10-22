@@ -14,6 +14,7 @@ pub mod encode;
 pub mod export;
 pub mod golden;
 pub mod gpu;
+pub mod heal;
 pub mod lens;
 pub mod mask;
 pub mod overlay;

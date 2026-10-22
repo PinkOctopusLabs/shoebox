@@ -66,6 +66,8 @@ struct Inner {
     noise: Option<super::detail::Noise>,
     detailed: Option<(super::detail::Detail, Arc<Rgb>)>,
     masks: Option<(u64, Arc<crate::mask::Masks>)>,
+    /// The healed source: what it was made from, the spots' key, and it.
+    healed: Option<(Option<Arc<Rgb>>, u64, Arc<Rgb>)>,
     mask_source: Option<Arc<Rgb>>,
 }
 
@@ -112,6 +114,29 @@ impl Cache {
         });
         self.lock().mask_source = Some(m.clone());
         m
+    }
+
+    /// The source after spot removal, from `from` (the detail stage's
+    /// result; None: the source itself) and spots keyed `key`.
+    pub fn healed(
+        &self,
+        from: Option<&Arc<Rgb>>,
+        key: u64,
+        make: impl FnOnce() -> Rgb,
+    ) -> Arc<Rgb> {
+        if let Some((f, k, img)) = &self.lock().healed
+            && *k == key
+            && match (f, from) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            }
+        {
+            return img.clone();
+        }
+        let img = Arc::new(make());
+        self.lock().healed = Some((from.cloned(), key, img.clone()));
+        img
     }
 
     /// The detail stage's result for `d` (`make` runs on a miss).

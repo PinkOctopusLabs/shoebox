@@ -1005,6 +1005,11 @@ impl ShoeboxApp {
         (t.selected.clone(), t.part, self.develop.layers_rendered())
     }
 
+    /// Develop's spot tool: on, and the spot selected (tests).
+    pub fn develop_spots(&self) -> (bool, Option<usize>) {
+        (self.develop.spots.active, self.develop.spots.selected)
+    }
+
     /// Where Develop's split divider is drawn (tests).
     pub fn develop_divider_x(&self) -> Option<f32> {
         self.develop.divider_x
@@ -3976,6 +3981,16 @@ impl ShoeboxApp {
             if pressed(egui::Key::W) {
                 self.develop.picking = !self.develop.picking;
             }
+            if pressed(egui::Key::Q) {
+                let on = !self.develop.spots.active;
+                views::spots::set_active(self, on);
+            }
+            if pressed(egui::Key::Backspace)
+                && self.develop.spots.active
+                && let Some(i) = self.develop.spots.selected
+            {
+                views::spots::remove(self, i);
+            }
             if pressed(egui::Key::O) && self.develop.local.selected.is_some() {
                 let t = &mut self.develop.local;
                 t.show_mask = !t.show_mask;
@@ -4002,6 +4017,12 @@ impl ShoeboxApp {
                 if pressed(egui::Key::Escape) {
                     views::develop::finish_crop(self, false);
                 }
+            } else if pressed(egui::Key::Escape)
+                && self.develop.spots.active
+                && !ctx.any_popup_open()
+            {
+                // Escape puts the spot tool down first.
+                views::spots::set_active(self, false);
             } else if pressed(egui::Key::Escape)
                 && self.develop.local.selected.is_some()
                 && !ctx.any_popup_open()

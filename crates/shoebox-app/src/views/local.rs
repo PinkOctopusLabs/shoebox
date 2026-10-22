@@ -588,16 +588,16 @@ fn picker(app: &mut ShoeboxApp, ui: &mut egui::Ui, hint: &str) {
 }
 
 /// Screen ↔ stored-image units for the photo drawn at `target`.
-struct Mapping<'a> {
+pub(super) struct Mapping<'a> {
     frame: &'a Frame,
     inv: [[f64; 3]; 3],
     target: Rect,
     /// The source's long edge (pixels).
-    long: f64,
+    pub(super) long: f64,
 }
 
 impl<'a> Mapping<'a> {
-    fn new(frame: &'a Frame, target: Rect, src: (usize, usize)) -> Option<Self> {
+    pub(super) fn new(frame: &'a Frame, target: Rect, src: (usize, usize)) -> Option<Self> {
         let m = frame.map.map(|r| r.map(f64::from));
         Some(Self {
             frame,
@@ -607,7 +607,7 @@ impl<'a> Mapping<'a> {
         })
     }
 
-    fn to_units(&self, p: Pos2) -> [f64; 2] {
+    pub(super) fn to_units(&self, p: Pos2) -> [f64; 2] {
         let f = self.frame;
         let ox = (p.x - self.target.left()) / self.target.width() * f.width as f32 - 0.5;
         let oy = (p.y - self.target.top()) / self.target.height() * f.height as f32 - 0.5;
@@ -618,7 +618,7 @@ impl<'a> Mapping<'a> {
         ]
     }
 
-    fn to_screen(&self, u: [f64; 2]) -> Pos2 {
+    pub(super) fn to_screen(&self, u: [f64; 2]) -> Pos2 {
         let s = [u[0] * self.long - 0.5, u[1] * self.long - 0.5, 1.0];
         let o = shoebox_develop::colour::mulv(&self.inv, s);
         let (ox, oy) = (o[0] / o[2], o[1] / o[2]);
@@ -630,7 +630,7 @@ impl<'a> Mapping<'a> {
     }
 
     /// Screen points per unit near `u` (for the brush's circle).
-    fn scale_at(&self, u: [f64; 2]) -> f32 {
+    pub(super) fn scale_at(&self, u: [f64; 2]) -> f32 {
         let a = self.to_screen(u);
         let b = self.to_screen([u[0] + 0.01, u[1]]);
         a.distance(b) / 0.01
@@ -674,6 +674,9 @@ pub fn on_photo(
     painter: &egui::Painter,
     target: Rect,
 ) {
+    if app.develop.spots.active {
+        return;
+    }
     let Some(doc) = &app.develop.doc else { return };
     let s = doc.settings().clone();
     let Some((_, layer)) = selected(app, &s) else {

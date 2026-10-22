@@ -356,6 +356,54 @@ pub struct Colour {
     pub luminance: [f64; 8],
 }
 
+/// Spot removal (EDITING-SPEC, Healing): spots healed or cloned from
+/// elsewhere in the photo, in order.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Heal {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub spots: Vec<Spot>,
+}
+
+/// Heal blends the copied texture into its surroundings (matching their
+/// brightness and colour); clone copies it as it is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpotKind {
+    #[default]
+    Heal,
+    Clone,
+}
+
+/// One spot: a circle at `dest` filled from the same circle at `source`.
+/// Positions and radius are in the stored image, in units of its long edge
+/// (as local adjustment masks).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Spot {
+    pub kind: SpotKind,
+    pub dest: [f64; 2],
+    pub source: [f64; 2],
+    pub radius: f64,
+    /// The soft edge, 0–1 of the radius.
+    pub feather: f64,
+    /// 0–100.
+    pub opacity: f64,
+}
+
+impl Default for Spot {
+    fn default() -> Self {
+        Self {
+            kind: SpotKind::Heal,
+            dest: [0.5, 0.33],
+            source: [0.6, 0.33],
+            radius: 0.01,
+            feather: 0.3,
+            opacity: 100.0,
+        }
+    }
+}
+
 /// Point Color (Tools beyond PhotoLab): colours picked on the photo, each
 /// with its hue, saturation and luminance shifted wherever that colour is.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -467,6 +515,7 @@ pub struct Modules {
     pub exposure: Exposure,
     pub lens: LensCorrection,
     pub defringe: Defringe,
+    pub heal: Heal,
     pub noise_reduction: NoiseReduction,
     pub sharpening: Sharpening,
     pub dehaze: Dehaze,

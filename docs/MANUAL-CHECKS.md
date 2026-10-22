@@ -100,3 +100,7 @@ together at the end, before the release.
   picked colour shifts smoothly with no hard edges or speckle where it
   fades out, Show affected matches what changes, and skin picked with a
   narrow range leaves similar backgrounds alone.
+- [ ] **Spot removal** on real blemishes (sensor dust in a sky, a spot
+  on skin, a small sign on a wall): heal leaves no visible edge or colour
+  shift at 100% and in a full-size export; the automatic source picks a
+  sensible place; clone copies texture exactly.

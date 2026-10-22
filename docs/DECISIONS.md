@@ -1910,3 +1910,34 @@ masks; AI raw denoise (RawNIND); Smart-light tone; finer AI masks.
 - **Show affected** greys whatever the selected point doesn't reach, in
   both pipes, so the GPU check covers it. Point Color travels with the
   Colour part of presets and copied settings.
+
+## Spot removal: heal and clone (2026-10-22)
+
+- `modules.heal.spots`: each spot a circle (`dest`, radius, feather,
+  opacity) filled from the same circle at `source`, heal or clone, in
+  the stored image's long-edge units like masks. Spots apply in order.
+- **On the source, after the detail stage**, so after noise reduction and
+  in linear light, as the spec asks. The spec also says after lens
+  correction; here lens corrections are part of sampling in the live
+  pipe, so spots sit before them, in the coordinates they're drawn in.
+  The result is cached on the source (keyed by the detail stage's result
+  and the spots) and is what the GPU uploads (`Demosaiced::prepared`),
+  so the shader needs nothing new.
+- **Heal** is the Poisson blend: the copied texture plus the harmonic
+  interpolation of the edge's difference, solved on the CPU by successive
+  over-relaxation (ω from the circle's size, stopping when the largest
+  change is 1e-5 of the values). A blot healed from a part of a gradient
+  0.125 brighter matches the gradient within 0.01. The spec suggested
+  Jacobi on the GPU; a spot is small, so the CPU solves it in
+  milliseconds and the pipes can't differ.
+- **The source** is chosen when the spot is made: of 72 circles 2.5, 3.5
+  and 5 radii away that fit in the photo, the one whose ring (1.05–1.6
+  radii, compared as square roots of the values) is most like the spot's,
+  slightly favouring nearer ones; found on the photo as healed so far.
+  Dragging the source changes it.
+- **Tool:** Q (or Spot tool) turns it on; a click adds a spot (Heal or
+  Clone, with the panel's size, feather and opacity), the panel's
+  sliders change the selected spot, the spot and its source drag,
+  Backspace removes the selected spot, Escape puts the tool down. Spot
+  removal is its own part in presets and copied settings, unticked by
+  default.

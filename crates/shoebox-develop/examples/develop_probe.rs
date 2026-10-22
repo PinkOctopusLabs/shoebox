@@ -105,7 +105,7 @@ fn main() {
             use shoebox_develop::gpu::{Output, Pipe, headless};
             let (device, queue) = headless().expect("a GPU");
             let pipe = Pipe::new(&device, Output::Rgba32Float).unwrap();
-            let detailed = src.detailed(&s);
+            let detailed = src.prepared(&s);
             let gsrc = pipe.upload(&device, &queue, detailed.as_deref().unwrap_or(&src.rgb));
             let t = Instant::now();
             let g = pipe.render(&device, &queue, &gsrc, &frame, true).unwrap();

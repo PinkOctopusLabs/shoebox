@@ -134,6 +134,8 @@ pub struct State {
     pub local: super::local::Tool,
     /// Point Color: picking, the point selected, its reach shown.
     pub points: super::point_colour::Tool,
+    /// Spot removal: the tool, the spot selected, settings for new ones.
+    pub spots: super::spots::Tool,
     /// The frame the edit was last rendered with (handles are placed
     /// through it).
     pub(super) frame: Option<Frame>,
@@ -297,6 +299,7 @@ impl State {
                 brush: self.local.brush,
                 ..Default::default()
             },
+            spots: self.spots.carried(),
             ..Default::default()
         };
     }
@@ -831,8 +834,9 @@ fn render(app: &mut ShoeboxApp, ctx: &egui::Context, gpu: Option<&eframe::egui_w
         settings.geometry.crop = [0.0, 0.0, 1.0, 1.0];
     }
     // The GPU pipe, with this photo's demosaiced image uploaded (after the
-    // detail stage: noise reduction, sharpening, texture).
-    let detailed = ready.src.detailed(&settings);
+    // detail stage: noise reduction, sharpening, texture; and spot
+    // removal).
+    let detailed = ready.src.prepared(&settings);
     let same = |g: &GpuShared| {
         Arc::ptr_eq(&g.from.0, &ready.src)
             && match (&g.from.1, &detailed) {
@@ -1247,6 +1251,7 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui, gpu: Option<&eframe::egui_w
     if app.develop.crop.is_none() && compare != Compare::Original && edited.is_some() {
         super::local::on_photo(app, ui, &resp, &painter, target);
         super::point_colour::on_photo(app, ui, &resp, target);
+        super::spots::on_photo(app, ui, &resp, &painter, target);
     }
     // Cropping: the crop over the whole frame, its aspect and Done above.
     if let (Some(_), Some((_, s))) = (&app.develop.crop, edited) {
@@ -2133,6 +2138,7 @@ pub fn controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 }
 
                 super::local::section(app, ui, &s);
+                super::spots::section(app, ui, &s.modules.heal);
 
                 if display_referred {
                     // A finished image has no raw stages.

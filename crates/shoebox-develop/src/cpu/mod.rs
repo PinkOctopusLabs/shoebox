@@ -175,6 +175,29 @@ impl Demosaiced {
         let d = self.detail(s)?;
         Some(self.cache.detailed(&d, || detail::process(&self.rgb, &d)))
     }
+
+    /// The source the live pipe reads: after the detail stage and spot
+    /// removal. None when neither does anything (use `rgb`).
+    pub fn prepared(&self, s: &Settings) -> Option<std::sync::Arc<Rgb>> {
+        let detailed = self.detailed(s);
+        let spots = &s.modules.heal.spots;
+        if spots.is_empty() {
+            return detailed;
+        }
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            serde_json::to_string(spots)
+                .unwrap_or_default()
+                .hash(&mut h);
+            h.finish()
+        };
+        let from = detailed.as_deref().unwrap_or(&self.rgb);
+        Some(
+            self.cache
+                .healed(detailed.as_ref(), key, || crate::heal::heal(from, spots)),
+        )
+    }
 }
 
 /// A finished image (8-bit, `space`'s primaries and the sRGB transfer
@@ -960,8 +983,8 @@ pub fn scene(raw: &RawImage, s: &Settings, o: &Options) -> Rgb {
     render_from(raw, &src, s, o, false)
 }
 
-/// The whole pipe from a prepared source: the detail stage, then
-/// [`apply`].
+/// The whole pipe from a prepared source: the detail stage and spot
+/// removal, then [`apply`].
 pub fn render_from(
     raw: &RawImage,
     src: &Demosaiced,
@@ -972,10 +995,10 @@ pub fn render_from(
     apply_from(src, s, &frame(raw, src, s, o), display)
 }
 
-/// [`apply`] on the source after the detail stage for `s` (the settings
-/// `f` was made from).
+/// [`apply`] on the source after the detail stage and spot removal for
+/// `s` (the settings `f` was made from).
 pub fn apply_from(src: &Demosaiced, s: &Settings, f: &Frame, display: bool) -> Rgb {
-    match src.detailed(s) {
+    match src.prepared(s) {
         Some(img) => apply(&img, f, display),
         None => apply(&src.rgb, f, display),
     }

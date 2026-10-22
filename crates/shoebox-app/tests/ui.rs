@@ -4583,3 +4583,87 @@ fn develop_point_colour() {
     h.run_steps(3);
     assert!(points(&h).is_empty());
 }
+
+/// Spot removal: Q, a click heals a spot there from a source found
+/// nearby; dragging the spot moves it (one step); Backspace removes it;
+/// Escape puts the tool down without leaving Develop.
+#[test]
+fn develop_spot_removal() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(&root).unwrap();
+    let img = shoebox_fixtures::scene(7, 800, 600);
+    std::fs::write(
+        root.join("spots.jpg"),
+        shoebox_fixtures::jpeg(&img, 92).unwrap(),
+    )
+    .unwrap();
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let mut h = harness(p, egui::vec2(1400.0, 1200.0));
+    settle(&mut h, Duration::from_secs(60));
+    h.get_by_label("spots.jpg").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::D);
+    wait_for(&mut h, Duration::from_secs(30), "develop", |a| {
+        a.develop_ready()
+    });
+    h.run_steps(3);
+    let spots = |h: &Harness<'_, ShoeboxApp>| {
+        h.state()
+            .develop_doc()
+            .unwrap()
+            .settings()
+            .modules
+            .heal
+            .spots
+            .clone()
+    };
+    h.key_press(egui::Key::Q);
+    h.run_steps(2);
+    assert!(h.state().develop_spots().0);
+    let photo = h.state().develop_photo_rect().unwrap();
+    let at = photo.center();
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.event(egui::Event::PointerMoved(at));
+    h.run_steps(1);
+    h.event(button(at, true));
+    h.event(button(at, false));
+    h.run_steps(3);
+    let s = spots(&h);
+    assert_eq!(s.len(), 1);
+    assert_ne!(s[0].source, s[0].dest, "a source elsewhere");
+    assert_eq!(h.state().develop_spots().1, Some(0));
+    let doc = h.state().develop_doc().unwrap();
+    assert_eq!(doc.history().last().unwrap().label, "Heal spot");
+    snapshot(&mut h, "develop-spot");
+
+    // Drag it 40 points left: one step.
+    let steps = h.state().develop_doc().unwrap().history().len();
+    h.event(button(at, true));
+    h.run_steps(1);
+    for k in 1..=4 {
+        h.event(egui::Event::PointerMoved(
+            at + egui::vec2(-10.0 * k as f32, 0.0),
+        ));
+        h.run_steps(1);
+    }
+    h.event(button(at + egui::vec2(-40.0, 0.0), false));
+    h.run_steps(3);
+    let moved = spots(&h);
+    assert!(moved[0].dest[0] < s[0].dest[0] - 0.01, "{:?}", moved[0]);
+    assert_eq!(moved[0].source, s[0].source, "the source stays");
+    assert_eq!(h.state().develop_doc().unwrap().history().len(), steps + 1);
+
+    h.key_press(egui::Key::Backspace);
+    h.run_steps(3);
+    assert!(spots(&h).is_empty());
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert!(!h.state().develop_spots().0);
+    assert_eq!(h.state().view_name(), shoebox_app::app::View::Develop);
+}

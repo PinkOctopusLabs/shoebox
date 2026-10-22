@@ -27,10 +27,11 @@ pub enum Part {
     Crop,
     Raw,
     Locals,
+    Spots,
 }
 
 impl Part {
-    pub const ALL: [Part; 14] = [
+    pub const ALL: [Part; 15] = [
         Part::WhiteBalance,
         Part::Exposure,
         Part::Tone,
@@ -45,6 +46,7 @@ impl Part {
         Part::Crop,
         Part::Raw,
         Part::Locals,
+        Part::Spots,
     ];
 
     pub fn label(self) -> &'static str {
@@ -63,16 +65,17 @@ impl Part {
             Part::Crop => "Crop & rotate",
             Part::Raw => "Raw",
             Part::Locals => "Local adjustments",
+            Part::Spots => "Spot removal",
         }
     }
 
-    /// Ticked when copying settings: geometry, raw handling and local
-    /// adjustments rarely carry over from one frame to another
+    /// Ticked when copying settings: geometry, raw handling, local
+    /// adjustments and spots rarely carry over from one frame to another
     /// (EDITING-SPEC, Batch editing).
     pub fn copied_by_default(self) -> bool {
         !matches!(
             self,
-            Part::Transform | Part::Crop | Part::Raw | Part::Locals
+            Part::Transform | Part::Crop | Part::Raw | Part::Locals | Part::Spots
         )
     }
 
@@ -106,6 +109,7 @@ impl Part {
             ],
             Part::Raw => &[&["modules", "raw"]],
             Part::Locals => &[&["locals"]],
+            Part::Spots => &[&["modules", "heal"]],
         }
     }
 }
