@@ -5061,6 +5061,66 @@ fn develop_ai_denoise() {
     });
 }
 
+/// AI denoise in Auto from an ISO (Settings → Raw, off by default): ticked,
+/// it's saved at ISO 3200; Auto then turns AI denoise on for an ISO 6400
+/// raw (with little classic luminance noise reduction) and not for an
+/// ISO 400 one.
+#[test]
+fn auto_ai_denoise_from_iso() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("lib");
+    std::fs::create_dir_all(&root).unwrap();
+    for (name, iso) in [("DSC_0010.NEF", 6400), ("DSC_0011.NEF", 400)] {
+        let dng = shoebox_fixtures::Dng {
+            iso: Some(iso),
+            ..shoebox_fixtures::Dng::new(600, 400)
+        };
+        let bytes = dng.write(|x, y| 1500 + ((x * 7 + y * 13) % 600) as u16 * 15);
+        std::fs::write(root.join(name), &bytes).unwrap();
+    }
+    let p = paths(t.path(), std::slice::from_ref(&root));
+    let file = p.settings.clone();
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Comma);
+    h.run_steps(2);
+    h.get_by_label("Raw").click();
+    h.run_steps(3);
+    assert_eq!(h.state().settings().ai_denoise_from_iso, None);
+    h.get_by_label("AI denoise in Auto from ISO").click();
+    h.run_steps(3);
+    assert_eq!(h.state().settings().ai_denoise_from_iso, Some(3200));
+    wait_for(&mut h, Duration::from_secs(10), "settings saved", |_| {
+        Settings::load(&file).unwrap().ai_denoise_from_iso == Some(3200)
+    });
+    snapshot(&mut h, "settings-raw-ai-denoise");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+
+    for (name, ai) in [("DSC_0010.NEF", true), ("DSC_0011.NEF", false)] {
+        h.key_press(egui::Key::G);
+        h.run_steps(2);
+        h.get_by_label(name).click();
+        h.run_steps(2);
+        h.key_press(egui::Key::D);
+        // A frame in Develop drops the last photo's edit.
+        h.run_steps(2);
+        wait_for(&mut h, Duration::from_secs(30), "auto", |a| {
+            a.develop_ready()
+                && a.develop_doc()
+                    .is_some_and(|d| d.history().first().is_some_and(|s| s.label == "Auto"))
+        });
+        let s = h.state().develop_doc().unwrap().settings().clone();
+        assert_eq!(s.modules.denoise_ai.enabled, ai, "{name}");
+        if ai {
+            assert_eq!(s.modules.noise_reduction.luminance, 10.0);
+        } else {
+            assert_eq!(s.modules.noise_reduction.luminance, 0.0);
+        }
+    }
+}
+
 /// Colour grading: pick Shadows, click right of the wheel's middle: a
 /// red-ish hue (Oklab 0°) at part saturation, one step.
 #[test]

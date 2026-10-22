@@ -129,6 +129,11 @@ together at the end, before the release.
   reduction, detail (hair, foliage, text) kept, colours unchanged, no
   tile seams; look at bright lights in night shots for coloured edges;
   note the time per photo. Export one and check it matches Develop.
+- [ ] **AI denoise in Auto** (Settings → Raw, "AI denoise in Auto from
+  ISO"): pick the ISO where the classic noise reduction stops being
+  enough on the Z f's files; on an APFS clone, opening a NEF above it
+  for the first time turns AI denoise on and the result isn't smeared by
+  the classic luminance noise reduction left under it (10).
 - [ ] **Smart Lighting** on backlit portraits, interiors with windows
   and landscapes with bright skies: shadows open up and skies hold,
   without halos at the horizon or round people; Auto's slight setting

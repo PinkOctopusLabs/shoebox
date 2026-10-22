@@ -2208,3 +2208,24 @@ stay. To come back to with Linux:
   100%; the spec's per-layer sharpening on the detail stage itself, and
   per-layer AI denoise strength (which needs the un-denoised source bound
   beside the denoised one in both pipes), are still to come.
+
+## Auto: AI denoise from an ISO (2026-10-22)
+
+- **The setting:** Settings → Raw, "AI denoise in Auto from ISO", off by
+  default; ticked, it starts at ISO 3200 (100 to 102400). Stored as
+  `ai_denoise_from_iso` (absent: off).
+- **The rule:** when the photo's ISO is at or above it, Auto turns AI
+  denoise on at strength 100 and caps the classic luminance noise
+  reduction at 10 (the model does the work; the classic tier only tidies
+  up). Colour noise reduction stays by ISO. Below the ISO, Auto leaves AI
+  denoise as it was, so running Auto again doesn't undo a choice made by
+  hand.
+- **Raw photos only** (scene-referred sources; the app passes no
+  threshold for others). A photo without an ISO in its EXIF never
+  qualifies.
+- **Without the model** the step is still made: the photo shows the
+  classic result (luminance at most 10) until the model is downloaded and
+  the AI's result arrives. The setting offers the download when ticked,
+  as Detail does.
+- The test DNG fixture can now carry an ISO (in an Exif IFD), for the UI
+  test.

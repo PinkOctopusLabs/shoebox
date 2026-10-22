@@ -655,8 +655,13 @@ pub fn run_auto(app: &mut ShoeboxApp) {
         shoebox_develop::lens::grid(shot, &on, size.0, size.1).is_some()
     });
     let profile = shoebox_develop::auto::profile_for(&ready.meta.model);
+    // AI denoise from the chosen ISO (Settings → Raw), for raw data only.
+    let ai_from = app
+        .settings
+        .ai_denoise_from_iso
+        .filter(|_| ready.src.referred == cpu::Referred::Scene);
     edit(app, "auto", "Auto".into(), |s| {
-        *s = shoebox_develop::auto::settings(s, &stats, iso, lens);
+        *s = shoebox_develop::auto::settings(s, &stats, iso, lens, ai_from);
         s.modules.input_colour.profile = profile;
     });
 }

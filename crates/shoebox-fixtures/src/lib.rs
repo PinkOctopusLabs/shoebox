@@ -256,6 +256,8 @@ pub struct Dng {
     pub matrix2: Option<([f32; 9], u16)>,
     pub make: String,
     pub model: String,
+    /// ISO, in an Exif IFD, if any.
+    pub iso: Option<u16>,
 }
 
 impl Dng {
@@ -284,6 +286,7 @@ impl Dng {
             )),
             make: "Shoebox".into(),
             model: "Test Sensor".into(),
+            iso: None,
         }
     }
 
@@ -356,6 +359,10 @@ impl Dng {
         if let Some(((ox, oy), (cw, ch))) = self.crop {
             entries.push((0xC61F, Val::Long(vec![ox, oy])));
             entries.push((0xC620, Val::Long(vec![cw, ch])));
+        }
+        if let Some(iso) = self.iso {
+            let exif = w.ifd(vec![(0x8827, Val::Short(vec![iso]))], 0);
+            entries.push((0x8769, Val::Long(vec![exif])));
         }
         let ifd0 = w.ifd(entries, 0);
         w.finish(ifd0)

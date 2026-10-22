@@ -2,7 +2,9 @@
 //! and updates. Changes apply and save as they're made.
 
 use eframe::egui;
-use shoebox_core::settings::{DEFAULT_DNG_CACHE_GB, DEFAULT_IMAGE_MEMORY_MB, Settings};
+use shoebox_core::settings::{
+    DEFAULT_AI_DENOISE_ISO, DEFAULT_DNG_CACHE_GB, DEFAULT_IMAGE_MEMORY_MB, Settings,
+};
 use shoebox_core::template::{DEFAULT_IMPORT, DEFAULT_RENAME};
 
 use crate::app::ShoeboxApp;
@@ -491,6 +493,36 @@ fn raw(app: &mut ShoeboxApp, ui: &mut egui::Ui, s: &mut Settings) {
          the photo itself, as ordinary slider values you can change. A preset chosen here \
          replaces it.",
     );
+    let mut ai = s.ai_denoise_from_iso.is_some();
+    let mut from = s.ai_denoise_from_iso.unwrap_or(DEFAULT_AI_DENOISE_ISO);
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut ai, "AI denoise in Auto from ISO");
+        ui.add_enabled(
+            ai,
+            egui::DragValue::new(&mut from)
+                .range(100..=102_400)
+                .speed(20.0),
+        );
+    });
+    s.ai_denoise_from_iso = ai.then_some(from);
+    if ai {
+        note(
+            ui,
+            "At or above this ISO, Auto turns on AI denoise (Detail) for raw photos and keeps \
+             the classic luminance noise reduction low. The photo shows the classic result \
+             until the AI's is ready.",
+        );
+        egui::Grid::new("settings-ai-dl")
+            .num_columns(1)
+            .show(ui, |ui| {
+                crate::models::download_ui(
+                    ui,
+                    &app.denoiser,
+                    "the AI denoise model",
+                    "RawNIND's UtNet2, once, from the authors' Google Drive; it runs on this Mac",
+                );
+            });
+    }
     ui.add_space(8.0);
     ui.label(egui::RichText::new("Adobe DNG Converter").strong());
     match &status.converter {

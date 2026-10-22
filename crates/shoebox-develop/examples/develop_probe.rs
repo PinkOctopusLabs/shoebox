@@ -94,7 +94,7 @@ fn main() {
             let iso = std::env::var("SHOEBOX_ISO")
                 .ok()
                 .and_then(|v| v.parse().ok());
-            s = shoebox_develop::auto::settings(&s, &stats, iso, src.lens.is_some());
+            s = shoebox_develop::auto::settings(&s, &stats, iso, src.lens.is_some(), None);
             println!("auto: {stats:?}");
             println!("      {}", s.to_value());
         }

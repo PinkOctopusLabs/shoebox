@@ -6,7 +6,9 @@
 //! - Exposure from the 99.5th percentile (the brightest highlights land
 //!   near white), nudged halfway towards the camera JPEG's brightness.
 //! - Noise reduction by ISO; light capture sharpening (raw files are soft
-//!   until sharpened, as every raw editor's defaults reflect).
+//!   until sharpened, as every raw editor's defaults reflect). From an ISO
+//!   the person chooses, AI denoise instead, with only a little of the
+//!   classic luminance noise reduction.
 //! - Dehaze only when the photo measures hazy.
 //! - A little Shadows when much of the frame is deep shadow (a stand-in for
 //!   the Smart Lighting module of Phase 3).
@@ -118,10 +120,22 @@ pub fn measure(
     }
 }
 
+/// Most classic luminance noise reduction Auto leaves under AI denoise.
+const LUMINANCE_UNDER_AI: f64 = 10.0;
+
 /// `base` with Auto's settings: exposure, noise reduction, sharpening,
-/// dehaze, Smart Lighting and (with `lens`) lens corrections.
-pub fn settings(base: &Settings, s: &Stats, iso: Option<u32>, lens: bool) -> Settings {
+/// dehaze, Smart Lighting and (with `lens`) lens corrections. `ai_from`:
+/// AI denoise for photos of at least this ISO (raw photos only: callers
+/// pass None for others; an unknown ISO never qualifies).
+pub fn settings(
+    base: &Settings,
+    s: &Stats,
+    iso: Option<u32>,
+    lens: bool,
+    ai_from: Option<u32>,
+) -> Settings {
     let mut out = base.clone();
+    let ai = matches!((iso, ai_from), (Some(iso), Some(from)) if iso >= from);
     let mut ev = s.highlights_ev.clamp(-2.0, 2.0);
     if let Some(c) = s.camera_ev {
         ev += 0.5 * (c - ev);
@@ -132,6 +146,13 @@ pub fn settings(base: &Settings, s: &Stats, iso: Option<u32>, lens: bool) -> Set
     out.modules.noise_reduction.luminance = round((10.0 * stops).clamp(0.0, 60.0), 1.0);
     out.modules.noise_reduction.chroma =
         round((20.0 + 6.0 * (iso / 100.0).log2()).clamp(20.0, 50.0), 1.0);
+    if ai {
+        // The model does the work; the classic tier only tidies up.
+        out.modules.denoise_ai.enabled = true;
+        out.modules.denoise_ai.strength = 100.0;
+        let l = &mut out.modules.noise_reduction.luminance;
+        *l = l.min(LUMINANCE_UNDER_AI);
+    }
     out.modules.sharpening.amount = 30.0;
     out.modules.sharpening.masking = 20.0;
     out.modules.dehaze.amount = round(f64::from(((s.haze - 0.25) * 100.0).clamp(0.0, 30.0)), 1.0);

@@ -78,6 +78,10 @@ pub struct Settings {
     /// Develop: this preset (by name) instead of Auto for new photos.
     #[serde(default)]
     pub new_photo_preset: Option<String>,
+    /// Develop: Auto turns on AI denoise for raw photos of at least this
+    /// ISO (None: never).
+    #[serde(default)]
+    pub ai_denoise_from_iso: Option<u32>,
     /// How big text and controls are (⌘+ / ⌘− / ⌘0).
     #[serde(default)]
     pub text_size: TextSize,
@@ -116,6 +120,9 @@ impl TextSize {
 
 /// Default for [`Settings::dng_cache_gb`].
 pub const DEFAULT_DNG_CACHE_GB: u32 = 20;
+
+/// The ISO [`Settings::ai_denoise_from_iso`] starts at when turned on.
+pub const DEFAULT_AI_DENOISE_ISO: u32 = 3200;
 
 /// Default for [`Settings::image_memory_mb`].
 pub const DEFAULT_IMAGE_MEMORY_MB: u32 = 768;
@@ -271,5 +278,20 @@ mod tests {
         assert_eq!(TextSize::Small.step(false), TextSize::Small);
         let old: Settings = serde_json::from_str(r#"{"roots": []}"#).unwrap();
         assert_eq!(old.text_size, TextSize::Medium);
+    }
+
+    #[test]
+    fn ai_denoise_iso_defaults_off_and_round_trips() {
+        let old: Settings = serde_json::from_str(r#"{"roots": []}"#).unwrap();
+        assert_eq!(old.ai_denoise_from_iso, None);
+        assert_eq!(Settings::default().ai_denoise_from_iso, None);
+        let t = tempfile::tempdir().unwrap();
+        let f = t.path().join("settings.json");
+        let s = Settings {
+            ai_denoise_from_iso: Some(6400),
+            ..Settings::default()
+        };
+        s.save(&f).unwrap();
+        assert_eq!(Settings::load(&f).unwrap().ai_denoise_from_iso, Some(6400));
     }
 }

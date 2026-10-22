@@ -17,7 +17,7 @@ fn stats() -> Stats {
 
 #[test]
 fn the_rules() {
-    let s = settings(&Settings::default(), &stats(), Some(100), false);
+    let s = settings(&Settings::default(), &stats(), Some(100), false, None);
     assert_eq!(s.modules.exposure.ev, 1.0);
     assert_eq!(s.modules.noise_reduction.luminance, 0.0);
     assert_eq!(s.modules.noise_reduction.chroma, 20.0);
@@ -32,7 +32,7 @@ fn the_rules() {
         haze: 0.4,
         ..stats()
     };
-    let s = settings(&Settings::default(), &st, Some(6400), true);
+    let s = settings(&Settings::default(), &st, Some(6400), true, None);
     assert_eq!(s.modules.exposure.ev, 0.5);
     assert_eq!(s.modules.noise_reduction.luminance, 40.0);
     assert!(s.modules.noise_reduction.chroma > 40.0);
@@ -44,9 +44,47 @@ fn the_rules() {
     let mut base = Settings::default();
     base.modules.colour.saturation = 30.0;
     assert_eq!(
-        settings(&base, &st, None, false).modules.colour.saturation,
+        settings(&base, &st, None, false, None)
+            .modules
+            .colour
+            .saturation,
         30.0
     );
+}
+
+/// AI denoise from a chosen ISO: on at or above it, with the classic
+/// luminance noise reduction cut back; off below it, without a choice or
+/// without a known ISO.
+#[test]
+fn ai_denoise_from_iso() {
+    let at = |iso, from| settings(&Settings::default(), &stats(), iso, false, from);
+    let s = at(Some(6400), Some(3200));
+    assert!(s.modules.denoise_ai.enabled);
+    assert_eq!(s.modules.denoise_ai.strength, 100.0);
+    assert_eq!(s.modules.noise_reduction.luminance, 10.0);
+    // Colour noise reduction is still by ISO.
+    assert!(s.modules.noise_reduction.chroma > 40.0);
+    // At the ISO itself; under the cap, the classic amount stays.
+    let s = at(Some(3200), Some(3200));
+    assert!(s.modules.denoise_ai.enabled);
+    assert_eq!(s.modules.noise_reduction.luminance, 10.0);
+    let s = at(Some(400), Some(100));
+    assert!(s.modules.denoise_ai.enabled);
+    assert_eq!(s.modules.noise_reduction.luminance, 0.0);
+    for (iso, from) in [
+        (Some(3199), Some(3200)),
+        (Some(6400), None),
+        (None, Some(100)),
+    ] {
+        let s = at(iso, from);
+        assert!(!s.modules.denoise_ai.enabled, "{iso:?} {from:?}");
+    }
+    assert_eq!(at(Some(6400), None).modules.noise_reduction.luminance, 40.0);
+    // Below the ISO it leaves a strength set by hand alone.
+    let mut base = Settings::default();
+    base.modules.denoise_ai.strength = 60.0;
+    let s = settings(&base, &stats(), Some(200), false, Some(3200));
+    assert_eq!(s.modules.denoise_ai, base.modules.denoise_ai);
 }
 
 fn raw() -> shoebox_decode::raw::RawImage {
