@@ -320,7 +320,10 @@ impl Context<'_> {
                 continue;
             }
             match c.kind {
-                AlbumUse::Event => ids.extend(events::ensure_path(&mut self.events, &parts)),
+                AlbumUse::Event => ids.extend(
+                    super::sync::event_of(c, &self.events)
+                        .or_else(|| events::ensure_path(&mut self.events, &parts)),
+                ),
                 AlbumUse::Keyword => {
                     let k = format!("Albums|{}", parts.join("|"));
                     if !m.keywords.contains(&k) {

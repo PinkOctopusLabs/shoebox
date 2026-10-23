@@ -125,6 +125,13 @@ pub struct AlbumChoice {
     pub name: String,
     #[serde(rename = "use")]
     pub kind: AlbumUse,
+    /// Its name in Photos at the last sync (folders and name, `›`-joined),
+    /// to tell a rename in Photos from one in Shoebox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub photos_name: Option<String>,
+    /// The event it made (an event's id), which follows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
 }
 
 /// Choices remembered between syncs.
@@ -475,6 +482,8 @@ mod tests {
             AlbumChoice {
                 name: "Trips › Japan".into(),
                 kind: AlbumUse::Event,
+                photos_name: Some("Trips › Japan".into()),
+                event: Some("e1".into()),
             },
         );
         c.change_token = Some("tok".into());

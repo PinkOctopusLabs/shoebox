@@ -268,7 +268,13 @@ pub fn import(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     albums(app, ui);
     ui.add_space(6.0);
     let p = &planned.plan;
-    let work = p.new.len() + p.updated.len() + p.joined.len() + p.favourited.len();
+    let work = p.new.len()
+        + p.updated.len()
+        + p.joined.len()
+        + p.departed.len()
+        + p.favourited.len()
+        + p.renamed.len()
+        + p.gone.len();
     ui.horizontal(|ui| {
         let label = if p.new.is_empty() && work > 0 {
             "Bring photos up to date".to_owned()
@@ -374,11 +380,34 @@ fn summary(ui: &mut egui::Ui, planned: &Planned) {
             }
         }
     });
-    if !p.left.is_empty() {
-        let n: usize = p.left.iter().map(|(_, n)| n).sum();
-        ui.weak(format!(
-            "{} left albums in Photos since the last import; nothing changes here for that.",
-            plural(n, "photo")
+    // Albums' events follow Photos (and their keywords): say what moves.
+    let name = |id: &str| {
+        planned
+            .library
+            .albums
+            .iter()
+            .find(|a| a.id == id)
+            .map(|a| a.path().join(" › "))
+            .or_else(|| p.remembered.get(id).map(|c| c.name.clone()))
+            .unwrap_or_else(|| "an album".into())
+    };
+    let gone: std::collections::HashSet<&str> = p.gone.iter().map(|(id, _)| id.as_str()).collect();
+    for (album, n) in p.left.iter().filter(|(a, _)| !gone.contains(a.as_str())) {
+        ui.label(format!(
+            "{} taken out of {} in Photos: they leave its event here",
+            plural(*n, "photo"),
+            name(album)
+        ));
+    }
+    for r in &p.renamed {
+        ui.label(format!(
+            "{} was renamed {} in Photos: its event follows (unless you renamed it here)",
+            r.from, r.to
+        ));
+    }
+    for (_, was) in &p.gone {
+        ui.label(format!(
+            "{was} was deleted in Photos: its event stays here, with its photos"
         ));
     }
     if !p.new.is_empty() {
@@ -498,8 +527,14 @@ fn report(app: &mut ShoeboxApp, ui: &mut egui::Ui, r: &Report) {
     }
     if r.marked > 0 {
         parts.push(format!(
-            "{} given album events or ratings",
+            "{} with their albums' events, keywords or ratings brought up to date",
             plural(r.marked, "photo")
+        ));
+    }
+    if r.renamed > 0 {
+        parts.push(format!(
+            "{} renamed with their albums",
+            plural(r.renamed, "event")
         ));
     }
     ui.label(parts.join(" · "));

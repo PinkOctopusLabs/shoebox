@@ -53,6 +53,25 @@ impl FakeSource {
         }
     }
 
+    /// Rename an album (its folders stay).
+    pub fn rename_album(&self, id: &str, name: &str) {
+        if let Ok(mut s) = self.state.lock()
+            && let Some(a) = s.library.albums.iter_mut().find(|a| a.id == id)
+        {
+            a.name = name.to_owned();
+        }
+    }
+
+    /// Delete an album (its photos stay in Photos).
+    pub fn remove_album(&self, id: &str) {
+        if let Ok(mut s) = self.state.lock() {
+            s.library.albums.retain(|a| a.id != id);
+            for a in &mut s.library.assets {
+                a.albums.retain(|x| x != id);
+            }
+        }
+    }
+
     /// Change an asset in place (an edit made in Photos, a favourite).
     pub fn update(
         &self,

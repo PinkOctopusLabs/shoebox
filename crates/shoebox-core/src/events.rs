@@ -240,6 +240,28 @@ pub fn join(marks: &Marks, add: &[String], events: &[Event]) -> Marks {
     apply(marks, &ids, events, events)
 }
 
+/// `marks` with these events left (others it's in are kept).
+pub fn leave(marks: &Marks, remove: &[String], events: &[Event]) -> Marks {
+    let mut ids = marked(marks, &by_path(events));
+    ids.retain(|id| !remove.contains(id));
+    apply(marks, &ids, events, events)
+}
+
+/// The id of the event at this path of names, if there is one (matched
+/// case-insensitively; nothing is made).
+pub fn find_path(events: &[Event], names: &[String]) -> Option<String> {
+    let mut parent: Option<String> = None;
+    for name in names {
+        let id = events
+            .iter()
+            .find(|e| e.parent == parent && e.name.to_lowercase() == name.to_lowercase())?
+            .id
+            .clone();
+        parent = Some(id);
+    }
+    parent
+}
+
 /// The id of the event at this path of names (`["Italy 2019", "Rome"]`),
 /// matched case-insensitively, creating the missing ones in `events`.
 pub fn ensure_path(events: &mut Vec<Event>, names: &[String]) -> Option<String> {

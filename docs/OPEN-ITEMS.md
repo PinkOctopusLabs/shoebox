@@ -23,6 +23,11 @@ has no `TODO` or `FIXME` comments).
 
 Provisional choices the person should confirm or change.
 
+- [ ] **iCloud Photos: an album's event renamed in Shoebox.** For now the
+  Shoebox name sticks and Photos' later renames of the album don't follow,
+  which can leave one name in Shoebox and another in Photos. Source:
+  DECISIONS "iCloud Photos: events follow their albums".
+
 - [ ] **iCloud Photos (M7): the probe in a test account.** Phases 1–3
   are built, but no PhotoKit code has run against a Photos library yet. The
   probe (`--photos-probe`, MANUAL-CHECKS 11) checks the facts the sync

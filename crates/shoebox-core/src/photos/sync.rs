@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::ledger::{self, AlbumUse, Entry, Ledgers};
+use super::ledger::{self, AlbumChoice, AlbumUse, Entry, Ledgers};
 use super::model::{AssetId, Library, ResourceKind};
 use super::place::{self, Context, Staged, album_parts, favourite};
 use super::plan::Plan;
@@ -53,8 +53,11 @@ pub struct Report {
     /// Dated by Photos (the file had no date, or Photos' was changed).
     pub dated_by_photos: usize,
     pub undated: usize,
-    /// Library photos given album events or favourite marks.
+    /// Library photos whose album events, keywords or favourite marks
+    /// changed to follow Photos.
     pub marked: usize,
+    /// Events renamed to follow their albums in Photos.
+    pub renamed: usize,
     /// Stopped before the end, as asked.
     pub stopped: bool,
     /// Stopped before the end: too little free space.
@@ -251,7 +254,13 @@ pub fn run(
 ) -> Result<Report> {
     let mut report = Report::default();
     let total = plan.new.len() + plan.updated.len();
-    if total == 0 && plan.joined.is_empty() && plan.favourited.is_empty() {
+    if total == 0
+        && plan.joined.is_empty()
+        && plan.departed.is_empty()
+        && plan.favourited.is_empty()
+        && plan.renamed.is_empty()
+        && plan.gone.is_empty()
+    {
         return Ok(report);
     }
     std::fs::create_dir_all(job.staging).map_err(io(job.staging))?;
@@ -264,13 +273,9 @@ pub fn run(
 
     // First step: marks on photos synced before, and the album choices.
     let mut writes = marks_for_synced(job, plan, ledgers, cx, &mut report)?;
-    let mut choices = ledgers.choices.get(dest).cloned().unwrap_or_default();
-    choices.albums = cx
-        .albums
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect::<BTreeMap<_, _>>();
-    writes.push(ledger::plan_choices(cx.root, &choices)?);
+    // The album choices go with the last step, when the events new albums
+    // make are there to link.
+    let choices_base = ledgers.choices.get(dest).cloned().unwrap_or_default();
     let mut records: HashMap<usize, Vec<(AssetId, Entry)>> = HashMap::new();
     for ((root, id), e) in synced_entries(plan, job, ledgers) {
         records.entry(root).or_default().push((id, e));
@@ -403,7 +408,13 @@ pub fn run(
                 break;
             }
         }
-        // Marks and records with no downloads after them (or none at all).
+        // Marks and records with no downloads after them (or none at all),
+        // and the album choices.
+        let choices = ledger::Choices {
+            albums: choices_to_keep(plan, cx),
+            ..choices_base.clone()
+        };
+        pending.push(ledger::plan_choices(cx.root, &choices)?);
         flush(Vec::new(), pending, &mut records, cx, ledgers)
     })();
     // The cache's own files: removing them breaks no rule.
@@ -439,6 +450,7 @@ fn synced_entries(plan: &Plan, job: &Job<'_>, ledgers: &Ledgers) -> Vec<((usize,
     let changed = plan
         .joined
         .iter()
+        .chain(&plan.departed)
         .map(|(i, _)| *i)
         .chain(plan.favourited.iter().copied());
     for i in changed {
@@ -457,9 +469,69 @@ fn synced_entries(plan: &Plan, job: &Job<'_>, ledgers: &Ledgers) -> Vec<((usize,
     out.into_values().collect()
 }
 
-/// Sidecar edits for library photos of assets synced before that joined
-/// albums or were favourited in Photos since. A rating set in Shoebox is
-/// never replaced; reference roots are never written.
+/// An album's choice: as made in this sync's plan, else as remembered.
+fn choice_of<'a>(cx: &'a Context<'_>, plan: &'a Plan, album: &str) -> Option<&'a AlbumChoice> {
+    cx.albums.get(album).or_else(|| plan.remembered.get(album))
+}
+
+/// The event an album made (its linked id, if still there, else by name).
+pub(crate) fn event_of(c: &AlbumChoice, events: &[events::Event]) -> Option<String> {
+    c.event
+        .clone()
+        .filter(|id| events.iter().any(|e| &e.id == id))
+        .or_else(|| events::find_path(events, &album_parts(c)))
+}
+
+/// Follow albums renamed in Photos: an event an album made takes the new
+/// name (and folders), unless it was renamed in Shoebox since. Returns how
+/// many events were renamed; `cx.events` holds the new names.
+fn follow_renames(plan: &Plan, cx: &mut Context<'_>) -> usize {
+    let mut n = 0;
+    for r in &plan.renamed {
+        let Some(was) = plan.remembered.get(&r.id) else {
+            continue;
+        };
+        if was.kind != AlbumUse::Event {
+            continue;
+        }
+        let Some(id) = event_of(was, &cx.events) else {
+            continue;
+        };
+        // Renamed in Shoebox since: leave it.
+        let current: Vec<String> = events::path_of(&cx.events, &id)
+            .split('|')
+            .map(str::to_owned)
+            .collect();
+        if current != album_parts(was) {
+            continue;
+        }
+        let to: Vec<String> =
+            r.to.split('›')
+                .map(|p| p.trim().replace('|', "-"))
+                .filter(|p| !p.is_empty())
+                .collect();
+        let Some((leaf, parents)) = to.split_last() else {
+            continue;
+        };
+        let parent = if parents.is_empty() {
+            None
+        } else {
+            events::ensure_path(&mut cx.events, parents)
+        };
+        if let Some(e) = cx.events.iter_mut().find(|e| e.id == id) {
+            e.name = leaf.clone();
+            e.parent = parent;
+            e.updated = events::now_ms();
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Sidecar edits for library photos of assets synced before, following
+/// Photos: renamed albums' events and keywords, albums joined and left,
+/// favourites. One write a photo, whatever changed. A rating set in Shoebox
+/// is never replaced; reference roots are never written.
 fn marks_for_synced(
     job: &Job<'_>,
     plan: &Plan,
@@ -467,13 +539,6 @@ fn marks_for_synced(
     cx: &mut Context<'_>,
     report: &mut Report,
 ) -> Result<Vec<(PathBuf, Vec<u8>)>> {
-    let mut changes: BTreeMap<usize, (Vec<String>, bool)> = BTreeMap::new();
-    for (i, albums) in &plan.joined {
-        changes.entry(*i).or_default().0 = albums.clone();
-    }
-    for i in &plan.favourited {
-        changes.entry(*i).or_default().1 = true;
-    }
     let by_path: HashMap<&Path, usize> = job
         .catalog
         .photos
@@ -481,58 +546,178 @@ fn marks_for_synced(
         .enumerate()
         .map(|(i, p)| (p.path.as_path(), i))
         .collect();
-    let mut writes = Vec::new();
-    for (i, (albums, favourited)) in changes {
+    // Each library file of an asset's record.
+    let files_of = |root: usize, e: &Entry| -> Vec<usize> {
+        e.files
+            .iter()
+            .filter(|f| f.kind != ResourceKind::PairedVideo)
+            .filter_map(|f| {
+                let path = if Path::new(&f.rel).is_absolute() {
+                    PathBuf::from(&f.rel)
+                } else {
+                    job.roots[root].join(&f.rel)
+                };
+                by_path.get(path.as_path()).copied()
+            })
+            .filter(|&pi| !job.catalog.is_reference(pi))
+            .collect()
+    };
+    let mut updated: BTreeMap<usize, crate::marks::Marks> = BTreeMap::new();
+
+    // Renames: events (their keywords on every member), and keywords.
+    let before = cx.events.clone();
+    report.renamed = follow_renames(plan, cx);
+    if report.renamed > 0 {
+        for (pi, m) in events::mark_updates(job.catalog, &before, &cx.events, None, false) {
+            if !job.catalog.is_reference(pi) {
+                updated.insert(pi, m);
+            }
+        }
+    }
+    let keyword = |c: &AlbumChoice| format!("Albums|{}", album_parts(c).join("|"));
+    let renamed_keywords: Vec<(String, String, String)> = plan
+        .renamed
+        .iter()
+        .filter_map(|r| {
+            let was = plan
+                .remembered
+                .get(&r.id)
+                .filter(|c| c.kind == AlbumUse::Keyword)?;
+            let now = choice_of(cx, plan, &r.id)?;
+            (keyword(was) != keyword(now)).then(|| (r.id.clone(), keyword(was), keyword(now)))
+        })
+        .collect();
+    if !renamed_keywords.is_empty() {
+        for (_, root, e) in ledgers.iter() {
+            for (album, from, to) in &renamed_keywords {
+                if !e.albums.contains(album) {
+                    continue;
+                }
+                for pi in files_of(root, e) {
+                    let m = updated
+                        .entry(pi)
+                        .or_insert_with(|| job.catalog.photos[pi].marks.clone());
+                    for k in &mut m.keywords {
+                        if k == from {
+                            k.clone_from(to);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Albums joined and left, favourites.
+    #[derive(Default)]
+    struct Change {
+        joined: Vec<String>,
+        left: Vec<String>,
+        favourited: bool,
+    }
+    let mut changes: BTreeMap<usize, Change> = BTreeMap::new();
+    for (i, albums) in &plan.joined {
+        changes.entry(*i).or_default().joined = albums.clone();
+    }
+    for (i, albums) in &plan.departed {
+        changes.entry(*i).or_default().left = albums.clone();
+    }
+    for i in &plan.favourited {
+        changes.entry(*i).or_default().favourited = true;
+    }
+    let mut marked = std::collections::HashSet::new();
+    for (i, ch) in changes {
         let a = &job.library.assets[i];
         let Some((root, e)) = ledgers.find(&a.id) else {
             continue;
         };
-        let mut ids = Vec::new();
-        let mut keywords = Vec::new();
-        for album in &albums {
-            let Some(c) = cx.albums.get(album) else {
+        let (mut join, mut add_kw) = (Vec::new(), Vec::new());
+        for album in &ch.joined {
+            let Some(c) = choice_of(cx, plan, album).cloned() else {
                 continue;
             };
-            let parts = album_parts(c);
+            let parts = album_parts(&c);
             if parts.is_empty() {
                 continue;
             }
             match c.kind {
-                AlbumUse::Event => ids.extend(events::ensure_path(&mut cx.events, &parts)),
-                AlbumUse::Keyword => keywords.push(format!("Albums|{}", parts.join("|"))),
+                AlbumUse::Event => join.extend(
+                    event_of(&c, &cx.events)
+                        .or_else(|| events::ensure_path(&mut cx.events, &parts)),
+                ),
+                AlbumUse::Keyword => add_kw.push(keyword(&c)),
                 AlbumUse::Nothing => {}
             }
         }
-        for f in &e.files {
-            let path = if f.kind == ResourceKind::PairedVideo {
-                continue;
-            } else if Path::new(&f.rel).is_absolute() {
-                PathBuf::from(&f.rel)
-            } else {
-                job.roots[root].join(&f.rel)
-            };
-            let Some(&pi) = by_path.get(path.as_path()) else {
+        let (mut leave, mut drop_kw) = (Vec::new(), Vec::new());
+        // An album deleted in Photos: its photos stay in its event.
+        let gone: std::collections::HashSet<&str> =
+            plan.gone.iter().map(|(id, _)| id.as_str()).collect();
+        for album in ch.left.iter().filter(|a| !gone.contains(a.as_str())) {
+            let Some(c) = choice_of(cx, plan, album) else {
                 continue;
             };
-            if job.catalog.is_reference(pi) {
-                continue;
+            match c.kind {
+                AlbumUse::Event => leave.extend(event_of(c, &cx.events)),
+                AlbumUse::Keyword => drop_kw.push(keyword(c)),
+                AlbumUse::Nothing => {}
             }
+        }
+        for pi in files_of(root, e) {
             let photo = &job.catalog.photos[pi];
-            let mut m = events::join(&photo.marks, &ids, &cx.events);
-            for k in &keywords {
+            let base = updated
+                .get(&pi)
+                .cloned()
+                .unwrap_or_else(|| photo.marks.clone());
+            let mut m = events::leave(&base, &leave, &cx.events);
+            m = events::join(&m, &join, &cx.events);
+            m.keywords.retain(|k| !drop_kw.contains(k));
+            for k in &add_kw {
                 if !m.keywords.contains(k) {
                     m.keywords.push(k.clone());
                 }
             }
-            if favourited && photo.marks.rating == 0 {
+            if ch.favourited && photo.marks.rating == 0 {
                 favourite(&mut m, cx.options.favourite);
             }
-            let w = sidecar::plan_write(&photo.path, &photo.marks, &m, false)?;
-            if !w.is_empty() {
-                writes.extend(w);
-                report.marked += 1;
+            if m != base {
+                marked.insert(pi);
             }
+            updated.insert(pi, m);
         }
     }
+    report.marked = marked.len();
+    let mut writes = Vec::new();
+    for (pi, m) in updated {
+        let photo = &job.catalog.photos[pi];
+        writes.extend(sidecar::plan_write(&photo.path, &photo.marks, &m, false)?);
+    }
     Ok(writes)
+}
+
+/// The album choices to remember: this sync's, and earlier ones of albums
+/// still in Photos without photos now; each with its event's id.
+fn choices_to_keep(plan: &Plan, cx: &Context<'_>) -> BTreeMap<String, AlbumChoice> {
+    let gone: std::collections::HashSet<&str> =
+        plan.gone.iter().map(|(id, _)| id.as_str()).collect();
+    let mut out: BTreeMap<String, AlbumChoice> = plan
+        .remembered
+        .iter()
+        .filter(|(id, _)| !gone.contains(id.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    for (k, v) in cx.albums {
+        let mut v = v.clone();
+        if v.event.is_none() {
+            v.event = plan.remembered.get(k).and_then(|c| c.event.clone());
+        }
+        out.insert(k.clone(), v);
+    }
+    for c in out.values_mut() {
+        // The event it's linked to (renamed in Shoebox or not), else the
+        // one of its name.
+        c.event = (c.kind == AlbumUse::Event)
+            .then(|| event_of(c, &cx.events))
+            .flatten();
+    }
+    out
 }

@@ -4194,3 +4194,29 @@ files for assets it has already. The probe times 200 lookups.
 library either way. The iCloud ids stage (`cloudIdentifierMappings`) is
 next if it's slow: the stage timings in the log will say.
 
+## iCloud Photos: events follow their albums (2026-10-23)
+Photos' albums hold references, as Shoebox's events do (a keyword on each
+photo; a photo can be in several). Asked for: keep album events in step
+with Photos, one way (Photos → Shoebox).
+- Each sync compares a synced photo's albums with those recorded last
+  time: albums joined add the event (as before), albums left take the
+  photo out of the event (`Plan::departed`, `events::leave`); keyword
+  albums lose the keyword. Only photos that came from Photos are touched,
+  so photos added to an event in Shoebox stay, and only Photos' changes
+  since the last sync apply, so a photo taken out of an event in Shoebox
+  isn't put back.
+- `choices.json` remembers each album's name in Photos and the event it
+  made (by id). An album renamed or moved in Photos renames or moves its
+  event and the members' keywords (`events::mark_updates`), unless the
+  event was renamed in Shoebox since (provisional: see OPEN-ITEMS); joins
+  follow the link, so they go to that event, not a new one of the album's
+  name. An album deleted in Photos leaves its event and members alone and
+  is forgotten.
+- All in the sync's first step (one write a photo), in its batch: ⌘Z takes
+  it back. The Import screen says what moves before Import ("3 photos
+  taken out of Trips › Japan in Photos: they leave its event here", the
+  renames, the deletions).
+- Test: `events_follow_their_albums` (leave, join, rename, a library
+  photo of the person's own kept and renamed, a rename in Shoebox kept and
+  joined, an album deleted); `a_photo_in_several_albums_is_one_copy_in_several_events`.
+

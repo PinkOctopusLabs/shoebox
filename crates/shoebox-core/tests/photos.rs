@@ -754,3 +754,123 @@ fn a_photo_in_several_albums_is_one_copy_in_several_events() {
         assert_eq!(members.get(id).map(|m| m.len()), Some(1), "{name}");
     }
 }
+
+/// Events made from albums follow them at each sync (Photos → Shoebox):
+/// a photo taken out of an album leaves its event, one added joins it, an
+/// album renamed in Photos renames its event, unless the event was renamed
+/// in Shoebox; photos that didn't come from Photos keep their events; an
+/// album deleted in Photos leaves its event in place; undo takes it back.
+#[test]
+fn events_follow_their_albums() {
+    let mut w = World::new();
+    library(&w);
+    let lib = w.lib.clone();
+    w.sync(&lib);
+    let p1 = lib.join("2024/2024-06-03/20240603-141502-120.jpg");
+    let p3 = lib.join("2024/2024-08-01/20240801-090000-5.jpg");
+    // One of the library's own photos, put in the same event in Shoebox.
+    let mine = lib.join("mine/DSC_0001.jpg");
+    std::fs::create_dir_all(mine.parent().unwrap()).unwrap();
+    std::fs::write(&mine, photo(60, &shot("2024:06:05 10:00:00", ""))).unwrap();
+    std::fs::write(
+        shoebox_core::sidecar::per_file(&mine),
+        shoebox_core::xmp::edit(
+            None,
+            &shoebox_core::marks::Marks {
+                keywords: vec!["Events|Trips|Japan".into()],
+                ..Default::default()
+            }
+            .changes_from(&Default::default()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let keywords = |w: &mut World, p: &Path| -> Vec<String> {
+        let c = w.catalog();
+        c.photos
+            .iter()
+            .find(|x| x.path == p)
+            .map(|x| x.marks.keywords.clone())
+            .unwrap_or_default()
+    };
+    assert!(keywords(&mut w, &p1).contains(&"Events|Trips|Japan".to_owned()));
+
+    // In Photos: 1 leaves the album, 3 joins it, and it's renamed.
+    w.source.update("L1", |a, _| a.albums.clear());
+    w.source.update("L3", |a, _| a.albums.push("A1".into()));
+    w.source.rename_album("A1", "Japan 2024");
+    let (p, _) = w.plan();
+    assert_eq!(p.departed.len(), 1);
+    assert_eq!(p.joined.len(), 1);
+    assert_eq!(p.renamed.len(), 1);
+    assert_eq!(
+        p.albums[0].choice.name, "Trips › Japan 2024",
+        "the new name, not renamed here"
+    );
+    let (_, report) = w.sync(&lib);
+    assert_eq!((report.renamed, report.copied), (1, 0), "{report:?}");
+    let evs = events::load(std::slice::from_ref(&lib));
+    assert!(evs.iter().any(|e| e.name == "Japan 2024"));
+    assert!(!evs.iter().any(|e| e.name == "Japan"));
+    assert!(
+        !keywords(&mut w, &p1)
+            .iter()
+            .any(|k| k.starts_with("Events|")),
+        "left"
+    );
+    assert!(
+        keywords(&mut w, &p3).contains(&"Events|Trips|Japan 2024".to_owned()),
+        "joined"
+    );
+    assert!(
+        keywords(&mut w, &mine).contains(&"Events|Trips|Japan 2024".to_owned()),
+        "a photo of the library's own stays, renamed with its event"
+    );
+    let (again, _) = w.plan();
+    assert!(again.departed.is_empty() && again.joined.is_empty() && again.renamed.is_empty());
+
+    // Renamed in Shoebox, then in Photos: Shoebox's name stays.
+    let mut evs = events::load(std::slice::from_ref(&lib));
+    let old = evs.clone();
+    let id = evs
+        .iter()
+        .find(|e| e.name == "Japan 2024")
+        .unwrap()
+        .id
+        .clone();
+    evs.iter_mut().find(|e| e.id == id).unwrap().name = "Kyoto".into();
+    let catalog = w.catalog();
+    let mut writes = events::plan_save(std::slice::from_ref(&lib), &evs).unwrap();
+    for (pi, m) in events::mark_updates(&catalog, &old, &evs, None, false) {
+        let ph = &catalog.photos[pi];
+        writes.extend(shoebox_core::sidecar::plan_write(&ph.path, &ph.marks, &m, false).unwrap());
+    }
+    w.fo.write_sidecars("rename event", writes).unwrap();
+    // ...and a photo added to the album in Photos joins it, under
+    // Shoebox's name, not a new event of the album's.
+    w.source.rename_album("A1", "Japan trip");
+    w.source.update("L2", |a, _| a.albums.push("A1".into()));
+    w.sync(&lib);
+    let evs = events::load(std::slice::from_ref(&lib));
+    assert!(evs.iter().any(|e| e.name == "Kyoto"));
+    assert!(!evs.iter().any(|e| e.name == "Japan trip"));
+    let p2 = lib.join("2024/2024-07-01/20240701-140000.jpg");
+    assert!(keywords(&mut w, &p2).contains(&"Events|Trips|Kyoto".to_owned()));
+
+    // Deleted in Photos: the event stays.
+    w.source.remove_album("A1");
+    let (p, _) = w.plan();
+    assert_eq!(p.gone.len(), 1);
+    let (_, report) = w.sync(&lib);
+    assert!(
+        events::load(std::slice::from_ref(&lib))
+            .iter()
+            .any(|e| e.name == "Kyoto")
+    );
+    assert!(
+        keywords(&mut w, &p3).contains(&"Events|Trips|Kyoto".to_owned()),
+        "{report:?}"
+    );
+    let (p, _) = w.plan();
+    assert!(p.gone.is_empty(), "forgotten once seen");
+}

@@ -67,6 +67,15 @@ pub struct AlbumRow {
     pub photos: usize,
 }
 
+/// An album renamed in Photos since the last sync.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlbumRename {
+    pub id: String,
+    /// Its name in Photos then and now (folders and name, `›`-joined).
+    pub from: String,
+    pub to: String,
+}
+
 /// What a sync will do.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Plan {
@@ -79,9 +88,20 @@ pub struct Plan {
     pub joined: Vec<(usize, Vec<String>)>,
     /// Assets synced before and favourited in Photos since.
     pub favourited: Vec<usize>,
+    /// Assets synced before that left albums since: (asset, album ids).
+    /// They leave those albums' events (or lose their keywords).
+    pub departed: Vec<(usize, Vec<String>)>,
     /// Albums assets left in Photos since the last sync: (album id, how
-    /// many). Reported, never acted on by themselves.
+    /// many), for the summary.
     pub left: Vec<(String, usize)>,
+    /// Albums renamed (or moved) in Photos since the last sync.
+    pub renamed: Vec<AlbumRename>,
+    /// Albums gone from Photos since the last sync: (id, name). Their
+    /// events stay, no longer linked.
+    pub gone: Vec<(String, String)>,
+    /// What each album became last time (all of them, also those without
+    /// photos now), for the sync.
+    pub remembered: BTreeMap<String, AlbumChoice>,
     /// Synced before, nothing new.
     pub synced: usize,
     /// Left out: hidden in Photos.
@@ -145,6 +165,8 @@ pub fn default_choice(path: &[String]) -> AlbumChoice {
         } else {
             AlbumUse::Event
         },
+        photos_name: Some(path.join(" › ")),
+        event: None,
     }
 }
 
@@ -207,12 +229,23 @@ pub fn plan(
                     .filter(|x| !had.contains(x.as_str()))
                     .cloned()
                     .collect();
-                for x in had.difference(&now) {
-                    *left.entry((*x).to_owned()).or_default() += 1;
+                let mut departed: Vec<String> = e
+                    .albums
+                    .iter()
+                    .filter(|x| !now.contains(x.as_str()))
+                    .cloned()
+                    .collect();
+                departed.dedup();
+                for x in &departed {
+                    *left.entry(x.clone()).or_default() += 1;
                 }
                 let mut changed = false;
                 if !joined.is_empty() {
                     out.joined.push((i, joined));
+                    changed = true;
+                }
+                if !departed.is_empty() {
+                    out.departed.push((i, departed));
                     changed = true;
                 }
                 if a.favourite && !e.favourite {
@@ -246,16 +279,51 @@ pub fn plan(
         }
     }
     out.left = left.into_iter().collect();
+    out.remembered = choices.clone();
+    let present: HashSet<&str> = library.albums.iter().map(|a| a.id.as_str()).collect();
+    out.gone = choices
+        .iter()
+        .filter(|(id, _)| !present.contains(id.as_str()))
+        .map(|(id, c)| {
+            (
+                id.clone(),
+                c.photos_name.clone().unwrap_or_else(|| c.name.clone()),
+            )
+        })
+        .collect();
+    for al in &library.albums {
+        let now = al.path().join(" › ");
+        if let Some(c) = choices.get(&al.id)
+            && let Some(was) = &c.photos_name
+            && *was != now
+        {
+            out.renamed.push(AlbumRename {
+                id: al.id.clone(),
+                from: was.clone(),
+                to: now,
+            });
+        }
+    }
     out.albums = library
         .albums
         .iter()
         .filter_map(|al| {
             let photos = *in_album.get(al.id.as_str())?;
             let path = al.path();
-            let choice = choices
+            let now = path.join(" › ");
+            let mut choice = choices
                 .get(&al.id)
                 .cloned()
                 .unwrap_or_else(|| default_choice(&path));
+            // Renamed in Photos, and not in Shoebox: the new name.
+            if choice
+                .photos_name
+                .as_deref()
+                .is_some_and(|was| was != now && choice.name == was)
+            {
+                choice.name = now.clone();
+            }
+            choice.photos_name = Some(now);
             Some(AlbumRow {
                 id: al.id.clone(),
                 path,
