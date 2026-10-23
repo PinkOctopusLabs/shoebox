@@ -136,14 +136,6 @@ Provisional choices the person should confirm or change.
   app) is applied to the photo's metadata, which is cached; if the sidecar
   date is later deleted, the old one stays until the image itself changes
   or the cache is rebuilt. S. Source: DECISIONS "iCloud Photos: the core".
-- [ ] **Download from Cloud can hold up the library thread for good.**
-  `LibraryCommand::Download` reads each file through on the library worker;
-  a cloud drive that never delivers one (Google Drive did, 2026-10-23: the
-  read waits in the kernel, no `ETIMEDOUT`) leaves scans, marks and undo
-  queued behind it until Shoebox quits. The image loader's downloads now
-  have threads of their own (`jobs::downloader`); do the same here, the
-  library worker only re-reading what has arrived. S–M. Source: the 0.3.1
-  hang report of 2026-10-23.
 
 Small known defects.
 

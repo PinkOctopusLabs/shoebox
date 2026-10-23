@@ -3837,6 +3837,7 @@ impl ShoeboxApp {
                     .filter(|k| !original && self.previews_ready.contains(k))
                     .map(|k| self.developer.preview_path(&k)),
                 cloud: p.cloud && !open,
+                fetch: open,
                 keep: true,
             },
         ));
@@ -3927,6 +3928,7 @@ impl ShoeboxApp {
                 target: self.target,
                 edited: None,
                 cloud: false,
+                fetch: true,
                 keep: false,
             },
         ));

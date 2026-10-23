@@ -4317,3 +4317,31 @@ sync record is a folder, not one file" in "iCloud Photos: the core".
   (fileops); `old_step_files_are_read_with_the_logs`,
   `logs_roll_over_and_skip_a_cut_line` (ledger);
   `first_sync_names_marks_and_records` checks one log for a three-step sync.
+
+## Cloud downloads off the library thread (2026-10-23)
+After the 0.3.2 update the open photo (cloud-only, 152 KB) took about
+four minutes to arrive, and until it did nothing else the library does
+ran: deleting did nothing, as Download from Cloud read it on the library
+worker. Google Drive wasn't failing, just backed up: since the iCloud
+Photos import into the Drive library at 13:17 it had logged "Slow working
+set change acknowledgment" 595 times (up to 99 s) and was still uploading,
+so one file's read waited behind its queue.
+- `LibraryCommand::Download` now goes to a `cloud-fetch` thread of its own
+  (`Library::send` routes it; `jobs::fetch`), which reports progress and
+  then sends the library worker `LibraryCommand::Downloaded`, which only
+  re-reads the files. Downloads run one request at a time there, so a file
+  that never arrives still holds up later downloads (not marks, moves,
+  undo or scans). The image loader's downloads already had threads of
+  their own (DECISIONS, the 0.3.2 fix).
+- Thumbnails too: 0.3.2's loader downloaded any file it found cloud-only,
+  so grid tiles of photos Drive had moved off the Mac since the last scan
+  (the catalog still saying "here") waited in Drive's queue on the four
+  download threads instead of showing as in the cloud. A load now says
+  whether to download (`Job::fetch`: the open photo and import previews);
+  any other found cloud-only gets its cached thumbnail or `IN_CLOUD`.
+- Nothing Shoebox does makes Drive faster; a read of a cloud-only file
+  waits in the kernel until Drive delivers.
+- Tests: `a_stuck_download_leaves_the_library_working`;
+  `a_stuck_download_blocks_neither_loading_nor_quitting` (an offloaded
+  grid photo isn't downloaded).
+

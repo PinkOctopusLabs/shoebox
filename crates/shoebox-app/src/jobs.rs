@@ -89,6 +89,10 @@ pub struct Job {
     pub edited: Option<PathBuf>,
     /// In the cloud only and not to be downloaded: cached thumbnails only.
     pub cloud: bool,
+    /// Download the file first if it's in the cloud only (the open photo,
+    /// import previews). Otherwise a file found in the cloud only (moved
+    /// off the Mac since it was read) is treated as `cloud`.
+    pub fetch: bool,
     /// Keep thumbnails in the on-disk cache (not for import previews,
     /// whose sources aren't in the library).
     pub keep: bool,
@@ -317,23 +321,24 @@ fn worker(q: &Queue, tx: &Sender<Loaded>, thumbs: &ThumbCache, repaint: &(dyn Fn
             orientation: job.orientation,
             target: job.target,
         };
-        // A photo in the cloud only that's to be read (opened): a thumbnail
-        // made before needs nothing downloaded; otherwise it goes to a
-        // download thread, and comes back here once it's on disk.
-        let fetch = !job.cloud && shoebox_core::cloud::path_is_cloud_only(&job.path);
+        // A file in the cloud only: a thumbnail made before needs nothing
+        // downloaded. Otherwise one that's to be read (opened) goes to a
+        // download thread, and comes back here once it's on disk; any other
+        // shows as in the cloud.
+        let in_cloud = job.cloud || shoebox_core::cloud::path_is_cloud_only(&job.path);
         let cached = match key.size {
-            Size::Small if fetch || job.cloud => thumbs.cached(&src, thumbs::SMALL),
-            Size::Large if fetch || job.cloud => thumbs.cached(&src, thumbs::LARGE),
+            Size::Small if in_cloud => thumbs.cached(&src, thumbs::SMALL),
+            Size::Large if in_cloud => thumbs.cached(&src, thumbs::LARGE),
             _ => None,
         };
-        if fetch && cached.is_none() {
+        if in_cloud && !job.cloud && job.fetch && cached.is_none() {
             hand_over(q, key, priority, job);
             continue;
         }
         let result = match key.size {
             _ if let Some(img) = cached => Ok(img),
             // Reading the file would download it.
-            _ if job.cloud => Err(IN_CLOUD.to_owned()),
+            _ if in_cloud => Err(IN_CLOUD.to_owned()),
             Size::Small | Size::Large if !job.keep => shoebox_decode::render_path(
                 job.format,
                 &job.path,
@@ -522,8 +527,15 @@ pub enum LibraryCommand {
     /// batch, and remember dismissed pairs.
     ApplyDuplicates(HashMap<PathBuf, Decision>),
     /// Download cloud-only files (by reading them; nothing is written) and
-    /// read them as photos.
+    /// read them as photos. Run by the download thread, so a cloud drive
+    /// that never delivers holds up nothing else.
     Download(Vec<PathBuf>),
+    /// From the download thread: these files are fetched (`failed` of them
+    /// couldn't be); read them again.
+    Downloaded {
+        paths: Vec<PathBuf>,
+        failed: usize,
+    },
     /// A photo's edit (Develop): the catalog's working copy, or its
     /// `.shoebox/edits` file when that's newer. Answered by `EditLoaded`.
     LoadEdit {
@@ -929,6 +941,8 @@ fn edit_info(root: &Path, rel: &str, json: String) -> Option<EditInfo> {
 
 pub struct Library {
     commands: Sender<LibraryCommand>,
+    /// To the download thread ([`LibraryCommand::Download`]).
+    downloads: Sender<Vec<PathBuf>>,
     pub events: Receiver<LibraryEvent>,
     /// Set to stop an import's planning or copying (the worker is busy with
     /// it, so this can't wait in the command queue).
@@ -945,18 +959,50 @@ pub struct LibraryPaths {
 
 impl Library {
     pub fn new(paths: LibraryPaths, repaint: impl Fn() + Send + Sync + 'static) -> Self {
+        Self::with_download(paths, repaint, shoebox_core::cloud::download)
+    }
+
+    /// [`Library::new`], cloud-only files fetched by `download` (tests).
+    fn with_download(
+        paths: LibraryPaths,
+        repaint: impl Fn() + Send + Sync + 'static,
+        download: impl Fn(&Path) -> std::io::Result<()> + Send + 'static,
+    ) -> Self {
         let (ctx_tx, ctx_rx) = crossbeam_channel::unbounded::<LibraryCommand>();
         let (ev_tx, ev_rx) = crossbeam_channel::unbounded();
+        let (dl_tx, dl_rx) = crossbeam_channel::unbounded::<Vec<PathBuf>>();
+        let repaint: Arc<dyn Fn() + Send + Sync> = Arc::new(repaint);
         let import_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop = import_stop.clone();
+        let (events, redraw) = (ev_tx.clone(), repaint.clone());
         let spawned = std::thread::Builder::new()
             .name("library".into())
-            .spawn(move || library_worker(&paths, &ctx_rx, &ev_tx, &repaint, &stop));
+            .spawn(move || library_worker(&paths, &ctx_rx, &ev_tx, &*repaint, &stop));
         if let Err(e) = spawned {
             tracing::error!("could not start library thread: {e}");
         }
+        // Downloads have a thread of their own: a cloud drive can keep a
+        // read waiting for minutes, or for good, and the library's other
+        // work (marks, moves, undo) mustn't wait behind it.
+        let library = ctx_tx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("cloud-fetch".into())
+            .spawn(move || {
+                let emit = |e: LibraryEvent| {
+                    let _ = events.send(e);
+                    redraw();
+                };
+                for paths in dl_rx {
+                    let failed = fetch(&paths, &download, &emit);
+                    let _ = library.send(LibraryCommand::Downloaded { paths, failed });
+                }
+            });
+        if let Err(e) = spawned {
+            tracing::error!("could not start download thread: {e}");
+        }
         Self {
             commands: ctx_tx,
+            downloads: dl_tx,
             events: ev_rx,
             import_stop,
         }
@@ -969,6 +1015,10 @@ impl Library {
     }
 
     pub fn send(&self, c: LibraryCommand) {
+        if let LibraryCommand::Download(paths) = c {
+            let _ = self.downloads.send(paths);
+            return;
+        }
         // A new plan or import starts uncancelled.
         if matches!(
             c,
@@ -986,6 +1036,24 @@ impl Library {
         self.import_stop
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
+}
+
+/// Download cloud-only files, reporting progress; how many couldn't be.
+fn fetch(
+    paths: &[PathBuf],
+    download: &dyn Fn(&Path) -> std::io::Result<()>,
+    emit: &dyn Fn(LibraryEvent),
+) -> usize {
+    let total = paths.len();
+    let mut failed = 0;
+    for (n, p) in paths.iter().enumerate() {
+        emit(LibraryEvent::Downloading { done: n, total });
+        if let Err(e) = download(p) {
+            tracing::warn!("downloading {}: {e}", p.display());
+            failed += 1;
+        }
+    }
+    failed
 }
 
 /// Whether `batch` is a send to Photos (undone there first).
@@ -1691,16 +1759,13 @@ fn library_worker(
                 emit(LibraryEvent::Ejected(eject(&volume)));
                 (false, false)
             }
+            // `Library::send` gives these to the download thread.
             LibraryCommand::Download(paths) => {
+                tracing::warn!("{} downloads sent past the download thread", paths.len());
+                (false, false)
+            }
+            LibraryCommand::Downloaded { paths, failed } => {
                 let total = paths.len();
-                let mut failed = 0;
-                for (n, p) in paths.iter().enumerate() {
-                    if let Err(e) = shoebox_core::cloud::download(p) {
-                        tracing::warn!("downloading {}: {e}", p.display());
-                        failed += 1;
-                    }
-                    emit(LibraryEvent::Downloading { done: n, total });
-                }
                 let photos: Vec<usize> =
                     paths.iter().filter_map(|p| index.get(p).copied()).collect();
                 match catalog.reread(&photos, &By::Other, &mut cache) {
@@ -2657,6 +2722,7 @@ mod tests {
             target: shoebox_decode::Target::Srgb,
             edited: None,
             cloud: false,
+            fetch: true,
             keep: true,
         }
     }
@@ -2680,27 +2746,67 @@ mod tests {
         }
     }
 
+    /// A download the cloud drive never delivers doesn't hold up the
+    /// library's other work.
+    #[test]
+    fn a_stuck_download_leaves_the_library_working() {
+        let t = tempfile::tempdir().unwrap();
+        let (_never, never) = crossbeam_channel::unbounded::<()>();
+        let library = Library::with_download(
+            LibraryPaths {
+                settings: t.path().join("settings.json"),
+                cache_db: t.path().join("cache.sqlite"),
+                journal: t.path().join("journal.sqlite"),
+                trash_dir: None,
+            },
+            || {},
+            move |_| {
+                let _ = never.recv();
+                Ok(())
+            },
+        );
+        library.send(LibraryCommand::Download(vec![t.path().join("a.jpg")]));
+        library.send(LibraryCommand::Open);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let (mut catalog, mut downloading) = (false, false);
+        while !catalog {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match library.events.recv_timeout(left) {
+                Ok(LibraryEvent::Catalog { .. }) => catalog = true,
+                Ok(LibraryEvent::Downloading { done: 0, total: 1 }) => downloading = true,
+                Ok(_) => {}
+                Err(e) => panic!("no catalog while a download waits: {e}"),
+            }
+        }
+        assert!(downloading, "the download is under way");
+    }
+
     /// A cloud drive that never delivers a file holds up neither the loading
     /// of other photos nor quitting.
     #[test]
     fn a_stuck_download_blocks_neither_loading_nor_quitting() {
         let t = tempfile::tempdir().unwrap();
-        let [here, slow, stuck] = ["here.jpg", "slow.jpg", "stuck.jpg"].map(|n| t.path().join(n));
-        for (n, p) in [&here, &slow, &stuck].into_iter().enumerate() {
+        let [here, slow, stuck, away] =
+            ["here.jpg", "slow.jpg", "stuck.jpg", "away.jpg"].map(|n| t.path().join(n));
+        for (n, p) in [&here, &slow, &stuck, &away].into_iter().enumerate() {
             let img = shoebox_fixtures::jpeg(&shoebox_fixtures::scene(n as u64, 64, 48), 85);
             std::fs::write(p, img.unwrap()).unwrap();
         }
         shoebox_core::cloud::pretend_cloud_only(&slow);
         shoebox_core::cloud::pretend_cloud_only(&stuck);
+        shoebox_core::cloud::pretend_cloud_only(&away);
         let (release, released) = crossbeam_channel::unbounded::<()>();
         let (_never, never) = crossbeam_channel::unbounded::<()>();
         let stuck_path = stuck.clone();
+        let fetched = Arc::new(Mutex::new(Vec::new()));
+        let log = fetched.clone();
         // One loader thread: if a download ran on it, nothing else would load.
         let loader = Loader::with_download(
             1,
             ThumbCache::new(t.path().join("thumbs")),
             || {},
             move |p| {
+                log.lock().unwrap().push(p.to_path_buf());
                 let _ = if p == stuck_path {
                     never.recv()
                 } else {
@@ -2709,14 +2815,25 @@ mod tests {
                 shoebox_core::cloud::download(p)
             },
         );
+        // `away` is in the grid, not open: moved off the Mac since it was
+        // read, it shows as in the cloud rather than being downloaded.
         let wanted = || {
             [&stuck, &slow, &here]
                 .map(|p| (key(p), Priority::Visible, job(p)))
                 .into_iter()
+                .chain([(
+                    key(&away),
+                    Priority::Visible,
+                    Job {
+                        fetch: false,
+                        ..job(&away)
+                    },
+                )])
         };
         let mut got = HashMap::new();
         loader.demand(wanted());
-        wait(&loader, &[key(&here)], &mut got);
+        wait(&loader, &[key(&here), key(&away)], &mut got);
+        assert!(!got[&key(&away)], "in the cloud");
         assert!(!got.contains_key(&key(&slow)) && !got.contains_key(&key(&stuck)));
 
         // Once downloaded, a file goes back to the loaders (the app asks
@@ -2736,6 +2853,7 @@ mod tests {
         }
         assert!(got[&key(&slow)]);
         assert!(!got.contains_key(&key(&stuck)));
+        assert!(!fetched.lock().unwrap().contains(&away), "never downloaded");
 
         let start = Instant::now();
         drop(loader);
