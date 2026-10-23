@@ -1094,6 +1094,18 @@ fn library_worker(
         }
         let (settings_changed, rescan) = match cmd {
             LibraryCommand::Open => {
+                // Interrupted batches with nothing left to run (a sync the
+                // app stopped between steps): finished, nothing to ask.
+                match fileops.close_finished_interrupted() {
+                    Ok(closed) if !closed.is_empty() => {
+                        tracing::info!(
+                            "closed interrupted batches with nothing left to run: {closed:?}"
+                        );
+                        batches(&fileops);
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("checking interrupted batches: {e}"),
+                }
                 // Edits kept but not yet written (the app quit first).
                 if let Err(e) = shoebox_core::edits::save_pending(&cache, &fileops) {
                     tracing::warn!("saving edits left from last time: {e}");

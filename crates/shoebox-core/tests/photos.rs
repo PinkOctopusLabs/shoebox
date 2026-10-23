@@ -920,3 +920,35 @@ fn leftovers_in_the_cache_dont_block_the_next_sync() {
         .collect();
     assert_eq!(left, ["push"], "nothing else left behind");
 }
+
+/// A sync the app stopped between steps leaves its batch "running" with
+/// every step done: closed at the next start, nothing to ask. One with a
+/// step still to run is left for the person to resume or roll back.
+#[test]
+fn interrupted_batches_with_nothing_left_are_closed() {
+    let w = World::new();
+    let finished = w.fo.begin_import("copy from iCloud Photos").unwrap();
+    let left = w.fo.begin_import("another").unwrap();
+    let src = w.base.join("x.txt");
+    std::fs::write(&src, b"x").unwrap();
+    w.fo.journal()
+        .record(
+            left,
+            0,
+            shoebox_core::fileops::Op::Mkdir,
+            &src,
+            &w.lib.join("later"),
+            None,
+        )
+        .unwrap();
+    assert_eq!(w.fo.journal().incomplete().unwrap().len(), 2);
+    assert_eq!(w.fo.close_finished_interrupted().unwrap(), vec![finished]);
+    let still: Vec<i64> =
+        w.fo.journal()
+            .incomplete()
+            .unwrap()
+            .iter()
+            .map(|b| b.id)
+            .collect();
+    assert_eq!(still, vec![left]);
+}

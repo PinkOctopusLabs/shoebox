@@ -1274,6 +1274,29 @@ impl FileOps {
     /// done, the rest run now with the same checks (a move or copy never
     /// replaces a file; a sidecar is only written if no other app changed it
     /// since the plan; a trashed file must still have the planned content).
+    /// Close interrupted batches with nothing left to run (every step done
+    /// or failed): there's nothing to resume or decide. A sync whose app
+    /// stopped between its steps leaves one. Only safe when nothing is
+    /// running (at start). Returns the batches closed.
+    pub fn close_finished_interrupted(&self) -> Result<Vec<i64>> {
+        let mut closed = Vec::new();
+        for b in self.journal.incomplete()? {
+            if b.kind == "undo" {
+                continue;
+            }
+            let pending = self
+                .journal
+                .ops(b.id)?
+                .iter()
+                .any(|op| op.status == OpStatus::Pending);
+            if !pending {
+                self.journal.set_batch_status(b.id, "done")?;
+                closed.push(b.id);
+            }
+        }
+        Ok(closed)
+    }
+
     pub fn resume(&self, batch: i64) -> Result<usize> {
         let j = &self.journal;
         let b = j

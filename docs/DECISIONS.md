@@ -4273,3 +4273,12 @@ Photos asks for its photo after clearing the scope, so it wins. Test:
 `all_photos_opens_at_the_newest`; `show_in_all_photos_scrolls_to_it` still
 passes.
 
+## Interrupted batches with nothing left to run close themselves (2026-10-23)
+The crashed iCloud Photos import left its batch "running" with every step
+done (the Photos thread died between steps), so History kept asking to
+Resume or Roll back, and Roll back would have sent ~28,000 copies to the
+Trash. At start the library worker now closes interrupted batches with no
+step pending (`FileOps::close_finished_interrupted`; not interrupted
+undos); ones with a step still to run are asked about as before (SPEC
+safety rule 8). Test: `interrupted_batches_with_nothing_left_are_closed`.
+
