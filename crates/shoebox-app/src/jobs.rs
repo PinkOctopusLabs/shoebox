@@ -251,7 +251,17 @@ fn worker(q: &Queue, tx: &Sender<Loaded>, thumbs: &ThumbCache, repaint: &(dyn Fn
             orientation: job.orientation,
             target: job.target,
         };
+        // A photo in the cloud only that's to be read (opened): download it
+        // first, waiting out the drive's timeouts, rather than having the
+        // decoder's read time out part-way.
+        let fetched = if job.cloud {
+            Ok(())
+        } else {
+            shoebox_core::cloud::download(&job.path)
+                .map_err(|e| format!("{}: downloading from the cloud: {e}", job.path.display()))
+        };
         let result = match key.size {
+            _ if fetched.is_err() => Err(fetched.err().unwrap_or_default()),
             // Reading the file would download it.
             _ if job.cloud => match key.size {
                 Size::Small => thumbs.cached(&src, thumbs::SMALL),

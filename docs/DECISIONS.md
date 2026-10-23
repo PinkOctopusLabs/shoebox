@@ -4220,3 +4220,16 @@ with Photos, one way (Photos → Shoebox).
   photo of the person's own kept and renamed, a rename in Shoebox kept and
   joined, an album deleted); `a_photo_in_several_albums_is_one_copy_in_several_events`.
 
+## Cloud-only photos: waiting out the drive (2026-10-23)
+Opening NEFs in a Google Drive (streaming) library failed with
+"Operation timed out (os error 60)": reading a placeholder makes the
+drive fetch it, and Google Drive answers a read it can't serve in time
+with `ETIMEDOUT` while it goes on fetching. The loupe and Develop decoded
+straight from the placeholder, so the decoder's read failed. Now anything
+about to read a photo that's in the cloud only (the loader for a full
+view or a thumbnail, Develop's prepare, so exports too) downloads it first
+with `cloud::download`, which reads through and, on `ETIMEDOUT` (or an
+interrupted read), waits 2 s and reads on from where it got to, for up to
+10 minutes (`DOWNLOAD_PATIENCE`). The real drive's behaviour isn't
+reproducible in tests (no placeholder there); MANUAL-CHECKS 1 covers it.
+

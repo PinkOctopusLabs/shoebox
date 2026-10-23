@@ -43,12 +43,55 @@ pub fn path_is_cloud_only(path: &Path) -> bool {
 /// Download a cloud-only file by reading it through (the cloud drive
 /// fetches it); nothing is written. Does nothing to a file already here.
 pub fn download(path: &Path) -> std::io::Result<()> {
+    download_within(path, DOWNLOAD_PATIENCE)
+}
+
+/// How long [`download`] keeps at it: a large raw over a slow line.
+pub const DOWNLOAD_PATIENCE: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// A read the cloud drive gave up on for now, while it goes on fetching:
+/// Google Drive answers a read it can't serve in time with `ETIMEDOUT`.
+fn still_fetching(e: &std::io::Error) -> bool {
+    e.raw_os_error() == Some(libc::ETIMEDOUT)
+        || matches!(
+            e.kind(),
+            std::io::ErrorKind::TimedOut
+                | std::io::ErrorKind::Interrupted
+                | std::io::ErrorKind::WouldBlock
+        )
+}
+
+/// [`download`], trying again (from where it got to) while the drive says
+/// it's still fetching, for up to `patience`.
+pub fn download_within(path: &Path, patience: std::time::Duration) -> std::io::Result<()> {
     if !path_is_cloud_only(path) {
         return Ok(());
     }
-    let mut f = std::fs::File::open(path)?;
+    let deadline = std::time::Instant::now() + patience;
+    let mut done: u64 = 0;
     let mut buf = vec![0u8; 1 << 20];
-    while f.read(&mut buf)? > 0 {}
+    loop {
+        let r = (|| -> std::io::Result<()> {
+            use std::io::{Seek, SeekFrom};
+            let mut f = std::fs::File::open(path)?;
+            f.seek(SeekFrom::Start(done))?;
+            loop {
+                let n = f.read(&mut buf)?;
+                if n == 0 {
+                    return Ok(());
+                }
+                done += n as u64;
+            }
+        })();
+        match r {
+            Ok(()) => break,
+            Err(e) if still_fetching(&e) && std::time::Instant::now() < deadline => {
+                tracing::info!("{}: still downloading ({e}); waiting", path.display());
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+            Err(e) => return Err(e),
+        }
+    }
     if let Ok(mut s) = PRETEND.lock()
         && let Some(s) = s.as_mut()
     {
@@ -69,6 +112,19 @@ pub fn pretend_cloud_only(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_drive_timeout_is_waited_out_other_errors_are_not() {
+        assert!(still_fetching(&std::io::Error::from_raw_os_error(
+            libc::ETIMEDOUT
+        )));
+        assert!(!still_fetching(&std::io::Error::from_raw_os_error(
+            libc::ENOENT
+        )));
+        assert!(!still_fetching(&std::io::Error::from_raw_os_error(
+            libc::EACCES
+        )));
+    }
 
     #[test]
     fn pretend_and_download() {

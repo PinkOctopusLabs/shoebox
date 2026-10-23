@@ -929,6 +929,10 @@ fn prepare(
     emit: &dyn Fn(Event),
     ai: bool,
 ) -> Result<Option<Ready>, String> {
+    // In the cloud only: download it first, waiting out the drive's
+    // timeouts.
+    shoebox_core::cloud::download(&r.path)
+        .map_err(|e| format!("{}: downloading from the cloud: {e}", r.path.display()))?;
     if !r.format.is_raw() {
         return finished(r, long_edge).map(Some);
     }

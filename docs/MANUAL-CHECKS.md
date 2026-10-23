@@ -24,12 +24,12 @@ they're run now, together, before the release. This file is the runbook.
   references. darktable, RawTherapee, Preview, Photos and Finder are fine
   where a check asks whether a file opens elsewhere.
 
-**63 checks** (58 carried over, 2 gate verdicts added, 3 for iCloud Photos), plus one already
+**64 checks** (58 carried over, 2 gate verdicts added, 3 for iCloud Photos, 1 for cloud-only raws), plus one already
 done:
 
 | Area | Checks |
 | --- | --- |
-| [1. Library and files](#1-library-and-files) | 4 |
+| [1. Library and files](#1-library-and-files) | 5 |
 | [2. Raw decode and colour](#2-raw-decode-and-colour) | 6 |
 | [3. Develop: tone, colour and effects](#3-develop-tone-colour-and-effects) | 8 |
 | [4. Noise and detail](#4-noise-and-detail) | 3 |
@@ -143,6 +143,12 @@ APFS clone, in folders by shoot.
     keeps its saturated reds and greens);
   - Info shows the date, camera and size;
   - Develop opens each as a finished image; an export from it matches.
+
+- [ ] **Large raws in the cloud only** (from 2026-10-23): in a Google
+  Drive streaming library, open a few NEFs that are in the cloud only
+  (cloud badge) in the loupe and in Develop. Passes: each opens once it has
+  downloaded (a large one may take a while; the log says "still
+  downloading"), no "Operation timed out".
 
 ## 2. Raw decode and colour
 
