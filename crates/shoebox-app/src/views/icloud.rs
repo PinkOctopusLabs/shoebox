@@ -372,7 +372,7 @@ fn summary(ui: &mut egui::Ui, planned: &Planned) {
             (p.joined.len(), "copied before and added to albums since"),
             (p.favourited.len(), "copied before and favourited since"),
             (p.hidden, "hidden in Photos, left out"),
-            (p.burst_frames, "burst frames nobody kept, left out"),
+            (p.burst_frames, "other frames of bursts, left out (each burst's key photo and the frames you kept are copied; Settings can copy them all)"),
         ];
         for (n, what) in parts {
             if n > 0 {
