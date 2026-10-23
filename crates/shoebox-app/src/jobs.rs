@@ -104,10 +104,21 @@ pub struct Loaded {
     pub histogram: Option<Box<[[u32; 256]; 4]>>,
 }
 
+/// Fetches a cloud-only file.
+type Download = dyn Fn(&Path) -> std::io::Result<()> + Send + Sync;
+
+/// Loads waiting for a cloud-only file to download.
+type Waiting = Vec<(Key, Priority, Job)>;
+
 #[derive(Default)]
 struct QueueState {
     pending: HashMap<Key, (Priority, Job)>,
+    /// Being loaded, or waiting for their file to download.
     in_flight: HashSet<Key>,
+    /// Cloud-only files to download, with the loads waiting for each.
+    to_download: HashMap<PathBuf, Waiting>,
+    /// Cloud-only files downloading now, with the loads waiting for each.
+    downloading: HashMap<PathBuf, Waiting>,
     shutdown: bool,
 }
 
@@ -128,13 +139,23 @@ impl Loader {
         thumbs: ThumbCache,
         repaint: impl Fn() + Send + Sync + 'static,
     ) -> Self {
+        Self::with_download(threads, thumbs, repaint, shoebox_core::cloud::download)
+    }
+
+    /// [`Loader::new`], cloud-only files fetched by `download` (tests).
+    fn with_download(
+        threads: usize,
+        thumbs: ThumbCache,
+        repaint: impl Fn() + Send + Sync + 'static,
+        download: impl Fn(&Path) -> std::io::Result<()> + Send + Sync + 'static,
+    ) -> Self {
         let queue = Arc::new(Queue {
             state: Mutex::new(QueueState::default()),
             ready: Condvar::new(),
         });
         let (tx, rx) = crossbeam_channel::unbounded();
         let repaint: Arc<dyn Fn() + Send + Sync> = Arc::new(repaint);
-        let workers = (0..threads.max(1))
+        let mut workers: Vec<_> = (0..threads.max(1))
             .filter_map(|i| {
                 let (q, tx, thumbs, repaint) =
                     (queue.clone(), tx.clone(), thumbs.clone(), repaint.clone());
@@ -145,6 +166,19 @@ impl Loader {
                     .ok()
             })
             .collect();
+        // Downloads have threads of their own: a cloud drive can keep a read
+        // waiting for minutes, or for good, and that mustn't hold up the
+        // loading of everything else.
+        let download: Arc<Download> = Arc::new(download);
+        workers.extend((0..DOWNLOADS).filter_map(|i| {
+            let (q, tx, repaint, download) =
+                (queue.clone(), tx.clone(), repaint.clone(), download.clone());
+            std::thread::Builder::new()
+                .name(format!("cloud-download-{i}"))
+                .spawn(move || downloader(&q, &tx, &*repaint, &*download))
+                .map_err(|e| tracing::error!("could not start download thread: {e}"))
+                .ok()
+        }));
         Self {
             queue,
             results: rx,
@@ -159,6 +193,20 @@ impl Loader {
             return;
         };
         s.pending.clear();
+        let wanted: Vec<_> = wanted.into_iter().collect();
+        // Downloads not started yet are dropped too.
+        let keys: HashSet<Key> = wanted.iter().map(|(k, _, _)| *k).collect();
+        let s = &mut *s;
+        for waiting in s.to_download.values_mut() {
+            waiting.retain(|(k, _, _)| {
+                let keep = keys.contains(k);
+                if !keep {
+                    s.in_flight.remove(k);
+                }
+                keep
+            });
+        }
+        s.to_download.retain(|_, w| !w.is_empty());
         for (k, p, j) in wanted {
             if s.in_flight.contains(&k) {
                 continue;
@@ -184,20 +232,38 @@ impl Loader {
     }
 }
 
+/// Cloud-only files downloaded at once.
+const DOWNLOADS: usize = 4;
+
+/// How long quitting waits for loads under way. A read of a cloud-only file
+/// can wait in the kernel until the drive delivers it, which may be never:
+/// threads still busy after this are left to end with the process.
+const SHUTDOWN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
+
 impl Drop for Loader {
     fn drop(&mut self) {
         if let Ok(mut s) = self.queue.state.lock() {
             s.shutdown = true;
             s.pending.clear();
+            s.to_download.clear();
         }
         self.queue.ready.notify_all();
+        let deadline = std::time::Instant::now() + SHUTDOWN_PATIENCE;
         for w in self.workers.drain(..) {
-            let _ = w.join();
+            while !w.is_finished() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            if w.is_finished() {
+                let _ = w.join();
+            } else {
+                let name = w.thread().name().unwrap_or("loader").to_owned();
+                tracing::warn!("{name} still busy at quit (a cloud drive's read?); leaving it");
+            }
         }
     }
 }
 
-fn next_job(q: &Queue) -> Option<(Key, Job)> {
+fn next_job(q: &Queue) -> Option<(Key, Priority, Job)> {
     let mut s = q.state.lock().ok()?;
     loop {
         if s.shutdown {
@@ -209,17 +275,17 @@ fn next_job(q: &Queue) -> Option<(Key, Job)> {
             .min_by_key(|(k, (p, _))| (*p, k.size))
             .map(|(k, _)| *k);
         if let Some(k) = best
-            && let Some((_, job)) = s.pending.remove(&k)
+            && let Some((p, job)) = s.pending.remove(&k)
         {
             s.in_flight.insert(k);
-            return Some((k, job));
+            return Some((k, p, job));
         }
         s = q.ready.wait(s).ok()?;
     }
 }
 
 fn worker(q: &Queue, tx: &Sender<Loaded>, thumbs: &ThumbCache, repaint: &(dyn Fn() + Send + Sync)) {
-    while let Some((key, job)) = next_job(q) {
+    while let Some((key, priority, job)) = next_job(q) {
         // An edited photo shows its preview (the original if that fails).
         if let Some(preview) = &job.edited {
             let px = match key.size {
@@ -251,24 +317,23 @@ fn worker(q: &Queue, tx: &Sender<Loaded>, thumbs: &ThumbCache, repaint: &(dyn Fn
             orientation: job.orientation,
             target: job.target,
         };
-        // A photo in the cloud only that's to be read (opened): download it
-        // first, waiting out the drive's timeouts, rather than having the
-        // decoder's read time out part-way.
-        let fetched = if job.cloud {
-            Ok(())
-        } else {
-            shoebox_core::cloud::download(&job.path)
-                .map_err(|e| format!("{}: downloading from the cloud: {e}", job.path.display()))
+        // A photo in the cloud only that's to be read (opened): a thumbnail
+        // made before needs nothing downloaded; otherwise it goes to a
+        // download thread, and comes back here once it's on disk.
+        let fetch = !job.cloud && shoebox_core::cloud::path_is_cloud_only(&job.path);
+        let cached = match key.size {
+            Size::Small if fetch || job.cloud => thumbs.cached(&src, thumbs::SMALL),
+            Size::Large if fetch || job.cloud => thumbs.cached(&src, thumbs::LARGE),
+            _ => None,
         };
+        if fetch && cached.is_none() {
+            hand_over(q, key, priority, job);
+            continue;
+        }
         let result = match key.size {
-            _ if fetched.is_err() => Err(fetched.err().unwrap_or_default()),
+            _ if let Some(img) = cached => Ok(img),
             // Reading the file would download it.
-            _ if job.cloud => match key.size {
-                Size::Small => thumbs.cached(&src, thumbs::SMALL),
-                Size::Large => thumbs.cached(&src, thumbs::LARGE),
-                Size::Full => None,
-            }
-            .ok_or_else(|| IN_CLOUD.to_owned()),
+            _ if job.cloud => Err(IN_CLOUD.to_owned()),
             Size::Small | Size::Large if !job.keep => shoebox_decode::render_path(
                 job.format,
                 &job.path,
@@ -304,6 +369,83 @@ fn worker(q: &Queue, tx: &Sender<Loaded>, thumbs: &ThumbCache, repaint: &(dyn Fn
         if let Ok(mut s) = q.state.lock() {
             s.in_flight.remove(&key);
         }
+        repaint();
+    }
+}
+
+/// Pass a load to the download threads: its file is in the cloud only.
+fn hand_over(q: &Queue, key: Key, priority: Priority, job: Job) {
+    let Ok(mut s) = q.state.lock() else {
+        return;
+    };
+    let s = &mut *s;
+    match s.downloading.get_mut(&job.path) {
+        Some(waiting) => waiting.push((key, priority, job)),
+        None => s
+            .to_download
+            .entry(job.path.clone())
+            .or_default()
+            .push((key, priority, job)),
+    }
+    q.ready.notify_all();
+}
+
+/// The next file to download (the one wanted most), or `None` at shutdown.
+fn next_download(q: &Queue) -> Option<PathBuf> {
+    let mut s = q.state.lock().ok()?;
+    loop {
+        if s.shutdown {
+            return None;
+        }
+        let best = s
+            .to_download
+            .iter()
+            .min_by_key(|(_, w)| w.iter().map(|(k, p, _)| (*p, k.size)).min())
+            .map(|(path, _)| path.clone());
+        if let Some(path) = best
+            && let Some(waiting) = s.to_download.remove(&path)
+        {
+            s.downloading.insert(path.clone(), waiting);
+            return Some(path);
+        }
+        s = q.ready.wait(s).ok()?;
+    }
+}
+
+fn downloader(
+    q: &Queue,
+    tx: &Sender<Loaded>,
+    repaint: &(dyn Fn() + Send + Sync),
+    download: &Download,
+) {
+    while let Some(path) = next_download(q) {
+        let fetched = download(&path);
+        let Ok(mut s) = q.state.lock() else {
+            return;
+        };
+        let waiting = s.downloading.remove(&path).unwrap_or_default();
+        for (key, priority, job) in waiting {
+            s.in_flight.remove(&key);
+            match &fetched {
+                // Back to the loaders, if it's still wanted when one gets to it.
+                Ok(()) if !s.shutdown => {
+                    s.pending.entry(key).or_insert((priority, job));
+                }
+                Ok(()) => {}
+                Err(e) => {
+                    let _ = tx.send(Loaded {
+                        key,
+                        result: Err(format!(
+                            "{}: downloading from the cloud: {e}",
+                            path.display()
+                        )),
+                        histogram: None,
+                    });
+                }
+            }
+        }
+        drop(s);
+        q.ready.notify_all();
         repaint();
     }
 }
@@ -2498,4 +2640,105 @@ fn apply_dupes(
 enum Command {
     App(LibraryCommand),
     Changed(Vec<PathBuf>),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn job(path: &Path) -> Job {
+        Job {
+            path: path.to_path_buf(),
+            format: Format::Jpeg,
+            size: std::fs::metadata(path).unwrap().len(),
+            mtime_ns: 0,
+            orientation: 1,
+            target: shoebox_decode::Target::Srgb,
+            edited: None,
+            cloud: false,
+            keep: true,
+        }
+    }
+
+    fn key(path: &Path) -> Key {
+        Key {
+            photo: photo_id(path),
+            size: Size::Small,
+        }
+    }
+
+    /// Wait for these loads, returning whether each worked.
+    fn wait(loader: &Loader, keys: &[Key], got: &mut HashMap<Key, bool>) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !keys.iter().all(|k| got.contains_key(k)) {
+            assert!(Instant::now() < deadline, "timed out waiting for loads");
+            for l in loader.drain() {
+                got.insert(l.key, l.result.is_ok());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// A cloud drive that never delivers a file holds up neither the loading
+    /// of other photos nor quitting.
+    #[test]
+    fn a_stuck_download_blocks_neither_loading_nor_quitting() {
+        let t = tempfile::tempdir().unwrap();
+        let [here, slow, stuck] = ["here.jpg", "slow.jpg", "stuck.jpg"].map(|n| t.path().join(n));
+        for (n, p) in [&here, &slow, &stuck].into_iter().enumerate() {
+            let img = shoebox_fixtures::jpeg(&shoebox_fixtures::scene(n as u64, 64, 48), 85);
+            std::fs::write(p, img.unwrap()).unwrap();
+        }
+        shoebox_core::cloud::pretend_cloud_only(&slow);
+        shoebox_core::cloud::pretend_cloud_only(&stuck);
+        let (release, released) = crossbeam_channel::unbounded::<()>();
+        let (_never, never) = crossbeam_channel::unbounded::<()>();
+        let stuck_path = stuck.clone();
+        // One loader thread: if a download ran on it, nothing else would load.
+        let loader = Loader::with_download(
+            1,
+            ThumbCache::new(t.path().join("thumbs")),
+            || {},
+            move |p| {
+                let _ = if p == stuck_path {
+                    never.recv()
+                } else {
+                    released.recv()
+                };
+                shoebox_core::cloud::download(p)
+            },
+        );
+        let wanted = || {
+            [&stuck, &slow, &here]
+                .map(|p| (key(p), Priority::Visible, job(p)))
+                .into_iter()
+        };
+        let mut got = HashMap::new();
+        loader.demand(wanted());
+        wait(&loader, &[key(&here)], &mut got);
+        assert!(!got.contains_key(&key(&slow)) && !got.contains_key(&key(&stuck)));
+
+        // Once downloaded, a file goes back to the loaders (the app asks
+        // for what it wants every frame).
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !got.contains_key(&key(&slow)) {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for the download"
+            );
+            loader.demand(wanted());
+            for l in loader.drain() {
+                got.insert(l.key, l.result.is_ok());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(got[&key(&slow)]);
+        assert!(!got.contains_key(&key(&stuck)));
+
+        let start = Instant::now();
+        drop(loader);
+        assert!(start.elapsed() < SHUTDOWN_PATIENCE + Duration::from_secs(1));
+    }
 }
