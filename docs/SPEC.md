@@ -152,7 +152,7 @@ Google Drive (streaming), iCloud Drive (Optimise Mac Storage), Dropbox and OneDr
 
 - The scan lists it from its name, size and sidecars (which are small, so they're read), with a cloud badge, and caches nothing for it; the status bar counts them.
 - Thumbnails show only if they were cached before; semantic search, faces and duplicates leave it out (Duplicates says how many) until it's here.
-- Opening it in the loupe, or **Download from Cloud** in a photo's menu (for the selection, whole stacks), downloads it by reading it through (nothing is written); then it's read like any other photo. A download isn't recorded as a change.
+- Clicking it (making it the current photo, which opening it in the loupe does too), or **Download from Cloud** in a photo's menu (for the selection, whole stacks), downloads it by reading it through (nothing is written); then it's read like any other photo, thumbnail and details included. A click downloads that one file only, so selecting many (⌘A) downloads nothing. A download isn't recorded as a change.
 - Import reads every source file, so importing from a cloud folder downloads it; the plan says how many.
 
 ## Duplicate detection

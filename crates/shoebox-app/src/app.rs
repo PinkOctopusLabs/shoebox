@@ -440,6 +440,8 @@ pub struct ShoeboxApp {
     pub(crate) download_progress: Option<(usize, usize)>,
     /// Cloud-only photos opened in the loupe, downloading.
     fetching: HashSet<PhotoId>,
+    /// The cloud-only photo last clicked, downloaded for that (once).
+    fetched_on_click: Option<PhotoId>,
     /// Photos in the cloud only.
     pub(crate) cloud_count: usize,
     pub(crate) scanning: bool,
@@ -667,6 +669,7 @@ impl ShoeboxApp {
             scan_progress: None,
             download_progress: None,
             fetching: HashSet::new(),
+            fetched_on_click: None,
             cloud_count: 0,
             scanning: true,
             error: None,
@@ -3915,6 +3918,28 @@ impl ShoeboxApp {
         }
     }
 
+    /// Clicking a photo that's in the cloud only downloads it (that file,
+    /// not a whole selection), so its thumbnail and details show.
+    fn fetch_current(&mut self) {
+        let Some(id) = self.current else {
+            return;
+        };
+        if self.fetched_on_click == Some(id) {
+            return;
+        }
+        let Some(i) = self.index(id) else {
+            return;
+        };
+        let p = &self.catalog.photos[i];
+        if !p.cloud {
+            return;
+        }
+        self.fetched_on_click = Some(id);
+        let path = p.path.clone();
+        self.download_progress = Some((0, 1));
+        self.library.send(LibraryCommand::Download(vec![path]));
+    }
+
     /// How many of these photos (with their stacks) are in the cloud only.
     pub(crate) fn cloud_in(&self, ids: &[PhotoId]) -> usize {
         ids.iter()
@@ -4401,6 +4426,7 @@ impl eframe::App for ShoeboxApp {
         self.apply_events(&ctx);
         self.tick_semantic(&ctx);
         views::icloud::tick(self);
+        self.fetch_current();
         if let Some(id) = self.show_in_all_request.take() {
             self.start_show_in_all(id);
         }

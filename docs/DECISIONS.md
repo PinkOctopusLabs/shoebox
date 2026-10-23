@@ -4253,3 +4253,14 @@ ends that run with a message, not the thread.
   Send to Photos' `push` folder is left alone)
   (`leftovers_in_the_cache_dont_block_the_next_sync`).
 
+## Cloud-only photos download when clicked (2026-10-23)
+After an iCloud Photos import into a Google Drive (streaming) library,
+Drive moved copies off the Mac before Shoebox made their thumbnails, so
+they showed as grey cloud tiles. Asked for: clicking one downloads it.
+Now the current photo, if it's in the cloud only, is downloaded once
+(`ShoeboxApp::fetch_current`: that file, through `LibraryCommand::Download`,
+progress in the status bar), then read like any other, thumbnail and
+details included. Only the clicked file: a selection (⌘A) downloads
+nothing; Download from Cloud in the menu still does a selection's whole
+stacks. SPEC "Cloud drives" updated. Test: `cloud_only_photos`.
+
