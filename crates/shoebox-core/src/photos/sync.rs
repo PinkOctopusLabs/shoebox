@@ -222,7 +222,17 @@ fn fetch_step(
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(planned) = step.get(i) else { break };
-                    let r = fetch_one(job, planned, shared, progress, stop);
+                    // A panic in one asset's download (PhotoKit giving
+                    // something its header says it never does) fails that
+                    // asset, not the sync.
+                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        fetch_one(job, planned, shared, progress, stop)
+                    }))
+                    .unwrap_or_else(|_| {
+                        Err(Missed::Failed(
+                            "Photos gave Shoebox something it didn't expect".into(),
+                        ))
+                    });
                     if let Ok(mut g) = slots[i].lock() {
                         *g = Some(r);
                     }

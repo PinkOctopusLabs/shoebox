@@ -127,7 +127,7 @@ fn read_asset(a: &PHAsset, with_files: bool) -> RawAsset {
                 .iter()
                 .map(|r| RawResource {
                     kind: r.r#type().0,
-                    name: r.originalFilename().to_string(),
+                    name: resource_name(&r),
                 })
                 .collect()
         } else {
@@ -153,6 +153,35 @@ fn read_asset(a: &PHAsset, with_files: bool) -> RawAsset {
             resources,
         }
     }
+}
+
+/// A file's name as Photos has it. Photos can give none (though its header
+/// says it always does; the generated binding would panic), so it's asked
+/// for as optional, and a missing one is made from the file's type.
+fn resource_name(r: &PHAssetResource) -> String {
+    // SAFETY: both selectors exist on PHAssetResource and return an
+    // NSString or nil.
+    let (name, uti): (Option<Retained<NSString>>, Option<Retained<NSString>>) = unsafe {
+        (
+            objc2::msg_send![r, originalFilename],
+            objc2::msg_send![r, uniformTypeIdentifier],
+        )
+    };
+    if let Some(n) = name.map(|n| n.to_string()).filter(|n| !n.is_empty()) {
+        return n;
+    }
+    let ext = match uti.map(|u| u.to_string()).as_deref() {
+        Some("public.heic" | "public.heif") => "heic",
+        Some("public.jpeg") => "jpg",
+        Some("public.png") => "png",
+        Some("public.tiff") => "tif",
+        Some("com.adobe.raw-image" | "com.apple.raw-image") => "dng",
+        Some("com.apple.quicktime-movie") => "mov",
+        Some("public.mpeg-4") => "mp4",
+        Some("com.compuserve.gif") => "gif",
+        _ => "bin",
+    };
+    format!("unnamed.{ext}")
 }
 
 /// Every asset, hidden ones and every burst frame included, so Shoebox's

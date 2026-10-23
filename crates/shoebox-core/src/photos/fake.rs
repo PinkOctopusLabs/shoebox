@@ -29,6 +29,8 @@ struct State {
     library: Library,
     files: HashMap<(String, ResourceKind), Vec<u8>>,
     failing: HashMap<(String, ResourceKind), String>,
+    /// Assets whose download panics (as a binding did on a nil name).
+    panicking: Vec<String>,
 }
 
 impl FakeSource {
@@ -93,6 +95,13 @@ impl FakeSource {
     pub fn fail(&self, local: &str, kind: ResourceKind, why: &str) {
         if let Ok(mut s) = self.state.lock() {
             s.failing.insert((local.to_owned(), kind), why.to_owned());
+        }
+    }
+
+    /// Make an asset's download panic.
+    pub fn panic_on(&self, local: &str) {
+        if let Ok(mut s) = self.state.lock() {
+            s.panicking.push(local.to_owned());
         }
     }
 
@@ -228,6 +237,11 @@ impl PhotoSource for FakeSource {
                 .lock()
                 .map_err(|_| CoreError::Photos("fake library poisoned".into()))?;
             let key = (asset.local.clone(), kind);
+            #[allow(clippy::panic)]
+            if s.panicking.contains(&asset.local) {
+                drop(s);
+                panic!("fake: {} panics", asset.local);
+            }
             if let Some(why) = s.failing.get(&key) {
                 return Err(CoreError::Photos(why.clone()));
             }

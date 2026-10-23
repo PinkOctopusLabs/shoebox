@@ -307,11 +307,23 @@ fn worker(
                 let Some((req, planned)) = last.take() else {
                     continue;
                 };
-                match run(
-                    source, library, staging, &req, &planned, &albums, emit, stop,
-                ) {
-                    Ok(r) => emit(Event::Done(r)),
-                    Err(e) => emit(Event::Failed(e.to_string())),
+                // A panic ends this import, not the thread: the screen
+                // says so instead of waiting for ever. What was copied stays
+                // (each step's records go with its copies); its batch is
+                // left for crash recovery to finish at the next start.
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run(
+                        source, library, staging, &req, &planned, &albums, emit, stop,
+                    )
+                }));
+                match r {
+                    Ok(Ok(r)) => emit(Event::Done(r)),
+                    Ok(Err(e)) => emit(Event::Failed(e.to_string())),
+                    Err(_) => emit(Event::Failed(
+                        "The import stopped unexpectedly. What was copied is kept: Find photos \
+                         again to copy the rest."
+                            .into(),
+                    )),
                 }
             }
         }

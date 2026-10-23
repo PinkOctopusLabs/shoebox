@@ -4233,3 +4233,16 @@ interrupted read), waits 2 s and reads on from where it got to, for up to
 10 minutes (`DOWNLOAD_PATIENCE`). The real drive's behaviour isn't
 reproducible in tests (no placeholder there); MANUAL-CHECKS 1 covers it.
 
+## iCloud Photos: a nil file name (2026-10-23)
+The first real import stopped at 20,180 of 29,649: `-[PHAssetResource
+originalFilename]` returned nil for some assets, though its header says it
+never does, and objc2-photos' generated binding panics on that. The panic
+in a download thread ended the Photos thread, leaving the screen waiting
+and the batch running (crash recovery's Resume closes it; everything
+copied had its records written with it). Now the name and type are read
+with `msg_send!` as optional, a missing name is made from the type
+(`unnamed.heic`, …; files are named by the template anyway); a panic in one
+asset's download fails that asset (Try again) and the sync goes on
+(`a_panic_fails_one_asset_not_the_sync`); and a panic anywhere in a run
+ends that run with a message, not the thread.
+

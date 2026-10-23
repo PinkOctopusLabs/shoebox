@@ -874,3 +874,19 @@ fn events_follow_their_albums() {
     let (p, _) = w.plan();
     assert!(p.gone.is_empty(), "forgotten once seen");
 }
+
+/// A panic while downloading one asset (PhotoKit's binding once panicked
+/// on a nil file name) fails that asset only; the rest are copied and the
+/// batch is closed.
+#[test]
+fn a_panic_fails_one_asset_not_the_sync() {
+    let mut w = World::new();
+    library(&w);
+    w.source.panic_on("L2");
+    let lib = w.lib.clone();
+    let (_, report) = w.sync(&lib);
+    assert_eq!(report.failed.len(), 1, "{report:?}");
+    assert_eq!(report.failed[0].0.local, "L2");
+    assert_eq!(report.copied, 3);
+    assert!(w.fo.journal().incomplete().unwrap().is_empty());
+}
