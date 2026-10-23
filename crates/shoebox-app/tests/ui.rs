@@ -3873,9 +3873,23 @@ fn virtual_copies() {
     });
 
     // Delete the copy (right-click): to the Trash, back to the master.
-    h.run_steps(5);
+    // Under load the copies list can take a few frames to show again.
+    let start = Instant::now();
+    while h.query_by_label("Copy 1").is_none() {
+        assert!(start.elapsed() < Duration::from_secs(30), "no Copy 1 row");
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+    }
     h.get_by_label("Copy 1").click_secondary();
-    h.run_steps(2);
+    let start = Instant::now();
+    while h.query_by_label("Delete").is_none() {
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "no Delete in the menu"
+        );
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+    }
     h.get_by_label("Delete").click();
     wait_for(&mut h, Duration::from_secs(20), "copy removed", |a| {
         !edits.join("pier.jpg.copy-1.json").exists() && a.copy_count("pier.jpg") == 0

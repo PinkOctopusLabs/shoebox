@@ -116,12 +116,16 @@ Provisional choices the person should confirm or change.
 
 ## Bugs
 
-- [ ] **`virtual_copies` (UI test) fails under a full workspace run.** It
-  passes alone and in `--test ui`, but failed twice (2026-10-22, 2026-10-23)
-  when every crate's tests ran at once, at its wait for the deleted copy
-  (`tests/ui.rs`, "copy removed", 20 s). Likely a timing flake under load.
-  S. Source: these runs.
-
+- [ ] **UI tests fail under heavy load.** `virtual_copies` failed in most
+  full runs from 2026-10-22, at its right-click on the copy (the copies
+  row, then the menu's Delete, not on screen in 30 s); on 2026-10-23
+  `develop_upright_levels_a_tilted_photo` and
+  `develop_colour_grading_wheel` failed the same way. They pass alone. A
+  bisect (pass at e22cdf8, fail at 3444a2b) wasn't conclusive: the Mac's
+  load average was 18–25 (Photos' mediaanalysisd, several users logged
+  in). The test now waits for the row and the menu item rather than a
+  fixed number of frames. Rerun on a quiet machine; if it still fails,
+  bisect again. S. Source: these runs.
 - [ ] **A sidecar date stays in the metadata cache after it's removed.**
   A capture time from a sidecar (iCloud Photos' date, or one set in another
   app) is applied to the photo's metadata, which is cached; if the sidecar
