@@ -40,6 +40,8 @@ pub enum View {
     History,
     /// Tasks → Activity: what's running now.
     Activity,
+    /// Tasks → Find dates: the undated photos, with clues.
+    Dates,
     /// Photos with a GPS position on a map.
     Map,
     /// Editing a raw photo (D).
@@ -67,7 +69,12 @@ impl View {
     pub fn has_filters(self) -> bool {
         !matches!(
             self,
-            View::Duplicates | View::Import | View::History | View::Activity | View::Develop
+            View::Duplicates
+                | View::Import
+                | View::History
+                | View::Activity
+                | View::Dates
+                | View::Develop
         )
     }
 }
@@ -575,6 +582,7 @@ pub struct ShoeboxApp {
     pub(crate) ppl: crate::people::PeopleState,
     pub(crate) photos: crate::photos::Photos,
     pub(crate) icloud: views::icloud::State,
+    pub(crate) dates: views::dates::State,
     pub(crate) push: views::push::State,
     /// Where a send to Photos renders its files.
     pub(crate) photos_push_dir: PathBuf,
@@ -758,6 +766,7 @@ impl ShoeboxApp {
             ppl: Default::default(),
             photos,
             icloud: Default::default(),
+            dates: Default::default(),
             push: Default::default(),
             photos_push_dir,
         }
@@ -934,6 +943,16 @@ impl ShoeboxApp {
             .find(|e| e.name == name)
             .and_then(|e| self.event_members.get(&e.id))
             .map_or(0, |m| m.len())
+    }
+
+    /// The capture time of the photo with this file name, as the catalog
+    /// has it (tests).
+    pub fn capture_time_of(&self, name: &str) -> Option<String> {
+        self.catalog
+            .photos
+            .iter()
+            .find(|p| p.path.file_name().is_some_and(|n| n == name))
+            .and_then(|p| p.meta.exif.capture_time.clone())
     }
 
     /// Replace the filter and rebuild the visible items.
@@ -4428,7 +4447,9 @@ impl ShoeboxApp {
                 }
                 return;
             }
-            View::Duplicates | View::Import | View::History | View::Activity => return,
+            View::Duplicates | View::Import | View::History | View::Activity | View::Dates => {
+                return;
+            }
             _ => {}
         }
         if pressed(egui::Key::ArrowRight) {
@@ -4567,6 +4588,7 @@ impl eframe::App for ShoeboxApp {
                 View::Import => views::files::import(self, ui),
                 View::History => views::files::history(self, ui),
                 View::Activity => views::activity::show(self, ui),
+                View::Dates => views::dates::show(self, ui),
                 View::Timeline => views::timeline::show(self, ui),
                 View::Map => views::map::show(self, ui),
                 View::Develop => views::develop::show(self, ui, frame.wgpu_render_state()),
@@ -4578,6 +4600,7 @@ impl eframe::App for ShoeboxApp {
         views::export::dialog(self, &ctx);
         views::push::dialog(self, &ctx);
         views::merge::dialog(self, &ctx);
+        views::dates::dialog(self, &ctx);
         views::presets::copy_window(self, &ctx);
         self.scroll_to_current = false;
 

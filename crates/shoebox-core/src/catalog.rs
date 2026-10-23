@@ -133,6 +133,7 @@ impl Catalog {
                     marks: Marks::default(),
                     sidecar: None,
                     sig: String::new(),
+                    date: None,
                 });
                 let path = root.path.join(&rel);
                 let Some(format) = Format::from_path(&path) else {
@@ -268,9 +269,7 @@ impl Catalog {
                             tracing::warn!("marks: {e}");
                             sidecar::Loaded::default()
                         });
-                    if let Some(d) = &loaded.date {
-                        d.apply(&mut m);
-                    }
+                    m.set_sidecar_date(loaded.date.as_ref());
                     let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                     progress(n, total);
                     let p = Photo {
@@ -307,6 +306,7 @@ impl Catalog {
                     marks: p.marks.clone(),
                     sidecar: p.sidecar.clone(),
                     sig: p.sidecar_sig.clone(),
+                    date: p.meta.sidecar_date().cloned(),
                 })
                 .collect();
             let entries: Vec<MetaEntry<'_>> = read
@@ -431,6 +431,45 @@ impl Catalog {
         Ok(Some(batch))
     }
 
+    /// Date several photos as one journaled batch (one undo step): each
+    /// date goes to the photo's sidecar ([`sidecar::plan_date`]) and shows
+    /// in the catalog and cache at once. Returns the batch, or None if
+    /// nothing was written. Photos in reference roots are skipped. An
+    /// approximate date doesn't replace a file's own (see
+    /// [`Meta::set_sidecar_date`]), though it's written.
+    pub fn set_dates(
+        &mut self,
+        updates: &[(usize, sidecar::SidecarDate)],
+        fileops: &crate::fileops::FileOps,
+        cache: &Cache,
+        label: &str,
+    ) -> Result<Option<i64>> {
+        let updates: Vec<&(usize, sidecar::SidecarDate)> = updates
+            .iter()
+            .filter(|(i, _)| *i < self.photos.len() && !self.is_reference(*i))
+            .collect();
+        let writes = updates
+            .iter()
+            .map(|(i, d)| sidecar::plan_date(&self.photos[*i].path, d))
+            .collect::<Result<Vec<_>>>()?;
+        if writes.is_empty() {
+            return Ok(None);
+        }
+        let batch = fileops.write_sidecars(label, writes)?;
+        let by = By::Shoebox {
+            batch,
+            label: label.to_owned(),
+        };
+        for (i, d) in updates {
+            self.photos[*i].meta.set_sidecar_date(Some(d));
+            let marks = self.photos[*i].marks.clone();
+            self.note_marks(*i, marks, cache)?;
+            self.note_change(*i, Change::now(What::SIDECAR, by.clone()), cache)?;
+        }
+        self.finish();
+        Ok(Some(batch))
+    }
+
     /// Record marks now on disk for photo `i` in the catalog and cache.
     fn note_marks(&mut self, i: usize, marks: Marks, cache: &Cache) -> Result<()> {
         let path = self.photos[i].path.clone();
@@ -450,6 +489,7 @@ impl Catalog {
                 marks: photo.marks.clone(),
                 sidecar: photo.sidecar.clone(),
                 sig: photo.sidecar_sig.clone(),
+                date: photo.meta.sidecar_date().cloned(),
             },
         )
     }
@@ -617,9 +657,10 @@ impl Catalog {
                     sidecar::Loaded::default()
                 });
             let p = &mut self.photos[i];
-            if let Some(d) = &loaded.date {
-                d.apply(&mut p.meta);
-            }
+            let was = p.meta.capture_seconds();
+            p.meta.set_sidecar_date(loaded.date.as_ref());
+            // A sidecar's date set, changed or taken back moves it.
+            out.reordered |= p.meta.capture_seconds() != was;
             p.size = size;
             p.mtime_ns = mtime_ns;
             p.marks = loaded.marks;
@@ -651,6 +692,7 @@ impl Catalog {
                     marks: p.marks.clone(),
                     sidecar: p.sidecar.clone(),
                     sig: p.sidecar_sig.clone(),
+                    date: p.meta.sidecar_date().cloned(),
                 }
             })
             .collect();
@@ -747,6 +789,7 @@ impl Catalog {
                     marks: p.marks.clone(),
                     sidecar: p.sidecar.clone(),
                     sig: p.sidecar_sig.clone(),
+                    date: p.meta.sidecar_date().cloned(),
                 },
             )?;
         }

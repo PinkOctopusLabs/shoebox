@@ -487,6 +487,12 @@ pub enum LibraryCommand {
     AddRoot(PathBuf),
     RemoveRoot(PathBuf),
     SetReference(PathBuf, bool),
+    /// Date photos in their sidecars as one undoable batch (Set date…,
+    /// Find dates).
+    SetDates {
+        dates: Vec<(PathBuf, shoebox_core::sidecar::SidecarDate)>,
+        label: String,
+    },
     /// Write marks to sidecars as one undoable batch.
     SetMarks {
         updates: Vec<(PathBuf, Marks)>,
@@ -1101,6 +1107,7 @@ impl LibraryCommand {
             C::RemoveRoot { .. } => "Removing a folder".into(),
             C::SetReference { .. } => "Changing a reference folder".into(),
             C::SetMarks { updates, .. } => format!("Saving marks on {} photos", updates.len()),
+            C::SetDates { dates, .. } => format!("Dating {} photos", dates.len()),
             C::SaveEvents { .. } => "Saving events".into(),
             C::Undo | C::UndoBatch { .. } => "Undoing".into(),
             C::Redo => "Redoing".into(),
@@ -1466,6 +1473,26 @@ fn library_worker(
                     ..*new
                 };
                 (true, false)
+            }
+            LibraryCommand::SetDates { dates, label } => {
+                let resolved: Vec<(usize, shoebox_core::sidecar::SidecarDate)> = dates
+                    .into_iter()
+                    .filter_map(|(path, d)| index.get(&path).map(|&i| (i, d)))
+                    .collect();
+                match catalog.set_dates(&resolved, &fileops, &cache, &label) {
+                    Ok(Some(batch)) => {
+                        undo.push(batch);
+                        redo.clear();
+                        fresh.set(true);
+                        history(&undo, &redo);
+                        // Dated photos sort elsewhere.
+                        index = reindex(&catalog);
+                        publish(&catalog, &settings, true);
+                    }
+                    Ok(None) => {}
+                    Err(e) => emit(LibraryEvent::Error(format!("setting dates: {e}"))),
+                }
+                (false, false)
             }
             LibraryCommand::SetMarks { updates, label } => {
                 let resolved: Vec<(usize, Marks)> = updates

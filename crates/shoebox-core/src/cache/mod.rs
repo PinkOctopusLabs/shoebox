@@ -11,6 +11,7 @@ use crate::exif::ExifInfo;
 use crate::hash::{ANALYZER_VERSION, Analysis, Digest, PHashes};
 use crate::marks::{Label, Marks, Pick};
 use crate::meta::{META_VERSION, Meta};
+use crate::sidecar::SidecarDate;
 
 /// A root's cached files by relative path.
 pub type KnownFiles = HashMap<String, Known>;
@@ -33,6 +34,9 @@ pub struct CachedMarks {
     pub marks: Marks,
     pub sidecar: Option<std::path::PathBuf>,
     pub sig: String,
+    /// The sidecars' date, shown in place of the file's own (which `exif`
+    /// keeps).
+    pub date: Option<SidecarDate>,
 }
 
 fn pick_str(p: Option<Pick>) -> Option<&'static str> {
@@ -54,7 +58,7 @@ fn label_from(s: Option<String>) -> Option<Label> {
     s.and_then(|s| Label::ALL.into_iter().find(|l| l.name() == s))
 }
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 /// Rebuildable tables, dropped when the schema version changes.
 /// `dupe_ignores` holds user decisions and is never dropped.
@@ -145,9 +149,14 @@ impl Cache {
                 "cache schema {version} is newer than this build ({SCHEMA_VERSION})"
             )));
         }
+        // 8 and 9 add columns; a rebuild would throw away every hash, and
+        // what's known of cloud-only files. Rows from before 9 have the
+        // sidecars' dates in `exif` (they stay until the file is read again).
         if version == 7 {
-            // 8 adds a column; a rebuild would throw away every hash.
             conn.execute_batch("ALTER TABLE exif ADD COLUMN nef_compression INTEGER")?;
+        }
+        if version == 7 || version == 8 {
+            conn.execute_batch("ALTER TABLE marks ADD COLUMN date TEXT")?;
         } else if version != 0 && version < SCHEMA_VERSION {
             tracing::info!("cache schema {version} is out of date; rebuilding");
             for t in REBUILDABLE {
@@ -280,11 +289,13 @@ impl Cache {
             )?;
             let mut marks = tx.prepare_cached(
                 "INSERT OR REPLACE INTO marks(file_id, rating, pick, label, keywords, sidecar, sidecar_sig, event,
-                    gps_lat_e7, gps_lon_e7)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    gps_lat_e7, gps_lon_e7, date)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             )?;
             for e in entries {
-                let m = e.meta;
+                // The file's own date; a sidecar's goes with the marks.
+                let own = e.meta.file_meta();
+                let m = &own;
                 let id: i64 = file.query_row(
                     params![
                         e.root_id,
@@ -332,6 +343,7 @@ impl Cache {
                     k.marks.event,
                     k.marks.gps_e7.map(|g| g.0),
                     k.marks.gps_e7.map(|g| g.1),
+                    k.date.as_ref().map(SidecarDate::to_xmp),
                 ])?;
             }
         }
@@ -343,8 +355,8 @@ impl Cache {
     pub fn update_marks(&self, root_id: i64, rel: &str, m: &CachedMarks) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO marks(file_id, rating, pick, label, keywords, sidecar, sidecar_sig, event,
-                gps_lat_e7, gps_lon_e7)
-             SELECT id, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11
+                gps_lat_e7, gps_lon_e7, date)
+             SELECT id, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12
              FROM files WHERE root_id = ?1 AND rel_path = ?2",
             params![
                 root_id,
@@ -358,6 +370,7 @@ impl Cache {
                 m.marks.event,
                 m.marks.gps_e7.map(|g| g.0),
                 m.marks.gps_e7.map(|g| g.1),
+                m.date.as_ref().map(SidecarDate::to_xmp),
             ],
         )?;
         Ok(())
@@ -371,7 +384,7 @@ impl Cache {
                     e.focal, e.fnumber, e.exposure, e.iso, e.orientation,
                     k.rating, k.pick, k.label, k.keywords, k.sidecar, k.sidecar_sig, k.event,
                     f.changed_at, f.change_source, e.gps_lat, e.gps_lon, e.shutter_count,
-                    k.gps_lat_e7, k.gps_lon_e7, e.nef_compression
+                    k.gps_lat_e7, k.gps_lon_e7, e.nef_compression, k.date
              FROM files f LEFT JOIN exif e ON e.file_id = f.id
                           LEFT JOIN marks k ON k.file_id = f.id
              WHERE f.root_id = ?1 AND f.meta_version = ?2",
@@ -390,6 +403,7 @@ impl Cache {
                     size: r.get::<_, i64>(1)? as u64,
                     mtime_ns: r.get::<_, i64>(2)?,
                     meta: Meta {
+                        dated: None,
                         width: r.get(3)?,
                         height: r.get(4)?,
                         exif: ExifInfo {
@@ -431,6 +445,9 @@ impl Cache {
                             },
                             sidecar: r.get::<_, Option<String>>(21)?.map(Into::into),
                             sig: r.get(22)?,
+                            date: r
+                                .get::<_, Option<String>>(32)?
+                                .and_then(|d| SidecarDate::parse(&d)),
                         }),
                         None => None,
                     },
@@ -438,7 +455,12 @@ impl Cache {
                 },
             ))
         })?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        let mut out: KnownFiles = rows.collect::<Result<_, _>>()?;
+        for k in out.values_mut() {
+            let date = k.marks.as_ref().and_then(|m| m.date.as_ref());
+            k.meta.set_sidecar_date(date);
+        }
+        Ok(out)
     }
 
     /// A file Shoebox moved: carry its row (metadata, hashes, marks, unseen
@@ -769,6 +791,7 @@ mod tests {
             conn.execute_batch(include_str!("schema.sql")).unwrap();
             conn.execute_batch(
                 "ALTER TABLE exif DROP COLUMN nef_compression;
+                 ALTER TABLE marks DROP COLUMN date;
                  INSERT INTO roots(id, path) VALUES (1, '/photos');
                  INSERT INTO files(id, root_id, rel_path, ext, size, mtime, blake3)
                    VALUES (1, 1, 'a.nef', 'nef', 10, 20, x'00ff');
@@ -790,5 +813,40 @@ mod tests {
         drop(cache);
         // And opening it again is a no-op.
         Cache::open(&path).unwrap();
+    }
+
+    /// Schema 8 → 9 adds the sidecars' date to the marks in place.
+    #[test]
+    fn schema_8_upgrades_without_a_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(include_str!("schema.sql")).unwrap();
+            conn.execute_batch(
+                "ALTER TABLE marks DROP COLUMN date;
+                 INSERT INTO roots(id, path) VALUES (1, '/photos');
+                 INSERT INTO files(id, root_id, rel_path, ext, size, mtime, blake3, meta_version)
+                   VALUES (1, 1, 'a.jpg', 'jpg', 10, 20, x'00ff', 4);
+                 INSERT INTO exif(file_id, capture_time) VALUES (1, '2019:03:12 10:15:30');
+                 INSERT INTO marks(file_id, rating, keywords, sidecar_sig) VALUES (1, 3, '', 's');",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 8).unwrap();
+        }
+        let cache = Cache::open(&path).unwrap();
+        let known = cache.load_meta(1).unwrap();
+        let a = &known["a.jpg"];
+        assert_eq!(
+            a.meta.exif.capture_time.as_deref(),
+            Some("2019:03:12 10:15:30")
+        );
+        let marks = a.marks.as_ref().unwrap();
+        assert_eq!((marks.marks.rating, marks.date.as_ref()), (3, None));
+        let blake3: Vec<u8> = cache
+            .conn
+            .query_row("SELECT blake3 FROM files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(blake3, vec![0x00, 0xff]);
     }
 }

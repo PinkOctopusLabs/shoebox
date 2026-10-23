@@ -8,6 +8,7 @@ use shoebox_decode::Format;
 
 use crate::error::{Result, io};
 use crate::exif::{self, ExifInfo};
+use crate::sidecar::{Precision, SidecarDate};
 
 /// Bump when metadata extraction changes, so cached rows are re-read.
 pub const META_VERSION: i64 = 4;
@@ -22,9 +23,73 @@ pub struct Meta {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub exif: ExifInfo,
+    /// A sidecar's date, shown (in `exif`) in place of the file's own.
+    pub dated: Option<Box<Dated>>,
+}
+
+/// A sidecar's date in place of the file's own, and the file's own to put
+/// back.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Dated {
+    pub sidecar: SidecarDate,
+    pub file: FileDate,
+}
+
+/// A file's own capture time, as EXIF has it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FileDate {
+    pub time: Option<String>,
+    pub subsec: Option<String>,
+    pub offset: Option<String>,
 }
 
 impl Meta {
+    /// The sidecar's date shown in place of the file's own, if any.
+    pub fn sidecar_date(&self) -> Option<&SidecarDate> {
+        self.dated.as_ref().map(|d| &d.sidecar)
+    }
+
+    /// How much of the date shown is known.
+    pub fn precision(&self) -> Precision {
+        self.sidecar_date()
+            .map_or(Precision::Moment, |d| d.precision)
+    }
+
+    /// Show a sidecar's `date` in place of the file's own, or (None) the
+    /// file's own again. A sidecar's exact date always wins; an approximate
+    /// one only dates a file that has no date of its own (another app's
+    /// `photoshop:DateCreated` is often just the year).
+    pub fn set_sidecar_date(&mut self, date: Option<&SidecarDate>) {
+        if let Some(d) = self.dated.take() {
+            self.exif.capture_time = d.file.time;
+            self.exif.subsec = d.file.subsec;
+            self.exif.offset = d.file.offset;
+        }
+        let Some(date) = date else {
+            return;
+        };
+        if date.precision != Precision::Moment && self.exif.capture_time.is_some() {
+            return;
+        }
+        let file = FileDate {
+            time: self.exif.capture_time.replace(date.time.clone()),
+            subsec: std::mem::replace(&mut self.exif.subsec, date.subsec.clone()),
+            offset: std::mem::replace(&mut self.exif.offset, date.offset.clone()),
+        };
+        self.dated = Some(Box::new(Dated {
+            sidecar: date.clone(),
+            file,
+        }));
+    }
+
+    /// As the file itself says, without a sidecar's date (what the cache
+    /// keeps; the sidecar's is cached with its marks).
+    pub fn file_meta(&self) -> Meta {
+        let mut m = self.clone();
+        m.set_sidecar_date(None);
+        m
+    }
+
     pub fn orientation(&self) -> u16 {
         self.exif.orientation.unwrap_or(1)
     }
@@ -83,6 +148,7 @@ fn from_bytes(format: Format, data: &[u8]) -> (Meta, bool) {
     let complete = dims.is_some() || (format == Format::Heic && exif != ExifInfo::default());
     (
         Meta {
+            dated: None,
             width,
             height,
             exif,
@@ -112,6 +178,7 @@ fn movie(path: &Path) -> Result<Meta> {
         exif.offset = Some(z.strftime("%:z").to_string());
     }
     Ok(Meta {
+        dated: None,
         width: info.width,
         height: info.height,
         exif,

@@ -333,3 +333,97 @@ fn cloud_only_files_are_listed_not_read() {
     let (_, s) = Catalog::refresh(&mut cache, roots(), &|_, _| {}).unwrap();
     assert_eq!((s.cached, s.cloud), (2, 0));
 }
+
+/// Dates set here (SPEC "Dates"): written to the sidecar, kept through
+/// rescans, reopening and duplicate analysis (which caches the file's own
+/// EXIF), and taken back by undo. An approximate date dates an undated
+/// photo only.
+#[test]
+fn dates_set_here_survive_rescans_and_undo() {
+    use shoebox_core::changes::By;
+    use shoebox_core::fileops::{FileOps, Journal};
+    use shoebox_core::sidecar::{Precision, SidecarDate};
+
+    let t = tempfile::tempdir().unwrap();
+    let lib = t.path().join("lib");
+    shoebox_fixtures::build_library(&lib).unwrap();
+    let mut cache = Cache::open(&t.path().join("cache.sqlite")).unwrap();
+    let fo = FileOps::new(
+        Journal::open(&t.path().join("journal.sqlite")).unwrap(),
+        vec![lib.join("ref").canonicalize().unwrap()],
+    );
+    let (mut c, _) = Catalog::refresh(&mut cache, roots(&lib), &|_, _| {}).unwrap();
+    let find = |c: &Catalog, rel: &str| c.photos.iter().position(|p| p.rel == rel).unwrap();
+    let time = |c: &Catalog, rel: &str| c.photos[find(c, rel)].meta.exif.capture_time.clone();
+    let carved = "recovered/f0003.jpg";
+    assert_eq!(time(&c, carved), None);
+
+    let d = SidecarDate::moment("2019:03:12 10:15:30".into(), None, Some("+01:00".into()));
+    let i = find(&c, carved);
+    let batch = c
+        .set_dates(&[(i, d.clone())], &fo, &cache, "Set date")
+        .unwrap()
+        .unwrap();
+    assert_eq!(time(&c, carved).as_deref(), Some("2019:03:12 10:15:30"));
+    let side = std::fs::read_to_string(lib.join("scan/recovered/f0003.jpg.xmp")).unwrap();
+    assert!(side.contains("2019-03-12T10:15:30+01:00"), "{side}");
+
+    // Rescans and reopening keep it, also after duplicate analysis has
+    // cached the file's own (dateless) EXIF.
+    let (c2, s2) = Catalog::refresh(&mut cache, roots(&lib), &|_, _| {}).unwrap();
+    assert_eq!(s2.read, 0);
+    assert_eq!(time(&c2, carved).as_deref(), Some("2019:03:12 10:15:30"));
+    let (files, _) = shoebox_core::scan::scan_with_sidecars(&roots(&lib), &[]).unwrap();
+    shoebox_core::pipeline::analyze_all(&mut cache, &roots(&lib), files).unwrap();
+    let reopened = Catalog::from_cache(&cache, roots(&lib)).unwrap();
+    assert_eq!(
+        time(&reopened, carved).as_deref(),
+        Some("2019:03:12 10:15:30")
+    );
+    let (c3, _) = Catalog::refresh(&mut cache, roots(&lib), &|_, _| {}).unwrap();
+    assert_eq!(time(&c3, carved).as_deref(), Some("2019:03:12 10:15:30"));
+
+    // Undo takes it back, here and in the cache.
+    fo.undo(batch).unwrap();
+    let i = find(&c, carved);
+    let r = c.reread(&[i], &By::Other, &mut cache).unwrap();
+    assert!(r.reordered, "an undated photo sorts last");
+    assert_eq!(time(&c, carved), None);
+    assert_eq!(
+        time(&Catalog::from_cache(&cache, roots(&lib)).unwrap(), carved),
+        None
+    );
+
+    // Just the month: the middle of it, as approximate; XMP has no time.
+    let march = SidecarDate::approximate(2019, Some(3), None).unwrap();
+    let i = find(&c, carved);
+    c.set_dates(&[(i, march.clone())], &fo, &cache, "Set date")
+        .unwrap();
+    let p = &c.photos[find(&c, carved)];
+    assert_eq!(
+        p.meta.exif.capture_time.as_deref(),
+        Some("2019:03:15 12:00:00")
+    );
+    assert_eq!(p.meta.precision(), Precision::Month);
+    let side = std::fs::read_to_string(lib.join("scan/recovered/f0003.jpg.xmp")).unwrap();
+    assert!(
+        side.contains(">2019-03<") || side.contains("\"2019-03\""),
+        "{side}"
+    );
+    assert!(!side.contains("DateTimeOriginal"), "{side}");
+    let reopened = Catalog::from_cache(&cache, roots(&lib)).unwrap();
+    assert_eq!(
+        reopened.photos[find(&reopened, carved)].meta.precision(),
+        Precision::Month
+    );
+
+    // A dated photo keeps its own date under an approximate one.
+    let dated = (0..c.photos.len())
+        .find(|&j| !c.is_reference(j) && c.photos[j].meta.exif.capture_time.is_some())
+        .unwrap();
+    let rel = c.photos[dated].rel.clone();
+    let before = c.photos[dated].meta.exif.capture_time.clone();
+    c.set_dates(&[(dated, march)], &fo, &cache, "Set date")
+        .unwrap();
+    assert_eq!(time(&c, &rel), before);
+}

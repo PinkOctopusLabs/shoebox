@@ -3,6 +3,7 @@
 pub mod activity;
 pub mod compare;
 pub mod crop;
+pub mod dates;
 pub mod develop;
 pub mod duplicates;
 pub mod export;
@@ -682,6 +683,14 @@ pub fn photo_menu(app: &mut ShoeboxApp, resp: &egui::Response, pos: usize) {
         }
         if ui.button("Rename…").clicked() {
             app.start_rename();
+            ui.close();
+        }
+        if ui
+            .button("Set Date…")
+            .on_hover_text("Date the selected photos, or correct their date (in their sidecars)")
+            .clicked()
+        {
+            dates::open_set_date(app);
             ui.close();
         }
         if ui.button("Move to _rejected  (⌘Backspace)").clicked() {

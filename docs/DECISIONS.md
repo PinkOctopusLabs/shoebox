@@ -4407,3 +4407,68 @@ why those sidecars had GPS and nothing else.
   metadata isn't read, so an empty date says nothing.
 - Tests: `an_edit_without_exif_takes_its_originals_date`,
   `edits_synced_before_without_a_date_get_one`.
+
+## Dates: Set date… and Find dates, Phase 1 (2026-10-23)
+SPEC "Dates". Asked for: a tool that helps date the undated photos from
+several kinds of clue. Decided with the person: approximate dates allowed
+(a day, month or year), dated files offered a move out of `_undated/` (Phase
+4), shifting wrong dates later (OPEN-ITEMS "Shift dates").
+- **Storing a date.** `sidecar::plan_date`: the per-file sidecar gets
+  `exif:DateTimeOriginal` and `photoshop:DateCreated`; an approximate date
+  only the latter (`2019-03-12`, `2019-03`, `2019`; the former needs a
+  time) and any `exif:DateTimeOriginal` there is removed, or it would win.
+  `SidecarDate` has a `Precision` (Moment, Day, Month, Year); an
+  approximate one's time is the middle of its period (noon, the 15th,
+  1 July), which is how it sorts and names. `SidecarDate::parse` reads the
+  partial forms too.
+- **Another app's partial date doesn't override EXIF.** digiKam and others
+  often write `photoshop:DateCreated` as just a year, so an approximate
+  sidecar date only dates a file with no date of its own
+  (`Meta::set_sidecar_date`); an exact one always wins, as before. The dry
+  run says "keeps its own date".
+- **The file's own date is kept apart.** `Meta::dated` holds the sidecar's
+  date shown and the file's own, so a sidecar date taken back (⌘Z, another
+  app) restores the file's. The cache's `exif` rows now always hold the
+  file's own date (`Meta::file_meta`), and the sidecars' date is cached with
+  the marks (`marks.date`, schema 9, added in place like 8's column: a
+  rebuild would forget what's known of cloud-only files). This also fixes a
+  latent bug: duplicate analysis wrote each file's own EXIF into the same
+  rows, so a photo dated only by its sidecar (an iCloud Photos screenshot)
+  could show undated after the next launch. Rows from before 9 keep the
+  sidecar's date in `exif` until the file is read again. `Catalog::reread`
+  re-sorts when a sidecar date changes the capture time.
+- **Writing.** `Catalog::set_dates` (one `sidecar` batch, like marks; skips
+  reference roots), `LibraryCommand::SetDates`. Set Date… is in the photo
+  menu and on an undated photo's Captured row in the Info panel (a dated
+  photo's row stays as it was: a button there widened the panel and moved
+  the grid on the first click); its dialog is the dry run
+  (each photo's date now and after). Find dates' Accept, its other
+  suggestions and a typed date all open the same dialog.
+- **Clues** (`shoebox_core::dating`, Phase 1): EXIF's digitized date (sure)
+  and modified date (likely: an editor may have set it), the GPS date and
+  time stamp (sure; UTC, shown in the Mac's time zone), dates in the file's
+  own XMP (sure; `sidecar::load` deliberately ignores them as capture
+  times), a PNG's `Creation Time`; the file name (`IMG_20190312_101530`,
+  `PXL_…` with milliseconds, Shoebox's own `20190312-101530-120`,
+  `Screenshot 2019-03-12 at 10.15.30`, `IMG-20190312-WA0001` as the day,
+  Unix seconds or milliseconds from 2000 on, likely); folder names
+  (`2014-03-12 Party` the day, `March 2014`, `2014/03 Japan` or `2014/Sept`
+  the month, likely; `2014` or `2014 Japan` the year, a guess). Years from
+  1900 to next year. A clue another source agrees with (at the coarser
+  precision) is one step surer. Only the first 1 MB of a file is read;
+  cloud-only files aren't read (names and folders still count).
+- **The view** (Tasks → Find dates): the clues are found on a `find-dates`
+  thread when the view opens (again for photos new to the catalog), shown
+  in Activity. Undated photos outside reference folders, grouped by folder
+  and their best clue's source and day (file names with different times on
+  one day group together; Accept dates each by its own), clueless ones by
+  folder; surest first; Skip hides a group for the session. Groups are
+  worked out once per change of clues or catalog, and only thumbnails on
+  screen are asked for. *Show beside…* waits for Phase 2.
+- Tests: `dating::tests` (names, folders, other dates in a JPEG, a PNG, the
+  file's XMP, ranking), `sidecar` partial dates via
+  `dates_set_here_survive_rescans_and_undo` (catalog: rescans, reopening,
+  duplicate analysis, undo, approximate dates), `schema_8_upgrades_without_a_rebuild`,
+  `views::dates::tests::typed_dates`, UI `find_dates_suggests_and_sets_dates`
+  (snapshot `find-dates`).
+

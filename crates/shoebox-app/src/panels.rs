@@ -169,6 +169,7 @@ fn view_title(v: View) -> &'static str {
         View::Import => "Import",
         View::History => "History",
         View::Activity => "Activity",
+        View::Dates => "Find dates",
         _ => "",
     }
 }
@@ -223,7 +224,7 @@ pub fn viewbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 }
                 if !matches!(
                     app.view,
-                    View::Duplicates | View::Import | View::History | View::Activity
+                    View::Duplicates | View::Import | View::History | View::Activity | View::Dates
                 ) {
                     ui.add_space(4.0);
                     ui.separator();
@@ -905,6 +906,14 @@ fn library_contents(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         .clicked()
     {
         app.set_view(View::Import);
+    }
+    if row(ui, app.view == View::Dates, "Find dates", None)
+        .on_hover_text(
+            "Suggest dates for the undated photos, from clues in their files, names and folders",
+        )
+        .clicked()
+    {
+        app.set_view(View::Dates);
     }
     let interrupted = app.history.interrupted();
     let label = if interrupted > 0 {
@@ -1732,21 +1741,7 @@ fn details(app: &mut ShoeboxApp, ui: &mut egui::Ui, id: crate::jobs::PhotoId, id
             "Virtual copy",
             opt(app.copy_info(id).map(|c| c.name.clone())),
         ),
-        (
-            "Captured",
-            opt(x.capture_time.as_ref().map(|t| {
-                let mut s = t.replacen(':', "-", 2);
-                if let Some(ss) = &x.subsec {
-                    s.push('.');
-                    s.push_str(ss);
-                }
-                if let Some(o) = &x.offset {
-                    s.push(' ');
-                    s.push_str(o);
-                }
-                s
-            })),
-        ),
+        ("Captured", crate::views::dates::meta_date_text(&photo.meta)),
         (
             "Camera",
             opt(match (&x.make, &x.model) {
@@ -1805,7 +1800,22 @@ fn details(app: &mut ShoeboxApp, ui: &mut egui::Ui, id: crate::jobs::PhotoId, id
         .show(ui, |ui| {
             for (k, v) in rows.into_iter().filter(|(_, v)| !v.is_empty()) {
                 ui.label(RichText::new(k).weak());
-                ui.label(v);
+                // Undated: offer a date here (short, so the panel keeps
+                // its width); a dated photo's is in the photo menu.
+                if k == "Captured" && x.capture_time.is_none() && !app.catalog.is_reference(idx) {
+                    ui.horizontal(|ui| {
+                        ui.label(v);
+                        if ui
+                            .small_button("Set date…")
+                            .on_hover_text("Date the selected photos (in their sidecars)")
+                            .clicked()
+                        {
+                            crate::views::dates::open_set_date(app);
+                        }
+                    });
+                } else {
+                    ui.label(v);
+                }
                 ui.end_row();
             }
         });

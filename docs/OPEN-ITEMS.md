@@ -235,6 +235,10 @@ Defaults that are guesses so far.
 
 ### Library
 
+- [ ] **Shift dates.** Move the dates of photos already dated by an offset
+  (a camera whose clock was wrong, or set to another time zone), for a
+  selection or a camera over a span, with the dry run and batch Set date…
+  uses. Deferred when Find dates was planned (SPEC "Dates"). M.
 - [ ] **iCloud Photos: "probably already in the library".** Hold back a
   Photos asset when the library has a photo taken at the same moment (to
   the sub-second) with the same proportions, before downloading it, with

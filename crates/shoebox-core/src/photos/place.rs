@@ -24,7 +24,7 @@ use crate::events::{self, Event};
 use crate::fileops::{PlannedCopy, suffixed};
 use crate::marks::{Marks, Pick};
 use crate::meta::Meta;
-use crate::sidecar::{self, SidecarDate};
+use crate::sidecar::{self, Precision, SidecarDate};
 use crate::template::{Fields, Template};
 use crate::xmp::{self, Prop, Value};
 
@@ -179,6 +179,7 @@ fn date_for(asset: &Asset, meta: Option<&Meta>, tz: &TimeZone) -> Dated {
             time: t.to_owned(),
             subsec: s.map(str::to_owned),
             offset: o.map(str::to_owned),
+            precision: Precision::Moment,
         }),
         by_photos: false,
     };
@@ -233,6 +234,7 @@ fn photos_date(at: Timestamp, tz: &TimeZone) -> Dated {
             time: z.strftime("%Y:%m:%d %H:%M:%S").to_string(),
             subsec: (ms > 0).then(|| format!("{ms:03}")),
             offset: Some(z.strftime("%:z").to_string()),
+            precision: Precision::Moment,
         }),
         by_photos: true,
     }

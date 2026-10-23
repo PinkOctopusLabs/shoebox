@@ -24,12 +24,12 @@ they're run now, together, before the release. This file is the runbook.
   references. darktable, RawTherapee, Preview, Photos and Finder are fine
   where a check asks whether a file opens elsewhere.
 
-**65 checks** (58 carried over, 2 gate verdicts added, 3 for iCloud Photos, 1 for cloud-only raws, 1 for Activity), plus one already
+**66 checks** (58 carried over, 2 gate verdicts added, 3 for iCloud Photos, 1 for cloud-only raws, 1 for Activity, 1 for Find dates), plus one already
 done:
 
 | Area | Checks |
 | --- | --- |
-| [1. Library and files](#1-library-and-files) | 6 |
+| [1. Library and files](#1-library-and-files) | 7 |
 | [2. Raw decode and colour](#2-raw-decode-and-colour) | 6 |
 | [3. Develop: tone, colour and effects](#3-develop-tone-colour-and-effects) | 8 |
 | [4. Noise and detail](#4-noise-and-detail) | 3 |
@@ -158,6 +158,17 @@ APFS clone, in folders by shoot.
   while it waits, marking, rejecting and undo still work, and grid
   thumbnails of other cloud-only photos show as in the cloud rather than
   waiting; the row goes once the photo opens.
+
+- [ ] **Find dates on real undated photos** (from 2026-10-23), on an APFS
+  clone of the library (`cp -cR`), not the library itself. Open Tasks →
+  Find dates. Passes: it counts the undated photos as Grid's Undated does;
+  the clues arrive in Activity's "Finding dates" and the groups make sense
+  (WhatsApp and screenshot names, `-photos` edits by their names, scans by
+  their folders); spot-check ten suggestions against what you know; Accept
+  on a group and a typed month on another write only `.xmp` files (the
+  dry run lists them), the photos move to their place in Grid, the Info
+  panel shows "March 2019 (approximate)" for the month, and ⌘Z puts both
+  back. Note clues that were wrong or missing (for Phase 2).
 
 ## 2. Raw decode and colour
 

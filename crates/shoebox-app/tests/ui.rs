@@ -7056,3 +7056,97 @@ fn all_photos_opens_at_the_newest() {
     h.run_steps(5);
     assert!(visible(&h, "P_199.jpg"), "back at the newest");
 }
+
+/// Find dates (SPEC "Dates"): clues from names and folders, grouped;
+/// Accept dates each photo by its own after the dry run, ⌘Z takes it back;
+/// a date typed in dates a clueless group; Set Date… from the photo menu.
+#[test]
+fn find_dates_suggests_and_sets_dates() {
+    let t = tempfile::tempdir().unwrap();
+    let base = t.path().canonicalize().unwrap();
+    let lib = base.join("lib");
+    let img = |seed| shoebox_fixtures::jpeg(&shoebox_fixtures::scene(seed, 320, 240), 85).unwrap();
+    let chat = lib.join("_undated/320x240");
+    std::fs::create_dir_all(&chat).unwrap();
+    std::fs::write(chat.join("IMG_20190312_101530.jpg"), img(1)).unwrap();
+    std::fs::write(chat.join("IMG_20190312_181002.jpg"), img(2)).unwrap();
+    let trip = lib.join("Scans/March 2014");
+    std::fs::create_dir_all(&trip).unwrap();
+    std::fs::write(trip.join("scan1.jpg"), img(3)).unwrap();
+    let none = lib.join("Misc");
+    std::fs::create_dir_all(&none).unwrap();
+    std::fs::write(none.join("photo.jpg"), img(4)).unwrap();
+    let p = paths(&base, std::slice::from_ref(&lib));
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+
+    h.get_by_label("Find dates").click();
+    wait_for(&mut h, Duration::from_secs(20), "clues", |a| {
+        shoebox_app::views::dates::looked_at(a) == 4
+    });
+    h.run_steps(3);
+    assert!(h.query_by_label_contains("4 undated photos").is_some());
+    assert!(
+        h.query_by_label_contains("12 March 2019, each at its own time · sure")
+            .is_some(),
+        "the file names' day"
+    );
+    assert!(
+        h.query_by_label_contains("March 2014 (approximate) · likely")
+            .is_some()
+    );
+    assert!(h.query_by_label_contains("No clues").is_some());
+    snapshot(&mut h, "find-dates");
+
+    // Accept the names' dates: the dry run, then one batch.
+    h.get_all_by_label("Accept…").next().unwrap().click();
+    h.run_steps(3);
+    assert!(
+        h.query_by_label("12 March 2019, 10:15:30").is_some(),
+        "the dry run"
+    );
+    h.get_by_label("Set 2 dates").click();
+    wait_for(&mut h, Duration::from_secs(10), "dated", |a| {
+        a.capture_time_of("IMG_20190312_181002.jpg").is_some()
+    });
+    assert_eq!(
+        h.state()
+            .capture_time_of("IMG_20190312_101530.jpg")
+            .as_deref(),
+        Some("2019:03:12 10:15:30")
+    );
+    let side = std::fs::read_to_string(chat.join("IMG_20190312_181002.jpg.xmp")).unwrap();
+    assert!(side.contains("2019-03-12T18:10:02"), "{side}");
+    h.run_steps(3);
+    assert!(h.query_by_label_contains("2 undated photos").is_some());
+
+    // ⌘Z takes both back.
+    settle(&mut h, Duration::from_secs(30));
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    wait_for(&mut h, Duration::from_secs(10), "undone", |a| {
+        a.capture_time_of("IMG_20190312_181002.jpg").is_none()
+            && a.capture_time_of("IMG_20190312_101530.jpg").is_none()
+    });
+
+    // A date typed for the clueless one.
+    h.run_steps(3);
+    let field = h
+        .get_all_by_role(egui::accesskit::Role::TextInput)
+        .last()
+        .unwrap();
+    field.click();
+    h.run_steps(1);
+    h.event(egui::Event::Text("2001-06".into()));
+    h.run_steps(2);
+    h.get_by_label("Set June 2001…").click();
+    h.run_steps(3);
+    h.get_by_label("Set 1 date").click();
+    wait_for(&mut h, Duration::from_secs(10), "typed date", |a| {
+        a.capture_time_of("photo.jpg").as_deref() == Some("2001:06:15 12:00:00")
+    });
+    let side = std::fs::read_to_string(none.join("photo.jpg.xmp")).unwrap();
+    assert!(
+        side.contains("2001-06") && !side.contains("DateTimeOriginal"),
+        "{side}"
+    );
+}

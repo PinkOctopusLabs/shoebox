@@ -5,6 +5,7 @@ pub mod catalog;
 pub mod changes;
 pub mod cloud;
 pub mod collections;
+pub mod dating;
 pub mod dupes;
 pub mod edits;
 pub mod embeddings;

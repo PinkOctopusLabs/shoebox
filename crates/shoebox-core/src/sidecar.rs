@@ -83,7 +83,20 @@ pub struct Loaded {
     pub date: Option<SidecarDate>,
 }
 
-/// A capture time from a sidecar, in EXIF's terms.
+/// How much of a date is known.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Precision {
+    /// A date and time.
+    #[default]
+    Moment,
+    Day,
+    Month,
+    Year,
+}
+
+/// A capture time from a sidecar, in EXIF's terms. An approximate one
+/// (a day, month or year) has the middle of its period as its time: noon,
+/// the 15th, 1 July.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SidecarDate {
     /// `YYYY:MM:DD HH:MM:SS`.
@@ -91,19 +104,73 @@ pub struct SidecarDate {
     pub subsec: Option<String>,
     /// `+01:00`.
     pub offset: Option<String>,
+    pub precision: Precision,
 }
 
 impl SidecarDate {
-    /// Put it in place of the file's own capture time.
-    pub fn apply(&self, meta: &mut crate::meta::Meta) {
-        meta.exif.capture_time = Some(self.time.clone());
-        meta.exif.subsec = self.subsec.clone();
-        meta.exif.offset = self.offset.clone();
+    /// A date and time.
+    pub fn moment(time: String, subsec: Option<String>, offset: Option<String>) -> Self {
+        Self {
+            time,
+            subsec,
+            offset,
+            precision: Precision::Moment,
+        }
+    }
+
+    /// Just the day, month (`day` None) or year (`month` None), as the
+    /// middle of that period. None if it isn't a date.
+    pub fn approximate(year: i16, month: Option<i8>, day: Option<i8>) -> Option<Self> {
+        let (m, d, precision) = match (month, day) {
+            (None, _) => (7, 1, Precision::Year),
+            (Some(m), None) => (m, 15, Precision::Month),
+            (Some(m), Some(d)) => (m, d, Precision::Day),
+        };
+        jiff::civil::Date::new(year, m, d).ok()?;
+        if year < 1 {
+            return None;
+        }
+        Some(Self {
+            time: format!("{year:04}:{m:02}:{d:02} 12:00:00"),
+            subsec: None,
+            offset: None,
+            precision,
+        })
     }
 
     /// Read `2024-06-03T14:15:02.120+01:00` (XMP's ISO 8601) or
-    /// `2024:06:03 14:15:02`; a date without a time isn't a capture time.
+    /// `2024:06:03 14:15:02`, or an approximate date as XMP writes them
+    /// (`2024-06-03`, `2024-06`, `2024`).
     pub fn parse(s: &str) -> Option<Self> {
+        Self::parse_moment(s).or_else(|| Self::parse_approximate(s))
+    }
+
+    fn parse_approximate(s: &str) -> Option<Self> {
+        let s = s.trim();
+        if !s.is_ascii() {
+            return None;
+        }
+        let num = |r: &str| {
+            (!r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| r.parse::<i16>().ok())
+                .flatten()
+        };
+        let parts: Vec<&str> = s.split(['-', ':']).collect();
+        match parts.as_slice() {
+            [y] if y.len() == 4 => Self::approximate(num(y)?, None, None),
+            [y, m] if y.len() == 4 && m.len() == 2 => {
+                Self::approximate(num(y)?, Some(i8::try_from(num(m)?).ok()?), None)
+            }
+            [y, m, d] if y.len() == 4 && m.len() == 2 && d.len() == 2 => Self::approximate(
+                num(y)?,
+                Some(i8::try_from(num(m)?).ok()?),
+                Some(i8::try_from(num(d)?).ok()?),
+            ),
+            _ => None,
+        }
+    }
+
+    fn parse_moment(s: &str) -> Option<Self> {
         let s = s.trim();
         // Byte offsets below assume ASCII; anything else isn't a date.
         let (Some(dt), Some(rest)) = (s.get(..19), s.get(19..)) else {
@@ -142,16 +209,19 @@ impl SidecarDate {
             z if z.len() == 6 && (z.starts_with('+') || z.starts_with('-')) => Some(z.to_owned()),
             _ => return None,
         };
-        Some(Self {
-            time,
-            subsec,
-            offset,
-        })
+        Some(Self::moment(time, subsec, offset))
     }
 
-    /// XMP's form: `2024-06-03T14:15:02.120+01:00`.
+    /// XMP's form: `2024-06-03T14:15:02.120+01:00`; `2024-06-03`, `2024-06`
+    /// or `2024` for an approximate date.
     pub fn to_xmp(&self) -> String {
         let t = &self.time;
+        match self.precision {
+            Precision::Moment => {}
+            Precision::Day => return format!("{}-{}-{}", &t[0..4], &t[5..7], &t[8..10]),
+            Precision::Month => return format!("{}-{}", &t[0..4], &t[5..7]),
+            Precision::Year => return t[0..4].to_owned(),
+        }
         let mut out = format!("{}-{}-{}T{}", &t[0..4], &t[5..7], &t[8..10], &t[11..]);
         if let Some(s) = &self.subsec {
             out.push('.');
@@ -193,6 +263,31 @@ pub fn load(
         sidecar: file.map(Path::to_path_buf),
         date,
     })
+}
+
+/// The sidecar write that dates a photo: `date` in its per-file sidecar
+/// (`name.ext.xmp`, made if needed) as `exif:DateTimeOriginal` and
+/// `photoshop:DateCreated`; an approximate date only as the latter (the
+/// former needs a time), removing any `exif:DateTimeOriginal` there, which
+/// would win.
+pub fn plan_date(image: &Path, date: &SidecarDate) -> Result<(PathBuf, Vec<u8>)> {
+    let (_, file) = present(image, &|p| p.exists());
+    let path = file.unwrap_or_else(|| per_file(image));
+    let existing = match std::fs::read(&path) {
+        Ok(b) => Some(b),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(io(&path)(e)),
+    };
+    let v = date.to_xmp();
+    let original = (date.precision == Precision::Moment).then(|| Value::Text(v.clone()));
+    let bytes = xmp::edit(
+        existing.as_deref(),
+        &[
+            (Prop::DateTimeOriginal, original),
+            (Prop::DateCreated, Some(Value::Text(v))),
+        ],
+    )?;
+    Ok((path, bytes))
 }
 
 /// The sidecar writes that change a photo's marks from `old` (as shown) to

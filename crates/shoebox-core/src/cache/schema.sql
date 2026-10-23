@@ -64,7 +64,9 @@ CREATE TABLE IF NOT EXISTS marks (
     gps_lat_e7  INTEGER,
     gps_lon_e7  INTEGER,
     sidecar     TEXT,
-    sidecar_sig TEXT NOT NULL
+    sidecar_sig TEXT NOT NULL,
+    -- The sidecars' date (XMP's form), shown in place of the file's own.
+    date        TEXT
 );
 
 -- One row per rotation (0, 90, 180, 270) of the upright image.
