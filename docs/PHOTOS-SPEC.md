@@ -75,7 +75,7 @@ Always the originals as Photos holds them, at full quality: never the optimised 
 **Names and dates.** The import template names files as usual. Many Photos assets have no EXIF capture date (screenshots, saved images, messaging apps), and the person may have changed a date in Photos, which leaves the original file unchanged. So:
 
 - The file's EXIF date wins when there is one and it agrees with Photos (within the time-zone offset).
-- No EXIF date: name the file by Photos' creation date (not `_undated/`) and write that date to the copy's sidecar as `photoshop:DateCreated` and `exif:DateTimeOriginal` (XMP), which the scanner must then read as capture time (a small change in `exif`/`sidecar` precedence: sidecar date, then EXIF).
+- No EXIF date: name the file by Photos' creation date (not `_undated/`) and write that date to the copy's sidecar as `photoshop:DateCreated` and `exif:DateTimeOriginal` (XMP), which the scanner must then read as capture time (a small change in `exif`/`sidecar` precedence: sidecar date, then EXIF). Each copy goes by its own EXIF: Photos' render of an edit (`-photos`) has none even when its original does, so it gets the asset's date (the original's, when that stands) in its sidecar. A sync also dates copies earlier syncs left without one (the library read no date in them or their sidecars; cloud-only files wait until they're here), listed in its plan as *copied before without a date*.
 - EXIF and Photos disagree (the person corrected the date in Photos): Photos wins for the name and the sidecar date, and the Info panel shows both dates.
 - The same rule applies to location: a location the person set in Photos and that isn't in the file goes to the sidecar as `exif:GPSLatitude`/`GPSLongitude`, read by the map.
 

@@ -21,6 +21,7 @@ use shoebox_core::photos::{
     Access, Album, Asset, AssetId, Media, PhotoSource, Resource, ResourceKind,
 };
 use shoebox_core::scan::{Role, Root};
+use shoebox_core::sidecar;
 use shoebox_core::template::{DEFAULT_IMPORT, Template};
 use shoebox_fixtures::{Shot, jpeg, scene, with_exif};
 
@@ -140,7 +141,8 @@ impl World {
         let at = roots.iter().position(|r| r == into).unwrap();
         let library = self.source.fetch().unwrap();
         let options = Options::default();
-        let p = plan::plan(&library, &ledgers, &ledgers.choices[at].albums, &options);
+        let mut p = plan::plan(&library, &ledgers, &ledgers.choices[at].albums, &options);
+        plan::undated_copies(&mut p, &library, &ledgers, &catalog, &roots);
         let albums: HashMap<String, AlbumChoice> = p
             .albums
             .iter()
@@ -315,6 +317,9 @@ fn first_sync_names_marks_and_records() {
             "2024/2024-07-01/20240701-140000.jpg.xmp",
             "2024/2024-08-01/20240801-090000-5.jpg",
             "2024/2024-08-01/20240801-090000-5.mov",
+            // The fake movie has no date of its own (a real one has its
+            // QuickTime date): the photo's, in its sidecar.
+            "2024/2024-08-01/20240801-090000-5.mov.xmp",
             "2024/2024-09-01/20240901-100000-photos.jpg",
             "2024/2024-09-01/20240901-100000.jpg",
             "backup/IMG_0007.JPG",
@@ -360,6 +365,86 @@ fn first_sync_names_marks_and_records() {
     assert!(names[1].starts_with("synced-") && names[1].ends_with("-001.jsonl"));
     let log = std::fs::read_to_string(dir.join(&names[1])).unwrap();
     assert_eq!(log.lines().count(), 5, "{log}");
+}
+
+/// Photos' render of an edit, without the original's EXIF (as Photos
+/// makes them): the original's date in its sidecar.
+fn edited_without_exif(w: &World) {
+    let s = shot("2024:09:01 10:00:00", "");
+    let (b, e) = (photo(8, &s), jpeg(&scene(80, 600, 400), 80).unwrap());
+    let mut a = asset(
+        8,
+        "2024-09-01T01:00:00Z",
+        vec![
+            res(ResourceKind::Original, "IMG_0008.JPG", b.len()),
+            res(ResourceKind::Edited, "FullSizeRender.jpg", e.len()),
+        ],
+    );
+    a.edited = Some(EditedBy::Other("com.apple.photo".into()));
+    w.source.add(a, vec![b, e]);
+}
+
+fn capture_time(catalog: &Catalog, ends: &str) -> Option<String> {
+    catalog
+        .photos
+        .iter()
+        .find(|p| p.rel.ends_with(ends))
+        .unwrap()
+        .meta
+        .exif
+        .capture_time
+        .clone()
+}
+
+#[test]
+fn an_edit_without_exif_takes_its_originals_date() {
+    let mut w = World::new();
+    edited_without_exif(&w);
+    let lib = w.lib.clone();
+    let (_, report) = w.sync(&lib);
+    assert_eq!(
+        (report.copied, report.dated_by_photos),
+        (1, 0),
+        "{report:?}"
+    );
+    let edit = "2024/2024-09-01/20240901-100000-photos.jpg";
+    assert!(
+        lib.join(format!("{edit}.xmp")).exists(),
+        "{:?}",
+        files(&lib)
+    );
+    let catalog = w.catalog();
+    assert_eq!(
+        capture_time(&catalog, "20240901-100000-photos.jpg").as_deref(),
+        Some("2024:09:01 10:00:00")
+    );
+}
+
+#[test]
+fn edits_synced_before_without_a_date_get_one() {
+    let mut w = World::new();
+    edited_without_exif(&w);
+    let lib = w.lib.clone();
+    w.sync(&lib);
+    // As an older sync left it: no sidecar, so no date.
+    let edit = lib.join("2024/2024-09-01/20240901-100000-photos.jpg");
+    std::fs::remove_file(sidecar::per_file(&edit)).unwrap();
+    assert_eq!(capture_time(&w.catalog(), "-photos.jpg"), None);
+
+    let (p, report) = w.sync(&lib);
+    assert_eq!(p.undated, vec![(0, edit.clone())]);
+    assert_eq!((report.copied, report.redated), (0, 1), "{report:?}");
+    assert!(
+        report.batch.is_some(),
+        "written in a batch, so it can be undone"
+    );
+    assert_eq!(
+        capture_time(&w.catalog(), "-photos.jpg").as_deref(),
+        Some("2024:09:01 10:00:00")
+    );
+    // Dated now: nothing more to do.
+    let (p, report) = w.sync(&lib);
+    assert!(p.undated.is_empty() && report.batch.is_none(), "{p:?}");
 }
 
 #[test]

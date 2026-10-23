@@ -274,7 +274,8 @@ pub fn import(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         + p.departed.len()
         + p.favourited.len()
         + p.renamed.len()
-        + p.gone.len();
+        + p.gone.len()
+        + p.undated.len();
     ui.horizontal(|ui| {
         let label = if p.new.is_empty() && work > 0 {
             "Bring photos up to date".to_owned()
@@ -371,6 +372,10 @@ fn summary(ui: &mut egui::Ui, planned: &Planned) {
             ),
             (p.joined.len(), "copied before and added to albums since"),
             (p.favourited.len(), "copied before and favourited since"),
+            (
+                p.undated.len(),
+                "copied before without a date (Photos' date goes in their sidecars)",
+            ),
             (p.hidden, "hidden in Photos, left out"),
             (p.burst_frames, "other frames of bursts, left out (each burst's key photo and the frames you kept are copied; Settings can copy them all)"),
         ];
@@ -524,6 +529,12 @@ fn report(app: &mut ShoeboxApp, ui: &mut egui::Ui, r: &Report) {
     }
     if r.dated_by_photos > 0 {
         parts.push(format!("{} dated by Photos", r.dated_by_photos));
+    }
+    if r.redated > 0 {
+        parts.push(format!(
+            "{} copied before dated by Photos",
+            plural(r.redated, "file")
+        ));
     }
     if r.marked > 0 {
         parts.push(format!(

@@ -214,6 +214,17 @@ fn date_for(asset: &Asset, meta: Option<&Meta>, tz: &TimeZone) -> Dated {
     photos_date(photos, tz)
 }
 
+/// The date for a copy synced before without one: its original's, as the
+/// library reads it (`original`), by the same rule as [`place`], else
+/// Photos'.
+pub(crate) fn date_of_copy(
+    asset: &Asset,
+    original: Option<&Meta>,
+    tz: &TimeZone,
+) -> Option<SidecarDate> {
+    date_for(asset, original, tz).date
+}
+
 fn photos_date(at: Timestamp, tz: &TimeZone) -> Dated {
     let z = at.to_zoned(tz.clone());
     let ms = z.subsec_nanosecond() / 1_000_000;
@@ -335,7 +346,9 @@ impl Context<'_> {
         }
         let m = events::join(&m, &ids, &self.events);
         let mut changes = m.changes_from(&Marks::default());
-        if dated.by_photos
+        // Each copy by its own EXIF: Photos' renders of edits have none,
+        // even when the original's date stands.
+        if (dated.by_photos || meta.exif.capture_time.is_none())
             && let Some(d) = &dated.date
         {
             let v = d.to_xmp();

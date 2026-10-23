@@ -707,7 +707,7 @@ library is a test library (CLAUDE.md, safety rule 9), never in yours.
   another new folder with `--keep` after the folder, and look at
   `<folder>/library`: day folders named as card imports are, each Live
   Photo's movie beside its photo, the edited photo's `-photos` copy beside
-  it, the favourites rated ★5 and the album photos in its event (open the
+  it and dated as it is (in its day, not under Undated), the favourites rated ★5 and the album photos in its event (open the
   folder in Shoebox in the test account to see). Copy `report.txt` into
   DECISIONS ("iCloud Photos: PhotoKit").
 - [ ] **Import from iCloud Photos in the app** (PHOTOS-SPEC Phase 4; added

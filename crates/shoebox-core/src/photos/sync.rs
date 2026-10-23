@@ -23,6 +23,7 @@ use crate::error::{CoreError, Result, io};
 use crate::events;
 use crate::fileops::{FileOps, PlannedCopy};
 use crate::sidecar;
+use crate::xmp::{self, Prop, Value};
 
 /// Where a sync stands.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -58,6 +59,9 @@ pub struct Report {
     pub marked: usize,
     /// Events renamed to follow their albums in Photos.
     pub renamed: usize,
+    /// Files synced before that had no date, given Photos' in their
+    /// sidecars ([`Plan::undated`]).
+    pub redated: usize,
     /// Stopped before the end, as asked.
     pub stopped: bool,
     /// Stopped before the end: too little free space.
@@ -270,6 +274,7 @@ pub fn run(
         && plan.favourited.is_empty()
         && plan.renamed.is_empty()
         && plan.gone.is_empty()
+        && plan.undated.is_empty()
     {
         return Ok(report);
     }
@@ -288,6 +293,7 @@ pub fn run(
 
     // First step: marks on photos synced before, and the album choices.
     let mut writes = marks_for_synced(job, plan, ledgers, cx, &mut report)?;
+    report.redated = dates_for_synced(job, plan, ledgers, cx, &mut writes)?;
     // The album choices go with the last step, when the events new albums
     // make are there to link.
     let choices_base = ledgers.choices.get(dest).cloned().unwrap_or_default();
@@ -733,6 +739,76 @@ fn marks_for_synced(
         writes.extend(sidecar::plan_write(&photo.path, &photo.marks, &m, false)?);
     }
     Ok(writes)
+}
+
+/// Photos' date in the sidecars of files synced before without one
+/// ([`Plan::undated`]), merged into `writes` (a sidecar the marks change
+/// too is written once). Returns how many.
+fn dates_for_synced(
+    job: &Job<'_>,
+    plan: &Plan,
+    ledgers: &Ledgers,
+    cx: &Context<'_>,
+    writes: &mut Vec<(PathBuf, Vec<u8>)>,
+) -> Result<usize> {
+    if plan.undated.is_empty() {
+        return Ok(0);
+    }
+    let by_path: HashMap<&Path, usize> = job
+        .catalog
+        .photos
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.path.as_path(), i))
+        .collect();
+    let mut n = 0;
+    for (i, path) in &plan.undated {
+        let Some(a) = job.library.assets.get(*i) else {
+            continue;
+        };
+        let Some(&pi) = by_path.get(path.as_path()) else {
+            continue;
+        };
+        let photo = &job.catalog.photos[pi];
+        if job.catalog.is_reference(pi) || photo.meta.exif.capture_time.is_some() {
+            continue;
+        }
+        let original = ledgers
+            .find(&a.id)
+            .and_then(|(r, e)| Some(e.file(ResourceKind::Original)?.path(job.roots.get(r)?)))
+            .and_then(|p| by_path.get(p.as_path()))
+            .map(|&oi| &job.catalog.photos[oi].meta);
+        let Some(d) = place::date_of_copy(a, original, &cx.tz) else {
+            continue;
+        };
+        let car = photo
+            .sidecar
+            .clone()
+            .unwrap_or_else(|| sidecar::per_file(&photo.path));
+        let at = writes.iter().position(|(p, _)| *p == car);
+        let base = match at {
+            Some(k) => Some(writes[k].1.clone()),
+            None => match std::fs::read(&car) {
+                Ok(b) => Some(b),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(io(&car)(e)),
+            },
+        };
+        let v = d.to_xmp();
+        let bytes = xmp::edit(
+            base.as_deref(),
+            &[
+                (Prop::DateTimeOriginal, Some(Value::Text(v.clone()))),
+                (Prop::DateCreated, Some(Value::Text(v))),
+            ],
+        )?;
+        match at {
+            Some(k) => writes[k].1 = bytes,
+            None => writes.push((car, bytes)),
+        }
+        n += 1;
+    }
+    Ok(n)
 }
 
 /// The album choices to remember: this sync's, and earlier ones of albums

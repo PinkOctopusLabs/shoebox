@@ -2,10 +2,12 @@
 //! which were synced before (and what changed on them in Photos since),
 //! which files of each are wanted, and what each album becomes.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use super::ledger::{AlbumChoice, AlbumUse, Ledgers};
 use super::model::{Asset, Library, ResourceKind};
+use crate::catalog::Catalog;
 
 /// What a favourite in Photos becomes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -102,6 +104,11 @@ pub struct Plan {
     /// What each album became last time (all of them, also those without
     /// photos now), for the sync.
     pub remembered: BTreeMap<String, AlbumChoice>,
+    /// Files synced before that the library shows without a date (Photos'
+    /// renders of edits have no EXIF date; syncs before 0.3.5 left their
+    /// sidecars without one): (asset, library file). Photos' date goes to
+    /// their sidecars. See [`undated_copies`].
+    pub undated: Vec<(usize, PathBuf)>,
     /// Synced before, nothing new.
     pub synced: usize,
     /// Left out: hidden in Photos.
@@ -334,6 +341,51 @@ pub fn plan(
         .collect();
     out.albums.sort_by(|a, b| a.path.cmp(&b.path));
     out
+}
+
+/// Fill [`Plan::undated`]: the files of assets synced before that
+/// `catalog` read and found no date in (nor in their sidecars), in roots
+/// that can be written. Cloud-only files aren't read, so they wait until
+/// they're here. `roots` as given to [`Ledgers::load`].
+pub fn undated_copies(
+    plan: &mut Plan,
+    library: &Library,
+    ledgers: &Ledgers,
+    catalog: &Catalog,
+    roots: &[PathBuf],
+) {
+    let by_path: HashMap<&Path, usize> = catalog
+        .photos
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.path.as_path(), i))
+        .collect();
+    plan.undated.clear();
+    let mut seen = HashSet::new();
+    for (i, a) in library.assets.iter().enumerate() {
+        if a.created.is_none() {
+            continue;
+        }
+        let Some((r, e)) = ledgers.find(&a.id) else {
+            continue;
+        };
+        let Some(root) = roots.get(r) else {
+            continue;
+        };
+        for f in &e.files {
+            let path = f.path(root);
+            let Some(&pi) = by_path.get(path.as_path()) else {
+                continue;
+            };
+            let p = &catalog.photos[pi];
+            if p.cloud || catalog.is_reference(pi) || p.meta.exif.capture_time.is_some() {
+                continue;
+            }
+            if seen.insert(path.clone()) {
+                plan.undated.push((i, path));
+            }
+        }
+    }
 }
 
 fn add_sizes(out: &mut Plan, a: &Asset, kinds: &[ResourceKind]) {

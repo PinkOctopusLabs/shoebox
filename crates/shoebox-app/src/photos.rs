@@ -243,7 +243,8 @@ fn worker(
                     .and_then(|i| ledgers.choices.get(i))
                     .map(|c| c.albums.clone())
                     .unwrap_or_default();
-                let p = plan::plan(&lib, &ledgers, &choices, &req.options);
+                let mut p = plan::plan(&lib, &ledgers, &choices, &req.options);
+                plan::undated_copies(&mut p, &lib, &ledgers, &req.catalog, &req.roots);
                 let planned = Arc::new(Planned {
                     plan: p,
                     library: lib,

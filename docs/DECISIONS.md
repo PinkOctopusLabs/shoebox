@@ -4386,3 +4386,24 @@ section. Reproduced in `the_first_click_keeps_the_grid_still` (72 px in a
   current photo and the jump to the newest come first. A new photo list
   (filter, sort) doesn't carry the anchor.
 
+## iCloud Photos: every copy dated (2026-10-23)
+Reported: synced photos in `2026/2026-03-12/` showed under *Undated*.
+They were Photos' renders of edits (`…-photos.heic`): Photos strips EXIF
+from them (no date, no camera), and the sync decided the date once, from
+the original. The original's EXIF date agreed with Photos, so no copy's
+sidecar got a date; the edit was named and filed by the original's date
+but read as undated. Location was already checked file by file, which is
+why those sidecars had GPS and nothing else.
+- `place::sidecar_for` writes the date to a copy's sidecar when Photos'
+  date won or that copy has no EXIF date of its own. A movie always has a
+  date (QuickTime's, else its file time), so only unreadable files gain one.
+- Repair: `plan::undated_copies` lists files of assets synced before that
+  the catalog read and found undated (not cloud-only, not in reference
+  roots), `Plan::undated`; the sync adds the date (the original's as the
+  library reads it, by the same rule, else Photos') in its first step,
+  merged with any marks written to the same sidecar, in the sync's batch
+  (undoable). The dry run says *copied before without a date*, the report
+  *dated by Photos*. Cloud-only copies are left until they're here: their
+  metadata isn't read, so an empty date says nothing.
+- Tests: `an_edit_without_exif_takes_its_originals_date`,
+  `edits_synced_before_without_a_date_get_one`.

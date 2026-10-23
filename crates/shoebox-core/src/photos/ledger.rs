@@ -73,6 +73,18 @@ impl Entry {
     }
 }
 
+impl File {
+    /// Where it is, in the record's `root`.
+    pub fn path(&self, root: &Path) -> PathBuf {
+        let p = Path::new(&self.rel);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            root.join(p)
+        }
+    }
+}
+
 /// A record as a line of a sync's log.
 #[derive(Serialize)]
 struct LineOut<'a> {
