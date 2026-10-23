@@ -161,6 +161,13 @@ Small known defects.
 
 Defaults that are guesses so far.
 
+- [ ] **Find dates: look-alike threshold and the picture pass.** A dated
+  photo counts as a look-alike at an embedding cosine of 0.8 or more
+  (`dating::LOOK_MIN`), the 8 closest are asked and 3 must share a period;
+  text is read at a 2048 px long edge (`TEXT_EDGE`). All guesses. The
+  first text read in a run loads Vision's model (about 45 s here). Check:
+  "Find dates on real undated photos" in MANUAL-CHECKS.
+
 - [ ] **Baseline exposure (+0.75) and the display transform** (white point
   4 stops up, slope 0.17 a stop). Check: "30 NEFs render cleanly". Source:
   DECISIONS "Develop, Phase 1: the CPU reference pipeline".

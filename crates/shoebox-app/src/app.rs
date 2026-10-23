@@ -586,6 +586,8 @@ pub struct ShoeboxApp {
     /// The cache's file, which Find dates reads beside the library's own
     /// connection.
     pub(crate) cache_db: PathBuf,
+    /// Search's embeddings, which Find dates reads likewise.
+    pub(crate) embeddings_db: PathBuf,
     pub(crate) push: views::push::State,
     /// Where a send to Photos renders its files.
     pub(crate) photos_push_dir: PathBuf,
@@ -615,6 +617,7 @@ impl ShoeboxApp {
         let (c1, c2, c3, c4) = (ctx.clone(), ctx.clone(), ctx.clone(), ctx.clone());
         let activity = crate::activity::Board::default();
         let cache_db = paths.cache_db.clone();
+        let embeddings_db = paths.embeddings_db.clone();
         let loader = Loader::new(
             threads,
             ThumbCache::new(paths.thumbs),
@@ -772,6 +775,7 @@ impl ShoeboxApp {
             icloud: Default::default(),
             dates: Default::default(),
             cache_db: cache_db.clone(),
+            embeddings_db: embeddings_db.clone(),
             push: Default::default(),
             photos_push_dir,
         }

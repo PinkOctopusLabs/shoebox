@@ -294,6 +294,34 @@ impl Store {
     }
 }
 
+/// Every row of `kind` from `model`, read through a read-only connection
+/// beside the one the search or faces thread has (Find dates' look-alikes).
+/// Nothing is created: a missing database reads as no rows.
+pub fn read_rows(path: &Path, kind: &str, model: &str) -> Result<Vec<(PathBuf, Payload)>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let conn = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    let mut st =
+        conn.prepare("SELECT path, scale, vec FROM embeddings WHERE kind = ?1 AND model = ?2")?;
+    let rows = st
+        .query_map([kind, model], |r| {
+            Ok((
+                PathBuf::from(r.get::<_, String>(0)?),
+                Payload {
+                    scale: r.get::<_, f64>(1)? as f32,
+                    data: r.get(2)?,
+                },
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 /// The embeddings database: one row per file and *kind* of analysis
 /// ("image" embeddings, "faces"), each from a *model*.
 pub struct Store {
@@ -707,5 +735,27 @@ mod tests {
             assert!(hits.len() < 200_000);
         }
         eprintln!("200k search: {best:.1} ms");
+    }
+
+    #[test]
+    fn rows_read_beside_the_store() {
+        let t = tempfile::tempdir().unwrap();
+        let db = t.path().join("embeddings.sqlite");
+        assert!(
+            read_rows(&db, "image", "m1").unwrap().is_empty(),
+            "no database yet"
+        );
+        let mut store = Store::open(&db, "image", "m1").unwrap();
+        let key = FileKey {
+            path: "/lib/a.jpg".into(),
+            size: 1,
+            mtime_ns: 2,
+        };
+        let v = Vector::quantise(&[0.6, 0.8]);
+        store.put(&[(key, v.payload())]).unwrap();
+        let rows = read_rows(&db, "image", "m1").unwrap();
+        assert_eq!(rows, vec![(PathBuf::from("/lib/a.jpg"), v.payload())]);
+        assert!(read_rows(&db, "image", "other model").unwrap().is_empty());
+        assert!(read_rows(&db, "faces", "m1").unwrap().is_empty());
     }
 }

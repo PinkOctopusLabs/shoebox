@@ -16,6 +16,7 @@ use std::path::PathBuf;
 
 use crate::catalog::{Catalog, Photo};
 use crate::dupes::{self, mih::MultiIndex};
+use crate::embeddings::Vector;
 use crate::hash::{Analysis, Digest};
 use crate::photos::ResourceKind;
 use crate::sidecar::{Precision, SidecarDate};
@@ -42,10 +43,16 @@ pub enum Source {
     SamePicture,
     /// Between the camera's frames before and after it.
     Sequence,
+    /// A date in the picture's text (a film camera's imprint, a ticket).
+    Text,
     FileName,
     Folder,
     /// The dated photos in its folder.
     Neighbours,
+    /// The dated photos it looks most like (a hint).
+    LookAlike,
+    /// Dated photos of the same people (a hint).
+    People,
 }
 
 impl Source {
@@ -63,7 +70,16 @@ impl Source {
             Source::FileName => "File name",
             Source::Folder => "Folder",
             Source::Neighbours => "Photos in its folder",
+            Source::Text => "Text in the photo",
+            Source::LookAlike => "Photos it looks like",
+            Source::People => "Photos of the same people",
         }
+    }
+
+    /// A hint: shown as a suggestion to pick, never one Accept takes, and
+    /// never surer than a guess.
+    pub fn is_hint(self) -> bool {
+        matches!(self, Source::LookAlike | Source::People)
     }
 }
 
@@ -99,6 +115,9 @@ impl Clue {
             },
             Source::Sequence => format!("between frames {e}"),
             Source::Neighbours => format!("{e} photos in its folder"),
+            Source::Text => format!("text in the photo: “{e}”"),
+            Source::LookAlike => format!("looks like {e}"),
+            Source::People => e.clone(),
             s => format!("{}: {e}", s.label()),
         }
     }
@@ -140,6 +159,9 @@ pub fn rank(clues: &mut [Clue]) {
                 Confidence::Low => Confidence::Medium,
                 _ => Confidence::High,
             };
+        }
+        if c.source.is_hint() {
+            c.confidence = Confidence::Low;
         }
     }
     clues.sort_by(|a, b| {
@@ -626,6 +648,184 @@ pub fn in_folders(rel: &Path) -> Vec<Clue> {
     .unwrap_or_default()
 }
 
+// ---- In the picture ---------------------------------------------------
+
+/// A two-digit year as a film camera's imprint means it (`'98`, `'03`).
+fn year_of_two(yy: &str) -> Option<i16> {
+    let n: i16 = yy.parse().ok()?;
+    let now = jiff::Zoned::now().year();
+    let y = if 2000 + n <= now { 2000 + n } else { 1900 + n };
+    year_ok(y).then_some(y)
+}
+
+fn day_clue(y: i16, m: &str, d: &str) -> Option<SidecarDate> {
+    let date = Date::new(y, m.parse().ok()?, d.parse().ok()?).ok()?;
+    day_of(date)
+}
+
+/// Dates in one line of text: `2019-03-12`, `12/03/2019` (or `03/12/2019`:
+/// both when it can't be told), `12 March 2019`, `March 12, 2019`, `March
+/// 2019`, and a film camera's imprint (`'98 3 12`, `3 12 '98`).
+fn text_dates(line: &str) -> Vec<(SidecarDate, Confidence)> {
+    let l = line.replace(['’', '‘', '`', '´'], "'");
+    let r = runs(&l);
+    let mut out = Vec::new();
+    let num = |k: usize| r.get(k).filter(|x| x.digits).map(|x| x.text);
+    let sep = |k: usize| {
+        r.get(k)
+            .filter(|x| !x.digits && x.text.len() == 1 && matches!(x.text, "-" | "." | "/"))
+            .map(|x| x.text)
+    };
+    let space = |k: usize| {
+        r.get(k)
+            .is_some_and(|x| !x.digits && x.text.trim().is_empty())
+    };
+    for i in 0..r.len() {
+        let Some(a) = num(i) else { continue };
+        // Numbers joined by one separator, twice.
+        if let (Some(s1), Some(b), Some(s2), Some(c)) =
+            (sep(i + 1), num(i + 2), sep(i + 3), num(i + 4))
+            && s1 == s2
+        {
+            if a.len() == 4 && b.len() <= 2 && c.len() <= 2 {
+                if let Some(y) = a.parse().ok().filter(|y| year_ok(*y))
+                    && let Some(d) = day_clue(y, b, c)
+                {
+                    out.push((d, Confidence::Medium));
+                }
+            } else if a.len() <= 2 && b.len() <= 2 && (c.len() == 4 || c.len() == 2) {
+                let y = if c.len() == 4 {
+                    c.parse().ok().filter(|y| year_ok(*y))
+                } else {
+                    year_of_two(c)
+                };
+                let (x, z): (u8, u8) = (a.parse().unwrap_or(0), b.parse().unwrap_or(0));
+                let sure = if c.len() == 4 {
+                    Confidence::Medium
+                } else {
+                    Confidence::Low
+                };
+                if let Some(y) = y {
+                    if x > 12 {
+                        out.extend(day_clue(y, b, a).map(|d| (d, sure)));
+                    } else if z > 12 {
+                        out.extend(day_clue(y, a, b).map(|d| (d, sure)));
+                    } else {
+                        out.extend(day_clue(y, b, a).map(|d| (d, Confidence::Low)));
+                        if x != z {
+                            out.extend(day_clue(y, a, b).map(|d| (d, Confidence::Low)));
+                        }
+                    }
+                }
+            }
+        }
+        // An imprint's year: '98, then month and day; or month and day
+        // (day and month) before it.
+        if a.len() == 2
+            && i > 0
+            && r[i - 1].text.ends_with('\'')
+            && let Some(y) = year_of_two(a)
+        {
+            if space(i + 1)
+                && space(i + 3)
+                && let (Some(m), Some(d)) = (num(i + 2), num(i + 4))
+                && let Some(day) = day_clue(y, m, d)
+            {
+                out.push((day, Confidence::Medium));
+            } else if i >= 4
+                && space(i - 3)
+                && r[i - 1].text.trim() == "'"
+                && let (Some(p), Some(q)) = (num(i - 4), num(i - 2))
+            {
+                let (x, z): (u8, u8) = (p.parse().unwrap_or(0), q.parse().unwrap_or(0));
+                if x > 12 {
+                    out.extend(day_clue(y, q, p).map(|day| (day, Confidence::Medium)));
+                } else if z > 12 {
+                    out.extend(day_clue(y, p, q).map(|day| (day, Confidence::Medium)));
+                } else {
+                    // Month first or day first: both, as guesses.
+                    out.extend(day_clue(y, p, q).map(|day| (day, Confidence::Low)));
+                    if x != z {
+                        out.extend(day_clue(y, q, p).map(|day| (day, Confidence::Low)));
+                    }
+                }
+            }
+        }
+    }
+    // Month names, with the day and year around them.
+    let words: Vec<&str> = l
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    for (k, w) in words.iter().enumerate() {
+        let Some(m) = month_named(w) else { continue };
+        let day = |s: Option<&&str>| {
+            s.and_then(|x| x.parse::<i8>().ok())
+                .filter(|d| (1..=31).contains(d))
+        };
+        let year = |s: Option<&&str>| {
+            s.filter(|x| x.len() == 4)
+                .and_then(|x| x.parse::<i16>().ok())
+                .filter(|y| year_ok(*y))
+        };
+        let found = if let (Some(d), Some(y)) = (
+            day(k.checked_sub(1).and_then(|j| words.get(j))),
+            year(words.get(k + 1)),
+        ) {
+            SidecarDate::approximate(y, Some(m), Some(d))
+        } else if let (Some(d), Some(y)) = (day(words.get(k + 1)), year(words.get(k + 2))) {
+            SidecarDate::approximate(y, Some(m), Some(d))
+        } else if let Some(y) = year(words.get(k + 1)) {
+            SidecarDate::approximate(y, Some(m), None)
+        } else {
+            None
+        };
+        out.extend(found.map(|d| (d, Confidence::Medium)));
+    }
+    out
+}
+
+/// Dates in the text Vision read in a picture, one clue a date (the
+/// surest reading of each).
+pub fn in_text(lines: &[String]) -> Vec<Clue> {
+    let mut out: Vec<Clue> = Vec::new();
+    for line in lines {
+        for (date, confidence) in text_dates(line) {
+            match out.iter_mut().find(|c| c.date == date) {
+                Some(c) => c.confidence = c.confidence.max(confidence),
+                None => out.push(Clue {
+                    date,
+                    source: Source::Text,
+                    confidence,
+                    evidence: line.trim().to_owned(),
+                }),
+            }
+        }
+    }
+    out
+}
+
+/// What a search tag says about when, as words for the view (never a
+/// date): a Christmas tree, snow, autumn leaves.
+/// Search's tags drop their article (`christmas tree`); either form is read.
+pub fn scene_hint(label: &str) -> Option<&'static str> {
+    let l = ["a ", "an ", "the "]
+        .iter()
+        .find_map(|a| label.strip_prefix(a))
+        .unwrap_or(label);
+    Some(match l {
+        "christmas tree" => "a Christmas tree (December)",
+        "snow" | "snowy mountain" | "snowboarding" => "snow (winter there)",
+        "autumn leaves" => "autumn leaves",
+        "fireworks" => "fireworks (New Year or a national day?)",
+        "birthday party" => "a birthday party",
+        "wedding" => "a wedding",
+        "graduation" => "a graduation",
+        "black and white photo" => "black and white (often older)",
+        _ => return None,
+    })
+}
+
 // ---- In the library ---------------------------------------------------
 
 /// Frames either side further than this aren't asked.
@@ -653,6 +853,38 @@ pub struct Library<'a> {
     exact: HashMap<Digest, Vec<usize>>,
     data: HashMap<Digest, Vec<usize>>,
     tree: MultiIndex,
+    /// Search's image embeddings, by catalog index (stacks' primaries).
+    vectors: HashMap<usize, Vector>,
+    /// The people (search's face groups) in each photo, by catalog index.
+    people: HashMap<usize, Vec<usize>>,
+}
+
+/// How alike two photos must look (embeddings' cosine) to count.
+const LOOK_MIN: f32 = 0.8;
+/// The photos it looks most like that are asked.
+const LOOK_TOP: usize = 8;
+
+/// The day (else month, else year) most of `times` share, if at least
+/// `min` do: that period, and how many.
+fn common(times: &[f64], min: usize) -> Option<(SidecarDate, usize)> {
+    for (n, precision) in [
+        (10, Precision::Day),
+        (7, Precision::Month),
+        (4, Precision::Year),
+    ] {
+        let mut by: HashMap<String, Vec<f64>> = HashMap::new();
+        for &t in times {
+            if let Some(k) = time_at(t).and_then(|s| s.get(..n).map(str::to_owned)) {
+                by.entry(k).or_default().push(t);
+            }
+        }
+        if let Some((_, v)) = by.into_iter().max_by_key(|(k, v)| (v.len(), k.clone()))
+            && v.len() >= min
+        {
+            return Some((approx_at(v[0], precision)?, v.len()));
+        }
+    }
+    None
 }
 
 /// A photo's date as the catalog has it.
@@ -783,6 +1015,8 @@ impl<'a> Library<'a> {
             exact: HashMap::new(),
             data: HashMap::new(),
             tree: MultiIndex::new(),
+            vectors: HashMap::new(),
+            people: HashMap::new(),
         };
         for (i, p) in catalog.photos.iter().enumerate() {
             l.by_path.insert(p.path.as_path(), i);
@@ -840,6 +1074,70 @@ impl<'a> Library<'a> {
             l.hashed.push((i, item(p, &a)));
         }
         l
+    }
+
+    /// Search's image embeddings and the people in each photo (both by
+    /// catalog index), for [`Self::picture_clues`].
+    pub fn with_pictures(
+        mut self,
+        vectors: HashMap<usize, Vector>,
+        people: HashMap<usize, Vec<usize>>,
+    ) -> Self {
+        self.vectors = vectors;
+        self.people = people;
+        self
+    }
+
+    /// Photo `i`'s clues from its picture: dates in the text Vision read in
+    /// it (`text`), and the hints of the dated photos it looks most like and
+    /// those of the same people.
+    pub fn picture_clues(&self, i: usize, text: &[String]) -> Vec<Clue> {
+        let mut out = in_text(text);
+        out.extend(self.looks_like(i));
+        out.extend(self.same_people(i));
+        out
+    }
+
+    fn looks_like(&self, i: usize) -> Option<Clue> {
+        let v = self.vectors.get(&i)?;
+        let stack = self.catalog.stack_of.get(i);
+        let mut alike: Vec<(f32, f64)> = self
+            .vectors
+            .iter()
+            .filter(|(j, _)| **j != i && self.catalog.stack_of.get(**j) != stack)
+            .filter_map(|(&j, w)| {
+                let t = self.catalog.photos.get(j)?.meta.capture_seconds()?;
+                let score = v.dot(w);
+                (score >= LOOK_MIN).then_some((score, t))
+            })
+            .collect();
+        alike.sort_by(|a, b| b.0.total_cmp(&a.0));
+        alike.truncate(LOOK_TOP);
+        let times: Vec<f64> = alike.iter().map(|(_, t)| *t).collect();
+        let (date, n) = common(&times, 3)?;
+        Some(Clue {
+            date,
+            source: Source::LookAlike,
+            confidence: Confidence::Low,
+            evidence: format!("{n} dated photos then"),
+        })
+    }
+
+    fn same_people(&self, i: usize) -> Option<Clue> {
+        let mine = self.people.get(&i).filter(|g| g.len() >= 2)?;
+        let times: Vec<f64> = self
+            .people
+            .iter()
+            .filter(|(j, g)| **j != i && mine.iter().all(|p| g.contains(p)))
+            .filter_map(|(&j, _)| self.catalog.photos.get(j)?.meta.capture_seconds())
+            .collect();
+        let (date, n) = common(&times, 2)?;
+        Some(Clue {
+            date,
+            source: Source::People,
+            confidence: Confidence::Low,
+            evidence: format!("{n} dated photos of the same {} people", mine.len()),
+        })
     }
 
     /// How many dated photos have hashes to compare with.
@@ -1383,5 +1681,151 @@ mod tests {
         // One side only, a frame away: the day.
         let (d, c, _) = between(&[(10, day)], 11).unwrap();
         assert_eq!((d.precision, c), (Precision::Day, Confidence::Medium));
+    }
+
+    fn text(line: &str) -> Vec<(String, Precision, Confidence)> {
+        let mut v: Vec<_> = in_text(&[line.to_owned()])
+            .into_iter()
+            .map(|c| (c.date.time, c.date.precision, c.confidence))
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn dates_in_text() {
+        let day = |t: &str, c| vec![(format!("{t} 12:00:00"), Precision::Day, c)];
+        use Confidence::{Low, Medium};
+        assert_eq!(text("Printed 2019-03-12"), day("2019:03:12", Medium));
+        assert_eq!(text("25/12/2003"), day("2003:12:25", Medium));
+        assert_eq!(text("12/25/2003"), day("2003:12:25", Medium));
+        // Can't tell: both, as guesses.
+        assert_eq!(
+            text("03.04.2011"),
+            vec![
+                ("2011:03:04 12:00:00".into(), Precision::Day, Low),
+                ("2011:04:03 12:00:00".into(), Precision::Day, Low),
+            ]
+        );
+        assert_eq!(text("TUESDAY, 12 March 2019"), day("2019:03:12", Medium));
+        assert_eq!(text("March 12, 2019"), day("2019:03:12", Medium));
+        assert_eq!(
+            text("Spring sale March 2019"),
+            vec![("2019:03:15 12:00:00".into(), Precision::Month, Medium)]
+        );
+        // A film camera's imprint, either way round, curly apostrophe too.
+        assert_eq!(text("'98 3 12"), day("1998:03:12", Medium));
+        assert_eq!(text("3 25 ’98"), day("1998:03:25", Medium));
+        assert_eq!(text("25 3 '98"), day("1998:03:25", Medium));
+        assert_eq!(
+            text("12 3 '98"),
+            vec![
+                ("1998:03:12 12:00:00".into(), Precision::Day, Low),
+                ("1998:12:03 12:00:00".into(), Precision::Day, Low),
+            ]
+        );
+        // Not dates.
+        for none in [
+            "10:15",
+            "Call 0412 345 678",
+            "1/2 price",
+            "Page 12 of 40",
+            "May I help?",
+            "1999",
+        ] {
+            assert!(text(none).is_empty(), "{none}: {:?}", text(none));
+        }
+    }
+
+    #[test]
+    fn look_alikes_and_people_are_hints() {
+        use crate::cache::Cache;
+        use crate::embeddings::Vector;
+        use crate::scan::{Role, Root};
+        use shoebox_fixtures::{Shot, jpeg, scene, with_exif};
+
+        let t = tempfile::tempdir().unwrap();
+        let lib = t.path().canonicalize().unwrap();
+        let shot = |dt: &'static str| Shot {
+            datetime: dt,
+            subsec: "",
+            orientation: 1,
+            serial: "1",
+        };
+        let times = [
+            "2015:08:01 10:00:00",
+            "2015:08:01 11:00:00",
+            "2015:08:01 12:00:00",
+            "2015:08:02 12:00:00",
+            "2009:01:01 12:00:00",
+        ];
+        for (k, dt) in times.iter().enumerate() {
+            let b = with_exif(&jpeg(&scene(k as u64, 64, 48), 85).unwrap(), &shot(dt));
+            std::fs::write(lib.join(format!("d{k}.jpg")), b).unwrap();
+        }
+        std::fs::write(lib.join("u.jpg"), jpeg(&scene(9, 64, 48), 85).unwrap()).unwrap();
+        let mut cache = Cache::open_in_memory().unwrap();
+        let roots = vec![Root::new(&lib, Role::Scan).unwrap()];
+        let (c, _) = Catalog::refresh(&mut cache, roots, &|_, _| {}).unwrap();
+        let at = |name: &str| c.photos.iter().position(|p| p.rel == name).unwrap();
+        // The undated photo looks like the first four (August 2015), not
+        // the last.
+        let unit = |a: f32| {
+            let mut v = vec![0.0f32; 8];
+            v[0] = a;
+            v[1] = (1.0 - a * a).sqrt();
+            Vector::quantise(&v)
+        };
+        let mut vectors = HashMap::new();
+        vectors.insert(at("u.jpg"), unit(1.0));
+        for k in 0..4 {
+            vectors.insert(at(&format!("d{k}.jpg")), unit(0.95));
+        }
+        vectors.insert(at("d4.jpg"), unit(0.1));
+        // People 1 and 2 are in it, and in d0 and d1 together.
+        let mut people = HashMap::new();
+        people.insert(at("u.jpg"), vec![1, 2]);
+        people.insert(at("d0.jpg"), vec![1, 2, 3]);
+        people.insert(at("d1.jpg"), vec![2, 1]);
+        people.insert(at("d4.jpg"), vec![1]);
+        let l = Library::new(&c, Vec::new(), Vec::new()).with_pictures(vectors, people);
+        let mut v = l.picture_clues(at("u.jpg"), &["'15 8 1".to_owned()]);
+        rank(&mut v);
+        let by = |s: Source| v.iter().find(|c| c.source == s).cloned().unwrap();
+        let look = by(Source::LookAlike);
+        assert_eq!(
+            (
+                look.date.time.as_str(),
+                look.date.precision,
+                look.confidence
+            ),
+            ("2015:08:01 12:00:00", Precision::Day, Confidence::Low)
+        );
+        assert_eq!(look.describe(), "looks like 3 dated photos then");
+        let people = by(Source::People);
+        assert_eq!(
+            (people.date.time.as_str(), people.confidence),
+            ("2015:08:01 12:00:00", Confidence::Low)
+        );
+        // The imprint is the clue (and the hints agree with it); the hints
+        // stay hints.
+        assert_eq!(v[0].source, Source::Text);
+        assert_eq!(v[0].confidence, Confidence::High);
+        assert!(
+            v.iter()
+                .filter(|c| c.source.is_hint())
+                .all(|c| c.confidence == Confidence::Low)
+        );
+    }
+
+    #[test]
+    fn scene_hints_from_tags() {
+        assert_eq!(
+            scene_hint("christmas tree"),
+            Some("a Christmas tree (December)")
+        );
+        assert_eq!(scene_hint("a christmas tree"), scene_hint("christmas tree"));
+        assert_eq!(scene_hint("snowy mountain"), Some("snow (winter there)"));
+        assert_eq!(scene_hint("dog"), None);
     }
 }

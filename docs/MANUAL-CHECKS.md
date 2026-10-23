@@ -171,8 +171,12 @@ APFS clone, in folders by shoot.
   back. Run Tasks → Duplicates first once, so the same-picture clue has
   hashes to compare with; carved previews should then find their NEFs,
   `-photos` edits their originals, and frames between dated ones their
-  day. *Show beside…* opens Grid at photos of that day. Note clues that were
-  wrong or missing.
+  day. *Show beside…* opens Grid at photos of that day. With Search and People
+  on, scans with a date printed on them (a film camera's orange imprint)
+  are read; look-alike and people hints look sensible and are never what
+  Accept takes; scene hints (a Christmas tree) show beside their groups.
+  Note clues that were wrong or missing, and how long the picture pass
+  takes for the library's undated photos.
 
 ## 2. Raw decode and colour
 

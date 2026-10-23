@@ -102,6 +102,52 @@ pub fn png(img: &RgbImage) -> Result<Vec<u8>> {
     Ok(out.into_inner())
 }
 
+/// Text in a 5×7 bitmap font (digits, `-`, `'`, `/`, `.` and spaces),
+/// `scale` pixels a dot, black on white, as a photo of a date (Find dates'
+/// text clue: a film camera's imprint, a ticket).
+pub fn printed(text: &str, scale: u32) -> RgbImage {
+    const FONT: [(char, [u8; 7]); 15] = [
+        ('0', [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E]),
+        ('1', [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E]),
+        ('2', [0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F]),
+        ('3', [0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E]),
+        ('4', [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02]),
+        ('5', [0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E]),
+        ('6', [0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E]),
+        ('7', [0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08]),
+        ('8', [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E]),
+        ('9', [0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C]),
+        ('-', [0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00]),
+        ('\'', [0x04, 0x04, 0x08, 0x00, 0x00, 0x00, 0x00]),
+        ('/', [0x01, 0x01, 0x02, 0x04, 0x08, 0x10, 0x10]),
+        ('.', [0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C]),
+        (' ', [0; 7]),
+    ];
+    let n = text.chars().count() as u32;
+    let (cw, ch) = (6 * scale, 9 * scale);
+    let mut img = RgbImage::from_pixel(cw * n + 4 * scale, ch + 4 * scale, image::Rgb([255; 3]));
+    for (k, c) in text.chars().enumerate() {
+        let Some((_, rows)) = FONT.iter().find(|(f, _)| *f == c) else {
+            continue;
+        };
+        for (ry, bits) in rows.iter().enumerate() {
+            for rx in 0..5u32 {
+                if bits & (0x10 >> rx) == 0 {
+                    continue;
+                }
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        let x = 2 * scale + k as u32 * cw + rx * scale + dx;
+                        let y = 2 * scale + (ry as u32 + 1) * scale + dy;
+                        img.put_pixel(x, y, image::Rgb([0; 3]));
+                    }
+                }
+            }
+        }
+    }
+    img
+}
+
 pub fn resize_long(img: &RgbImage, long: u32) -> RgbImage {
     let s = long as f32 / img.width().max(img.height()) as f32;
     let w = (img.width() as f32 * s).round() as u32;

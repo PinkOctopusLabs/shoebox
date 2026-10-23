@@ -4517,3 +4517,48 @@ the `find-dates` thread from the catalog snapshot):
   `file_numbers`; UI `find_dates_from_the_library_and_show_beside` (snapshot
   `find-dates-library`).
 
+## Dates: Find dates, Phase 3 (2026-10-24)
+SPEC "Dates". The picture's clues.
+- **A second pass.** Reading text and comparing embeddings is slow, so the
+  `find-dates` thread first sends every photo's own and library clues,
+  then goes back over the photos without a sure (high) suggestion for the
+  picture's, and sends their clues again (`Found::More` grows Activity's
+  total). Clues are kept unranked between passes: ranking twice would
+  count agreement twice. The view regroups whenever clues arrive (a
+  counter, not their number: the second pass replaces a photo's).
+- **Text** (`shoebox_ml::vision::text`: `VNRecognizeTextRequest`, accurate,
+  language correction off as dates are digits; the picture rendered at a
+  2048 px long edge, not cloud-only ones or movies). `dating::in_text`
+  finds `2019-03-12`, `25/12/2003` and `12/25/2003` (day or month over 12
+  decides; otherwise both, as guesses), two-digit years after separators
+  as guesses, `12 March 2019`, `March 12, 2019`, `March 2019`, and film
+  imprints by their apostrophe (`'98 3 12`, `3 25 '98`, `25 3 '98`; both
+  readings when it can't be told). Likely, not sure: a ticket or a paper
+  in the photo may be older than the photo. Not numbers alone, times,
+  phone numbers or prices.
+- **Hints** (`Source::is_hint`: look-alikes and people): never more than a
+  guess (also after agreeing with something), never the suggestion
+  Accept takes (a group's best is its first non-hint clue), but they can
+  make another clue surer by agreeing with it, and show as buttons to pick.
+  - Look-alikes: search's image embeddings, read from `embeddings.sqlite`
+    through a read-only connection (`embeddings::read_rows`), stacks'
+    primaries only; the 8 dated photos most alike at a cosine of 0.8 or
+    more (not the same stack); at least three sharing a day, else a month,
+    else a year (`common`). Thresholds in OPEN-ITEMS.
+  - People: the People view's groups per photo (its `PeopleView`, passed
+    to the thread); dated photos with all of its people, when it has two or
+    more (one person spans years), at least two sharing a period.
+- **Scene hints** are words, not clues: search's tags on the group's
+  photos that say something about when (`dating::scene_hint`: a Christmas
+  tree "(December)", snow "(winter there)" since the hemisphere isn't
+  known, autumn leaves, fireworks, a birthday, a wedding, a graduation,
+  black and white "(often older)"), shown as "Hints: …" under the group.
+  No era from a film look: there's no label for it, and a decade can't be
+  written as a date.
+- `shoebox_fixtures::printed` draws text in a 5×7 bitmap font, for the
+  Vision test and the UI test.
+- Tests: `dating::tests::dates_in_text`, `look_alikes_and_people_are_hints`,
+  `scene_hints_from_tags`; `embeddings::tests::rows_read_beside_the_store`;
+  `vision::tests::text_is_read_from_the_picture` (macOS); UI
+  `find_dates_reads_text_in_the_picture` (snapshot `find-dates-text`).
+

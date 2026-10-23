@@ -7217,3 +7217,40 @@ fn find_dates_from_the_library_and_show_beside() {
     h.run_steps(3);
     assert_eq!(h.state().view_name(), View::Duplicates);
 }
+
+/// Find dates, Phase 3: a date printed in the picture is read (Vision) and
+/// suggested; the picture pass shows in Activity's progress.
+#[cfg(target_os = "macos")]
+#[test]
+fn find_dates_reads_text_in_the_picture() {
+    let t = tempfile::tempdir().unwrap();
+    let base = t.path().canonicalize().unwrap();
+    let lib = base.join("lib/Misc");
+    std::fs::create_dir_all(&lib).unwrap();
+    let ticket = shoebox_fixtures::printed("25/12/2003", 10);
+    std::fs::write(
+        lib.join("ticket.jpg"),
+        shoebox_fixtures::jpeg(&ticket, 92).unwrap(),
+    )
+    .unwrap();
+    let p = paths(&base, &[base.join("lib")]);
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+
+    h.get_by_label("Find dates").click();
+    wait_for(&mut h, Duration::from_secs(120), "the picture pass", |a| {
+        shoebox_app::views::dates::looked_at(a) == 1
+            && shoebox_app::views::dates::progress(a).is_none()
+    });
+    h.run_steps(3);
+    snapshot(&mut h, "find-dates-text");
+    assert!(
+        h.query_by_label_contains("25 December 2003 (approximate) · likely")
+            .is_some(),
+        "the date in the picture"
+    );
+    assert!(
+        h.query_by_label_contains("text in the photo: “25/12/2003”")
+            .is_some()
+    );
+}

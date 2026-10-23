@@ -10,6 +10,7 @@ use eframe::egui::{self, Color32, Rect, RichText, pos2, vec2};
 use shoebox_core::cache::Cache;
 use shoebox_core::catalog::{Catalog, Photo};
 use shoebox_core::dating::{self, Clue, Confidence};
+use shoebox_core::embeddings::{self, Vector};
 use shoebox_core::hash::Analysis;
 use shoebox_core::photos::ledger::Ledgers;
 use shoebox_core::sidecar::{Precision, SidecarDate};
@@ -33,6 +34,9 @@ const MONTHS: [&str; 12] = [
     "December",
 ];
 
+/// The long edge pictures are read for text at.
+const TEXT_EDGE: u32 = 2048;
+
 /// Thumbnails shown in a group before "+N".
 const STRIP: usize = 12;
 const THUMB: f32 = 96.0;
@@ -54,11 +58,13 @@ pub struct State {
     /// How many dated photos have the duplicate finder's hashes, of how
     /// many (the same-picture clue compares with those only).
     hashed: Option<(usize, usize)>,
+    /// Bumped whenever clues arrive (the picture pass replaces a photo's).
+    found: usize,
 }
 
 /// What the view shows, worked out once per change.
 struct Grouped {
-    /// The clues and the catalog it was made from.
+    /// The clues (their [`State::found`]) and the catalog it was made from.
     clues: usize,
     catalog: usize,
     groups: Vec<Group>,
@@ -83,6 +89,8 @@ enum Found {
         dated: usize,
     },
     Clues(PathBuf, Vec<Clue>),
+    /// A second pass over this many photos (their pictures).
+    More(usize),
 }
 
 /// The clue thread: what it has done of how many.
@@ -360,28 +368,43 @@ fn start(app: &mut ShoeboxApp, ctx: &egui::Context) {
     let (tx, rx) = mpsc::channel();
     let total = todo.len();
     let ctx = ctx.clone();
-    let catalog = app.catalog.clone();
-    let cache_db = app.cache_db.clone();
+    let job = Job {
+        catalog: app.catalog.clone(),
+        cache_db: app.cache_db.clone(),
+        embeddings_db: app.embeddings_db.clone(),
+        people: app.ppl.view.clone(),
+        todo,
+    };
     let spawned = std::thread::Builder::new()
         .name("find-dates".into())
-        .spawn(move || find(&catalog, &cache_db, &todo, &tx, &ctx));
+        .spawn(move || find(&job, &tx, &ctx));
     match spawned {
         Ok(_) => app.dates.finder = Some(Finder { rx, done: 0, total }),
         Err(e) => tracing::warn!("find dates: {e}"),
     }
 }
 
-/// The clues for photos `todo` of `catalog`: their own, and the library's
-/// (iCloud Photos records, the hashes the duplicate finder cached, read
-/// from the cache beside the library's connection; an undated photo not
-/// hashed yet is hashed here, unless it's in the cloud only).
-fn find(
-    catalog: &Catalog,
-    cache_db: &Path,
-    todo: &[usize],
-    tx: &mpsc::Sender<Found>,
-    ctx: &egui::Context,
-) {
+/// What the clue thread works from.
+struct Job {
+    catalog: std::sync::Arc<Catalog>,
+    cache_db: PathBuf,
+    embeddings_db: PathBuf,
+    people: Option<std::sync::Arc<crate::people::PeopleView>>,
+    /// The photos to find clues for (catalog indices).
+    todo: Vec<usize>,
+}
+
+/// The clues for the photos of `job`, in two passes. First their own and
+/// the library's (iCloud Photos records, the hashes the duplicate finder
+/// cached, read from the cache beside the library's connection; an
+/// undated photo not hashed yet is hashed here, unless it's in the cloud
+/// only). Then, for those without a sure date, the picture's: its text
+/// (Vision), and the hints of the photos it looks like (search's
+/// embeddings, read beside the search thread's connection) and of the same
+/// people. Each pass sends each photo's clues; the second's replace the
+/// first's.
+fn find(job: &Job, tx: &mpsc::Sender<Found>, ctx: &egui::Context) {
+    let (catalog, todo) = (&*job.catalog, &job.todo);
     let roots: Vec<PathBuf> = catalog.roots.iter().map(|r| r.path.clone()).collect();
     let ledgers = Ledgers::load(&roots);
     let assets = ledgers
@@ -391,7 +414,7 @@ fn find(
             Some(e.files.iter().map(|f| (f.kind, f.path(root))).collect())
         })
         .collect();
-    let cache = match Cache::open_read_only(cache_db) {
+    let cache = match Cache::open_read_only(&job.cache_db) {
         Ok(c) => Some(c),
         Err(e) => {
             tracing::warn!("find dates: no cached hashes: {e}");
@@ -432,6 +455,9 @@ fn find(
         todo.len(),
         library.hashed()
     );
+    // Each photo's clues as found, before ranking (ranking twice would
+    // count agreement twice).
+    let mut found: Vec<(usize, Vec<Clue>)> = Vec::with_capacity(todo.len());
     for (n, &i) in todo.iter().enumerate() {
         let p = &catalog.photos[i];
         let mut c = dating::clues(&p.path, Path::new(&p.rel), p.format, p.cloud);
@@ -441,11 +467,101 @@ fn find(
                 .flatten()
         });
         c.extend(library.clues(i, own.as_ref()));
+        let mut ranked = c.clone();
+        dating::rank(&mut ranked);
+        if tx.send(Found::Clues(p.path.clone(), ranked)).is_err() {
+            return;
+        }
+        found.push((i, c));
+        if n % 16 == 0 {
+            ctx.request_repaint();
+        }
+    }
+
+    // The picture's clues, for those without a sure date yet.
+    let sure = |c: &[Clue]| {
+        let mut r = c.to_vec();
+        dating::rank(&mut r);
+        r.iter()
+            .find(|c| !c.source.is_hint())
+            .is_some_and(|c| c.confidence == Confidence::High)
+    };
+    found.retain(|(_, c)| !sure(c));
+    if found.is_empty() {
+        ctx.request_repaint();
+        return;
+    }
+    if tx.send(Found::More(found.len())).is_err() {
+        return;
+    }
+    let by_path: HashMap<&Path, usize> = catalog
+        .photos
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.path.as_path(), i))
+        .collect();
+    let vectors: HashMap<usize, Vector> =
+        match embeddings::read_rows(&job.embeddings_db, "image", shoebox_ml::MODEL_ID) {
+            Ok(rows) => rows
+                .iter()
+                .filter_map(|(path, p)| {
+                    Some((*by_path.get(path.as_path())?, Vector::from_payload(p)))
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!("find dates: no search embeddings: {e}");
+                HashMap::new()
+            }
+        };
+    let people: HashMap<usize, Vec<usize>> = match &job.people {
+        Some(v) => {
+            let ids: HashMap<crate::jobs::PhotoId, usize> = catalog
+                .photos
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (photo_id(&p.path), i))
+                .collect();
+            v.by_photo
+                .iter()
+                .filter_map(|(id, groups)| Some((*ids.get(id)?, groups.clone())))
+                .collect()
+        }
+        None => HashMap::new(),
+    };
+    tracing::info!(
+        "find dates: the pictures of {} photos ({} with search embeddings, {} with people)",
+        found.len(),
+        vectors.len(),
+        people.len()
+    );
+    let library = library.with_pictures(vectors, people);
+    for (n, (i, mut c)) in found.into_iter().enumerate() {
+        let p = &catalog.photos[i];
+        let text = if p.cloud || p.format.is_movie() {
+            Vec::new()
+        } else {
+            shoebox_decode::render_path(
+                p.format,
+                &p.path,
+                Some(TEXT_EDGE),
+                p.meta.orientation(),
+                shoebox_decode::Target::Srgb,
+            )
+            .map_err(|e| tracing::warn!("find dates: {}: {e}", p.path.display()))
+            .ok()
+            .and_then(|img| {
+                shoebox_ml::vision::text(&img.px, img.width as usize, img.height as usize)
+                    .map_err(|e| tracing::warn!("find dates: text in {}: {e}", p.path.display()))
+                    .ok()
+            })
+            .unwrap_or_default()
+        };
+        c.extend(library.picture_clues(i, &text));
         dating::rank(&mut c);
         if tx.send(Found::Clues(p.path.clone(), c)).is_err() {
             return;
         }
-        if n % 16 == 0 {
+        if n % 8 == 0 {
             ctx.request_repaint();
         }
     }
@@ -462,9 +578,11 @@ fn poll(app: &mut ShoeboxApp) {
         match f.rx.try_recv() {
             Ok(Found::Clues(path, c)) => {
                 f.done += 1;
+                app.dates.found += 1;
                 app.dates.clues.insert(path, c);
             }
             Ok(Found::Hashed { hashed, dated }) => app.dates.hashed = Some((hashed, dated)),
+            Ok(Found::More(n)) => f.total += n,
             Err(mpsc::TryRecvError::Empty) => break,
             Err(mpsc::TryRecvError::Disconnected) => {
                 ended = true;
@@ -548,7 +666,8 @@ fn groups(app: &ShoeboxApp) -> Vec<Group> {
             Some(d) if !d.as_os_str().is_empty() => format!("{root}/{}", d.display()),
             _ => root,
         };
-        let best = clues.first().cloned();
+        // Hints are never the suggestion Accept takes.
+        let best = clues.iter().find(|c| !c.source.is_hint()).cloned();
         let what = best.as_ref().map_or_else(
             || "none".to_owned(),
             |c| {
@@ -571,11 +690,10 @@ fn groups(app: &ShoeboxApp) -> Vec<Group> {
         g.photos.push(p.path.clone());
         g.best.push(best);
         // Others that say something else than its best.
-        let first = clues.first();
+        let first = g.best.last().cloned().flatten();
         for c in clues
             .iter()
-            .skip(1)
-            .filter(|c| first.is_none_or(|b| b.date != c.date))
+            .filter(|c| first.as_ref().is_none_or(|b| b.date != c.date))
         {
             let same = |o: &Clue| o.date == c.date && o.source == c.source;
             match g.others.iter_mut().find(|(o, _)| same(o)) {
@@ -621,7 +739,7 @@ fn clue_text(c: &Clue) -> String {
 /// The groups and counts, made again when the clues or the catalog change.
 fn grouped(app: &mut ShoeboxApp) -> Grouped {
     let catalog = std::sync::Arc::as_ptr(&app.catalog) as usize;
-    let clues = app.dates.clues.len();
+    let clues = app.dates.found;
     match app.dates.view.take() {
         Some(v) if v.clues == clues && v.catalog == catalog => v,
         _ => {
@@ -686,9 +804,10 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         }
     });
     ui.weak(
-        "Each group's suggestion comes from clues in the files, their names and folders, and \
-         the rest of the library (the same picture or frame, the camera's sequence, the \
-         photos beside them). Accept dates each photo by its own suggestion; a date typed in \
+        "Each group's suggestion comes from clues in the files, their names and folders, the \
+         rest of the library (the same picture or frame, the camera's sequence, the photos \
+         beside them) and the pictures (dates in them; photos they look like and of the same \
+         people, as hints to pick yourself). Accept dates each photo by its own suggestion; a date typed in \
          dates them all. Nothing is written without the dry run.",
     );
     duplicates_note(app, ui);
@@ -755,6 +874,10 @@ fn group(app: &mut ShoeboxApp, ui: &mut egui::Ui, g: &Group) {
         None => {
             ui.weak("No clues: type a date if you know it.");
         }
+    }
+    let hints = scene_hints(app, g);
+    if !hints.is_empty() {
+        ui.weak(format!("Hints: {}", hints.join(" · ")));
     }
     strip(app, ui, g);
     ui.horizontal_wrapped(|ui| {
@@ -849,6 +972,32 @@ pub fn show_beside(app: &mut ShoeboxApp, date: &SidecarDate) {
     if let Some(i) = nearest {
         app.show_in_all(app.ids[i]);
     }
+}
+
+/// What search's tags on a group's photos say about when (a Christmas
+/// tree, snow), as words.
+fn scene_hints(app: &ShoeboxApp, g: &Group) -> Vec<&'static str> {
+    let Some(tags) = &app.sem.tags else {
+        return Vec::new();
+    };
+    let mut out: Vec<&'static str> = Vec::new();
+    for path in &g.photos {
+        let Some(t) = tags.by_photo.get(&photo_id(path)) else {
+            continue;
+        };
+        for (label, _) in t {
+            let hint = tags
+                .names
+                .get(usize::from(*label))
+                .and_then(|n| dating::scene_hint(n));
+            if let Some(h) = hint
+                && !out.contains(&h)
+            {
+                out.push(h);
+            }
+        }
+    }
+    out
 }
 
 /// A group's thumbnails; a click selects the photo (its Info shows).

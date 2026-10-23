@@ -281,6 +281,16 @@ pub fn segment(rgb: &[u8], width: usize, height: usize, what: Find) -> Result<Co
     imp::segment(rgb, width, height, what)
 }
 
+/// The lines of text in an upright 8-bit sRGB image, as Vision reads them
+/// (Find dates looks for dates in them: a film camera's imprint, a ticket,
+/// a newspaper). Language correction is off: dates are mostly digits.
+pub fn text(rgb: &[u8], width: usize, height: usize) -> Result<Vec<String>, MlError> {
+    if width == 0 || height == 0 || rgb.len() < width * height * 3 {
+        return Err(MlError::Vision("no image".into()));
+    }
+    imp::text(rgb, width, height)
+}
+
 /// `src` (`sw`×`sh`) resampled bilinearly to `w`×`h`.
 fn resize(src: &[f32], sw: usize, sh: usize, w: usize, h: usize) -> Vec<u8> {
     let mut out = vec![0u8; w * h];
@@ -553,6 +563,70 @@ mod imp {
         })
     }
 
+    pub fn text(rgb: &[u8], w: usize, h: usize) -> Result<Vec<String>, MlError> {
+        let mut rgbx = Vec::with_capacity(w * h * 4);
+        for p in rgb[..w * h * 3].as_chunks::<3>().0 {
+            rgbx.extend_from_slice(&[p[0], p[1], p[2], 255]);
+        }
+        autoreleasepool(|_| {
+            // SAFETY: as in `segment`: `rgbx` outlives the image.
+            let provider = unsafe {
+                CGDataProvider::with_data(
+                    std::ptr::null_mut(),
+                    rgbx.as_ptr().cast::<c_void>(),
+                    rgbx.len(),
+                    None,
+                )
+            }
+            .ok_or_else(|| MlError::Vision("no data provider".into()))?;
+            let space = CGColorSpace::new_device_rgb()
+                .ok_or_else(|| MlError::Vision("no colour space".into()))?;
+            // SAFETY: the sizes describe `rgbx` exactly.
+            let image = unsafe {
+                CGImage::new(
+                    w,
+                    h,
+                    8,
+                    32,
+                    w * 4,
+                    Some(&space),
+                    CGBitmapInfo(CGImageAlphaInfo::NoneSkipLast.0),
+                    Some(&provider),
+                    std::ptr::null(),
+                    false,
+                    CGColorRenderingIntent::RenderingIntentDefault,
+                )
+            }
+            .ok_or_else(|| MlError::Vision("no image".into()))?;
+            let options = NSDictionary::new();
+            // SAFETY: an empty options dictionary is of the right type.
+            let handler = unsafe {
+                VNImageRequestHandler::initWithCGImage_options(
+                    VNImageRequestHandler::alloc(),
+                    &image,
+                    &options,
+                )
+            };
+            let request = objc2_vision::VNRecognizeTextRequest::new();
+            request.setUsesLanguageCorrection(false);
+            let list: objc2::rc::Retained<NSArray<VNRequest>> =
+                NSArray::from_retained_slice(&[objc2::rc::Retained::into_super(
+                    objc2::rc::Retained::into_super(request.clone()),
+                )]);
+            handler
+                .performRequests_error(&list)
+                .map_err(|e| err("text", e.localizedDescription()))?;
+            let Some(results) = request.results() else {
+                return Ok(Vec::new());
+            };
+            Ok(results
+                .iter()
+                .filter_map(|obs| obs.topCandidates(1).firstObject())
+                .map(|t| t.string().to_string())
+                .collect())
+        })
+    }
+
     /// A one-component mask buffer (8-bit or float) as `w`×`h` bytes.
     fn read(buffer: &CVPixelBuffer, w: usize, h: usize) -> Result<Coverage, MlError> {
         let (bw, bh) = (
@@ -603,6 +677,10 @@ mod imp {
     }
 
     pub fn faces(_: &[u8], _: usize, _: usize) -> Result<Vec<super::Face>, MlError> {
+        Err(MlError::Vision("Vision is macOS only".into()))
+    }
+
+    pub fn text(_: &[u8], _: usize, _: usize) -> Result<Vec<String>, MlError> {
         Err(MlError::Vision("Vision is macOS only".into()))
     }
 }
@@ -665,5 +743,15 @@ mod tests {
         assert!(at(&skin, 20, 20) == 0, "not off the face");
         let brows = draw_parts(&faces, w, h, FacePart::Eyebrows);
         assert!(at(&brows, 130, 119) > 150 && at(&brows, 130, 140) < 20);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn text_is_read_from_the_picture() {
+        let img = shoebox_fixtures::printed("2019-03-12", 12);
+        let (w, h) = (img.width() as usize, img.height() as usize);
+        let lines = text(img.as_raw(), w, h).unwrap();
+        let all: String = lines.concat().split_whitespace().collect();
+        assert!(all.contains("2019-03-12"), "{lines:?}");
     }
 }
