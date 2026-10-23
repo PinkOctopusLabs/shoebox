@@ -81,17 +81,33 @@ pub fn run(out: &Path, keep: bool) -> Result<String> {
         lib.assets.iter().filter(|a| a.favourite).count(),
         lib.assets.iter().filter(|a| a.burst.is_some()).count()
     );
+    // Files are listed per asset at download; time 200 of those lookups.
     let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
-    let mut formats: BTreeMap<String, usize> = BTreeMap::new();
-    for a in &lib.assets {
-        for res in &a.resources {
+    let t = Instant::now();
+    let looked: Vec<_> = lib.assets.iter().take(200).collect();
+    for a in &looked {
+        for res in src.resources(&a.id).unwrap_or_default() {
             *kinds.entry(format!("{:?}", res.kind)).or_default() += 1;
         }
+    }
+    let _ = writeln!(
+        r,
+        "Files of {} assets looked up in {:.2} s (one at a time, as downloads do).",
+        looked.len(),
+        t.elapsed().as_secs_f64()
+    );
+    let _ = writeln!(
+        r,
+        "Live Photos: {}.",
+        lib.assets.iter().filter(|a| a.live).count()
+    );
+    let mut formats: BTreeMap<String, usize> = BTreeMap::new();
+    for a in &lib.assets {
         if let Some(e) = &a.edited {
             *formats.entry(format!("{e:?}")).or_default() += 1;
         }
     }
-    let _ = writeln!(r, "Files by kind: {kinds:?}");
+    let _ = writeln!(r, "Files by kind (those assets): {kinds:?}");
     let _ = writeln!(r, "Edits by who made them: {formats:?}");
     for al in &lib.albums {
         let _ = writeln!(r, "Album: {}", al.path().join(" › "));
@@ -126,14 +142,17 @@ pub fn run(out: &Path, keep: bool) -> Result<String> {
     for (i, a) in lib
         .assets
         .iter()
-        .filter(|a| a.resource(ResourceKind::Original).is_some())
+        .filter(|a| a.media == shoebox_core::photos::Media::Photo)
         .take(SAMPLE)
         .enumerate()
     {
-        let name = a
-            .resource(ResourceKind::Original)
-            .map(|x| x.file_name.clone())
-            .unwrap_or_default();
+        let name = src
+            .resources(&a.id)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|x| x.kind == ResourceKind::Original)
+            .map(|x| x.file_name)
+            .unwrap_or_else(|| "original".into());
         let (p1, p2) = (
             out.join(format!("{i}-a-{name}")),
             out.join(format!("{i}-b-{name}")),

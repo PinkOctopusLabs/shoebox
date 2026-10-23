@@ -107,6 +107,18 @@ impl Plan {
 
 /// The files of `a` a sync wants.
 fn wanted(a: &Asset, o: &Options) -> Vec<ResourceKind> {
+    // Listed without its files: what it may have, by its flags (an
+    // Alternate it turns out not to have is skipped at download).
+    if a.resources.is_empty() {
+        let mut v = vec![ResourceKind::Original, ResourceKind::Alternate];
+        if a.live && o.live_videos {
+            v.push(ResourceKind::PairedVideo);
+        }
+        if o.photos_edits && a.edited_elsewhere() {
+            v.push(ResourceKind::Edited);
+        }
+        return v;
+    }
     let mut v = Vec::new();
     for r in &a.resources {
         let want = match r.kind {

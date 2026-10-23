@@ -157,6 +157,7 @@ fn library(
                     representative: a.represents_burst,
                     picked: a.burst_selection & 2 != 0,
                 }),
+                live: a.live,
                 width: u32::try_from(a.width).unwrap_or(0),
                 height: u32::try_from(a.height).unwrap_or(0),
                 resources,

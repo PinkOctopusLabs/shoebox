@@ -111,8 +111,13 @@ pub struct Asset {
     pub favourite: bool,
     pub hidden: bool,
     pub burst: Option<Burst>,
+    /// A Live Photo (it has a movie).
+    pub live: bool,
     pub width: u32,
     pub height: u32,
+    /// Its files. Empty when the listing left them out (PhotoKit: asking
+    /// for 30,000 assets' files one by one takes minutes): they're looked
+    /// up just before the asset downloads ([`super::PhotoSource::resources`]).
     pub resources: Vec<Resource>,
     /// Ids of the albums it's in.
     pub albums: Vec<String>,
@@ -128,7 +133,7 @@ impl Asset {
     /// Has an edit made outside Shoebox.
     pub fn edited_elsewhere(&self) -> bool {
         matches!(self.edited, Some(EditedBy::Other(_)))
-            && self.resource(ResourceKind::Edited).is_some()
+            && (self.resources.is_empty() || self.resource(ResourceKind::Edited).is_some())
     }
 }
 

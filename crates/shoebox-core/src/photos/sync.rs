@@ -129,8 +129,8 @@ struct Fetch<'a> {
     parallel: usize,
 }
 
-/// An asset's files, read, or why they didn't arrive.
-type Fetched = std::result::Result<Vec<Staged>, Missed>;
+/// An asset's files, read (and its file list), or why they didn't arrive.
+type Fetched = std::result::Result<(Vec<Staged>, Vec<super::model::Resource>), Missed>;
 
 /// Why an asset's files didn't arrive.
 enum Missed {
@@ -147,15 +147,27 @@ fn fetch_one(
     stop: &AtomicBool,
 ) -> Fetched {
     let asset = &job.library.assets[planned.asset];
+    // Listed without its files: look them up now.
+    let files = if asset.resources.is_empty() {
+        job.source
+            .resources(&asset.id)
+            .map_err(|e| Missed::Failed(e.to_string()))?
+    } else {
+        asset.resources.clone()
+    };
+    if !files.iter().any(|r| r.kind == ResourceKind::Original) {
+        return Err(Missed::Failed("Photos lists no original for it".into()));
+    }
     let mut staged = Vec::new();
     for kind in &planned.resources {
         if stop.load(Ordering::Relaxed) {
             return Err(Missed::Stopped);
         }
-        let name = asset
-            .resource(*kind)
-            .map(|r| r.file_name.clone())
-            .unwrap_or_default();
+        // A kind it may have (a RAW+JPEG pair's other half) but hasn't.
+        let Some(res) = files.iter().find(|r| r.kind == *kind) else {
+            continue;
+        };
+        let name = res.file_name.clone();
         let ext = name
             .rsplit_once('.')
             .map(|(_, e)| e)
@@ -187,7 +199,7 @@ fn fetch_one(
         }
         staged.push(s);
     }
-    Ok(staged)
+    Ok((staged, files))
 }
 
 /// Download a step's assets, `job.parallel` at a time; results in order.
@@ -332,18 +344,28 @@ pub fn run(
             let fetched = fetch_step(fetch, step, &shared, progress, stop);
             let mut copies = Vec::new();
             for (planned, got) in step.iter().zip(fetched) {
-                let asset = &job.library.assets[planned.asset];
-                let staged = match got {
+                let listed = &job.library.assets[planned.asset];
+                let (staged, files) = match got {
                     Ok(s) => s,
                     Err(Missed::Stopped) => {
                         report.stopped = true;
                         continue;
                     }
                     Err(Missed::Failed(why)) => {
-                        tracing::warn!("photos: {} failed: {why}", asset.id.local);
-                        report.failed.push((asset.id.clone(), why));
+                        tracing::warn!("photos: {} failed: {why}", listed.id.local);
+                        report.failed.push((listed.id.clone(), why));
                         continue;
                     }
+                };
+                let with_files;
+                let asset = if listed.resources.is_empty() {
+                    with_files = super::model::Asset {
+                        resources: files,
+                        ..listed.clone()
+                    };
+                    &with_files
+                } else {
+                    listed
                 };
                 let previous = ledgers.find(&asset.id);
                 let prev = previous.map(|(r, e)| (job.roots[r].as_path(), e));

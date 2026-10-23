@@ -6577,6 +6577,7 @@ fn import_from_icloud_photos() {
                 favourite: n == 1,
                 hidden: n == 4,
                 burst: None,
+                live: false,
                 width: 320,
                 height: 240,
                 resources: vec![Resource {
@@ -6740,6 +6741,7 @@ fn send_to_photos() {
             favourite: false,
             hidden: false,
             burst: None,
+            live: false,
             width: 320,
             height: 240,
             resources: vec![Resource {

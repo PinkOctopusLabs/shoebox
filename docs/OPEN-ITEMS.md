@@ -250,11 +250,10 @@ Defaults that are guesses so far.
   exports as a whole: deferred 2026-10-23.)
 - [ ] **Send to Photos: undoing an update** goes back to the original, not
   to the earlier send; undo leaves album membership. S–M. Source: same.
-- [ ] **iCloud Photos: faster listing.** Each asset's file list
-  (`assetResourcesForAsset`) is read for every asset, synced ones too;
-  only new ones need it (an edit shows in `hasAdjustments`). Pick by the
-  log's stage timings from a real library. M. Source: DECISIONS "iCloud
-  Photos: listing progress".
+- [ ] **iCloud Photos: the iCloud ids stage.** If the log shows
+  `cloudIdentifierMappings` is slow on a real library, look up cloud ids
+  only for assets the records don't know by their local id. S–M. Source:
+  DECISIONS "iCloud Photos: listing without files".
 - [ ] **iCloud Photos: quick re-sync by change token.** Every sync lists
   every asset now; `fetchPersistentChangesSinceToken` would list only
   what changed. M. Source: DECISIONS "iCloud Photos: PhotoKit".

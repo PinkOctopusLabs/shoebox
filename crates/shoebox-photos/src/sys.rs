@@ -100,6 +100,8 @@ pub struct RawAsset {
     pub represents_burst: bool,
     /// `PHAssetBurstSelectionType` bits: 1 auto pick, 2 user pick.
     pub burst_selection: usize,
+    /// A Live Photo (`PHAssetMediaSubtypePhotoLive`).
+    pub live: bool,
     pub width: usize,
     pub height: usize,
     pub has_adjustments: bool,
@@ -111,20 +113,26 @@ fn date(d: Option<Retained<NSDate>>) -> Option<f64> {
     d.map(|d| d.timeIntervalSince1970())
 }
 
-fn read_asset(a: &PHAsset) -> RawAsset {
+/// `with_files`: also list its files (one more PhotoKit query an asset:
+/// left out of the full listing, done when the asset downloads).
+fn read_asset(a: &PHAsset, with_files: bool) -> RawAsset {
     // SAFETY: plain property reads on a valid asset.
     unsafe {
         let location = a.location().map(|l| {
             let c = l.coordinate();
             (c.latitude, c.longitude)
         });
-        let resources = PHAssetResource::assetResourcesForAsset(a)
-            .iter()
-            .map(|r| RawResource {
-                kind: r.r#type().0,
-                name: r.originalFilename().to_string(),
-            })
-            .collect();
+        let resources = if with_files {
+            PHAssetResource::assetResourcesForAsset(a)
+                .iter()
+                .map(|r| RawResource {
+                    kind: r.r#type().0,
+                    name: r.originalFilename().to_string(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         RawAsset {
             local: a.localIdentifier().to_string(),
             media: a.mediaType().0,
@@ -136,6 +144,8 @@ fn read_asset(a: &PHAsset) -> RawAsset {
             burst: a.burstIdentifier().map(|b| b.to_string()),
             represents_burst: a.representsBurst(),
             burst_selection: a.burstSelectionTypes().0,
+            // PHAssetMediaSubtypePhotoLive.
+            live: a.mediaSubtypes().0 & (1 << 3) != 0,
             width: a.pixelWidth(),
             height: a.pixelHeight(),
             has_adjustments: a.hasAdjustments(),
@@ -166,7 +176,7 @@ pub fn assets(progress: &dyn Fn(usize, usize), stop: &AtomicBool) -> Option<Vec<
             }
             autoreleasepool(|_| {
                 for i in start..(start + 100).min(n) {
-                    out.push(read_asset(&found.objectAtIndex(i)));
+                    out.push(read_asset(&found.objectAtIndex(i), false));
                 }
             });
             progress(out.len(), n);
@@ -434,7 +444,7 @@ pub fn assets_by_id(locals: &[String]) -> Vec<RawAsset> {
         unsafe {
             let found = PHAsset::fetchAssetsWithLocalIdentifiers_options(&arr, None);
             (0..found.count())
-                .map(|i| read_asset(&found.objectAtIndex(i)))
+                .map(|i| read_asset(&found.objectAtIndex(i), true))
                 .collect()
         }
     })

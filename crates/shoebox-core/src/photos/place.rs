@@ -576,6 +576,7 @@ mod tests {
             favourite: false,
             hidden: false,
             burst: None,
+            live: false,
             width: 4032,
             height: 3024,
             resources: vec![],

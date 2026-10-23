@@ -14,6 +14,8 @@ use crate::error::{CoreError, Result, io};
 
 #[derive(Default)]
 pub struct FakeSource {
+    /// List assets without their files, as PhotoKit's source does.
+    lazy: AtomicBool,
     state: Mutex<State>,
     downloads: AtomicUsize,
     pushes: AtomicUsize,
@@ -87,6 +89,12 @@ impl FakeSource {
         if let Ok(mut s) = self.state.lock() {
             s.answer = Some(access);
         }
+    }
+
+    /// List assets without their files (they're looked up at download), as
+    /// PhotoKit's source does.
+    pub fn list_without_files(&self) {
+        self.lazy.store(true, Ordering::Relaxed);
     }
 
     /// Pushes so far (new assets and edits).
@@ -171,7 +179,14 @@ impl PhotoSource for FakeSource {
                 progress(Listing::Photos { done: n, total: n });
                 progress(Listing::Albums { done: a, total: a });
                 progress(Listing::CloudIds { done: n, total: n });
-                Ok(s.library.clone())
+                let mut lib = s.library.clone();
+                if self.lazy.load(Ordering::Relaxed) {
+                    for a in &mut lib.assets {
+                        a.live = a.resource(ResourceKind::PairedVideo).is_some();
+                        a.resources.clear();
+                    }
+                }
+                Ok(lib)
             }
             _ => Err(CoreError::Photos("no access".into())),
         }
@@ -275,6 +290,7 @@ impl PhotoSource for FakeSource {
                     favourite: false,
                     hidden: false,
                     burst: None,
+                    live: false,
                     width: 0,
                     height: 0,
                     resources: vec![Resource {

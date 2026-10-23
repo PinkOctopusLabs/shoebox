@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
-use super::model::{Access, Asset, AssetId, Library, Listing, PushRequest, ResourceKind};
+use super::model::{Access, Asset, AssetId, Library, Listing, PushRequest, Resource, ResourceKind};
 use crate::error::Result;
 
 pub trait PhotoSource: Send + Sync {
@@ -38,7 +38,18 @@ pub trait PhotoSource: Send + Sync {
         stop: &AtomicBool,
     ) -> Result<()>;
 
-    /// These assets as Photos has them now (those still there).
+    /// An asset's files (for one listed without them).
+    fn resources(&self, asset: &AssetId) -> Result<Vec<Resource>> {
+        Ok(self
+            .lookup(std::slice::from_ref(asset))?
+            .into_iter()
+            .next()
+            .map(|a| a.resources)
+            .unwrap_or_default())
+    }
+
+    /// These assets as Photos has them now (those still there), with
+    /// their files.
     fn lookup(&self, ids: &[AssetId]) -> Result<Vec<Asset>>;
 
     /// Put a rendered file into Photos: a new asset, or an edit of one

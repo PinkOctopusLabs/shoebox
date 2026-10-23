@@ -4179,3 +4179,18 @@ Import screen shows the stage with a progress bar ("Reading your photos:
 12,000 of 28,431") and Stop; the log times each stage
 (`photos: listed N assets in S s`), to find which one to make faster.
 
+## iCloud Photos: listing without files (2026-10-23)
+The first real try sat on "Listing your Photos library…" for over 30
+minutes (25k photos). The listing asked PhotoKit for every asset's files
+(`assetResourcesForAsset`, one query an asset). Now it reads only each
+asset's own properties; whether it's a Live Photo comes from its media
+subtypes (`PhotoLive`), whether it has an edit from `hasAdjustments` and
+its adjustment format. Files are looked up per asset just before it
+downloads (`PhotoSource::resources`); a RAW+JPEG pair's other half is asked
+for and skipped if it isn't there. A sync after the first never looks up
+files for assets it has already. The probe times 200 lookups.
+`FakeSource::list_without_files` lists the same way;
+`listing_without_files_syncs_the_same` checks a sync gives the same
+library either way. The iCloud ids stage (`cloudIdentifierMappings`) is
+next if it's slow: the stage timings in the log will say.
+

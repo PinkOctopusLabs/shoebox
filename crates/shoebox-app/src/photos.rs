@@ -394,6 +394,7 @@ mod tests {
             favourite: n == 1,
             hidden: false,
             burst: None,
+            live: false,
             width: 10,
             height: 10,
             resources: vec![Resource {

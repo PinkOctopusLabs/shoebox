@@ -45,6 +45,7 @@ fn asset(n: u32, created: &str, resources: Vec<Resource>) -> Asset {
         favourite: false,
         hidden: false,
         burst: None,
+        live: false,
         width: 600,
         height: 400,
         resources,
@@ -669,4 +670,28 @@ fn undoing_a_send_is_refused_after_a_change_in_photos() {
         Some(EditedBy::Other("com.apple.photo".into())),
         "left as it is"
     );
+}
+
+/// PhotoKit lists assets without their files (asking for each one's takes
+/// minutes on a large library); the files are looked up at download. A
+/// sync that way gives exactly the library a fully listed one does: Live
+/// Photos' movies (by the Live flag), Photos' edits, no RAW halves that
+/// aren't there.
+#[test]
+fn listing_without_files_syncs_the_same() {
+    let mut full = World::new();
+    library(&full);
+    let lib = full.lib.clone();
+    full.sync(&lib);
+    let mut lazy = World::new();
+    lazy.source.list_without_files();
+    library(&lazy);
+    let (listed, _) = lazy.plan();
+    assert_eq!(listed.new.len(), 5);
+    let lib2 = lazy.lib.clone();
+    let (_, report) = lazy.sync(&lib2);
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert_eq!(files(&lib2), files(&lib));
+    let (p, _) = lazy.plan();
+    assert!(p.new.is_empty() && p.updated.is_empty(), "{p:?}");
 }
