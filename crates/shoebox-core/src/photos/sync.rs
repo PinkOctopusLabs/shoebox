@@ -273,7 +273,12 @@ pub fn run(
     {
         return Ok(report);
     }
-    std::fs::create_dir_all(job.staging).map_err(io(job.staging))?;
+    // Each sync downloads into a folder of its own, and clears what earlier
+    // ones left (one that stopped mid-step leaves its files): the cache's
+    // own files, so removing them breaks no rule.
+    clear_staging(job.staging);
+    let staging = job.staging.join(format!("sync-{}", job.run));
+    std::fs::create_dir_all(&staging).map_err(io(&staging))?;
     let root_index = |p: &Path| job.roots.iter().position(|r| r == p);
     let dest = root_index(cx.root)
         .ok_or_else(|| CoreError::Invalid(format!("{} isn't a library root", cx.root.display())))?;
@@ -353,7 +358,7 @@ pub fn run(
             let fetch = Fetch {
                 source: job.source,
                 library: job.library,
-                staging: job.staging,
+                staging: &staging,
                 parallel: job.parallel,
             };
             let fetched = fetch_step(fetch, step, &shared, progress, stop);
@@ -429,6 +434,7 @@ pub fn run(
     })();
     // The cache's own files: removing them breaks no rule.
     remove_staged(&shared);
+    let _ = std::fs::remove_dir_all(&staging);
     match result {
         Ok(()) => {
             job.batches.end(batch)?;
@@ -439,6 +445,31 @@ pub fn run(
         Err(e) => {
             job.batches.end(batch)?;
             Err(e)
+        }
+    }
+}
+
+/// Remove earlier syncs' downloads from the staging folder: loose files
+/// (from before syncs had folders) and `sync-*` folders. Other folders
+/// (Send to Photos' `push`) are left alone.
+fn clear_staging(staging: &Path) {
+    let Ok(rd) = std::fs::read_dir(staging) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        let is_sync = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("sync-"));
+        match e.file_type() {
+            Ok(t) if t.is_file() => {
+                let _ = std::fs::remove_file(&p);
+            }
+            Ok(t) if t.is_dir() && is_sync => {
+                let _ = std::fs::remove_dir_all(&p);
+            }
+            _ => {}
         }
     }
 }

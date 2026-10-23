@@ -890,3 +890,33 @@ fn a_panic_fails_one_asset_not_the_sync() {
     assert_eq!(report.copied, 3);
     assert!(w.fo.journal().incomplete().unwrap().is_empty());
 }
+
+/// Downloads a stopped sync left in the cache don't get in the way of the
+/// next one (the first real import crashed mid-step; the next found "File
+/// exists" for the same names).
+#[test]
+fn leftovers_in_the_cache_dont_block_the_next_sync() {
+    let mut w = World::new();
+    library(&w);
+    let staging = w.base.join("cache/photos-staging");
+    std::fs::create_dir_all(staging.join("sync-old")).unwrap();
+    std::fs::create_dir_all(staging.join("push")).unwrap();
+    for n in 0..8 {
+        std::fs::write(staging.join(format!("{n}-Original.JPG")), b"half").unwrap();
+    }
+    std::fs::write(staging.join("push/keep.jpg"), b"a send's render").unwrap();
+    let lib = w.lib.clone();
+    let (_, report) = w.sync(&lib);
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert_eq!(report.copied, 4);
+    assert!(
+        staging.join("push/keep.jpg").exists(),
+        "Send to Photos' folder left alone"
+    );
+    let left: Vec<_> = std::fs::read_dir(&staging)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    assert_eq!(left, ["push"], "nothing else left behind");
+}

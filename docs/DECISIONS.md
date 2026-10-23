@@ -4245,4 +4245,11 @@ with `msg_send!` as optional, a missing name is made from the type
 asset's download fails that asset (Try again) and the sync goes on
 (`a_panic_fails_one_asset_not_the_sync`); and a panic anywhere in a run
 ends that run with a message, not the thread.
+- Then: the next sync failed 10 assets with "File exists": the crashed
+  run's half-downloaded files were still in the staging folder under the
+  same names (`<asset index>-<kind>.<ext>`). Each sync now downloads into
+  `photos-staging/sync-<run>/`, removed when it ends, and starts by
+  clearing loose files and other `sync-*` folders there (the cache's own;
+  Send to Photos' `push` folder is left alone)
+  (`leftovers_in_the_cache_dont_block_the_next_sync`).
 
