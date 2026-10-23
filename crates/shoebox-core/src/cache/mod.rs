@@ -136,6 +136,36 @@ impl Cache {
         Self::init(Connection::open(path)?)
     }
 
+    /// Open for reading only, beside the library's own connection (Find
+    /// dates' thread): nothing is created or upgraded, and a cache from
+    /// another schema is refused.
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        let conn = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version != SCHEMA_VERSION {
+            return Err(CoreError::Invalid(format!(
+                "cache schema {version}, not {SCHEMA_VERSION}"
+            )));
+        }
+        Ok(Self { conn })
+    }
+
+    /// A root's id, if the cache knows it (unlike [`Self::root_id`], never
+    /// writes).
+    pub fn find_root(&self, path: &Path) -> Result<Option<i64>> {
+        let Some(p) = path.to_str() else {
+            return Ok(None);
+        };
+        Ok(self
+            .conn
+            .query_row("SELECT id FROM roots WHERE path = ?1", [p], |r| r.get(0))
+            .optional()?)
+    }
+
     pub fn open_in_memory() -> Result<Self> {
         Self::init(Connection::open_in_memory()?)
     }

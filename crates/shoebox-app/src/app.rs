@@ -583,6 +583,9 @@ pub struct ShoeboxApp {
     pub(crate) photos: crate::photos::Photos,
     pub(crate) icloud: views::icloud::State,
     pub(crate) dates: views::dates::State,
+    /// The cache's file, which Find dates reads beside the library's own
+    /// connection.
+    pub(crate) cache_db: PathBuf,
     pub(crate) push: views::push::State,
     /// Where a send to Photos renders its files.
     pub(crate) photos_push_dir: PathBuf,
@@ -611,6 +614,7 @@ impl ShoeboxApp {
             std::thread::available_parallelism().map_or(4, |n| n.get().saturating_sub(1).max(2));
         let (c1, c2, c3, c4) = (ctx.clone(), ctx.clone(), ctx.clone(), ctx.clone());
         let activity = crate::activity::Board::default();
+        let cache_db = paths.cache_db.clone();
         let loader = Loader::new(
             threads,
             ThumbCache::new(paths.thumbs),
@@ -767,6 +771,7 @@ impl ShoeboxApp {
             photos,
             icloud: Default::default(),
             dates: Default::default(),
+            cache_db: cache_db.clone(),
             push: Default::default(),
             photos_push_dir,
         }

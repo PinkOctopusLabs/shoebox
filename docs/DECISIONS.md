@@ -4472,3 +4472,48 @@ several kinds of clue. Decided with the person: approximate dates allowed
   `views::dates::tests::typed_dates`, UI `find_dates_suggests_and_sets_dates`
   (snapshot `find-dates`).
 
+## Dates: Find dates, Phase 2 (2026-10-24)
+SPEC "Dates". The library's clues (`dating::Library`, built once per run of
+the `find-dates` thread from the catalog snapshot):
+- **Same frame**: another member of its stack with a date (sure).
+- **Same iCloud Photos asset**: another library file of the asset in the
+  sync record, the original first (sure). Covers `-photos` edits a sync
+  left undated before 0.3.5, without waiting for the next sync.
+- **Same picture**: the duplicate finder's comparison (`dupes::compare`)
+  against the dated photos whose analyses are in the cache. Hashing the
+  whole library just for this would read every file, so it only uses what
+  Duplicates has analysed; the undated photos are analysed here when the
+  cache hasn't them (not cloud-only ones). The thread reads the cache
+  through a second, read-only connection (`Cache::open_read_only`,
+  `Cache::find_root`: neither writes, so the library's connection is never
+  held up) and stores nothing. Exact, image-data and near-identical
+  matches give the match's moment (sure); a merely similar one gives its
+  day (likely: a frame of the same scene).
+- **Camera sequence**: a file number (`DSC_0011`: a one-to-five letter or
+  `_` prefix and four to seven digits, `dating::file_number`) between dated
+  frames of the same series in the same folder, or a shutter count between
+  two of the same camera body's (model and serial). Interpolated by number,
+  kept as precise as the two neighbours agree (day, month, year), and sure
+  only when they're on the same day at most four frames apart; one side
+  only counts within three frames. Out-of-order times (a reset clock) and
+  frames more than 50 away give nothing. Same folder for file numbers,
+  because counters repeat every 10,000 frames and across cameras.
+- **Folder neighbours**: the dated photos in its folder, as precise as
+  their span allows (a day or a month likely, a year a guess; two photos
+  a guess). Not in `_` folders (`_undated/<size>` groups by size, not time).
+- Other suggestions that say the same date as the best are left out of a
+  group's buttons. Each clue words its evidence (`Clue::describe`: "same
+  picture as beach.jpg", "between frames DSC_0010 and DSC_0012").
+- **Show beside…** opens Grid with all photos by capture time at the dated
+  photo nearest the suggestion (`show_in_all`).
+- **Saying what same-picture needs** (asked for by the person): while not
+  every dated photo has the duplicate finder's hashes, a note under the
+  view's heading says how many do ("none of the dated photos has been
+  hashed yet", "1,200 of 50,000"), that Duplicates reads every photo once,
+  with Open Duplicates; *Look again* forgets the clues and finds them
+  afresh (the thread sends the counts first, `Found::Hashed`).
+- Tests: `dating::tests::clues_from_the_library` (a real catalog on disk:
+  sequence, neighbours, same picture, iCloud asset, stack), `frames_between`,
+  `file_numbers`; UI `find_dates_from_the_library_and_show_beside` (snapshot
+  `find-dates-library`).
+

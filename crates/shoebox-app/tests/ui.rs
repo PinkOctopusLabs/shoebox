@@ -7150,3 +7150,70 @@ fn find_dates_suggests_and_sets_dates() {
         "{side}"
     );
 }
+
+/// Find dates, Phase 2: a frame between two dated frames of the camera is
+/// dated by them; Show beside… opens Grid at the nearest dated photo.
+#[test]
+fn find_dates_from_the_library_and_show_beside() {
+    let t = tempfile::tempdir().unwrap();
+    let base = t.path().canonicalize().unwrap();
+    let lib = base.join("lib");
+    let roll = lib.join("roll");
+    std::fs::create_dir_all(&roll).unwrap();
+    let shot = |dt: &'static str| shoebox_fixtures::Shot {
+        datetime: dt,
+        subsec: "",
+        orientation: 1,
+        serial: "1",
+    };
+    let jpg = |seed| shoebox_fixtures::jpeg(&shoebox_fixtures::scene(seed, 320, 240), 85).unwrap();
+    std::fs::write(
+        roll.join("DSC_0010.JPG"),
+        shoebox_fixtures::with_exif(&jpg(1), &shot("2019:03:12 10:00:00")),
+    )
+    .unwrap();
+    std::fs::write(roll.join("DSC_0011.JPG"), jpg(2)).unwrap();
+    std::fs::write(
+        roll.join("DSC_0012.JPG"),
+        shoebox_fixtures::with_exif(&jpg(3), &shot("2019:03:12 10:00:40")),
+    )
+    .unwrap();
+    let p = paths(&base, std::slice::from_ref(&lib));
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+
+    h.get_by_label("Find dates").click();
+    wait_for(&mut h, Duration::from_secs(20), "clues", |a| {
+        shoebox_app::views::dates::looked_at(a) == 1
+    });
+    h.run_steps(3);
+    assert!(
+        h.query_by_label_contains("12 March 2019 (approximate) · sure")
+            .is_some()
+    );
+    assert!(
+        h.query_by_label_contains("between frames DSC_0010 and DSC_0012")
+            .is_some()
+    );
+    assert!(
+        h.query_by_label_contains("likely…").is_none(),
+        "the neighbours agree: no second button for the same day"
+    );
+    // Duplicates hasn't run: the note says so.
+    assert!(
+        h.query_by_label_contains("none of the dated photos has been hashed yet")
+            .is_some()
+    );
+    snapshot(&mut h, "find-dates-library");
+
+    h.get_by_label("Show beside…").click();
+    h.run_steps(4);
+    assert_eq!(h.state().view_name(), View::Grid);
+    assert_eq!(h.state().current_name().as_deref(), Some("DSC_0012.JPG"));
+
+    h.get_by_label("Find dates").click();
+    h.run_steps(3);
+    h.get_by_label("Open Duplicates").click();
+    h.run_steps(3);
+    assert_eq!(h.state().view_name(), View::Duplicates);
+}

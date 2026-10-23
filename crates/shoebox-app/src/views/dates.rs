@@ -7,9 +7,12 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use eframe::egui::{self, Color32, Rect, RichText, pos2, vec2};
+use shoebox_core::cache::Cache;
+use shoebox_core::catalog::{Catalog, Photo};
 use shoebox_core::dating::{self, Clue, Confidence};
+use shoebox_core::hash::Analysis;
+use shoebox_core::photos::ledger::Ledgers;
 use shoebox_core::sidecar::{Precision, SidecarDate};
-use shoebox_decode::Format;
 
 use crate::app::ShoeboxApp;
 use crate::jobs::{LibraryCommand, Priority, Size, photo_id};
@@ -48,6 +51,9 @@ pub struct State {
     view: Option<Grouped>,
     /// The catalog clues were last looked for in (new photos need theirs).
     looked_in: usize,
+    /// How many dated photos have the duplicate finder's hashes, of how
+    /// many (the same-picture clue compares with those only).
+    hashed: Option<(usize, usize)>,
 }
 
 /// What the view shows, worked out once per change.
@@ -69,19 +75,21 @@ pub struct SetDate {
     pub text: String,
 }
 
-/// The clue thread: what it has done of how many.
-struct Finder {
-    rx: mpsc::Receiver<(PathBuf, Vec<Clue>)>,
-    done: usize,
-    total: usize,
+/// What the clue thread sends.
+enum Found {
+    /// Dated photos with hashes to compare with, of how many.
+    Hashed {
+        hashed: usize,
+        dated: usize,
+    },
+    Clues(PathBuf, Vec<Clue>),
 }
 
-/// A photo to find clues for.
-struct Item {
-    path: PathBuf,
-    rel: PathBuf,
-    format: Format,
-    cloud: bool,
+/// The clue thread: what it has done of how many.
+struct Finder {
+    rx: mpsc::Receiver<Found>,
+    done: usize,
+    total: usize,
 }
 
 // ---- Dates as text ----------------------------------------------------
@@ -342,41 +350,106 @@ fn undated(app: &ShoeboxApp) -> Vec<usize> {
 
 /// Start finding clues for the undated photos not looked at yet.
 fn start(app: &mut ShoeboxApp, ctx: &egui::Context) {
-    let items: Vec<Item> = undated(app)
+    let todo: Vec<usize> = undated(app)
         .into_iter()
-        .map(|i| &app.catalog.photos[i])
-        .filter(|p| !app.dates.clues.contains_key(&p.path))
-        .map(|p| Item {
-            path: p.path.clone(),
-            rel: PathBuf::from(&p.rel),
-            format: p.format,
-            cloud: p.cloud,
-        })
+        .filter(|&i| !app.dates.clues.contains_key(&app.catalog.photos[i].path))
         .collect();
-    if items.is_empty() {
+    if todo.is_empty() {
         return;
     }
     let (tx, rx) = mpsc::channel();
-    let total = items.len();
+    let total = todo.len();
     let ctx = ctx.clone();
+    let catalog = app.catalog.clone();
+    let cache_db = app.cache_db.clone();
     let spawned = std::thread::Builder::new()
         .name("find-dates".into())
-        .spawn(move || {
-            for (n, it) in items.into_iter().enumerate() {
-                let c = dating::clues(&it.path, &it.rel, it.format, it.cloud);
-                if tx.send((it.path, c)).is_err() {
-                    return;
-                }
-                if n % 32 == 0 {
-                    ctx.request_repaint();
-                }
-            }
-            ctx.request_repaint();
-        });
+        .spawn(move || find(&catalog, &cache_db, &todo, &tx, &ctx));
     match spawned {
         Ok(_) => app.dates.finder = Some(Finder { rx, done: 0, total }),
         Err(e) => tracing::warn!("find dates: {e}"),
     }
+}
+
+/// The clues for photos `todo` of `catalog`: their own, and the library's
+/// (iCloud Photos records, the hashes the duplicate finder cached, read
+/// from the cache beside the library's connection; an undated photo not
+/// hashed yet is hashed here, unless it's in the cloud only).
+fn find(
+    catalog: &Catalog,
+    cache_db: &Path,
+    todo: &[usize],
+    tx: &mpsc::Sender<Found>,
+    ctx: &egui::Context,
+) {
+    let roots: Vec<PathBuf> = catalog.roots.iter().map(|r| r.path.clone()).collect();
+    let ledgers = Ledgers::load(&roots);
+    let assets = ledgers
+        .iter()
+        .filter_map(|(_, r, e)| {
+            let root = roots.get(r)?;
+            Some(e.files.iter().map(|f| (f.kind, f.path(root))).collect())
+        })
+        .collect();
+    let cache = match Cache::open_read_only(cache_db) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            tracing::warn!("find dates: no cached hashes: {e}");
+            None
+        }
+    };
+    let ids: Vec<Option<i64>> = roots
+        .iter()
+        .map(|r| cache.as_ref().and_then(|c| c.find_root(r).ok().flatten()))
+        .collect();
+    let cached = |p: &Photo| -> Option<Analysis> {
+        let id = (*ids.get(p.root)?)?;
+        cache
+            .as_ref()?
+            .lookup(id, &p.rel, p.size, p.mtime_ns)
+            .ok()
+            .flatten()
+    };
+    let hashed: Vec<(usize, Analysis)> = catalog
+        .photos
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.meta.exif.capture_time.is_some())
+        .filter_map(|(i, p)| Some((i, cached(p)?)))
+        .collect();
+    let dated = catalog
+        .photos
+        .iter()
+        .filter(|p| p.meta.exif.capture_time.is_some())
+        .count();
+    let library = dating::Library::new(catalog, assets, hashed);
+    let _ = tx.send(Found::Hashed {
+        hashed: library.hashed(),
+        dated,
+    });
+    tracing::info!(
+        "find dates: {} undated, {} dated photos hashed to compare with",
+        todo.len(),
+        library.hashed()
+    );
+    for (n, &i) in todo.iter().enumerate() {
+        let p = &catalog.photos[i];
+        let mut c = dating::clues(&p.path, Path::new(&p.rel), p.format, p.cloud);
+        let own = cached(p).or_else(|| {
+            (!p.cloud)
+                .then(|| shoebox_core::hash::analyze_path(&p.path).ok())
+                .flatten()
+        });
+        c.extend(library.clues(i, own.as_ref()));
+        dating::rank(&mut c);
+        if tx.send(Found::Clues(p.path.clone(), c)).is_err() {
+            return;
+        }
+        if n % 16 == 0 {
+            ctx.request_repaint();
+        }
+    }
+    ctx.request_repaint();
 }
 
 /// Take in what the thread has found.
@@ -387,10 +460,11 @@ fn poll(app: &mut ShoeboxApp) {
     let mut ended = false;
     loop {
         match f.rx.try_recv() {
-            Ok((path, c)) => {
+            Ok(Found::Clues(path, c)) => {
                 f.done += 1;
                 app.dates.clues.insert(path, c);
             }
+            Ok(Found::Hashed { hashed, dated }) => app.dates.hashed = Some((hashed, dated)),
             Err(mpsc::TryRecvError::Empty) => break,
             Err(mpsc::TryRecvError::Disconnected) => {
                 ended = true;
@@ -401,6 +475,46 @@ fn poll(app: &mut ShoeboxApp) {
     if ended {
         app.dates.finder = None;
     }
+}
+
+/// The same-picture clue compares with the dated photos Duplicates has
+/// hashed: say how many are, and how to hash the rest.
+fn duplicates_note(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    let Some((hashed, dated)) = app.dates.hashed else {
+        return;
+    };
+    if dated == 0 || hashed >= dated {
+        return;
+    }
+    ui.add_space(4.0);
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let have = if hashed == 0 {
+            "none of the dated photos has been hashed yet".to_owned()
+        } else {
+            format!("{hashed} of {dated} dated photos have been hashed")
+        };
+        ui.add(
+            egui::Label::new(format!(
+                "Finding the same picture dated elsewhere (such as a recovered preview and its \
+                 NEF) uses the hashes Duplicates makes, and {have}. Run Duplicates once (it \
+                 reads every photo, which takes a while in a large library), then Look again \
+                 here."
+            ))
+            .wrap(),
+        );
+        if ui.button("Open Duplicates").clicked() {
+            app.set_view(crate::app::View::Duplicates);
+        }
+    });
+}
+
+/// Forget the clues found and look again.
+fn look_again(app: &mut ShoeboxApp) {
+    app.dates.clues.clear();
+    app.dates.view = None;
+    app.dates.hashed = None;
+    app.dates.looked_in = 0;
 }
 
 /// How many photos have been looked at for clues.
@@ -456,7 +570,13 @@ fn groups(app: &ShoeboxApp) -> Vec<Group> {
         });
         g.photos.push(p.path.clone());
         g.best.push(best);
-        for c in clues.iter().skip(1) {
+        // Others that say something else than its best.
+        let first = clues.first();
+        for c in clues
+            .iter()
+            .skip(1)
+            .filter(|c| first.is_none_or(|b| b.date != c.date))
+        {
             let same = |o: &Clue| o.date == c.date && o.source == c.source;
             match g.others.iter_mut().find(|(o, _)| same(o)) {
                 Some((_, n)) => *n += 1,
@@ -553,12 +673,25 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 plural(references, "photo")
             ));
         }
+        if app.dates.finder.is_none()
+            && ui
+                .small_button("Look again")
+                .on_hover_text(
+                    "Look for clues again, with what's new in the library (such as hashes \
+                     from Duplicates)",
+                )
+                .clicked()
+        {
+            look_again(app);
+        }
     });
     ui.weak(
-        "Each group's suggestion comes from the files' other dates, their names and their \
-         folders. Accept dates each photo by its own suggestion; a date typed in dates them \
-         all. Nothing is written without the dry run.",
+        "Each group's suggestion comes from clues in the files, their names and folders, and \
+         the rest of the library (the same picture or frame, the camera's sequence, the \
+         photos beside them). Accept dates each photo by its own suggestion; a date typed in \
+         dates them all. Nothing is written without the dry run.",
     );
+    duplicates_note(app, ui);
     ui.separator();
     if view.undated == 0 {
         ui.add_space(20.0);
@@ -616,7 +749,7 @@ fn group(app: &mut ShoeboxApp, ui: &mut egui::Ui, g: &Group) {
                     clue_text(c)
                 };
                 ui.label(RichText::new(text).color(ui.visuals().strong_text_color()));
-                ui.weak(format!("· {}: {}", c.source.label(), c.evidence));
+                ui.weak(format!("· {}", c.describe()));
             });
         }
         None => {
@@ -664,12 +797,7 @@ fn group(app: &mut ShoeboxApp, ui: &mut egui::Ui, g: &Group) {
             });
         }
         for (c, n) in &g.others {
-            let hint = format!(
-                "{}: {} ({})",
-                c.source.label(),
-                c.evidence,
-                plural(*n, "photo")
-            );
+            let hint = format!("{} ({})", c.describe(), plural(*n, "photo"));
             if ui
                 .small_button(format!("{}…", clue_text(c)))
                 .on_hover_text(hint)
@@ -682,12 +810,45 @@ fn group(app: &mut ShoeboxApp, ui: &mut egui::Ui, g: &Group) {
                 });
             }
         }
+        if let Some(c) = best
+            && ui
+                .small_button("Show beside…")
+                .on_hover_text("Open Grid at the photos taken nearest this date, to compare")
+                .clicked()
+        {
+            show_beside(app, &c.date);
+        }
         if ui.small_button("Skip").clicked() {
             app.dates.skipped.insert(g.key.clone());
         }
     });
     ui.add_space(4.0);
     ui.separator();
+}
+
+/// Open Grid (all photos, by capture time) at the dated photo taken
+/// nearest `date`.
+pub fn show_beside(app: &mut ShoeboxApp, date: &SidecarDate) {
+    let Some(target) = shoebox_core::exif::capture_seconds(&date.time, None) else {
+        return;
+    };
+    // The catalog is sorted by capture time, the dated first.
+    let photos = &app.catalog.photos;
+    let dated = photos.partition_point(|p| p.meta.capture_seconds().is_some());
+    let at = photos[..dated].partition_point(|p| p.meta.capture_seconds() < Some(target));
+    let gap = |i: usize| {
+        photos
+            .get(i)
+            .and_then(|p| p.meta.capture_seconds())
+            .map_or(f64::INFINITY, |t| (t - target).abs())
+    };
+    let nearest = [at.checked_sub(1), (at < dated).then_some(at)]
+        .into_iter()
+        .flatten()
+        .min_by(|&a, &b| gap(a).total_cmp(&gap(b)));
+    if let Some(i) = nearest {
+        app.show_in_all(app.ids[i]);
+    }
 }
 
 /// A group's thumbnails; a click selects the photo (its Info shows).

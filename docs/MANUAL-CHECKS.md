@@ -168,7 +168,11 @@ APFS clone, in folders by shoot.
   on a group and a typed month on another write only `.xmp` files (the
   dry run lists them), the photos move to their place in Grid, the Info
   panel shows "March 2019 (approximate)" for the month, and ⌘Z puts both
-  back. Note clues that were wrong or missing (for Phase 2).
+  back. Run Tasks → Duplicates first once, so the same-picture clue has
+  hashes to compare with; carved previews should then find their NEFs,
+  `-photos` edits their originals, and frames between dated ones their
+  day. *Show beside…* opens Grid at photos of that day. Note clues that were
+  wrong or missing.
 
 ## 2. Raw decode and colour
 

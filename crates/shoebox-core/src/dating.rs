@@ -11,6 +11,13 @@ use jiff::civil::{Date, DateTime};
 use jiff::tz::TimeZone;
 use shoebox_decode::Format;
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use crate::catalog::{Catalog, Photo};
+use crate::dupes::{self, mih::MultiIndex};
+use crate::hash::{Analysis, Digest};
+use crate::photos::ResourceKind;
 use crate::sidecar::{Precision, SidecarDate};
 use crate::xmp::{self, Prop};
 
@@ -27,8 +34,18 @@ pub enum Source {
     PngCreated,
     /// EXIF's modified date (`DateTime`): an editor may have set it.
     Modified,
+    /// Another file of the same frame (its stack).
+    Stack,
+    /// Another file of the same iCloud Photos asset.
+    Photos,
+    /// The same picture (a copy, or a perceptual match).
+    SamePicture,
+    /// Between the camera's frames before and after it.
+    Sequence,
     FileName,
     Folder,
+    /// The dated photos in its folder.
+    Neighbours,
 }
 
 impl Source {
@@ -39,8 +56,13 @@ impl Source {
             Source::FileXmp => "Date in the file's XMP",
             Source::PngCreated => "Creation time in the PNG",
             Source::Modified => "Modified date in the file",
+            Source::Stack => "Same frame as",
+            Source::Photos => "Same iCloud Photos asset as",
+            Source::SamePicture => "Same picture as",
+            Source::Sequence => "Between frames",
             Source::FileName => "File name",
             Source::Folder => "Folder",
+            Source::Neighbours => "Photos in its folder",
         }
     }
 }
@@ -63,9 +85,29 @@ pub struct Clue {
     pub evidence: String,
 }
 
-/// Every clue for a photo, best first. `rel`: its path in its root (the
-/// folders above it are clues). A cloud-only file isn't read (`cloud`), so
-/// only its name and folders give clues.
+impl Clue {
+    /// The evidence in words: "File name: IMG_….jpg", "same picture as
+    /// DSC_1234.NEF", "between frames DSC_ 1233 and 1236".
+    pub fn describe(&self) -> String {
+        let e = &self.evidence;
+        match self.source {
+            Source::Stack => format!("same frame as {e}"),
+            Source::Photos => format!("same iCloud Photos asset as {e}"),
+            Source::SamePicture => match self.confidence {
+                Confidence::High => format!("same picture as {e}"),
+                _ => format!("looks like {e}"),
+            },
+            Source::Sequence => format!("between frames {e}"),
+            Source::Neighbours => format!("{e} photos in its folder"),
+            s => format!("{}: {e}", s.label()),
+        }
+    }
+}
+
+/// A photo's own clues (in the file, its name and its folders), not yet
+/// ranked ([`rank`] them with any [`Library::clues`]). `rel`: its path in
+/// its root (the folders above it are clues). A cloud-only file isn't read
+/// (`cloud`), so only its name and folders give clues.
 pub fn clues(path: &Path, rel: &Path, format: Format, cloud: bool) -> Vec<Clue> {
     let mut out = Vec::new();
     if !cloud {
@@ -75,7 +117,6 @@ pub fn clues(path: &Path, rel: &Path, format: Format, cloud: bool) -> Vec<Clue> 
         out.extend(in_name(name, &TimeZone::system()));
     }
     out.extend(in_folders(rel));
-    rank(&mut out);
     out
 }
 
@@ -585,6 +626,413 @@ pub fn in_folders(rel: &Path) -> Vec<Clue> {
     .unwrap_or_default()
 }
 
+// ---- In the library ---------------------------------------------------
+
+/// Frames either side further than this aren't asked.
+const SEQUENCE_REACH: u64 = 50;
+
+/// Dated photos by frame number: (number, catalog index), sorted.
+type Frames = Vec<(u64, usize)>;
+
+/// The library as its clues need it: the dated photos by folder, by camera
+/// sequence, by frame and iCloud Photos asset, and by picture.
+pub struct Library<'a> {
+    catalog: &'a Catalog,
+    by_path: HashMap<&'a Path, usize>,
+    /// Dated photos by folder (not `_` folders such as `_undated`).
+    folders: HashMap<&'a Path, Vec<usize>>,
+    /// Dated photos by folder and file-number series, by number.
+    series: HashMap<(&'a Path, String, usize), Frames>,
+    /// Dated photos by camera (model, serial), by shutter count.
+    shutters: HashMap<(String, Option<String>), Frames>,
+    /// Each iCloud Photos asset's library files, and which asset a file is.
+    assets: Vec<Vec<(ResourceKind, PathBuf)>>,
+    asset_of: HashMap<PathBuf, usize>,
+    /// Hashed dated photos (as the duplicate finder compares them).
+    hashed: Vec<(usize, dupes::Item)>,
+    exact: HashMap<Digest, Vec<usize>>,
+    data: HashMap<Digest, Vec<usize>>,
+    tree: MultiIndex,
+}
+
+/// A photo's date as the catalog has it.
+fn date_of(p: &Photo) -> Option<SidecarDate> {
+    let x = &p.meta.exif;
+    Some(SidecarDate {
+        time: x.capture_time.clone()?,
+        subsec: x.subsec.clone(),
+        offset: x.offset.clone(),
+        precision: p.meta.precision(),
+    })
+}
+
+/// `exif::capture_seconds` back to EXIF's form.
+fn time_at(secs: f64) -> Option<String> {
+    let t = jiff::Timestamp::from_second(secs.floor() as i64).ok()?;
+    Some(
+        t.to_zoned(TimeZone::UTC)
+            .strftime("%Y:%m:%d %H:%M:%S")
+            .to_string(),
+    )
+}
+
+/// The day, month or year around `secs`.
+fn approx_at(secs: f64, precision: Precision) -> Option<SidecarDate> {
+    let t = time_at(secs)?;
+    let num = |r: std::ops::Range<usize>| t.get(r)?.parse::<i16>().ok();
+    let (y, m, d) = (
+        num(0..4)?,
+        i8::try_from(num(5..7)?).ok()?,
+        i8::try_from(num(8..10)?).ok()?,
+    );
+    match precision {
+        Precision::Moment | Precision::Day => SidecarDate::approximate(y, Some(m), Some(d)),
+        Precision::Month => SidecarDate::approximate(y, Some(m), None),
+        Precision::Year => SidecarDate::approximate(y, None, None),
+    }
+}
+
+/// How much two times share: the same day, month or year (by their
+/// EXIF-form strings), or nothing.
+fn shared(a: f64, b: f64) -> Option<Precision> {
+    let (a, b) = (time_at(a)?, time_at(b)?);
+    [
+        (10, Precision::Day),
+        (7, Precision::Month),
+        (4, Precision::Year),
+    ]
+    .into_iter()
+    .find(|(n, _)| a.get(..*n) == b.get(..*n))
+    .map(|(_, p)| p)
+}
+
+/// A camera's file number: `DSC_1234`, `_DSC1234`, `IMG_0001`, `P1000123`,
+/// `f0003`: a prefix of one to five letters or `_`, then four to seven
+/// digits. (prefix, number, how many digits).
+pub fn file_number(name: &str) -> Option<(String, u64, usize)> {
+    let stem = Path::new(name).file_stem()?.to_str()?;
+    let r = runs(stem);
+    let (prefix, digits) = (r.first()?, r.get(1)?);
+    let ok = !prefix.digits
+        && (1..=5).contains(&prefix.text.len())
+        && prefix
+            .text
+            .bytes()
+            .all(|b| b.is_ascii_alphabetic() || b == b'_')
+        && digits.digits
+        && (4..=7).contains(&digits.text.len());
+    ok.then(|| {
+        (
+            prefix.text.to_ascii_uppercase(),
+            digits.text.parse().ok(),
+            digits.text.len(),
+        )
+    })
+    .and_then(|(p, n, d)| Some((p, n?, d)))
+}
+
+/// Where `n` falls between the dated frames of `seq` (sorted by number):
+/// the time between the nearest before and after, as precise as they agree.
+fn between(seq: &[(u64, f64)], n: u64) -> Option<(SidecarDate, Confidence, Vec<u64>)> {
+    let at = seq.partition_point(|(k, _)| *k < n);
+    let before = at
+        .checked_sub(1)
+        .and_then(|i| seq.get(i))
+        .filter(|(k, _)| n - k <= SEQUENCE_REACH);
+    let after = seq
+        .get(at)
+        .filter(|(k, _)| *k > n && k - n <= SEQUENCE_REACH);
+    match (before, after) {
+        (Some(&(kb, tb)), Some(&(ka, ta))) if ta >= tb => {
+            let t = tb + (ta - tb) * (n - kb) as f64 / (ka - kb) as f64;
+            let precision = shared(tb, ta)?;
+            let close = ka - kb <= 4;
+            let confidence = match (precision, close) {
+                (Precision::Day, true) => Confidence::High,
+                (Precision::Day, false) | (Precision::Month, true) => Confidence::Medium,
+                _ => Confidence::Low,
+            };
+            Some((approx_at(t, precision)?, confidence, vec![kb, ka]))
+        }
+        // One side only: close enough to say the day.
+        (Some(&(k, t)), None) | (None, Some(&(k, t))) if k.abs_diff(n) <= 3 => {
+            Some((approx_at(t, Precision::Day)?, Confidence::Medium, vec![k]))
+        }
+        _ => None,
+    }
+}
+
+impl<'a> Library<'a> {
+    /// `assets`: each iCloud Photos asset's library files (from the sync
+    /// record); `hashed`: the dated photos the duplicate finder has
+    /// analysed, by catalog index.
+    pub fn new(
+        catalog: &'a Catalog,
+        assets: Vec<Vec<(ResourceKind, PathBuf)>>,
+        hashed: Vec<(usize, Analysis)>,
+    ) -> Self {
+        let mut l = Library {
+            catalog,
+            by_path: HashMap::new(),
+            folders: HashMap::new(),
+            series: HashMap::new(),
+            shutters: HashMap::new(),
+            asset_of: HashMap::new(),
+            assets,
+            hashed: Vec::new(),
+            exact: HashMap::new(),
+            data: HashMap::new(),
+            tree: MultiIndex::new(),
+        };
+        for (i, p) in catalog.photos.iter().enumerate() {
+            l.by_path.insert(p.path.as_path(), i);
+            if p.meta.capture_seconds().is_none() {
+                continue;
+            }
+            let Some(dir) = p.path.parent() else {
+                continue;
+            };
+            let underscored = Path::new(&p.rel)
+                .components()
+                .any(|c| c.as_os_str().to_str().is_some_and(|s| s.starts_with('_')));
+            if !underscored {
+                l.folders.entry(dir).or_default().push(i);
+            }
+            if let Some((prefix, n, digits)) = p
+                .path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(file_number)
+            {
+                l.series
+                    .entry((dir, prefix, digits))
+                    .or_default()
+                    .push((n, i));
+            }
+            let x = &p.meta.exif;
+            if let (Some(model), Some(n)) = (&x.model, x.shutter_count) {
+                l.shutters
+                    .entry((model.clone(), x.serial.clone()))
+                    .or_default()
+                    .push((u64::from(n), i));
+            }
+        }
+        for v in l.series.values_mut().chain(l.shutters.values_mut()) {
+            v.sort_unstable();
+        }
+        for (a, files) in l.assets.iter().enumerate() {
+            for (_, f) in files {
+                l.asset_of.insert(f.clone(), a);
+            }
+        }
+        for (i, a) in hashed {
+            let Some(p) = catalog.photos.get(i) else {
+                continue;
+            };
+            let k = l.hashed.len();
+            l.exact.entry(a.blake3).or_default().push(k);
+            if let Some(h) = a.image_data_hash {
+                l.data.entry(h).or_default().push(k);
+            }
+            for h in &a.hashes {
+                l.tree.insert(h.phash, k);
+            }
+            l.hashed.push((i, item(p, &a)));
+        }
+        l
+    }
+
+    /// How many dated photos have hashes to compare with.
+    pub fn hashed(&self) -> usize {
+        self.hashed.len()
+    }
+
+    /// Photo `i`'s clues from the rest of the library. `own`: its analysis
+    /// (hashes), if it could be made.
+    pub fn clues(&self, i: usize, own: Option<&Analysis>) -> Vec<Clue> {
+        let Some(p) = self.catalog.photos.get(i) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        out.extend(self.same_frame(i));
+        out.extend(self.same_asset(p));
+        if let Some(a) = own {
+            out.extend(self.same_picture(i, a));
+        }
+        out.extend(self.sequence(p));
+        out.extend(self.neighbours(i, p));
+        out
+    }
+
+    fn name(&self, i: usize) -> String {
+        self.catalog.photos[i]
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
+    fn same_frame(&self, i: usize) -> Option<Clue> {
+        let s = self.catalog.stacks.get(*self.catalog.stack_of.get(i)?)?;
+        let (j, date) = s
+            .members
+            .iter()
+            .chain(&s.variants)
+            .filter(|&&j| j != i)
+            .find_map(|&j| Some((j, date_of(&self.catalog.photos[j])?)))?;
+        Some(Clue {
+            date,
+            source: Source::Stack,
+            confidence: Confidence::High,
+            evidence: self.name(j),
+        })
+    }
+
+    fn same_asset(&self, p: &Photo) -> Option<Clue> {
+        let files = self.assets.get(*self.asset_of.get(&p.path)?)?;
+        let mut others: Vec<&(ResourceKind, PathBuf)> =
+            files.iter().filter(|(_, f)| *f != p.path).collect();
+        // The original first.
+        others.sort_by_key(|(k, _)| *k != ResourceKind::Original);
+        let (j, date) = others.iter().find_map(|(_, f)| {
+            let j = *self.by_path.get(f.as_path())?;
+            Some((j, date_of(&self.catalog.photos[j])?))
+        })?;
+        Some(Clue {
+            date,
+            source: Source::Photos,
+            confidence: Confidence::High,
+            evidence: self.name(j),
+        })
+    }
+
+    fn same_picture(&self, i: usize, a: &Analysis) -> Option<Clue> {
+        let me = item(&self.catalog.photos[i], a);
+        let mut cand: Vec<usize> = self.exact.get(&a.blake3).cloned().unwrap_or_default();
+        if let Some(h) = a.image_data_hash.and_then(|h| self.data.get(&h)) {
+            cand.extend(h);
+        }
+        let cfg = dupes::Config::default();
+        if let Some(h) = a.hashes.first() {
+            cand.extend(
+                self.tree
+                    .find(h.phash, cfg.threshold)
+                    .into_iter()
+                    .map(|(k, _)| k),
+            );
+        }
+        cand.sort_unstable();
+        cand.dedup();
+        let (k, m) = cand
+            .into_iter()
+            .filter(|&k| self.hashed[k].0 != i)
+            .filter_map(|k| Some((k, dupes::compare(&me, &self.hashed[k].1, &cfg)?)))
+            .min_by_key(|(_, m)| (m.level, m.distance))?;
+        let j = self.hashed[k].0;
+        let date = date_of(&self.catalog.photos[j])?;
+        let (date, confidence) = match m.level {
+            dupes::Level::Similar => {
+                let secs = self.catalog.photos[j].meta.capture_seconds()?;
+                (approx_at(secs, Precision::Day)?, Confidence::Medium)
+            }
+            _ => (date, Confidence::High),
+        };
+        Some(Clue {
+            date,
+            source: Source::SamePicture,
+            confidence,
+            evidence: self.name(j),
+        })
+    }
+
+    fn sequence(&self, p: &Photo) -> Option<Clue> {
+        let secs = |list: &[(u64, usize)]| -> Vec<(u64, f64)> {
+            list.iter()
+                .filter_map(|&(n, j)| Some((n, self.catalog.photos[j].meta.capture_seconds()?)))
+                .collect()
+        };
+        let x = &p.meta.exif;
+        if let (Some(model), Some(n)) = (&x.model, x.shutter_count)
+            && let Some(list) = self.shutters.get(&(model.clone(), x.serial.clone()))
+            && let Some((date, confidence, frames)) = between(&secs(list), u64::from(n))
+        {
+            let frames: Vec<String> = frames.iter().map(u64::to_string).collect();
+            return Some(Clue {
+                date,
+                source: Source::Sequence,
+                confidence,
+                evidence: format!("{model} shutter counts {}", frames.join(" and ")),
+            });
+        }
+        let name = p.path.file_name()?.to_str()?;
+        let (prefix, n, digits) = file_number(name)?;
+        let list = self
+            .series
+            .get(&(p.path.parent()?, prefix.clone(), digits))?;
+        let (date, confidence, frames) = between(&secs(list), n)?;
+        // As the files are named: `DSC_0010 and DSC_0012`.
+        let shown = name.get(..prefix.len())?;
+        let frames: Vec<String> = frames
+            .iter()
+            .map(|k| format!("{shown}{k:0digits$}"))
+            .collect();
+        Some(Clue {
+            date,
+            source: Source::Sequence,
+            confidence,
+            evidence: frames.join(" and "),
+        })
+    }
+
+    fn neighbours(&self, i: usize, p: &Photo) -> Option<Clue> {
+        let list: Vec<f64> = self
+            .folders
+            .get(p.path.parent()?)?
+            .iter()
+            .filter(|&&j| j != i)
+            .filter_map(|&j| self.catalog.photos[j].meta.capture_seconds())
+            .collect();
+        if list.len() < 2 {
+            return None;
+        }
+        let (lo, hi) = list
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &t| {
+                (a.min(t), b.max(t))
+            });
+        let precision = shared(lo, hi)?;
+        let mut sorted = list.clone();
+        sorted.sort_by(f64::total_cmp);
+        let median = sorted[sorted.len() / 2];
+        let confidence = match (precision, list.len()) {
+            (Precision::Year, _) | (_, 2) => Confidence::Low,
+            _ => Confidence::Medium,
+        };
+        Some(Clue {
+            date: approx_at(median, precision)?,
+            source: Source::Neighbours,
+            confidence,
+            evidence: format!("{} dated", list.len()),
+        })
+    }
+}
+
+/// A photo and its analysis as the duplicate finder compares them.
+fn item(p: &Photo, a: &Analysis) -> dupes::Item {
+    dupes::Item {
+        role: crate::scan::Role::Scan,
+        format: p.format,
+        blake3: a.blake3,
+        image_data_hash: a.image_data_hash,
+        hashes: a.hashes.clone(),
+        pixels: u64::from(a.width.unwrap_or(0)) * u64::from(a.height.unwrap_or(0)),
+        siblings: None,
+        luma_stddev: a.luma_stddev,
+        capture: p.meta.capture_seconds(),
+        merged: false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -804,5 +1252,136 @@ mod tests {
         assert_eq!(c[0].source, Source::FileXmp);
         assert_eq!(c[0].date.precision, Precision::Month);
         assert_eq!(c[0].date.to_xmp(), "2011-08");
+    }
+
+    #[test]
+    fn file_numbers() {
+        assert_eq!(file_number("DSC_1234.JPG"), Some(("DSC_".into(), 1234, 4)));
+        assert_eq!(file_number("_dsc0007.nef"), Some(("_DSC".into(), 7, 4)));
+        assert_eq!(
+            file_number("P1000123.RW2"),
+            Some(("P".into(), 1_000_123, 7))
+        );
+        assert_eq!(file_number("f0003.jpg"), Some(("F".into(), 3, 4)));
+        for none in [
+            "IMG_20190312_101530.jpg",
+            "photo.jpg",
+            "DSC_12.JPG",
+            "1234.jpg",
+        ] {
+            assert_eq!(file_number(none), None, "{none}");
+        }
+    }
+
+    /// A library with the library's kinds of clue: a camera sequence, a
+    /// folder of dated photos, an undated copy of a dated picture, an
+    /// iCloud Photos asset's edit, and a stack's other file.
+    #[test]
+    fn clues_from_the_library() {
+        use crate::cache::Cache;
+        use crate::scan::{Role, Root};
+        use shoebox_fixtures::{Shot, jpeg, scene, with_exif};
+
+        let t = tempfile::tempdir().unwrap();
+        let lib = t.path().canonicalize().unwrap();
+        let shot = |dt: &'static str| Shot {
+            datetime: dt,
+            subsec: "",
+            orientation: 1,
+            serial: "1",
+        };
+        let dated = |seed, dt| with_exif(&jpeg(&scene(seed, 160, 120), 85).unwrap(), &shot(dt));
+        let plain = |seed| jpeg(&scene(seed, 160, 120), 85).unwrap();
+        let write = |rel: &str, bytes: Vec<u8>| {
+            let p = lib.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, bytes).unwrap();
+        };
+        // A roll: frames 10 and 12 dated, 11 not.
+        write("roll/DSC_0010.JPG", dated(1, "2019:03:12 10:00:00"));
+        write("roll/DSC_0011.JPG", plain(2));
+        write("roll/DSC_0012.JPG", dated(3, "2019:03:12 10:00:40"));
+        // An undated copy of a dated picture, elsewhere.
+        write("trip/beach.jpg", dated(4, "2018:07:01 15:30:00"));
+        write("_undated/160x120/f0001.jpg", plain(4));
+        // An iCloud Photos asset: the original dated, its edit not.
+        write("2020/IMG_0001.jpg", dated(5, "2020:01:02 09:00:00"));
+        write("2020/IMG_0001-photos.jpg", plain(6));
+        // A stack: the TIFF of a dated JPEG.
+        write("stack/frame.jpg", dated(7, "2021:05:05 05:05:05"));
+        write(
+            "stack/frame.tif",
+            shoebox_fixtures::tiff(&scene(8, 160, 120)).unwrap(),
+        );
+
+        let mut cache = Cache::open_in_memory().unwrap();
+        let roots = vec![Root::new(&lib, Role::Scan).unwrap()];
+        let (c, _) = Catalog::refresh(&mut cache, roots, &|_, _| {}).unwrap();
+        let find = |rel: &str| c.photos.iter().position(|p| p.rel == rel).unwrap();
+        let hashed: Vec<(usize, Analysis)> = (0..c.photos.len())
+            .filter(|&i| c.photos[i].meta.exif.capture_time.is_some())
+            .map(|i| (i, crate::hash::analyze_path(&c.photos[i].path).unwrap()))
+            .collect();
+        let asset = vec![
+            (ResourceKind::Original, lib.join("2020/IMG_0001.jpg")),
+            (ResourceKind::Edited, lib.join("2020/IMG_0001-photos.jpg")),
+        ];
+        let l = Library::new(&c, vec![asset], hashed);
+        let clues_of = |rel: &str| {
+            let i = find(rel);
+            let own = crate::hash::analyze_path(&c.photos[i].path).ok();
+            let mut v = l.clues(i, own.as_ref());
+            rank(&mut v);
+            v
+        };
+        let by = |v: &[Clue], s: Source| v.iter().find(|c| c.source == s).cloned();
+
+        let roll = clues_of("roll/DSC_0011.JPG");
+        let seq = by(&roll, Source::Sequence).expect("sequence");
+        assert_eq!(
+            (seq.date.time.as_str(), seq.date.precision, seq.confidence),
+            ("2019:03:12 12:00:00", Precision::Day, Confidence::High)
+        );
+        assert_eq!(seq.describe(), "between frames DSC_0010 and DSC_0012");
+        let n = by(&roll, Source::Neighbours).expect("neighbours");
+        assert_eq!(
+            (n.date.precision, n.date.time.as_str()),
+            (Precision::Day, "2019:03:12 12:00:00")
+        );
+
+        let copy = clues_of("_undated/160x120/f0001.jpg");
+        let same = by(&copy, Source::SamePicture).expect("same picture");
+        assert_eq!(
+            (same.date.time.as_str(), same.confidence),
+            ("2018:07:01 15:30:00", Confidence::High)
+        );
+        assert_eq!(same.describe(), "same picture as beach.jpg");
+        assert!(by(&copy, Source::Neighbours).is_none(), "not from _undated");
+
+        let edit = clues_of("2020/IMG_0001-photos.jpg");
+        let photos = by(&edit, Source::Photos).expect("asset");
+        assert_eq!(photos.date.time, "2020:01:02 09:00:00");
+        assert_eq!(photos.evidence, "IMG_0001.jpg");
+
+        let tif = clues_of("stack/frame.tif");
+        let stack = by(&tif, Source::Stack).expect("stack");
+        assert_eq!(
+            (stack.date.time.as_str(), stack.evidence.as_str()),
+            ("2021:05:05 05:05:05", "frame.jpg")
+        );
+    }
+
+    #[test]
+    fn frames_between() {
+        let day = 86_400.0;
+        // Out of order (a camera reset) or too far: nothing.
+        assert!(between(&[(10, 2.0 * day), (20, day)], 15).is_none());
+        assert!(between(&[(10, day), (200, day)], 100).is_none());
+        // Months apart: the year at most.
+        let (d, c, _) = between(&[(10, 0.0), (20, 100.0 * day)], 15).unwrap();
+        assert_eq!((d.precision, c), (Precision::Year, Confidence::Low));
+        // One side only, a frame away: the day.
+        let (d, c, _) = between(&[(10, day)], 11).unwrap();
+        assert_eq!((d.precision, c), (Precision::Day, Confidence::Medium));
     }
 }
