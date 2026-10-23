@@ -71,6 +71,10 @@ struct Grouped {
     undated: usize,
     cloud: usize,
     references: usize,
+    /// Photos in `_undated/` that have dates now (Move them…): those dated
+    /// to the day or moment, and how many with just a month or year.
+    filable: Vec<PathBuf>,
+    approximate: usize,
 }
 
 /// The dry run of a date write: the photos, the date each is suggested
@@ -200,6 +204,8 @@ pub fn dialog(app: &mut ShoeboxApp, ctx: &egui::Context) {
     let typed = parse_typed(&set.text);
     let mut keep = true;
     let mut go = false;
+    // The dates the dry run would write (only those that change a date).
+    let mut go_dates: Option<Vec<(PathBuf, SidecarDate)>> = None;
     egui::Modal::new(egui::Id::unique("set-date")).show(ctx, |ui| {
         ui.set_width(620.0);
         ui.heading(format!("Set date of {}", plural(set.photos.len(), "photo")));
@@ -246,58 +252,73 @@ pub fn dialog(app: &mut ShoeboxApp, ctx: &egui::Context) {
             );
         }
         ui.add_space(6.0);
-        let mut writes = 0;
+        // Each photo's row: worked out first, so the table only draws the
+        // rows in view (Accept all sure ones can list thousands).
+        let rows: Vec<(String, String, Option<SidecarDate>, RichText)> = set
+            .photos
+            .iter()
+            .enumerate()
+            .map(|(k, path)| {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let Some(&i) = by_path.get(path.as_path()) else {
+                    return (name, "gone".into(), None, RichText::new(""));
+                };
+                let p = &app.catalog.photos[i];
+                let date = date_for(&set, k, typed.as_ref());
+                let (write, after) = match &date {
+                    _ if app.catalog.is_reference(i) => {
+                        (None, RichText::new("left out: a reference folder").weak())
+                    }
+                    Some(d)
+                        if d.precision != Precision::Moment
+                            && p.meta.exif.capture_time.is_some()
+                            && p.meta.sidecar_date().is_none() =>
+                    {
+                        (None, RichText::new("keeps its own date").weak())
+                    }
+                    Some(d) => (
+                        Some(d.clone()),
+                        RichText::new(match d.precision {
+                            Precision::Moment => date_text(d),
+                            _ => format!("{} (approximate)", date_text(d)),
+                        }),
+                    ),
+                    None => (None, RichText::new("—").weak()),
+                };
+                (name, meta_date_text(&p.meta), write, after)
+            })
+            .collect();
+        let writes = rows.iter().filter(|r| r.2.is_some()).count();
+        let row_h = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
+        let cols = [260.0, 190.0];
+        ui.horizontal(|ui| {
+            for (w, h) in cols.iter().zip(["Photo", "Now"]) {
+                ui.add_sized([*w, row_h], egui::Label::new(RichText::new(h).strong()));
+            }
+            ui.label(RichText::new("After").strong());
+        });
         egui::ScrollArea::vertical()
             .max_height(320.0)
             .auto_shrink([false, true])
-            .show(ui, |ui| {
-                egui::Grid::new("set-date-rows")
-                    .num_columns(3)
-                    .striped(true)
-                    .spacing(vec2(12.0, 3.0))
-                    .show(ui, |ui| {
-                        ui.label(RichText::new("Photo").strong());
-                        ui.label(RichText::new("Now").strong());
-                        ui.label(RichText::new("After").strong());
-                        ui.end_row();
-                        for (k, path) in set.photos.iter().enumerate() {
-                            let date = date_for(&set, k, typed.as_ref());
-                            let name = path
-                                .file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_default();
-                            ui.label(name);
-                            let Some(&i) = by_path.get(path.as_path()) else {
-                                ui.weak("gone");
-                                ui.label("");
-                                ui.end_row();
-                                continue;
-                            };
-                            let p = &app.catalog.photos[i];
-                            ui.label(meta_date_text(&p.meta));
-                            let after = if app.catalog.is_reference(i) {
-                                RichText::new("left out: a reference folder").weak()
-                            } else if let Some(d) = &date {
-                                if d.precision != Precision::Moment
-                                    && p.meta.exif.capture_time.is_some()
-                                    && p.meta.sidecar_date().is_none()
-                                {
-                                    RichText::new("keeps its own date").weak()
-                                } else {
-                                    writes += 1;
-                                    RichText::new(match d.precision {
-                                        Precision::Moment => date_text(d),
-                                        _ => format!("{} (approximate)", date_text(d)),
-                                    })
-                                }
-                            } else {
-                                RichText::new("—").weak()
-                            };
-                            ui.label(after);
-                            ui.end_row();
-                        }
+            .show_rows(ui, row_h, rows.len(), |ui, range| {
+                for (name, now, _, after) in &rows[range] {
+                    ui.horizontal(|ui| {
+                        ui.add_sized([cols[0], row_h], egui::Label::new(name.as_str()).truncate());
+                        ui.add_sized([cols[1], row_h], egui::Label::new(now.as_str()).truncate());
+                        ui.label(after.clone());
                     });
+                }
             });
+        let chosen: Vec<(PathBuf, SidecarDate)> = set
+            .photos
+            .iter()
+            .zip(&rows)
+            .filter_map(|(p, r)| Some((p.clone(), r.2.clone()?)))
+            .collect();
+        go_dates = Some(chosen);
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             let label = format!("Set {}", plural(writes, "date"));
@@ -313,12 +334,7 @@ pub fn dialog(app: &mut ShoeboxApp, ctx: &egui::Context) {
         });
     });
     if go {
-        let dates: Vec<(PathBuf, SidecarDate)> = set
-            .photos
-            .iter()
-            .enumerate()
-            .filter_map(|(k, p)| Some((p.clone(), date_for(&set, k, typed.as_ref())?)))
-            .collect();
+        let dates = go_dates.unwrap_or_default();
         let label = format!("Set date of {}", plural(dates.len(), "photo"));
         app.command(LibraryCommand::SetDates { dates, label });
     } else if keep {
@@ -627,6 +643,60 @@ fn duplicates_note(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     });
 }
 
+/// Every photo (not in a skipped group) whose suggestion is sure, with it.
+fn sure_ones(view: &Grouped, skipped: &HashSet<String>) -> Vec<(PathBuf, SidecarDate)> {
+    view.groups
+        .iter()
+        .filter(|g| !skipped.contains(&g.key))
+        .flat_map(|g| g.photos.iter().zip(&g.best))
+        .filter_map(|(p, b)| {
+            let b = b.as_ref().filter(|b| b.confidence == Confidence::High)?;
+            Some((p.clone(), b.date.clone()))
+        })
+        .collect()
+}
+
+/// Photos dated in `_undated/`: offer to move them where the import
+/// template puts them (a move like any other: its dry run, one batch).
+fn file_note(app: &mut ShoeboxApp, ui: &mut egui::Ui, view: &Grouped) {
+    if view.filable.is_empty() {
+        return;
+    }
+    ui.add_space(4.0);
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let mut text = format!(
+            "{} in _undated/ {} a date now and can go where the import template puts {} \
+             (an exact date by the whole template; a day into its folder, keeping the name).",
+            plural(view.filable.len(), "photo"),
+            if view.filable.len() == 1 {
+                "has"
+            } else {
+                "have"
+            },
+            if view.filable.len() == 1 {
+                "it"
+            } else {
+                "them"
+            }
+        );
+        if view.approximate > 0 {
+            text.push_str(&format!(
+                " {} with just a month or year stay.",
+                plural(view.approximate, "photo")
+            ));
+        }
+        ui.add(egui::Label::new(text).wrap());
+        if ui.button("Move them…").clicked() {
+            let template = app.settings.import_template().to_owned();
+            app.request_org(crate::jobs::OrgRequest::FileDated {
+                photos: view.filable.clone(),
+                template,
+            });
+        }
+    });
+}
+
 /// Forget the clues found and look again.
 fn look_again(app: &mut ShoeboxApp) {
     app.dates.clues.clear();
@@ -736,6 +806,25 @@ fn clue_text(c: &Clue) -> String {
     format!("{d} · {}", confidence_text(c.confidence))
 }
 
+/// Photos in an `_undated` folder with a date now: to the day or moment,
+/// or (`approximate`) just a month or year. Not in reference folders.
+fn dated_in_undated(app: &ShoeboxApp, approximate: bool) -> Vec<PathBuf> {
+    let c = &app.catalog;
+    (0..c.photos.len())
+        .filter(|&i| {
+            let p = &c.photos[i];
+            p.meta.exif.capture_time.is_some()
+                && !c.is_reference(i)
+                && Path::new(&p.rel)
+                    .components()
+                    .next()
+                    .is_some_and(|f| f.as_os_str() == "_undated")
+                && matches!(p.meta.precision(), Precision::Month | Precision::Year) == approximate
+        })
+        .map(|i| c.photos[i].path.clone())
+        .collect()
+}
+
 /// The groups and counts, made again when the clues or the catalog change.
 fn grouped(app: &mut ShoeboxApp) -> Grouped {
     let catalog = std::sync::Arc::as_ptr(&app.catalog) as usize;
@@ -756,6 +845,8 @@ fn grouped(app: &mut ShoeboxApp) -> Grouped {
                         photos[i].meta.exif.capture_time.is_none() && app.catalog.is_reference(i)
                     })
                     .count(),
+                filable: dated_in_undated(app, false),
+                approximate: dated_in_undated(app, true).len(),
             }
         }
     }
@@ -811,6 +902,27 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
          dates them all. Nothing is written without the dry run.",
     );
     duplicates_note(app, ui);
+    file_note(app, ui, &view);
+    let sure = sure_ones(&view, &app.dates.skipped);
+    if !sure.is_empty() {
+        ui.add_space(4.0);
+        if ui
+            .button(format!(
+                "Accept all sure ones ({})…",
+                plural(sure.len(), "photo")
+            ))
+            .on_hover_text(
+                "Every photo whose suggestion is sure, each by its own, after the dry run",
+            )
+            .clicked()
+        {
+            app.dates.set = Some(SetDate {
+                suggested: sure.iter().map(|(_, d)| Some(d.clone())).collect(),
+                photos: sure.into_iter().map(|(p, _)| p).collect(),
+                text: String::new(),
+            });
+        }
+    }
     ui.separator();
     if view.undated == 0 {
         ui.add_space(20.0);

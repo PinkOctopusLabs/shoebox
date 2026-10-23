@@ -112,60 +112,111 @@ pub fn plan_rename(c: &Catalog, stacks: &[usize], template: &Template) -> Result
             out.undated.push(primary.path.clone());
             continue;
         }
-        let base = primary
+        groups.push(rendered(c, &m, k, template, in_place));
+    }
+    out.plan = fileops::plan_group_moves(&groups)?;
+    Ok(out)
+}
+
+/// What filing dated photos out of `_undated/` leaves alone.
+#[derive(Debug, Default)]
+pub struct FilePlan {
+    pub plan: Plan,
+    /// Stacks with only a month or year: no day folder to go to.
+    pub approximate: Vec<PathBuf>,
+}
+
+/// File stacks dated since they went to `_undated/` (SPEC "Dates", Find
+/// dates) where `template` (the import template) puts them: by the whole
+/// template when the date is exact; into its folders, keeping their names,
+/// when only the day is known (the template's time would be made up);
+/// left alone with just a month or year, or no date. A template without
+/// folders files nothing.
+pub fn plan_file_dated(c: &Catalog, stacks: &[usize], template: &str) -> Result<FilePlan> {
+    let mut out = FilePlan::default();
+    let Some((dir, _)) = template.rsplit_once('/') else {
+        return Ok(out);
+    };
+    let exact = Template::parse(template)?;
+    let day = Template::parse(&format!("{dir}/{{name}}.{{ext}}"))?;
+    let mut groups = Vec::new();
+    for (k, m) in members(c, stacks)?.into_iter().enumerate() {
+        let primary = &c.photos[m[0]];
+        if primary.meta.exif.capture_time.is_none() {
+            continue;
+        }
+        match primary.meta.precision() {
+            crate::sidecar::Precision::Moment => groups.push(rendered(c, &m, k, &exact, false)),
+            crate::sidecar::Precision::Day => groups.push(rendered(c, &m, k, &day, false)),
+            _ => out.approximate.push(primary.path.clone()),
+        }
+    }
+    out.plan = fileops::plan_group_moves(&groups)?;
+    Ok(out)
+}
+
+/// A stack's files (`m`, primary first) renamed by `template` from the
+/// primary's metadata, each keeping its extension and `-N` suffix: in its
+/// folder (`in_place`) or from its root. `k`: its place (`{seq}`).
+fn rendered(
+    c: &Catalog,
+    m: &[usize],
+    k: usize,
+    template: &Template,
+    in_place: bool,
+) -> Vec<(PathBuf, PathBuf)> {
+    let primary = &c.photos[m[0]];
+    let base = primary
+        .path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut g = Vec::new();
+    for &i in m {
+        let p = &c.photos[i];
+        let fields = Fields {
+            capture_time: primary.meta.exif.capture_time.clone(),
+            subsec: primary.meta.exif.subsec.clone(),
+            file_name: p
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            camera: primary.meta.exif.model.clone(),
+            width: primary.meta.width,
+            height: primary.meta.height,
+            seq: k + 1,
+        };
+        let rendered = template.render(&fields);
+        let stem = p
             .path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let mut g = Vec::new();
-        for i in m {
-            let p = &c.photos[i];
-            let fields = Fields {
-                capture_time: primary.meta.exif.capture_time.clone(),
-                subsec: primary.meta.exif.subsec.clone(),
-                file_name: p
-                    .path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                camera: primary.meta.exif.model.clone(),
-                width: primary.meta.width,
-                height: primary.meta.height,
-                seq: k + 1,
+        let suffix = variant_suffix(&stem, &base);
+        let rendered = if suffix.is_empty() {
+            rendered
+        } else {
+            let name = rendered
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            let new = match name.rsplit_once('.') {
+                Some((s, e)) => format!("{s}{suffix}.{e}"),
+                None => format!("{name}{suffix}"),
             };
-            let rendered = template.render(&fields);
-            let stem = p
-                .path
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let suffix = variant_suffix(&stem, &base);
-            let rendered = if suffix.is_empty() {
-                rendered
-            } else {
-                let name = rendered
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
-                let new = match name.rsplit_once('.') {
-                    Some((s, e)) => format!("{s}{suffix}.{e}"),
-                    None => format!("{name}{suffix}"),
-                };
-                rendered.with_file_name(new)
-            };
-            let dst = if in_place {
-                p.path
-                    .with_file_name(rendered.file_name().unwrap_or_default())
-            } else {
-                c.roots[p.root].path.join(rendered)
-            };
-            g.push((p.path.clone(), dst));
-        }
-        groups.push(g);
+            rendered.with_file_name(new)
+        };
+        let dst = if in_place {
+            p.path
+                .with_file_name(rendered.file_name().unwrap_or_default())
+        } else {
+            c.roots[p.root].path.join(rendered)
+        };
+        g.push((p.path.clone(), dst));
     }
-    out.plan = fileops::plan_group_moves(&groups)?;
-    Ok(out)
+    g
 }
 
 /// After moves, the app's own files that name moved files (collections,

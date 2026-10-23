@@ -4562,3 +4562,26 @@ SPEC "Dates". The picture's clues.
   `vision::tests::text_is_read_from_the_picture` (macOS); UI
   `find_dates_reads_text_in_the_picture` (snapshot `find-dates-text`).
 
+## Dates: Find dates, Phase 4 (2026-10-24)
+SPEC "Dates".
+- **Accept all sure ones (N photos)…** under the view's heading: every
+  photo (not in a skipped group) whose suggestion is sure, each with its
+  own date, into the same dry run as Set date…. That dry run now works out
+  its rows first and draws only those in view (`show_rows`), so thousands
+  are fine, and Set writes only the rows that change a date (not "keeps
+  its own date" or reference ones).
+- **Moving dated photos out of `_undated/`** (`organise::plan_file_dated`,
+  `OrgRequest::FileDated`, through the move dry run and one batch, ⌘Z as
+  for any move): photos whose first folder is `_undated` and that have a
+  date now, by the import template. An exact date gets the whole template
+  (the name an import would have given it). A day goes into the
+  template's folders (the template's directory part) keeping its own name,
+  since the template's time would be made up (`{name}.{ext}`). A month or
+  year stays (no day folder to go to); the offer and the dry run say how
+  many. A template without folders files nothing. Sidecars go with their
+  files, so the dates go too. Rename's rendering is shared
+  (`organise::rendered`).
+- Tests: `dated_photos_leave_undated_by_the_import_template` (core);
+  UI `find_dates_accepts_the_sure_ones_and_files_them` (snapshot
+  `find-dates-file`).
+

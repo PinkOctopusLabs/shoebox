@@ -7254,3 +7254,71 @@ fn find_dates_reads_text_in_the_picture() {
             .is_some()
     );
 }
+
+/// Find dates, Phase 4: Accept all sure ones takes only the sure
+/// suggestions, after the dry run; then the dated photo in `_undated/` is
+/// offered a move where the import template puts it, as a move like any
+/// other.
+#[test]
+fn find_dates_accepts_the_sure_ones_and_files_them() {
+    let t = tempfile::tempdir().unwrap();
+    let base = t.path().canonicalize().unwrap();
+    let lib = base.join("lib");
+    let undated = lib.join("_undated/320x240");
+    std::fs::create_dir_all(&undated).unwrap();
+    let jpg = |seed| shoebox_fixtures::jpeg(&shoebox_fixtures::scene(seed, 320, 240), 85).unwrap();
+    // Sure: the camera's name. Likely only: a chat app's day.
+    std::fs::write(undated.join("IMG_20190312_101530.jpg"), jpg(1)).unwrap();
+    std::fs::write(undated.join("IMG-20180701-WA0001.jpg"), jpg(2)).unwrap();
+    let p = paths(&base, std::slice::from_ref(&lib));
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+
+    h.get_by_label("Find dates").click();
+    wait_for(&mut h, Duration::from_secs(60), "clues", |a| {
+        shoebox_app::views::dates::looked_at(a) == 2
+            && shoebox_app::views::dates::progress(a).is_none()
+    });
+    h.run_steps(3);
+    h.get_by_label("Accept all sure ones (1 photo)…").click();
+    h.run_steps(3);
+    h.get_by_label("Set 1 date").click();
+    wait_for(&mut h, Duration::from_secs(10), "dated", |a| {
+        a.capture_time_of("IMG_20190312_101530.jpg").is_some()
+    });
+    assert_eq!(
+        h.state().capture_time_of("IMG-20180701-WA0001.jpg"),
+        None,
+        "not sure"
+    );
+    settle(&mut h, Duration::from_secs(30));
+    h.run_steps(3);
+    assert!(
+        h.query_by_label_contains("1 photo in _undated/ has a date now")
+            .is_some()
+    );
+    snapshot(&mut h, "find-dates-file");
+
+    h.get_by_label("Move them…").click();
+    // The dry run comes back from the library thread.
+    let start = Instant::now();
+    while h.query_by_label("Move 2 files").is_none() {
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(start.elapsed() < Duration::from_secs(30), "no dry run");
+    }
+    h.get_by_label("Move 2 files").click();
+    let filed = lib.join("2019/2019-03-12/20190312-101530.jpg");
+    let start = Instant::now();
+    while !filed.exists() {
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(start.elapsed() < Duration::from_secs(30), "not filed");
+    }
+    assert!(
+        lib.join("2019/2019-03-12/20190312-101530.jpg.xmp").exists(),
+        "its date went with it"
+    );
+    assert!(!undated.join("IMG_20190312_101530.jpg").exists());
+    assert!(undated.join("IMG-20180701-WA0001.jpg").exists());
+}

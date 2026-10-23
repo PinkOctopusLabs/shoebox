@@ -427,3 +427,84 @@ fn dates_set_here_survive_rescans_and_undo() {
         .unwrap();
     assert_eq!(time(&c, &rel), before);
 }
+
+/// Photos dated in `_undated/` filed by the import template: the whole
+/// template for an exact date, the day's folder (their own names) for a
+/// day, nothing for a month.
+#[test]
+fn dated_photos_leave_undated_by_the_import_template() {
+    use shoebox_core::fileops::{FileOps, Journal};
+    use shoebox_core::sidecar::SidecarDate;
+
+    let t = tempfile::tempdir().unwrap();
+    let lib = t.path().canonicalize().unwrap().join("lib");
+    let dir = lib.join("_undated/64x48");
+    std::fs::create_dir_all(&dir).unwrap();
+    for (k, name) in ["a.jpg", "b.jpg", "c.jpg"].iter().enumerate() {
+        let img = shoebox_fixtures::jpeg(&shoebox_fixtures::scene(k as u64, 64, 48), 85).unwrap();
+        std::fs::write(dir.join(name), img).unwrap();
+    }
+    let mut cache = Cache::open_in_memory().unwrap();
+    let roots = vec![Root::new(&lib, Role::Scan).unwrap()];
+    let fo = FileOps::new(Journal::open(&t.path().join("j.sqlite")).unwrap(), vec![]);
+    let (mut c, _) = Catalog::refresh(&mut cache, roots, &|_, _| {}).unwrap();
+    let at = |c: &Catalog, n: &str| c.photos.iter().position(|p| p.rel.ends_with(n)).unwrap();
+    let dates = vec![
+        (
+            at(&c, "a.jpg"),
+            SidecarDate::moment("2019:03:12 10:15:30".into(), None, None),
+        ),
+        (
+            at(&c, "b.jpg"),
+            SidecarDate::approximate(2018, Some(7), Some(1)).unwrap(),
+        ),
+        (
+            at(&c, "c.jpg"),
+            SidecarDate::approximate(2017, Some(5), None).unwrap(),
+        ),
+    ];
+    c.set_dates(&dates, &fo, &cache, "Set date").unwrap();
+    let stacks: Vec<usize> = ["a.jpg", "b.jpg", "c.jpg"]
+        .iter()
+        .map(|n| c.stack_of[at(&c, n)])
+        .collect();
+    let f = shoebox_core::organise::plan_file_dated(
+        &c,
+        &stacks,
+        shoebox_core::template::DEFAULT_IMPORT,
+    )
+    .unwrap();
+    let mut moves: Vec<(String, String)> = f
+        .plan
+        .moves
+        .iter()
+        .map(|m| {
+            let rel = |p: &std::path::Path| p.strip_prefix(&lib).unwrap().display().to_string();
+            (rel(&m.src), rel(&m.dst))
+        })
+        .collect();
+    moves.sort();
+    assert_eq!(
+        moves,
+        vec![
+            (
+                "_undated/64x48/a.jpg".into(),
+                "2019/2019-03-12/20190312-101530.jpg".into()
+            ),
+            // Its sidecar, with the date, goes with it.
+            (
+                "_undated/64x48/a.jpg.xmp".into(),
+                "2019/2019-03-12/20190312-101530.jpg.xmp".into()
+            ),
+            (
+                "_undated/64x48/b.jpg".into(),
+                "2018/2018-07-01/b.jpg".into()
+            ),
+            (
+                "_undated/64x48/b.jpg.xmp".into(),
+                "2018/2018-07-01/b.jpg.xmp".into()
+            ),
+        ]
+    );
+    assert_eq!(f.approximate, vec![dir.join("c.jpg")]);
+}

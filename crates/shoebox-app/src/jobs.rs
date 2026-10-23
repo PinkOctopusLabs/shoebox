@@ -664,6 +664,12 @@ pub enum OrgRequest {
     Trash {
         photos: Vec<PathBuf>,
     },
+    /// File photos dated since they went to `_undated/` where the import
+    /// `template` puts them (Find dates).
+    FileDated {
+        photos: Vec<PathBuf>,
+        template: String,
+    },
 }
 
 impl OrgRequest {
@@ -672,6 +678,7 @@ impl OrgRequest {
             OrgRequest::MoveTo { photos, .. }
             | OrgRequest::Reject { photos }
             | OrgRequest::Rename { photos, .. }
+            | OrgRequest::FileDated { photos, .. }
             | OrgRequest::Trash { photos } => photos,
         }
     }
@@ -679,7 +686,7 @@ impl OrgRequest {
     /// "Move", "Rename", "Move to Trash".
     pub fn verb(&self) -> &'static str {
         match self {
-            OrgRequest::MoveTo { .. } => "Move",
+            OrgRequest::MoveTo { .. } | OrgRequest::FileDated { .. } => "Move",
             OrgRequest::Reject { .. } => "Move to _rejected",
             OrgRequest::Rename { .. } => "Rename",
             OrgRequest::Trash { .. } => "Move to Trash",
@@ -692,6 +699,7 @@ impl OrgRequest {
             OrgRequest::Reject { .. } => "move rejects to _rejected".to_owned(),
             OrgRequest::Rename { template, .. } => format!("rename with {template}"),
             OrgRequest::Trash { .. } => "move to Trash".to_owned(),
+            OrgRequest::FileDated { .. } => "file dated photos out of _undated".to_owned(),
         }
     }
 }
@@ -2571,6 +2579,17 @@ fn plan_organise(
                 ));
             }
             r.plan.moves
+        }
+        OrgRequest::FileDated { template, .. } => {
+            let f =
+                organise::plan_file_dated(catalog, &stacks, template).map_err(|e| e.to_string())?;
+            if !f.approximate.is_empty() {
+                notes.push(format!(
+                    "{} dated only by month or year stay where they are (no day folder to go to)",
+                    f.approximate.len()
+                ));
+            }
+            f.plan.moves
         }
         OrgRequest::Trash { .. } => organise::trash_files(catalog, &stacks)
             .map_err(|e| e.to_string())?

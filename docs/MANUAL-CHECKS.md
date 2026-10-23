@@ -175,8 +175,12 @@ APFS clone, in folders by shoot.
   on, scans with a date printed on them (a film camera's orange imprint)
   are read; look-alike and people hints look sensible and are never what
   Accept takes; scene hints (a Christmas tree) show beside their groups.
-  Note clues that were wrong or missing, and how long the picture pass
-  takes for the library's undated photos.
+  Accept all sure ones lists only sure suggestions (spot-check a few) and
+  writes them as one step; Move them… then lists the `_undated/` photos
+  with their new places (exact dates named by the template, days in their
+  day folder with their own names), and ⌘Z puts them back. Note clues that
+  were wrong or missing, and how long the picture pass takes for the
+  library's undated photos.
 
 ## 2. Raw decode and colour
 
