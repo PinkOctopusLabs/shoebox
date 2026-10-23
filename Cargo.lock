@@ -6246,7 +6246,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "shoebox-app"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "blake3",
@@ -6281,7 +6281,7 @@ dependencies = [
 
 [[package]]
 name = "shoebox-cli"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "blake3",
@@ -6297,7 +6297,7 @@ dependencies = [
 
 [[package]]
 name = "shoebox-core"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "blake3",
@@ -6324,7 +6324,7 @@ dependencies = [
 
 [[package]]
 name = "shoebox-decode"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "criterion",
  "image",
@@ -6346,7 +6346,7 @@ dependencies = [
 
 [[package]]
 name = "shoebox-develop"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "avif-serialize",
  "blake3",
@@ -6379,7 +6379,7 @@ dependencies = [
 
 [[package]]
 name = "shoebox-fixtures"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "image",
@@ -6387,7 +6387,7 @@ dependencies = [
 
 [[package]]
 name = "shoebox-ml"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -6415,7 +6415,7 @@ dependencies = [
 
 [[package]]
 name = "shoebox-photos"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "blake3",
