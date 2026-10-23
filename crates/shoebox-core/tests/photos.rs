@@ -695,3 +695,62 @@ fn listing_without_files_syncs_the_same() {
     let (p, _) = lazy.plan();
     assert!(p.new.is_empty() && p.updated.is_empty(), "{p:?}");
 }
+
+/// A photo in several albums in Photos (albums hold references, not
+/// copies) is copied once, and is in each album's event: Shoebox's events
+/// are marks on the photo too. Albums as keywords likewise.
+#[test]
+fn a_photo_in_several_albums_is_one_copy_in_several_events() {
+    let mut w = World::new();
+    let s1 = shot("2024:06:03 14:15:02", "120");
+    let b1 = photo(1, &s1);
+    let mut a1 = asset(
+        1,
+        "2024-06-03T05:15:02.120Z",
+        vec![res(ResourceKind::Original, "IMG_0001.JPG", b1.len())],
+    );
+    a1.albums = vec!["A1".into(), "A2".into(), "A3".into()];
+    w.source.add(a1, vec![b1]);
+    for (id, name, folders) in [
+        ("A1", "Japan", vec!["Trips".to_owned()]),
+        ("A2", "Best of 2024", vec![]),
+        ("A3", "Family", vec![]),
+    ] {
+        w.source.add_album(Album {
+            id: id.into(),
+            name: name.into(),
+            folders,
+        });
+    }
+    let lib = w.lib.clone();
+    let (_, report) = w.sync(&lib);
+    assert_eq!((report.copied, report.files), (1, 1));
+    let jpgs: Vec<String> = files(&lib)
+        .into_iter()
+        .filter(|f| f.ends_with(".jpg"))
+        .collect();
+    assert_eq!(
+        jpgs,
+        ["2024/2024-06-03/20240603-141502-120.jpg"],
+        "one copy"
+    );
+    let catalog = w.catalog();
+    let p = catalog
+        .photos
+        .iter()
+        .find(|p| p.rel.ends_with(".jpg"))
+        .unwrap();
+    for k in ["Events|Trips|Japan", "Events|Best of 2024", "Events|Family"] {
+        assert!(
+            p.marks.keywords.iter().any(|x| x == k),
+            "{k} in {:?}",
+            p.marks.keywords
+        );
+    }
+    let evs = events::load(std::slice::from_ref(&lib));
+    let members = events::memberships(&catalog, &evs);
+    for name in ["Japan", "Best of 2024", "Family"] {
+        let id = &evs.iter().find(|e| e.name == name).unwrap().id;
+        assert_eq!(members.get(id).map(|m| m.len()), Some(1), "{name}");
+    }
+}
