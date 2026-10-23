@@ -12,7 +12,8 @@ use std::sync::atomic::AtomicBool;
 
 use shoebox_core::photos::model::{Burst, EditedBy};
 use shoebox_core::photos::{
-    Access, Album, Asset, AssetId, Library, Media, PhotoSource, PushRequest, Resource, ResourceKind,
+    Access, Album, Asset, AssetId, Library, Listing, Media, PhotoSource, PushRequest, Resource,
+    ResourceKind,
 };
 use shoebox_core::{CoreError, Result};
 
@@ -212,20 +213,58 @@ impl PhotoSource for PhotoKitSource {
         }
     }
 
-    fn fetch(&self) -> Result<Library> {
+    fn fetch_with(
+        &self,
+        progress: &(dyn Fn(Listing) + Sync),
+        stop: &AtomicBool,
+    ) -> Result<Library> {
         #[cfg(target_os = "macos")]
         {
             if !matches!(self.access(), Access::Full | Access::Limited) {
                 return Err(CoreError::Photos("no access to Photos".into()));
             }
-            let raw = sys::assets(&|_, _| {});
-            let albums = sys::albums();
+            // Each stage timed in the log, to see where a large library's
+            // time goes.
+            let t = std::time::Instant::now();
+            let raw = sys::assets(
+                &|done, total| progress(Listing::Photos { done, total }),
+                stop,
+            )
+            .ok_or(CoreError::Cancelled)?;
+            tracing::info!(
+                "photos: listed {} assets in {:.1} s",
+                raw.len(),
+                t.elapsed().as_secs_f64()
+            );
+            let t = std::time::Instant::now();
+            let albums = sys::albums(
+                &|done, total| progress(Listing::Albums { done, total }),
+                stop,
+            )
+            .ok_or(CoreError::Cancelled)?;
+            tracing::info!(
+                "photos: listed {} albums in {:.1} s",
+                albums.len(),
+                t.elapsed().as_secs_f64()
+            );
+            let t = std::time::Instant::now();
             let locals: Vec<String> = raw.iter().map(|a| a.local.clone()).collect();
-            let cloud = sys::cloud_ids(&locals);
+            let cloud = sys::cloud_ids(
+                &locals,
+                &|done, total| progress(Listing::CloudIds { done, total }),
+                stop,
+            )
+            .ok_or(CoreError::Cancelled)?;
+            tracing::info!(
+                "photos: matched {} cloud ids in {:.1} s",
+                cloud.len(),
+                t.elapsed().as_secs_f64()
+            );
             Ok(library(raw, albums, &cloud))
         }
         #[cfg(not(target_os = "macos"))]
         {
+            let _ = (progress, stop);
             Err(CoreError::Photos("Photos needs macOS".into()))
         }
     }
@@ -270,7 +309,12 @@ impl PhotoSource for PhotoKitSource {
                 }
                 None => {
                     let local = sys::create(&req.file, album).map_err(CoreError::Photos)?;
-                    let cloud = sys::cloud_ids(std::slice::from_ref(&local)).remove(&local);
+                    let cloud = sys::cloud_ids(
+                        std::slice::from_ref(&local),
+                        &|_, _| {},
+                        &AtomicBool::new(false),
+                    )
+                    .and_then(|mut m| m.remove(&local));
                     Ok(AssetId { cloud, local })
                 }
             }

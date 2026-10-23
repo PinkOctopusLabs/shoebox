@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
-use super::model::{Access, Asset, AssetId, Library, PushRequest, ResourceKind};
+use super::model::{Access, Asset, AssetId, Library, Listing, PushRequest, ResourceKind};
 use crate::error::Result;
 
 pub trait PhotoSource: Send + Sync {
@@ -14,8 +14,16 @@ pub trait PhotoSource: Send + Sync {
     /// Ask the person for access if they haven't been asked; the answer.
     fn request_access(&self) -> Access;
 
-    /// Every asset and album (metadata only: quick, downloads nothing).
-    fn fetch(&self) -> Result<Library>;
+    /// Every asset and album (metadata only; downloads nothing, but a large
+    /// library takes a while). `progress` hears how far it's got; setting
+    /// `stop` ends it with [`crate::CoreError::Cancelled`].
+    fn fetch_with(&self, progress: &(dyn Fn(Listing) + Sync), stop: &AtomicBool)
+    -> Result<Library>;
+
+    /// [`PhotoSource::fetch_with`], unwatched.
+    fn fetch(&self) -> Result<Library> {
+        self.fetch_with(&|_| {}, &AtomicBool::new(false))
+    }
 
     /// Write one of an asset's files to `to` (a new file in the cache),
     /// downloading it from iCloud if it isn't on this Mac. `progress` gets

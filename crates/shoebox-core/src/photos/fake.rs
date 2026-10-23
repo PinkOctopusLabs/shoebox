@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::model::{
-    Access, Asset, AssetId, EditedBy, Library, Media, PushRequest, Resource, ResourceKind,
+    Access, Asset, AssetId, EditedBy, Library, Listing, Media, PushRequest, Resource, ResourceKind,
 };
 use super::source::PhotoSource;
 use crate::error::{CoreError, Result, io};
@@ -153,13 +153,26 @@ impl PhotoSource for FakeSource {
         a
     }
 
-    fn fetch(&self) -> Result<Library> {
+    fn fetch_with(
+        &self,
+        progress: &(dyn Fn(Listing) + Sync),
+        stop: &AtomicBool,
+    ) -> Result<Library> {
+        if stop.load(Ordering::Relaxed) {
+            return Err(CoreError::Cancelled);
+        }
         let s = self
             .state
             .lock()
             .map_err(|_| CoreError::Photos("fake library poisoned".into()))?;
         match s.access {
-            Some(Access::Full | Access::Limited) => Ok(s.library.clone()),
+            Some(Access::Full | Access::Limited) => {
+                let (n, a) = (s.library.assets.len(), s.library.albums.len());
+                progress(Listing::Photos { done: n, total: n });
+                progress(Listing::Albums { done: a, total: a });
+                progress(Listing::CloudIds { done: n, total: n });
+                Ok(s.library.clone())
+            }
             _ => Err(CoreError::Photos("no access".into())),
         }
     }

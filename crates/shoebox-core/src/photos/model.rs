@@ -177,6 +177,17 @@ pub enum Access {
     Denied,
 }
 
+/// How far listing Photos has got: each stage's done and total.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Listing {
+    /// Reading each photo's details.
+    Photos { done: usize, total: usize },
+    /// Reading the albums and what's in them.
+    Albums { done: usize, total: usize },
+    /// Matching photos to their iCloud ids.
+    CloudIds { done: usize, total: usize },
+}
+
 /// Everything Photos lists (metadata only).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Library {

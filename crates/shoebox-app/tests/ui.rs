@@ -6613,6 +6613,21 @@ fn import_from_icloud_photos() {
         Some((3, 0)),
         "the hidden one left out"
     );
+    // A large library's listing shows its stage and progress, with Stop.
+    h.state_mut()
+        .show_listing(Some(shoebox_core::photos::Listing::Photos {
+            done: 12_000,
+            total: 28_431,
+        }));
+    h.run_steps(2);
+    assert!(
+        h.query_by_label_contains("Reading your photos: 12,000 of 28,431")
+            .is_some()
+    );
+    assert!(h.query_by_label("Stop").is_some());
+    snapshot(&mut h, "icloud-0-listing");
+    h.state_mut().show_listing(None);
+    h.run_steps(2);
     h.run_steps(2);
     assert!(
         h.query_by_label_contains("hidden in Photos, left out")

@@ -22,6 +22,6 @@ pub mod source;
 pub mod sync;
 
 pub use model::{
-    Access, Album, Asset, AssetId, Library, Media, PushRequest, Resource, ResourceKind,
+    Access, Album, Asset, AssetId, Library, Listing, Media, PushRequest, Resource, ResourceKind,
 };
 pub use source::PhotoSource;

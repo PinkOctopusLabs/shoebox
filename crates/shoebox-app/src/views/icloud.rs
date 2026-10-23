@@ -27,6 +27,8 @@ pub struct State {
     pub on: bool,
     pub access: Option<Access>,
     pub listing: bool,
+    /// How far listing has got.
+    pub listed: Option<shoebox_core::photos::Listing>,
     pub planned: Option<Arc<Planned>>,
     /// The plan's albums, as the person edits them.
     pub albums: Vec<AlbumRow>,
@@ -141,9 +143,18 @@ pub fn tick(app: &mut ShoeboxApp) {
                     st.listing = false;
                 }
             }
-            Event::Listing => st.listing = true,
+            Event::Listing => {
+                st.listing = true;
+                st.listed = None;
+            }
+            Event::ListingProgress(l) => st.listed = Some(l),
+            Event::Stopped => {
+                st.listing = false;
+                st.listed = None;
+            }
             Event::Planned(p) => {
                 st.listing = false;
+                st.listed = None;
                 st.albums = p.plan.albums.clone();
                 st.planned = Some(p);
             }
@@ -238,11 +249,10 @@ pub fn import(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         {
             plan(app);
         }
-        if app.icloud.listing {
-            ui.add(egui::Spinner::new());
-            ui.label("Listing your Photos library…");
-        }
     });
+    if app.icloud.listing {
+        listing(app, ui);
+    }
     access_note(app, ui);
     if let Some(e) = &app.icloud.error {
         ui.colored_label(ui.visuals().warn_fg_color, e);
@@ -282,6 +292,50 @@ pub fn import(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     if let Some((p, started)) = app.icloud.running.clone() {
         progress(app, ui, &p, started);
     }
+}
+
+/// Listing Photos: which stage, how far, and Stop.
+fn listing(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    use shoebox_core::photos::Listing;
+    let (stage, done, total) = match app.icloud.listed {
+        None => ("Opening your Photos library…", 0, 0),
+        Some(Listing::Photos { done, total }) => ("Reading your photos", done, total),
+        Some(Listing::Albums { done, total }) => ("Reading your albums", done, total),
+        Some(Listing::CloudIds { done, total }) => ("Matching photos to iCloud", done, total),
+    };
+    ui.horizontal(|ui| {
+        if total > 0 {
+            ui.add(
+                egui::ProgressBar::new(done as f32 / total as f32)
+                    .desired_width(320.0)
+                    .text(format!(
+                        "{stage}: {} of {}",
+                        thousands(done),
+                        thousands(total)
+                    )),
+            );
+        } else {
+            ui.add(egui::Spinner::new());
+            ui.label(stage);
+        }
+        if ui.button("Stop").clicked() {
+            cancel(app);
+        }
+    });
+    ui.weak("Nothing is downloaded yet: this reads each photo's details, which takes a few minutes for a large library.");
+}
+
+/// 28431 → "28,431".
+fn thousands(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 fn access_note(app: &ShoeboxApp, ui: &mut egui::Ui) {
@@ -580,6 +634,14 @@ fn favourite_name(f: Favourite) -> String {
 }
 
 impl ShoeboxApp {
+    /// Show Import's iCloud Photos source as listing, this far (tests).
+    #[doc(hidden)]
+    pub fn show_listing(&mut self, l: Option<shoebox_core::photos::Listing>) {
+        self.icloud.on = true;
+        self.icloud.listing = l.is_some();
+        self.icloud.listed = l;
+    }
+
     /// A send finished: the Info panel's row asks again.
     pub(crate) fn icloud_sent(&mut self) {
         self.icloud.asked = None;
@@ -603,5 +665,16 @@ impl ShoeboxApp {
     pub fn open_icloud_settings(&mut self) {
         self.open_settings();
         self.settings_ui.tab = crate::views::settings::Tab::Photos;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn thousands() {
+        assert_eq!(super::thousands(0), "0");
+        assert_eq!(super::thousands(999), "999");
+        assert_eq!(super::thousands(28431), "28,431");
+        assert_eq!(super::thousands(1234567), "1,234,567");
     }
 }

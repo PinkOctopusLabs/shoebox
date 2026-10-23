@@ -74,8 +74,12 @@ pub struct Planned {
 
 pub enum Event {
     Access(Access),
-    /// Listing Photos (no counts: PhotoKit gives none until it's done).
+    /// Listing Photos.
     Listing,
+    /// How far listing has got.
+    ListingProgress(shoebox_core::photos::Listing),
+    /// Listing was stopped, as asked.
+    Stopped,
     Planned(Arc<Planned>),
     Progress(Progress),
     Done(Report),
@@ -212,8 +216,22 @@ fn worker(
                     continue;
                 }
                 emit(Event::Listing);
-                let lib = match source.fetch() {
+                // At most ~10 updates a second.
+                let shown = std::sync::Mutex::new(Instant::now() - Duration::from_secs(1));
+                let progress = |l: shoebox_core::photos::Listing| {
+                    if let Ok(mut at) = shown.lock()
+                        && at.elapsed() >= Duration::from_millis(100)
+                    {
+                        *at = Instant::now();
+                        emit(Event::ListingProgress(l));
+                    }
+                };
+                let lib = match source.fetch_with(&progress, stop) {
                     Ok(l) => l,
+                    Err(CoreError::Cancelled) => {
+                        emit(Event::Stopped);
+                        continue;
+                    }
                     Err(e) => {
                         emit(Event::Failed(e.to_string()));
                         continue;

@@ -146,8 +146,9 @@ fn read_asset(a: &PHAsset) -> RawAsset {
 }
 
 /// Every asset, hidden ones and every burst frame included, so Shoebox's
-/// own options decide what's left out. `progress(done, total)`.
-pub fn assets(progress: &dyn Fn(usize, usize)) -> Vec<RawAsset> {
+/// own options decide what's left out. `progress(done, total)`; None if
+/// `stop` was set.
+pub fn assets(progress: &dyn Fn(usize, usize), stop: &AtomicBool) -> Option<Vec<RawAsset>> {
     // SAFETY: fetch options are plain objects; the result is read in place.
     unsafe {
         let opts = PHFetchOptions::new();
@@ -155,18 +156,22 @@ pub fn assets(progress: &dyn Fn(usize, usize)) -> Vec<RawAsset> {
         opts.setIncludeAllBurstAssets(true);
         let found = PHAsset::fetchAssetsWithOptions(Some(&opts));
         let n = found.count();
+        progress(0, n);
         let mut out = Vec::with_capacity(n);
         // Autorelease pools in chunks keep 30,000 assets' objects from
-        // piling up.
-        for start in (0..n).step_by(500) {
+        // piling up; small chunks keep the progress moving.
+        for start in (0..n).step_by(100) {
+            if stop.load(Ordering::Relaxed) {
+                return None;
+            }
             autoreleasepool(|_| {
-                for i in start..(start + 500).min(n) {
+                for i in start..(start + 100).min(n) {
                     out.push(read_asset(&found.objectAtIndex(i)));
                 }
             });
             progress(out.len(), n);
         }
-        out
+        Some(out)
     }
 }
 
@@ -228,7 +233,8 @@ pub fn album_titles() -> Vec<String> {
 }
 
 /// The person's own albums (not smart albums or shared ones).
-pub fn albums() -> Vec<RawAlbum> {
+/// `progress(done, total)`; None if `stop` was set.
+pub fn albums(progress: &dyn Fn(usize, usize), stop: &AtomicBool) -> Option<Vec<RawAlbum>> {
     let mut out = Vec::new();
     // SAFETY: fetches with valid options; results read in place.
     unsafe {
@@ -240,7 +246,13 @@ pub fn albums() -> Vec<RawAlbum> {
         let opts = PHFetchOptions::new();
         opts.setIncludeHiddenAssets(true);
         opts.setIncludeAllBurstAssets(true);
-        for i in 0..found.count() {
+        let n = found.count();
+        progress(0, n);
+        for i in 0..n {
+            if stop.load(Ordering::Relaxed) {
+                return None;
+            }
+            progress(i, n);
             autoreleasepool(|_| {
                 let album = found.objectAtIndex(i);
                 let in_it = PHAsset::fetchAssetsInAssetCollection_options(&album, Some(&opts));
@@ -258,17 +270,27 @@ pub fn albums() -> Vec<RawAlbum> {
                 });
             });
         }
+        progress(n, n);
     }
-    out
+    Some(out)
 }
 
-/// Cloud ids for local ids (those Photos has one for).
-pub fn cloud_ids(locals: &[String]) -> HashMap<String, String> {
+/// Cloud ids for local ids (those Photos has one for). `progress(done,
+/// total)`; None if `stop` was set.
+pub fn cloud_ids(
+    locals: &[String],
+    progress: &dyn Fn(usize, usize),
+    stop: &AtomicBool,
+) -> Option<HashMap<String, String>> {
     let mut out = HashMap::new();
     // SAFETY: arrays of valid strings; the shared library always exists.
     unsafe {
         let lib = PHPhotoLibrary::sharedPhotoLibrary();
-        for chunk in locals.chunks(1000) {
+        progress(0, locals.len());
+        for (k, chunk) in locals.chunks(1000).enumerate() {
+            if stop.load(Ordering::Relaxed) {
+                return None;
+            }
             autoreleasepool(|_| {
                 let ids: Vec<Retained<NSString>> =
                     chunk.iter().map(|s| NSString::from_str(s)).collect();
@@ -285,9 +307,10 @@ pub fn cloud_ids(locals: &[String]) -> HashMap<String, String> {
                     }
                 }
             });
+            progress((k * 1000 + chunk.len()).min(locals.len()), locals.len());
         }
     }
-    out
+    Some(out)
 }
 
 fn error_text(e: &NSError) -> String {

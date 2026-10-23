@@ -4167,3 +4167,15 @@ revert, delete, albums) wait for a test account.
   the records) and `undoing_a_send_is_refused_after_a_change_in_photos`;
   UI `send_to_photos` (the dialog's rows, a rendered JPEG becoming a new
   asset, the Info row, up to date, ⌘Z taking it back out of Photos).
+
+## iCloud Photos: listing progress (2026-10-23)
+First test (a 25–30k photo library): Find photos sat on a spinner for
+minutes. Listing reads every asset's details and files, its albums, then
+its iCloud ids, and said nothing until done. `PhotoSource::fetch_with`
+now reports each stage (`photos::Listing`: photos, albums, iCloud ids,
+done of total; photos in chunks of 100) and stops when asked
+(`CoreError::Cancelled`); `fetch` stays for callers that don't watch. The
+Import screen shows the stage with a progress bar ("Reading your photos:
+12,000 of 28,431") and Stop; the log times each stage
+(`photos: listed N assets in S s`), to find which one to make faster.
+
