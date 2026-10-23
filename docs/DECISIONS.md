@@ -4264,3 +4264,12 @@ details included. Only the clicked file: a selection (⌘A) downloads
 nothing; Download from Cloud in the menu still does a selection's whole
 stacks. SPEC "Cloud drives" updated. Test: `cloud_only_photos`.
 
+## All Photos opens at the newest (2026-10-23)
+Asked for. Grid and Masonry jump to the latest end of All Photos (the
+bottom, sorted by capture time oldest first; the top newest first; not
+for other sorts or a narrowed view) on start and when All photos is
+chosen (`scroll_to_latest`, `ShoeboxApp::latest_jump`). Show in All
+Photos asks for its photo after clearing the scope, so it wins. Test:
+`all_photos_opens_at_the_newest`; `show_in_all_photos_scrolls_to_it` still
+passes.
+

@@ -6872,3 +6872,63 @@ fn send_to_photos() {
             .is_some_and(|r| r == "A new photo in Photos")
     });
 }
+
+/// All Photos opens at its newest photos (the end, sorted by capture
+/// time), as Photos does; choosing All photos again goes back there.
+#[test]
+fn all_photos_opens_at_the_newest() {
+    let t = tempfile::tempdir().unwrap();
+    let lib = t.path().join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    let img = shoebox_fixtures::jpeg(&shoebox_fixtures::scene(9, 300, 200), 85).unwrap();
+    for n in 0..200u32 {
+        let shot = shoebox_fixtures::Shot {
+            datetime: Box::leak(
+                format!(
+                    "2024:01:{:02} {:02}:{:02}:00",
+                    1 + n / 100,
+                    (n / 60) % 24,
+                    n % 60
+                )
+                .into_boxed_str(),
+            ),
+            subsec: "",
+            orientation: 1,
+            serial: "1",
+        };
+        std::fs::write(
+            lib.join(format!("P_{n:03}.jpg")),
+            shoebox_fixtures::with_exif(&img, &shot),
+        )
+        .unwrap();
+    }
+    let p = paths(t.path(), std::slice::from_ref(&lib));
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(120));
+    h.run_steps(3);
+    let visible = |h: &Harness<'_, ShoeboxApp>, name: &str| {
+        h.query_by_label(name)
+            .is_some_and(|n| n.rect().min.y > 40.0 && n.rect().max.y < 860.0)
+    };
+    assert!(visible(&h, "P_199.jpg"), "the newest on screen");
+    assert!(!visible(&h, "P_000.jpg"), "not the oldest");
+    snapshot(&mut h, "all-photos-newest");
+
+    // Scroll to the top, then choose All photos: back at the newest.
+    h.event(egui::Event::PointerMoved(egui::pos2(800.0, 500.0)));
+    for _ in 0..60 {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 400.0),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+    }
+    h.run_steps(3);
+    assert!(visible(&h, "P_000.jpg"), "scrolled to the top");
+    h.get_by_label("All photos  200").click();
+    h.run_steps(5);
+    assert!(visible(&h, "P_199.jpg"), "back at the newest");
+}

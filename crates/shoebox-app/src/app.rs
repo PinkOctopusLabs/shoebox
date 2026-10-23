@@ -448,6 +448,9 @@ pub struct ShoeboxApp {
     pub(crate) error: Option<String>,
     /// When set, the centre view scrolls so this photo is visible.
     pub(crate) scroll_to_current: bool,
+    /// Show the newest photos: All Photos opens at its latest end (on
+    /// start, and when All photos is chosen), as Photos does.
+    pub(crate) scroll_to_latest: bool,
     pub(crate) filter: query::Filter,
     pub(crate) sort: query::Sort,
     pub(crate) sort_desc: bool,
@@ -674,6 +677,7 @@ impl ShoeboxApp {
             scanning: true,
             error: None,
             scroll_to_current: false,
+            scroll_to_latest: true,
             display,
             target,
             develop: Default::default(),
@@ -2238,6 +2242,33 @@ impl ShoeboxApp {
         self.sem.tag = None;
         self.sem.similar = None;
         self.set_folders(Vec::new());
+        // All Photos opens at the newest (Show in All Photos asks for its
+        // photo after this).
+        self.scroll_to_current = false;
+        self.scroll_to_latest = true;
+    }
+
+    /// Where the grid or masonry should jump to show the newest photos
+    /// (`content`: the photos' height; `view`: the area's), once, if asked
+    /// for: All Photos sorted by capture time (the end, or the top when
+    /// newest first). Taken when there are photos to show.
+    pub(crate) fn latest_jump(&mut self, content: f32, view: f32) -> Option<f32> {
+        // Showing a particular photo (Show in All Photos) wins.
+        if self.scroll_to_current {
+            self.scroll_to_latest = false;
+        }
+        if !self.scroll_to_latest || self.shown.is_empty() {
+            return None;
+        }
+        self.scroll_to_latest = false;
+        if self.narrowed() || self.sort != query::Sort::CaptureTime {
+            return None;
+        }
+        Some(if self.sort_desc {
+            0.0
+        } else {
+            (content - view).max(0.0)
+        })
     }
 
     /// Whether the photos shown are fewer than all of them: a folder,
@@ -2278,6 +2309,7 @@ impl ShoeboxApp {
         };
         self.activate(id);
         self.scroll_to_current = true;
+        self.scroll_to_latest = false;
     }
 
     /// Show these folders. The grid shows one source at a time: folders,

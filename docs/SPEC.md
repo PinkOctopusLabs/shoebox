@@ -67,7 +67,7 @@ The centre view changes with G, M, E, C, N and T; Tab folds the side panels away
   - Events, **Collections** and **Smart filters**.
   - **Tasks**: Duplicates review, Import, History (undo log).
   - Dragging grid items onto a folder moves them (with a confirm).
-- **Centre:** the active view. When the photos shown are narrowed (a folder, event, collection, person, tag, Find Similar or a filter) or the view isn't the grid, a photo's menu has **Show in All Photos**: it clears all of those, switches to the grid sorted by capture time, and selects that photo (its stack, if it's a folded stack's file), so the photos taken around it are beside it.
+- **Centre:** the active view. All Photos (Grid and Masonry, sorted by capture time) opens at its newest photos, as Photos does: on start, and when All photos is chosen in the left panel (Show in All Photos goes to its photo instead). When the photos shown are narrowed (a folder, event, collection, person, tag, Find Similar or a filter) or the view isn't the grid, a photo's menu has **Show in All Photos**: it clears all of those, switches to the grid sorted by capture time, and selects that photo (its stack, if it's a folded stack's file), so the photos taken around it are beside it.
 - **Right panel (collapsible):**
   - **Info**: histogram, capture time, camera, lens, shutter, aperture, ISO, focal length, dimensions, file size, full path, stack members, shutter count when available.
   - **Organise**: rating, flag, colour label, keyword editor with autocomplete.
