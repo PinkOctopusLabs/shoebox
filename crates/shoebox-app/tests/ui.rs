@@ -3884,14 +3884,17 @@ fn virtual_copies() {
     });
 
     // Delete the copy (right-click): to the Trash, back to the master.
-    // Under load the copies list can take a few frames to show again.
+    // Under load the copies list can take a few frames to show again; once
+    // it's there, let the panel settle so the click lands on the row.
     let start = Instant::now();
     while h.query_by_label("Copy 1").is_none() {
         assert!(start.elapsed() < Duration::from_secs(30), "no Copy 1 row");
         h.step();
         std::thread::sleep(Duration::from_millis(20));
     }
+    h.run_steps(5);
     h.get_by_label("Copy 1").click_secondary();
+    h.run_steps(2);
     let start = Instant::now();
     while h.query_by_label("Delete").is_none() {
         assert!(
