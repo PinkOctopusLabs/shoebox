@@ -65,14 +65,15 @@ The centre view changes with G, M, E, C, N and T; Tab folds the side panels away
 - **Left panel (resizable, collapsible, default 260 px):**
   - **Library**: each root as a folder tree with file counts, and a **+** button that opens a native folder picker. Right-click a folder to rescan, reveal in Finder, create a subfolder, mark as Reference, or remove from the library (files untouched).
   - Events, **Collections** and **Smart filters**.
-  - **Tasks**: Duplicates review, Import, History (undo log).
+  - **Tasks**: Duplicates review, Import, History (undo log), Activity (what's running now).
   - Dragging grid items onto a folder moves them (with a confirm).
 - **Centre:** the active view. All Photos (Grid and Masonry, sorted by capture time) opens at its newest photos, as Photos does: on start, and when All photos is chosen in the left panel (Show in All Photos goes to its photo instead). When the photos shown are narrowed (a folder, event, collection, person, tag, Find Similar or a filter) or the view isn't the grid, a photo's menu has **Show in All Photos**: it clears all of those, switches to the grid sorted by capture time, and selects that photo (its stack, if it's a folded stack's file), so the photos taken around it are beside it.
 - **Right panel (collapsible):**
   - **Info**: histogram, capture time, camera, lens, shutter, aperture, ISO, focal length, dimensions, file size, full path, stack members, shutter count when available.
   - **Organise**: rating, flag, colour label, keyword editor with autocomplete.
 - **Filmstrip (bottom):** shown in Loupe, Compare and Survey; the current image is highlighted, click to jump.
-- **Status bar:** selected / filtered / total counts and the current file's path.
+- **Status bar:** selected / filtered / total counts and the current file's path. On the right, the background work under way (the most important one, and "+N" when more is running); clicking it opens Activity.
+- **Activity** (Tasks → Activity): History's counterpart for what's running now, so slow work can be seen rather than guessed at. One row for each thing under way, with its progress and how long it has been going: the library's current job (a move, undo, scan, import step…), each file being downloaded from a cloud drive and how many wait their turn, thumbnails loading, an iCloud Photos sync or import, an export, a merge, search indexing and faces. A download that has waited 10 seconds says it is waiting for its drive ("Waiting for Google Drive · 3 min"): a cloud drive serves files in its own time, and nothing Shoebox does makes it faster. Rows for work that can be stopped (import, iCloud Photos, merge) have Stop; a download already waiting on its drive can't be interrupted, and the row doesn't pretend otherwise. With nothing running it says so.
 
 Tab hides the side panels and Shift+Tab hides every panel, as in Lightroom.
 

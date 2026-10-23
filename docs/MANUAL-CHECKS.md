@@ -24,12 +24,12 @@ they're run now, together, before the release. This file is the runbook.
   references. darktable, RawTherapee, Preview, Photos and Finder are fine
   where a check asks whether a file opens elsewhere.
 
-**64 checks** (58 carried over, 2 gate verdicts added, 3 for iCloud Photos, 1 for cloud-only raws), plus one already
+**65 checks** (58 carried over, 2 gate verdicts added, 3 for iCloud Photos, 1 for cloud-only raws, 1 for Activity), plus one already
 done:
 
 | Area | Checks |
 | --- | --- |
-| [1. Library and files](#1-library-and-files) | 5 |
+| [1. Library and files](#1-library-and-files) | 6 |
 | [2. Raw decode and colour](#2-raw-decode-and-colour) | 6 |
 | [3. Develop: tone, colour and effects](#3-develop-tone-colour-and-effects) | 8 |
 | [4. Noise and detail](#4-noise-and-detail) | 3 |
@@ -149,6 +149,15 @@ APFS clone, in folders by shoot.
   (cloud badge) in the loupe and in Develop. Passes: each opens once it has
   downloaded (a large one may take a while; the log says "still
   downloading"), no "Operation timed out".
+
+- [ ] **Activity while a cloud drive is slow** (from 2026-10-23): in the
+  Google Drive library, open a photo that's in the cloud only while Drive
+  is busy (just after a large import, or with a big upload under way).
+  Passes: Tasks → Activity lists it, and after 10 s it reads "Waiting for
+  Google Drive" with the time going up (the status bar says the same);
+  while it waits, marking, rejecting and undo still work, and grid
+  thumbnails of other cloud-only photos show as in the cloud rather than
+  waiting; the row goes once the photo opens.
 
 ## 2. Raw decode and colour
 

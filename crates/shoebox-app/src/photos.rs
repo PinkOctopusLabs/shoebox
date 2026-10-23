@@ -453,6 +453,7 @@ mod tests {
                 journal: base.join("journal.sqlite"),
                 trash_dir: Some(base.join("trash")),
             },
+            crate::activity::Board::default(),
             || {},
         );
         let fake = FakeSource::new();

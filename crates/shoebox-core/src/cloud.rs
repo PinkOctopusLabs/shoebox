@@ -100,6 +100,29 @@ pub fn download_within(path: &Path, patience: std::time::Duration) -> std::io::R
     Ok(())
 }
 
+/// The cloud drive a file is on, by the folder macOS keeps it in
+/// (`~/Library/CloudStorage/<Provider>-<account>`, iCloud Drive's
+/// `Mobile Documents`), for saying what a download waits for.
+pub fn provider(path: &Path) -> Option<&'static str> {
+    let mut parts = path.components().map(|c| c.as_os_str().to_string_lossy());
+    while let Some(p) = parts.next() {
+        if p == "Mobile Documents" {
+            return Some("iCloud Drive");
+        }
+        if p == "CloudStorage" {
+            let name = parts.next()?;
+            return Some(match () {
+                _ if name.starts_with("GoogleDrive") => "Google Drive",
+                _ if name.starts_with("OneDrive") => "OneDrive",
+                _ if name.starts_with("Dropbox") => "Dropbox",
+                _ if name.starts_with("Box") => "Box",
+                _ => "the cloud drive",
+            });
+        }
+    }
+    None
+}
+
 /// Tests: treat `path` as cloud-only (until [`download`]ed).
 #[doc(hidden)]
 pub fn pretend_cloud_only(path: &Path) {
@@ -112,6 +135,24 @@ pub fn pretend_cloud_only(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn providers_by_folder() {
+        let p = |s: &str| provider(Path::new(s));
+        assert_eq!(
+            p("/Users/a/Library/CloudStorage/GoogleDrive-a@b.com/My Drive/x.jpg"),
+            Some("Google Drive")
+        );
+        assert_eq!(
+            p("/Users/a/Library/CloudStorage/OneDrive-Personal/x.jpg"),
+            Some("OneDrive")
+        );
+        assert_eq!(
+            p("/Users/a/Library/Mobile Documents/com~apple~CloudDocs/x.jpg"),
+            Some("iCloud Drive")
+        );
+        assert_eq!(p("/Users/a/Pictures/x.jpg"), None);
+    }
 
     #[test]
     fn a_drive_timeout_is_waited_out_other_errors_are_not() {

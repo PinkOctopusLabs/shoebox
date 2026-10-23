@@ -24,6 +24,8 @@ use shoebox_core::settings::Settings;
 use shoebox_core::thumbs::{self, Source, ThumbCache};
 use shoebox_decode::{Format, Rgb8};
 
+use crate::activity::{Board, Kind};
+
 /// Stable id for a photo: hash of its path (survives catalog refreshes).
 pub type PhotoId = u64;
 
@@ -141,15 +143,23 @@ impl Loader {
     pub fn new(
         threads: usize,
         thumbs: ThumbCache,
+        board: Board,
         repaint: impl Fn() + Send + Sync + 'static,
     ) -> Self {
-        Self::with_download(threads, thumbs, repaint, shoebox_core::cloud::download)
+        Self::with_download(
+            threads,
+            thumbs,
+            board,
+            repaint,
+            shoebox_core::cloud::download,
+        )
     }
 
     /// [`Loader::new`], cloud-only files fetched by `download` (tests).
     fn with_download(
         threads: usize,
         thumbs: ThumbCache,
+        board: Board,
         repaint: impl Fn() + Send + Sync + 'static,
         download: impl Fn(&Path) -> std::io::Result<()> + Send + Sync + 'static,
     ) -> Self {
@@ -175,11 +185,16 @@ impl Loader {
         // loading of everything else.
         let download: Arc<Download> = Arc::new(download);
         workers.extend((0..DOWNLOADS).filter_map(|i| {
-            let (q, tx, repaint, download) =
-                (queue.clone(), tx.clone(), repaint.clone(), download.clone());
+            let (q, tx, repaint, download, board) = (
+                queue.clone(),
+                tx.clone(),
+                repaint.clone(),
+                download.clone(),
+                board.clone(),
+            );
             std::thread::Builder::new()
                 .name(format!("cloud-download-{i}"))
-                .spawn(move || downloader(&q, &tx, &*repaint, &*download))
+                .spawn(move || downloader(&q, &tx, &*repaint, &*download, &board))
                 .map_err(|e| tracing::error!("could not start download thread: {e}"))
                 .ok()
         }));
@@ -225,6 +240,11 @@ impl Loader {
 
     pub fn drain(&self) -> Vec<Loaded> {
         self.results.try_iter().collect()
+    }
+
+    /// Cloud-only files waiting for a download thread.
+    pub fn queued_downloads(&self) -> usize {
+        self.queue.state.lock().map_or(0, |s| s.to_download.len())
     }
 
     /// Images queued or being loaded.
@@ -422,9 +442,12 @@ fn downloader(
     tx: &Sender<Loaded>,
     repaint: &(dyn Fn() + Send + Sync),
     download: &Download,
+    board: &Board,
 ) {
     while let Some(path) = next_download(q) {
+        let task = board.start(Kind::Download, "Downloading", Some(path.clone()));
         let fetched = download(&path);
+        drop(task);
         let Ok(mut s) = q.state.lock() else {
             return;
         };
@@ -958,13 +981,18 @@ pub struct LibraryPaths {
 }
 
 impl Library {
-    pub fn new(paths: LibraryPaths, repaint: impl Fn() + Send + Sync + 'static) -> Self {
-        Self::with_download(paths, repaint, shoebox_core::cloud::download)
+    pub fn new(
+        paths: LibraryPaths,
+        board: Board,
+        repaint: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        Self::with_download(paths, board, repaint, shoebox_core::cloud::download)
     }
 
     /// [`Library::new`], cloud-only files fetched by `download` (tests).
     fn with_download(
         paths: LibraryPaths,
+        board: Board,
         repaint: impl Fn() + Send + Sync + 'static,
         download: impl Fn(&Path) -> std::io::Result<()> + Send + 'static,
     ) -> Self {
@@ -974,10 +1002,10 @@ impl Library {
         let repaint: Arc<dyn Fn() + Send + Sync> = Arc::new(repaint);
         let import_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop = import_stop.clone();
-        let (events, redraw) = (ev_tx.clone(), repaint.clone());
+        let (events, redraw, fetching) = (ev_tx.clone(), repaint.clone(), board.clone());
         let spawned = std::thread::Builder::new()
             .name("library".into())
-            .spawn(move || library_worker(&paths, &ctx_rx, &ev_tx, &*repaint, &stop));
+            .spawn(move || library_worker(&paths, &ctx_rx, &ev_tx, &*repaint, &stop, &board));
         if let Err(e) = spawned {
             tracing::error!("could not start library thread: {e}");
         }
@@ -993,7 +1021,7 @@ impl Library {
                     redraw();
                 };
                 for paths in dl_rx {
-                    let failed = fetch(&paths, &download, &emit);
+                    let failed = fetch(&paths, &download, &emit, Some(&fetching));
                     let _ = library.send(LibraryCommand::Downloaded { paths, failed });
                 }
             });
@@ -1043,17 +1071,68 @@ fn fetch(
     paths: &[PathBuf],
     download: &dyn Fn(&Path) -> std::io::Result<()>,
     emit: &dyn Fn(LibraryEvent),
+    board: Option<&Board>,
 ) -> usize {
     let total = paths.len();
     let mut failed = 0;
     for (n, p) in paths.iter().enumerate() {
         emit(LibraryEvent::Downloading { done: n, total });
+        let what = match total {
+            1 => "Downloading".to_owned(),
+            _ => format!("Downloading {} of {total}", n + 1),
+        };
+        let _task = board.map(|b| b.start(Kind::Download, what, Some(p.clone())));
         if let Err(e) = download(p) {
             tracing::warn!("downloading {}: {e}", p.display());
             failed += 1;
         }
     }
     failed
+}
+
+impl LibraryCommand {
+    /// What the library worker is doing, for Activity.
+    fn activity(&self) -> String {
+        use LibraryCommand as C;
+        match self {
+            C::Open => "Opening the library".into(),
+            C::Rescan => "Rescanning".into(),
+            C::AddRoot { .. } => "Adding a folder".into(),
+            C::RemoveRoot { .. } => "Removing a folder".into(),
+            C::SetReference { .. } => "Changing a reference folder".into(),
+            C::SetMarks { updates, .. } => format!("Saving marks on {} photos", updates.len()),
+            C::SaveEvents { .. } => "Saving events".into(),
+            C::Undo | C::UndoBatch { .. } => "Undoing".into(),
+            C::Redo => "Redoing".into(),
+            C::ClearRedo => "Clearing redo".into(),
+            C::SaveSettings { .. } => "Saving settings".into(),
+            C::MarkSeen { .. } => "Marking changes seen".into(),
+            C::PlanImport { .. } | C::ReplanImport { .. } => "Planning an import".into(),
+            C::RunImport { .. } => "Importing".into(),
+            C::PreviewOrganise { .. } => "Planning a move".into(),
+            C::RunOrganise { .. } => "Moving files".into(),
+            C::NewFolder { .. } => "Making a folder".into(),
+            C::SaveCollections { .. } => "Saving collections".into(),
+            C::LoadHistory | C::LoadBatch { .. } => "Reading history".into(),
+            C::ResumeBatch { .. } => "Resuming an operation".into(),
+            C::Eject { .. } => "Ejecting".into(),
+            C::FindDuplicates { .. } => "Finding duplicates".into(),
+            C::PreviewDuplicates { .. } => "Planning duplicates".into(),
+            C::ApplyDuplicates { .. } => "Moving duplicates".into(),
+            C::Download { .. } => "Downloading".into(),
+            C::Downloaded { paths, .. } => format!("Reading {} downloaded files", paths.len()),
+            C::LoadEdit { .. } | C::PutEdit { .. } => "Reading an edit".into(),
+            C::RemoveCopy { .. } => "Removing a virtual copy".into(),
+            C::SaveEdits => "Saving edits".into(),
+            C::ApplyPreset { .. } => "Applying a preset".into(),
+            C::RecordExports { .. } | C::LoadExports { .. } => "Recording exports".into(),
+            C::LoadFromPhotos { .. } => "Reading iCloud Photos' record".into(),
+            C::AddExports { .. } => "Adding exports".into(),
+            C::AddMerge { .. } => "Adding a merge".into(),
+            C::PhotosBatch { .. } => "Copying from iCloud Photos".into(),
+            C::UndoPushed { .. } => "Undoing a send to Photos".into(),
+        }
+    }
 }
 
 /// Whether `batch` is a send to Photos (undone there first).
@@ -1141,6 +1220,7 @@ fn library_worker(
     events: &Sender<LibraryEvent>,
     repaint: &(dyn Fn() + Send + Sync),
     import_stop: &std::sync::atomic::AtomicBool,
+    board: &Board,
 ) {
     let emit = |e: LibraryEvent| {
         let _ = events.send(e);
@@ -1255,6 +1335,11 @@ fn library_worker(
         let cmd = match cmd {
             Command::App(c) => c,
             Command::Changed(paths) => {
+                let _task = board.start(
+                    Kind::Library,
+                    format!("Reading {} changed files", paths.len()),
+                    None,
+                );
                 // Made elsewhere (Shoebox's own writes already updated the
                 // catalog, so re-reading finds nothing new for them).
                 let a = catalog.affected(&paths);
@@ -1302,6 +1387,7 @@ fn library_worker(
         ) {
             from_photos = None;
         }
+        let _task = board.start(Kind::Library, cmd.activity(), None);
         let (settings_changed, rescan) = match cmd {
             LibraryCommand::Open => {
                 // Interrupted batches with nothing left to run (a sync the
@@ -2752,6 +2838,7 @@ mod tests {
     fn a_stuck_download_leaves_the_library_working() {
         let t = tempfile::tempdir().unwrap();
         let (_never, never) = crossbeam_channel::unbounded::<()>();
+        let board = Board::default();
         let library = Library::with_download(
             LibraryPaths {
                 settings: t.path().join("settings.json"),
@@ -2759,6 +2846,7 @@ mod tests {
                 journal: t.path().join("journal.sqlite"),
                 trash_dir: None,
             },
+            board.clone(),
             || {},
             move |_| {
                 let _ = never.recv();
@@ -2779,6 +2867,14 @@ mod tests {
             }
         }
         assert!(downloading, "the download is under way");
+        assert!(
+            board
+                .items()
+                .iter()
+                .any(|i| i.kind == Kind::Download && i.what == "Downloading"),
+            "{:?}",
+            board.items()
+        );
     }
 
     /// A cloud drive that never delivers a file holds up neither the loading
@@ -2801,9 +2897,11 @@ mod tests {
         let fetched = Arc::new(Mutex::new(Vec::new()));
         let log = fetched.clone();
         // One loader thread: if a download ran on it, nothing else would load.
+        let board = Board::default();
         let loader = Loader::with_download(
             1,
             ThumbCache::new(t.path().join("thumbs")),
+            board.clone(),
             || {},
             move |p| {
                 log.lock().unwrap().push(p.to_path_buf());
@@ -2854,6 +2952,13 @@ mod tests {
         assert!(got[&key(&slow)]);
         assert!(!got.contains_key(&key(&stuck)));
         assert!(!fetched.lock().unwrap().contains(&away), "never downloaded");
+        // The stuck one is on the board, by its file.
+        let items = board.items();
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(
+            (items[0].kind, items[0].file.as_ref()),
+            (Kind::Download, Some(&stuck))
+        );
 
         let start = Instant::now();
         drop(loader);

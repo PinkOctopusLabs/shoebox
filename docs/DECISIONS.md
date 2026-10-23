@@ -4345,3 +4345,44 @@ so one file's read waited behind its queue.
   `a_stuck_download_blocks_neither_loading_nor_quitting` (an offloaded
   grid photo isn't downloaded).
 
+## Tasks → Activity (2026-10-23)
+Asked for, after a photo sat four minutes waiting for a backed-up Google
+Drive with nothing saying so. SPEC "Activity" written first.
+- **A board, not a log.** `activity::Board` (an `Arc<Mutex<Vec<Item>>>`)
+  holds what's running; a thread calls `start` and keeps the `Task`, whose
+  drop takes it off however the work ends (a panic included). Reporting:
+  the library worker (each command, named by `LibraryCommand::activity`,
+  and watcher batches), `cloud-fetch` and the loader's download threads
+  (each file). Work the app already tracks for the status bar (iCloud
+  Photos, import, scan, thumbnails, export, merge, search indexing,
+  faces) isn't put on the board twice: `views::activity::rows` reads it
+  where it is.
+- **Waiting, said plainly.** A download that has run 10 s reads "Waiting
+  for <drive>" (`shoebox_core::cloud::provider`: by the CloudStorage
+  folder's name, iCloud Drive by `Mobile Documents`), in Activity and in
+  the status bar, with the time going up. No Stop on it: the read waits in
+  the kernel, and a Stop that didn't stop would mislead. Stop is on the
+  rows that have one already (import, iCloud Photos, merge).
+- **Status bar.** Keeps its texts and order; adds "+N" when more is running
+  and opens Activity on a click. The Tasks row shows how many are running.
+- Tests: `work_leaves_the_board_however_it_ends`, `providers_by_folder`,
+  `elapsed_reads_naturally`; the two download tests check the board;
+  `activity_shows_what_waits_for_the_drive` (UI, snapshot
+  `activity-waiting`).
+
+## The grid stays still when its layout changes (2026-10-23)
+Reported: after starting, the first click on a photo made the grid jump
+to another part of the library, then it behaved. The first selection
+fills the Info panel, which widens it; the grid loses a few pixels, its
+tiles shrink by 2 px, and every row moves up by that much. At the same
+scroll offset, thousands of rows down, that's thousands of pixels: another
+section. Reproduced in `the_first_click_keeps_the_grid_still` (72 px in a
+200-photo library without the fix).
+- Grid and masonry now keep an `views::Anchor`: the first photo in view
+  last frame, where it was laid out, and the scroll offset. When the
+  layout moves it (same photo list, `shown_gen`), the view scrolls by the
+  difference, so that photo stays where it was; it covers any resize
+  (panels, window, thumbnail size), not only this one. Jumping to the
+  current photo and the jump to the newest come first. A new photo list
+  (filter, sort) doesn't carry the anchor.
+

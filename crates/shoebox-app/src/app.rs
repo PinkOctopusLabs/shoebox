@@ -38,6 +38,8 @@ pub enum View {
     Import,
     /// Tasks → History: every batch, with undo.
     History,
+    /// Tasks → Activity: what's running now.
+    Activity,
     /// Photos with a GPS position on a map.
     Map,
     /// Editing a raw photo (D).
@@ -65,7 +67,7 @@ impl View {
     pub fn has_filters(self) -> bool {
         !matches!(
             self,
-            View::Duplicates | View::Import | View::History | View::Develop
+            View::Duplicates | View::Import | View::History | View::Activity | View::Develop
         )
     }
 }
@@ -543,6 +545,8 @@ pub struct ShoeboxApp {
     quit_asked: bool,
     pub(crate) org: OrgState,
     pub(crate) history: HistoryState,
+    /// Work under way in the background threads (Tasks → Activity).
+    pub(crate) activity: crate::activity::Board,
     pub(crate) collections: Vec<Collection>,
     /// Member stacks per collection id.
     pub(crate) collection_members: HashMap<String, HashSet<usize>>,
@@ -598,9 +602,13 @@ impl ShoeboxApp {
         let threads =
             std::thread::available_parallelism().map_or(4, |n| n.get().saturating_sub(1).max(2));
         let (c1, c2, c3, c4) = (ctx.clone(), ctx.clone(), ctx.clone(), ctx.clone());
-        let loader = Loader::new(threads, ThumbCache::new(paths.thumbs), move || {
-            c1.request_repaint()
-        });
+        let activity = crate::activity::Board::default();
+        let loader = Loader::new(
+            threads,
+            ThumbCache::new(paths.thumbs),
+            activity.clone(),
+            move || c1.request_repaint(),
+        );
         let library = Library::new(
             LibraryPaths {
                 settings: paths.settings,
@@ -608,6 +616,7 @@ impl ShoeboxApp {
                 journal: paths.journal,
                 trash_dir: paths.trash_dir,
             },
+            activity.clone(),
             move || c2.request_repaint(),
         );
         library.send(LibraryCommand::Open);
@@ -730,6 +739,7 @@ impl ShoeboxApp {
             quit_asked: false,
             org: OrgState::default(),
             history: HistoryState::default(),
+            activity,
             collections: Vec::new(),
             collection_members: HashMap::new(),
             selected_collection: None,
@@ -3385,6 +3395,12 @@ impl ShoeboxApp {
             .collect()
     }
 
+    /// The background work board (tests).
+    #[doc(hidden)]
+    pub fn activity(&self) -> crate::activity::Board {
+        self.activity.clone()
+    }
+
     /// Select photos by file name (tests).
     pub fn select_names(&mut self, names: &[&str]) {
         self.selection = self
@@ -4412,7 +4428,7 @@ impl ShoeboxApp {
                 }
                 return;
             }
-            View::Duplicates | View::Import | View::History => return,
+            View::Duplicates | View::Import | View::History | View::Activity => return,
             _ => {}
         }
         if pressed(egui::Key::ArrowRight) {
@@ -4550,6 +4566,7 @@ impl eframe::App for ShoeboxApp {
                 View::Duplicates => views::duplicates::show(self, ui),
                 View::Import => views::files::import(self, ui),
                 View::History => views::files::history(self, ui),
+                View::Activity => views::activity::show(self, ui),
                 View::Timeline => views::timeline::show(self, ui),
                 View::Map => views::map::show(self, ui),
                 View::Develop => views::develop::show(self, ui, frame.wgpu_render_state()),

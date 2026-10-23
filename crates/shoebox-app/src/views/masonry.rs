@@ -15,6 +15,8 @@ pub struct Layout {
     /// Cell rects in content coordinates, by position in `shown`.
     rects: Vec<Rect>,
     height: f32,
+    /// The first photo in view last frame.
+    anchor: Option<super::Anchor>,
 }
 
 impl Layout {
@@ -121,8 +123,15 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         .then(|| app.current_pos().and_then(|p| layout.rects.get(p)))
         .flatten()
         .map(|r| (r.center().y - ui.available_height() / 2.0).max(0.0))
-        .or_else(|| app.latest_jump(layout.height, ui.available_height()));
+        .or_else(|| app.latest_jump(layout.height, ui.available_height()))
+        .or_else(|| {
+            super::Anchor::keep(layout.anchor, app.shown_gen, |pos| {
+                layout.rects.get(pos).map(|r| r.min.y)
+            })
+        });
     let area = super::photo_scroll(ui, jump);
+    let generation = app.shown_gen;
+    let mut anchor = None;
     area.show_viewport(ui, |ui, viewport| {
         ui.set_min_size(vec2(width, layout.height));
         let origin = ui.min_rect().min.to_vec2();
@@ -130,11 +139,15 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             if !r.intersects(viewport) {
                 continue;
             }
+            if anchor.is_none() {
+                anchor = Some(super::Anchor::at(generation, pos, r.min.y, viewport));
+            }
             let rect = r.translate(origin);
             let resp = cell(app, ui, rect, pos, true);
             handle_click(app, ui, &resp, pos);
         }
     });
+    layout.anchor = anchor;
     app.masonry = layout;
 }
 

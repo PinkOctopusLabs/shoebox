@@ -168,6 +168,7 @@ fn view_title(v: View) -> &'static str {
         View::Duplicates => "Duplicates",
         View::Import => "Import",
         View::History => "History",
+        View::Activity => "Activity",
         _ => "",
     }
 }
@@ -220,7 +221,10 @@ pub fn viewbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                         app.set_view(v);
                     }
                 }
-                if !matches!(app.view, View::Duplicates | View::Import | View::History) {
+                if !matches!(
+                    app.view,
+                    View::Duplicates | View::Import | View::History | View::Activity
+                ) {
                     ui.add_space(4.0);
                     ui.separator();
                     sort_menu(app, ui);
@@ -394,13 +398,13 @@ fn zoom_menu(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     }
 }
 
-/// Background work (laid out right to left).
+/// Background work (laid out right to left): the most important, "+N"
+/// when more is running; a click opens Activity.
 fn work(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     let busy = app.loader.busy();
-    if let Some((p, _)) = &app.icloud.running {
-        ui.label(format!("Copying from iCloud Photos {}/{}", p.done, p.total))
-            .on_hover_text("Tasks › Import shows more, and can stop it");
-        ui.add(egui::Spinner::new());
+    let running = crate::views::activity::rows(app);
+    let text = if let Some((p, _)) = &app.icloud.running {
+        Some(format!("Copying from iCloud Photos {}/{}", p.done, p.total))
     } else if let Some(c) = &app.import.copying {
         let mut text = format!("Importing {}/{}", c.done, c.files);
         if let Some(rate) = c.rate() {
@@ -409,29 +413,34 @@ fn work(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         if let Some(left) = c.left() {
             text.push_str(&format!(" · {}", time_left(left)));
         }
-        ui.label(text)
-            .on_hover_text("Tasks › Import shows more, and can cancel it");
-        ui.add(egui::Spinner::new());
+        Some(text)
     } else if let Some((done, total)) = app.download_progress {
-        ui.label(format!("Downloading {done}/{total} from the cloud"));
-        ui.add(egui::Spinner::new());
+        let waiting = running.iter().find(|r| r.what.starts_with("Waiting for"));
+        Some(match waiting {
+            Some(r) => r.what.clone(),
+            None => format!("Downloading {done}/{total} from the cloud"),
+        })
     } else if let Some((done, total)) = app.scan_progress {
-        ui.label(format!("Reading {done}/{total}"));
-        ui.add(egui::Spinner::new());
+        Some(format!("Reading {done}/{total}"))
     } else if app.scanning {
-        ui.label("Scanning…");
-        ui.add(egui::Spinner::new());
+        Some("Scanning…".to_owned())
     } else if busy > 0 {
-        ui.label(format!("{busy} thumbnails"));
-        ui.add(egui::Spinner::new());
+        Some(format!("{busy} thumbnails"))
     } else if let Some(task) = semantic_task(&app.sem.status) {
-        ui.label(task)
-            .on_hover_text("Semantic search (see Search in Settings)");
-        ui.add(egui::Spinner::new());
-    } else if let Some(task) = people_task(&app.ppl.status) {
-        ui.label(task)
-            .on_hover_text("People (see People in Settings)");
-        ui.add(egui::Spinner::new());
+        Some(task)
+    } else {
+        people_task(&app.ppl.status).or_else(|| running.first().map(|r| r.what.clone()))
+    };
+    let Some(mut text) = text else { return };
+    if running.len() > 1 {
+        text.push_str(&format!("  +{}", running.len() - 1));
+    }
+    let resp = ui
+        .add(egui::Label::new(text).sense(egui::Sense::click()))
+        .on_hover_text("Tasks › Activity shows everything running");
+    ui.add(egui::Spinner::new());
+    if resp.clicked() {
+        app.set_view(View::Activity);
     }
 }
 
@@ -910,6 +919,17 @@ fn library_contents(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     {
         app.command(LibraryCommand::LoadHistory);
         app.set_view(View::History);
+    }
+    let running = crate::views::activity::rows(app).len();
+    let label = match running {
+        0 => "Activity".to_owned(),
+        n => format!("Activity  {n}"),
+    };
+    if row(ui, app.view == View::Activity, label, None)
+        .on_hover_text("What's running now: downloads, imports, indexing…")
+        .clicked()
+    {
+        app.set_view(View::Activity);
     }
     if row(ui, app.settings_ui.open, "Settings…", None)
         .on_hover_text(format!(
@@ -2086,7 +2106,7 @@ pub fn empty_library(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
 }
 
 /// What semantic search is doing in the background, for the toolbar.
-fn semantic_task(s: &crate::semantic::Status) -> Option<String> {
+pub(crate) fn semantic_task(s: &crate::semantic::Status) -> Option<String> {
     use crate::semantic::ModelState as M;
     match &s.model {
         M::Downloading { done, total } => Some(format!(
@@ -2104,7 +2124,7 @@ fn semantic_task(s: &crate::semantic::Status) -> Option<String> {
 }
 
 /// What People is doing in the background, for the toolbar.
-fn people_task(s: &crate::semantic::Status) -> Option<String> {
+pub(crate) fn people_task(s: &crate::semantic::Status) -> Option<String> {
     use crate::semantic::ModelState as M;
     match &s.model {
         M::Downloading { done, total } => Some(format!(

@@ -6878,6 +6878,127 @@ fn send_to_photos() {
 
 /// All Photos opens at its newest photos (the end, sorted by capture
 /// time), as Photos does; choosing All photos again goes back there.
+/// Tasks → Activity lists what's running; a download that has waited
+/// says it's waiting for its drive, here and in the status bar.
+#[test]
+fn activity_shows_what_waits_for_the_drive() {
+    let t = tempfile::tempdir().unwrap();
+    let base = t.path().canonicalize().unwrap();
+    let lib = base.join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    let img = shoebox_fixtures::jpeg(&shoebox_fixtures::scene(1, 320, 240), 85).unwrap();
+    std::fs::write(lib.join("a.jpg"), img).unwrap();
+    let p = paths(&base, std::slice::from_ref(&lib));
+    let mut h = harness(p, egui::vec2(1200.0, 800.0));
+    settle(&mut h, Duration::from_secs(60));
+    h.get_by_label_contains("Activity").click();
+    h.run_steps(3);
+    assert!(h.query_by_label("Nothing running.").is_some());
+
+    let file = base
+        .join("Library/CloudStorage/GoogleDrive-someone@example.com/My Drive/Photo Library/b.jpg");
+    let board = h.state().activity();
+    let task = board.start_since(
+        shoebox_app::activity::Kind::Download,
+        "Downloading",
+        Some(file.clone()),
+        std::time::Instant::now() - Duration::from_secs(190),
+    );
+    h.run_steps(3);
+    assert_eq!(
+        h.query_all_by_label("Waiting for Google Drive").count(),
+        2,
+        "in the list and the status bar"
+    );
+    assert!(h.query_by_label("3 min").is_some());
+    assert!(
+        h.query_by_label_contains("b.jpg  ·  ").is_some(),
+        "the file, by name"
+    );
+    assert!(
+        h.query_by_label_contains("Activity  1").is_some(),
+        "the Tasks row counts it"
+    );
+    snapshot(&mut h, "activity-waiting");
+    drop(task);
+    h.run_steps(3);
+    assert!(h.query_by_label("Nothing running.").is_some());
+}
+
+/// The first click after opening doesn't move the grid: the photos on
+/// screen stay where they were.
+#[test]
+fn the_first_click_keeps_the_grid_still() {
+    let t = tempfile::tempdir().unwrap();
+    let lib = t
+        .path()
+        .join("CloudStorage/GoogleDrive-someone@example.com/My Drive/Pictures/Photo Library");
+    let dir = lib.join("_undated/960x640");
+    std::fs::create_dir_all(&dir).unwrap();
+    let img = shoebox_fixtures::jpeg(&shoebox_fixtures::scene(9, 300, 200), 85).unwrap();
+    for n in 0..200u32 {
+        let shot = shoebox_fixtures::Shot {
+            datetime: Box::leak(
+                format!(
+                    "2024:01:{:02} {:02}:{:02}:00",
+                    1 + n / 100,
+                    (n / 60) % 24,
+                    n % 60
+                )
+                .into_boxed_str(),
+            ),
+            subsec: "",
+            orientation: 1,
+            serial: "1",
+        };
+        std::fs::write(
+            dir.join(format!("2012-04-06T10-53-{n:03}.jpg")),
+            shoebox_fixtures::with_exif(&img, &shot),
+        )
+        .unwrap();
+    }
+    let p = paths(t.path(), std::slice::from_ref(&lib));
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(120));
+    h.run_steps(3);
+    // Up into the middle, where a small change in row height adds up.
+    h.event(egui::Event::PointerMoved(egui::pos2(800.0, 500.0)));
+    for _ in 0..6 {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 400.0),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+    }
+    h.run_steps(5);
+    // The highest photo wholly on screen.
+    let name = (0..200u32)
+        .map(|n| format!("2012-04-06T10-53-{n:03}.jpg"))
+        .filter_map(|n| {
+            let y = h.query_by_label(&n)?.rect().min.y;
+            Some((y, n))
+        })
+        .filter(|(y, _)| *y > 100.0)
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, n)| n)
+        .unwrap();
+    let before = h.get_by_label(&name).rect();
+    // The first click fills the Info panel, which widens it: fewer pixels
+    // for the grid, smaller tiles.
+    h.get_by_label(&name).click();
+    h.run_steps(5);
+    let after = h.query_by_label(&name).map(|t| t.rect());
+    snapshot(&mut h, "first-click");
+    let after = after.unwrap_or_else(|| panic!("{name} scrolled away"));
+    assert!(
+        (after.min.y - before.min.y).abs() < 8.0,
+        "{name} moved from {before:?} to {after:?}"
+    );
+}
+
 #[test]
 fn all_photos_opens_at_the_newest() {
     let t = tempfile::tempdir().unwrap();

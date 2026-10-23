@@ -1,5 +1,6 @@
 //! Centre views.
 
+pub mod activity;
 pub mod compare;
 pub mod crop;
 pub mod develop;
@@ -436,6 +437,44 @@ pub fn cell(
 /// when set. egui keeps last frame's scroll limit and any scroll still
 /// under way (a flick, a bounce at the end): a jump past that limit, into
 /// photos just shown, would spring back to it. So a jump starts afresh.
+/// The photo at the top of the grid's or masonry's view in the last frame,
+/// where it was laid out, and the scroll offset then: kept so that when the
+/// layout changes under it (a side panel or the window resized, which
+/// changes the columns), the view follows that photo instead of staying at
+/// an offset that now shows other photos.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Anchor {
+    /// The photo list it's in (`ShoeboxApp::shown_gen`).
+    generation: u64,
+    pos: usize,
+    y: f32,
+    scroll: f32,
+}
+
+impl Anchor {
+    /// Record the first photo in view (`viewport`: content coordinates).
+    pub fn at(generation: u64, pos: usize, y: f32, viewport: Rect) -> Self {
+        Self {
+            generation,
+            pos,
+            y,
+            scroll: viewport.min.y,
+        }
+    }
+
+    /// Where to scroll to keep that photo where it was, if the layout
+    /// moved it (`y_now`: where it is laid out now).
+    pub fn keep(
+        anchor: Option<Self>,
+        generation: u64,
+        y_now: impl Fn(usize) -> Option<f32>,
+    ) -> Option<f32> {
+        let a = anchor.filter(|a| a.generation == generation)?;
+        let y = y_now(a.pos)?;
+        ((y - a.y).abs() > 0.5).then(|| (a.scroll + y - a.y).max(0.0))
+    }
+}
+
 pub fn photo_scroll(ui: &egui::Ui, jump_to: Option<f32>) -> egui::ScrollArea {
     let area = egui::ScrollArea::vertical()
         .auto_shrink([false, false])
