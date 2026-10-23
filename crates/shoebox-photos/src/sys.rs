@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use block2::RcBlock;
+use objc2::AnyThread;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2_foundation::{NSArray, NSBundle, NSData, NSDate, NSError, NSString};
 use objc2_photos::{
@@ -399,4 +400,188 @@ pub fn download(
         let _ = std::fs::remove_file(to);
     }
     result
+}
+
+/// These assets as PhotoKit lists them (those still there).
+pub fn assets_by_id(locals: &[String]) -> Vec<RawAsset> {
+    autoreleasepool(|_| {
+        let ids: Vec<Retained<NSString>> = locals.iter().map(|s| NSString::from_str(s)).collect();
+        let arr = NSArray::from_retained_slice(&ids);
+        // SAFETY: a fetch by valid ids; results read in place.
+        unsafe {
+            let found = PHAsset::fetchAssetsWithLocalIdentifiers_options(&arr, None);
+            (0..found.count())
+                .map(|i| read_asset(&found.objectAtIndex(i)))
+                .collect()
+        }
+    })
+}
+
+fn asset_by_id(local: &str) -> Option<Retained<PHAsset>> {
+    let ids = NSArray::from_retained_slice(&[NSString::from_str(local)]);
+    // SAFETY: a fetch by a valid id.
+    unsafe { PHAsset::fetchAssetsWithLocalIdentifiers_options(&ids, None).firstObject() }
+}
+
+/// The person's regular album with this title, if there is one.
+fn album_named(title: &str) -> Option<Retained<PHAssetCollection>> {
+    // SAFETY: a fetch with no options; titles read in place.
+    unsafe {
+        let found = PHAssetCollection::fetchAssetCollectionsWithType_subtype_options(
+            PHAssetCollectionType::Album,
+            PHAssetCollectionSubtype::AlbumRegular,
+            None,
+        );
+        (0..found.count())
+            .map(|i| found.objectAtIndex(i))
+            .find(|a| a.localizedTitle().is_some_and(|t| t.to_string() == title))
+    }
+}
+
+/// Run `change` as one PhotoKit change (macOS may ask the person first).
+fn perform(change: impl Fn() + 'static) -> Result<(), String> {
+    let block = RcBlock::new(change);
+    // SAFETY: the block is valid for the call, which runs it synchronously.
+    unsafe {
+        PHPhotoLibrary::sharedPhotoLibrary()
+            .performChangesAndWait_error(RcBlock::as_ptr(&block))
+            .map_err(|e| error_text(&e))
+    }
+}
+
+/// Add `asset` (a new one's placeholder, or an asset) to the album `title`,
+/// made if needed. Call inside a change.
+fn add_to_album(title: &str, asset: &objc2::runtime::AnyObject) {
+    use objc2::runtime::ProtocolObject;
+    use objc2_photos::PHAssetCollectionChangeRequest;
+    // SAFETY: inside a change block; the array holds one valid object.
+    unsafe {
+        let request = match album_named(title) {
+            Some(a) => PHAssetCollectionChangeRequest::changeRequestForAssetCollection(&a),
+            None => Some(
+                PHAssetCollectionChangeRequest::creationRequestForAssetCollectionWithTitle(
+                    &NSString::from_str(title),
+                ),
+            ),
+        };
+        if let Some(r) = request {
+            let arr: Retained<NSArray<objc2::runtime::AnyObject>> = NSArray::from_slice(&[asset]);
+            r.addAssets(ProtocolObject::from_ref(&*arr));
+        }
+    }
+}
+
+/// A new asset from `file` (its original); its local id.
+pub fn create(file: &Path, album: Option<&str>) -> Result<String, String> {
+    use objc2_photos::{PHAssetCreationRequest, PHAssetResourceType};
+    let url = objc2_foundation::NSURL::from_file_path(file).ok_or("not a file path")?;
+    let made = Arc::new(Mutex::new(None::<String>));
+    let (m, album) = (made.clone(), album.map(str::to_owned));
+    perform(move || {
+        // SAFETY: inside the change block; the URL is a valid file URL.
+        unsafe {
+            let r = PHAssetCreationRequest::creationRequestForAsset();
+            r.addResourceWithType_fileURL_options(PHAssetResourceType::Photo, &url, None);
+            if let Some(p) = r.placeholderForCreatedAsset() {
+                if let Ok(mut g) = m.lock() {
+                    *g = Some(p.localIdentifier().to_string());
+                }
+                if let Some(t) = &album {
+                    add_to_album(t, &p);
+                }
+            }
+        }
+    })?;
+    let id = made.lock().ok().and_then(|g| g.clone());
+    id.ok_or_else(|| "Photos made no asset".into())
+}
+
+/// Edit asset `local`: `file` (a JPEG) as its rendered content, with
+/// Shoebox's adjustment data. Its original stays.
+pub fn edit(
+    local: &str,
+    file: &Path,
+    adjustment: &[u8],
+    format: &str,
+    album: Option<&str>,
+) -> Result<(), String> {
+    use objc2_photos::{
+        PHAdjustmentData, PHAssetChangeRequest, PHContentEditingInput, PHContentEditingOutput,
+    };
+    let asset = asset_by_id(local).ok_or_else(|| format!("{local} isn't in Photos any more"))?;
+    // The editing input (PhotoKit hands it over on a completion handler).
+    let (tx, rx) = mpsc::channel::<Option<Retained<PHContentEditingInput>>>();
+    let tx = Mutex::new(tx);
+    let done = RcBlock::new(
+        move |input: *mut PHContentEditingInput, _info: NonNull<objc2_foundation::NSDictionary>| {
+            // SAFETY: PhotoKit passes a valid input or null.
+            let input = unsafe { Retained::retain(input) };
+            if let Ok(t) = tx.lock() {
+                let _ = t.send(input);
+            }
+        },
+    );
+    // SAFETY: plain options; a valid asset and block; the request answers
+    // once. Network allowed: the original may be in iCloud only.
+    unsafe {
+        let opts = objc2_photos::PHContentEditingInputRequestOptions::new();
+        opts.setNetworkAccessAllowed(true);
+        asset.requestContentEditingInputWithOptions_completionHandler(Some(&opts), &done);
+    }
+    let input = rx
+        .recv_timeout(Duration::from_secs(120))
+        .ok()
+        .flatten()
+        .ok_or("Photos didn't hand over the photo to edit")?;
+    // SAFETY: a valid input; the output's URL is a file URL Photos made for us.
+    let output = unsafe {
+        PHContentEditingOutput::initWithContentEditingInput(PHContentEditingOutput::alloc(), &input)
+    };
+    // SAFETY: plain property reads and a new adjustment data object.
+    let dest = unsafe { output.renderedContentURL() }
+        .to_file_path()
+        .ok_or("Photos gave no file to write")?;
+    std::fs::copy(file, &dest).map_err(|e| format!("{}: {e}", dest.display()))?;
+    unsafe {
+        let data = PHAdjustmentData::initWithFormatIdentifier_formatVersion_data(
+            PHAdjustmentData::alloc(),
+            &NSString::from_str(format),
+            &NSString::from_str("1"),
+            &NSData::with_bytes(adjustment),
+        );
+        output.setAdjustmentData(Some(&data));
+    }
+    let album = album.map(str::to_owned);
+    perform(move || {
+        // SAFETY: inside the change block, on a valid asset and output.
+        unsafe {
+            PHAssetChangeRequest::changeRequestForAsset(&asset)
+                .setContentEditingOutput(Some(&output));
+            if let Some(t) = &album {
+                add_to_album(t, &asset);
+            }
+        }
+    })
+}
+
+/// Revert asset `local` to its original (dropping its edit).
+pub fn revert(local: &str) -> Result<(), String> {
+    use objc2_photos::PHAssetChangeRequest;
+    let asset = asset_by_id(local).ok_or_else(|| format!("{local} isn't in Photos any more"))?;
+    // SAFETY: inside the change block, on a valid asset.
+    perform(move || unsafe {
+        PHAssetChangeRequest::changeRequestForAsset(&asset).revertAssetContentToOriginal()
+    })
+}
+
+/// Delete asset `local` (to Recently Deleted; macOS asks the person).
+pub fn delete(local: &str) -> Result<(), String> {
+    use objc2::runtime::ProtocolObject;
+    use objc2_photos::PHAssetChangeRequest;
+    let asset = asset_by_id(local).ok_or_else(|| format!("{local} isn't in Photos any more"))?;
+    perform(move || {
+        let arr = NSArray::from_slice(&[&*asset]);
+        // SAFETY: inside the change block; an array of one valid asset.
+        unsafe { PHAssetChangeRequest::deleteAssets(ProtocolObject::from_ref(&*arr)) }
+    })
 }

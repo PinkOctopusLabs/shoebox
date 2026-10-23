@@ -17,8 +17,11 @@ pub mod ledger;
 pub mod model;
 pub mod place;
 pub mod plan;
+pub mod push;
 pub mod source;
 pub mod sync;
 
-pub use model::{Access, Album, Asset, AssetId, Library, Media, Resource, ResourceKind};
+pub use model::{
+    Access, Album, Asset, AssetId, Library, Media, PushRequest, Resource, ResourceKind,
+};
 pub use source::PhotoSource;

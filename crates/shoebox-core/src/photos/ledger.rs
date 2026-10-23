@@ -79,6 +79,34 @@ struct SyncedFile {
     assets: BTreeMap<String, Entry>,
 }
 
+/// A photo Shoebox sent to Photos (PHOTOS-SPEC, Push).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pushed {
+    pub local_id: String,
+    /// The library photo it came from, relative to the record's root.
+    pub from: String,
+    /// Which of its edits: `main`, or a virtual copy's id.
+    pub copy: String,
+    /// A new asset Shoebox made (else an edit of an asset that was there).
+    pub created: bool,
+    /// The edit sent (its preview key; None: unedited).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render_hash: Option<String>,
+    /// When (ms since 1970); the latest record wins.
+    pub pushed_at: i64,
+    /// The batch that recorded it (undoing it undoes the push, and empties
+    /// this record).
+    pub batch: i64,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct PushedFile {
+    #[serde(default)]
+    schema: u32,
+    #[serde(default)]
+    pushed: BTreeMap<String, Pushed>,
+}
+
 /// What an album's name becomes on the photos in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -121,6 +149,8 @@ pub struct Ledgers {
     by_local: HashMap<String, String>,
     /// Per root, as given to [`Ledgers::load`].
     pub choices: Vec<Choices>,
+    /// Pushes by asset key: (root index, record).
+    pushed: HashMap<String, (usize, Pushed)>,
 }
 
 impl Ledgers {
@@ -138,13 +168,33 @@ impl Ledgers {
             let mut names: Vec<PathBuf> = rd
                 .filter_map(|e| e.ok().map(|e| e.path()))
                 .filter(|p| {
-                    p.file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|n| n.starts_with("synced-") && n.ends_with(".json"))
+                    p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                        (n.starts_with("synced-") || n.starts_with("pushed-"))
+                            && n.ends_with(".json")
+                    })
                 })
                 .collect();
             names.sort();
             for p in names {
+                let pushed = p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("pushed-"));
+                if pushed {
+                    let Some(f) = read_json::<PushedFile>(&p) else {
+                        continue;
+                    };
+                    for (key, e) in f.pushed {
+                        let newer = out
+                            .pushed
+                            .get(&key)
+                            .is_none_or(|(_, old)| old.pushed_at <= e.pushed_at);
+                        if newer {
+                            out.pushed.insert(key, (i, e));
+                        }
+                    }
+                    continue;
+                }
                 let Some(f) = read_json::<SyncedFile>(&p) else {
                     continue;
                 };
@@ -213,6 +263,76 @@ impl Ledgers {
         out
     }
 
+    /// The push record of an asset, by its id.
+    pub fn pushed(&self, id: &AssetId) -> Option<(usize, &Pushed)> {
+        let hit = self
+            .pushed
+            .get(&id.key())
+            .or_else(|| self.pushed.values().find(|(_, p)| p.local_id == id.local));
+        hit.map(|(r, p)| (*r, p))
+    }
+
+    /// The latest push of a library photo's edit: its asset key
+    /// and record. `roots` as given to [`Ledgers::load`].
+    pub fn pushed_from(
+        &self,
+        roots: &[PathBuf],
+        photo: &Path,
+        copy: &str,
+    ) -> Option<(&str, &Pushed)> {
+        self.pushed
+            .iter()
+            .filter(|(_, (r, p))| {
+                p.copy == copy
+                    && roots
+                        .get(*r)
+                        .is_some_and(|root| root.join(&p.from) == photo)
+            })
+            .max_by_key(|(_, (_, p))| p.pushed_at)
+            .map(|(k, (_, p))| (k.as_str(), p))
+    }
+
+    /// The pushes a batch recorded: (asset key, root, record).
+    pub fn pushes_of(&self, batch: i64) -> Vec<(String, usize, Pushed)> {
+        self.pushed
+            .iter()
+            .filter(|(_, (_, p))| p.batch == batch)
+            .map(|(k, (r, p))| (k.clone(), *r, p.clone()))
+            .collect()
+    }
+
+    /// The asset a library file came from (copied by a sync), if any.
+    pub fn asset_of(&self, roots: &[PathBuf], photo: &Path) -> Option<(AssetId, ResourceKind)> {
+        for (key, (r, e)) in &self.entries {
+            for f in &e.files {
+                let p = Path::new(&f.rel);
+                let path = if p.is_absolute() {
+                    p.to_path_buf()
+                } else if let Some(root) = roots.get(*r) {
+                    root.join(p)
+                } else {
+                    continue;
+                };
+                if path == photo {
+                    let cloud = (!key.starts_with("local:")).then(|| key.clone());
+                    return Some((
+                        AssetId {
+                            cloud,
+                            local: e.local_id.clone(),
+                        },
+                        f.kind,
+                    ));
+                }
+            }
+        }
+        None
+    }
+
+    /// Record (in memory) a push just written.
+    pub fn record_push(&mut self, root: usize, id: &AssetId, p: Pushed) {
+        self.pushed.insert(id.key(), (root, p));
+    }
+
     /// Every record: (key, root index, entry).
     pub fn iter(&self) -> impl Iterator<Item = (&str, usize, &Entry)> {
         self.entries.iter().map(|(k, (r, e))| (k.as_str(), *r, e))
@@ -255,6 +375,24 @@ pub fn plan_synced(
     let dir = dir_for(root);
     std::fs::create_dir_all(&dir).map_err(io(&dir))?;
     Ok((dir.join(format!("synced-{run}-{n:05}.json")), bytes))
+}
+
+/// The file recording these pushes (`run`: when), as a write for the push's
+/// batch.
+pub fn plan_pushed(
+    root: &Path,
+    run: &str,
+    pushes: &[(AssetId, Pushed)],
+) -> Result<(PathBuf, Vec<u8>)> {
+    let body = PushedFile {
+        schema: 1,
+        pushed: pushes.iter().map(|(id, p)| (id.key(), p.clone())).collect(),
+    };
+    let bytes = serde_json::to_vec_pretty(&body)
+        .map_err(|e| CoreError::Invalid(format!("photos push record: {e}")))?;
+    let dir = dir_for(root);
+    std::fs::create_dir_all(&dir).map_err(io(&dir))?;
+    Ok((dir.join(format!("pushed-{run}.json")), bytes))
 }
 
 /// `choices.json` for a root, as a write.

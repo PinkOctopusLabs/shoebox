@@ -150,6 +150,20 @@ impl Album {
     }
 }
 
+/// A rendered file to put into Photos (PHOTOS-SPEC, Push).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushRequest {
+    /// The rendered file, in the cache (JPEG for an edit of an asset).
+    pub file: std::path::PathBuf,
+    /// Edit this asset (its original stays; Photos can revert); None: a
+    /// new asset from the file.
+    pub edit_of: Option<AssetId>,
+    /// Also put it in the album of this name (made if needed).
+    pub album: Option<String>,
+    /// Kept with an edit as its adjustment data (format [`ADJUSTMENT_FORMAT`]).
+    pub adjustment: Vec<u8>,
+}
+
 /// What Shoebox may do with the Photos library.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {

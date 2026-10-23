@@ -20,6 +20,7 @@ pub mod masonry;
 pub mod merge;
 pub mod point_colour;
 pub mod presets;
+pub mod push;
 pub mod settings;
 pub mod smart;
 pub mod spots;
@@ -501,6 +502,16 @@ pub fn photo_menu(app: &mut ShoeboxApp, resp: &egui::Response, pos: usize) {
             .clicked()
         {
             app.export.open = true;
+            ui.close();
+        }
+        if ui
+            .button("Send to Photos…")
+            .on_hover_text(
+                "Put the edited photo into Photos (iCloud Photos): as an edit of its photo there if it came from Photos, else as a new photo",
+            )
+            .clicked()
+        {
+            push::open(app);
             ui.close();
         }
         if n > 1

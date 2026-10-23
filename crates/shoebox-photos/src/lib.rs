@@ -12,7 +12,7 @@ use std::sync::atomic::AtomicBool;
 
 use shoebox_core::photos::model::{Burst, EditedBy};
 use shoebox_core::photos::{
-    Access, Album, Asset, AssetId, Library, Media, PhotoSource, Resource, ResourceKind,
+    Access, Album, Asset, AssetId, Library, Media, PhotoSource, PushRequest, Resource, ResourceKind,
 };
 use shoebox_core::{CoreError, Result};
 
@@ -61,6 +61,21 @@ impl PhotoKitSource {
             }
         }
         Vec::new()
+    }
+
+    /// Development builds write only to a test library (CLAUDE.md, safety
+    /// rule 9): one with an album named [`probe::TEST_ALBUM`]. A guard
+    /// against mistakes, not a security boundary; release builds write to
+    /// the person's own library, as they ask.
+    #[cfg(target_os = "macos")]
+    fn guard(&self) -> Result<()> {
+        if cfg!(debug_assertions) && !self.album_titles().iter().any(|t| t == probe::TEST_ALBUM) {
+            return Err(CoreError::Refused(format!(
+                "a development build only writes to a Photos library with an album named “{}”",
+                probe::TEST_ALBUM
+            )));
+        }
+        Ok(())
     }
 
     /// Whether this build can ask for Photos access at all: a bundled app
@@ -211,6 +226,76 @@ impl PhotoSource for PhotoKitSource {
         }
         #[cfg(not(target_os = "macos"))]
         {
+            Err(CoreError::Photos("Photos needs macOS".into()))
+        }
+    }
+
+    fn lookup(&self, ids: &[AssetId]) -> Result<Vec<Asset>> {
+        #[cfg(target_os = "macos")]
+        {
+            if !matches!(self.access(), Access::Full | Access::Limited) {
+                return Err(CoreError::Photos("no access to Photos".into()));
+            }
+            let locals: Vec<String> = ids.iter().map(|i| i.local.clone()).collect();
+            let raw = sys::assets_by_id(&locals);
+            let cloud: HashMap<String, String> = ids
+                .iter()
+                .filter_map(|i| i.cloud.clone().map(|c| (i.local.clone(), c)))
+                .collect();
+            Ok(library(raw, Vec::new(), &cloud).assets)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = ids;
+            Err(CoreError::Photos("Photos needs macOS".into()))
+        }
+    }
+
+    fn push(&self, req: &PushRequest) -> Result<AssetId> {
+        #[cfg(target_os = "macos")]
+        {
+            self.guard()?;
+            let album = req.album.as_deref();
+            match &req.edit_of {
+                Some(of) => {
+                    sys::edit(
+                        &of.local,
+                        &req.file,
+                        &req.adjustment,
+                        shoebox_core::photos::model::ADJUSTMENT_FORMAT,
+                        album,
+                    )
+                    .map_err(CoreError::Photos)?;
+                    Ok(of.clone())
+                }
+                None => {
+                    let local = sys::create(&req.file, album).map_err(CoreError::Photos)?;
+                    let cloud = sys::cloud_ids(std::slice::from_ref(&local)).remove(&local);
+                    Ok(AssetId { cloud, local })
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = req;
+            Err(CoreError::Photos("Photos needs macOS".into()))
+        }
+    }
+
+    fn undo_push(&self, id: &AssetId, created: bool) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            self.guard()?;
+            if created {
+                sys::delete(&id.local)
+            } else {
+                sys::revert(&id.local)
+            }
+            .map_err(CoreError::Photos)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (id, created);
             Err(CoreError::Photos("Photos needs macOS".into()))
         }
     }

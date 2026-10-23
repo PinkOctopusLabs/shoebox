@@ -36,7 +36,12 @@ pub struct State {
     pub error: Option<String>,
     /// The Info panel's question and its answer.
     asked: Option<PathBuf>,
-    origin: Option<(PathBuf, Option<(ResourceKind, i64)>)>,
+    #[allow(clippy::type_complexity)]
+    origin: Option<(
+        PathBuf,
+        Option<(ResourceKind, i64)>,
+        Option<crate::jobs::SentToPhotos>,
+    )>,
 }
 
 impl State {
@@ -104,6 +109,30 @@ pub fn cancel(app: &mut ShoeboxApp) {
 /// Take in what the Photos thread says (each frame).
 pub fn tick(app: &mut ShoeboxApp) {
     while let Ok(ev) = app.photos.events.try_recv() {
+        if matches!(
+            ev,
+            Event::PushPlanned(_) | Event::Pushed(_) | Event::PushUndone(_)
+        ) {
+            crate::views::push::event(app, ev);
+            continue;
+        }
+        if crate::views::push::waiting(app) {
+            let why = match &ev {
+                Event::Failed(e) => Some(e.clone()),
+                Event::Access(a) if !matches!(a, Access::Full | Access::Limited) => Some(
+                    "Shoebox can't see your Photos library: turn it on in System Settings › \
+                     Privacy & Security › Photos."
+                        .to_owned(),
+                ),
+                _ => None,
+            };
+            if let Some(why) = why {
+                app.push.planning = false;
+                app.push.sending = false;
+                app.push.error = Some(why);
+                continue;
+            }
+        }
         let st = &mut app.icloud;
         match ev {
             Event::Access(a) => {
@@ -144,6 +173,7 @@ pub fn tick(app: &mut ShoeboxApp) {
                 st.running = None;
                 st.error = Some(e);
             }
+            Event::PushPlanned(_) | Event::Pushed(_) | Event::PushUndone(_) => {}
         }
     }
 }
@@ -449,26 +479,53 @@ pub fn info_row(app: &mut ShoeboxApp, ui: &mut egui::Ui, photo: &Path) {
         app.icloud.origin = None;
         app.command(LibraryCommand::LoadFromPhotos(photo.to_path_buf()));
     }
-    let Some((p, Some((kind, at)))) = &app.icloud.origin else {
+    let Some((p, found, sent)) = app.icloud.origin.clone() else {
         return;
     };
     if p != photo {
         return;
     }
-    let what = match kind {
-        ResourceKind::Edited => "Photos' edit, from iCloud Photos",
-        _ => "From iCloud Photos",
-    };
-    ui.horizontal_wrapped(|ui| {
-        ui.label(what);
-        ui.weak(crate::app::local_time_ns(at * 1_000_000));
-    });
+    if let Some((kind, at)) = found {
+        let what = match kind {
+            ResourceKind::Edited => "Photos' edit, from iCloud Photos",
+            _ => "From iCloud Photos",
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.label(what);
+            ui.weak(crate::app::local_time_ns(at * 1_000_000));
+        });
+    }
+    if let Some(s) = sent {
+        let stale = app.edited.get(photo).cloned() != s.render_hash;
+        let mut again = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Sent to Photos");
+            ui.weak(crate::app::local_time_ns(s.at * 1_000_000));
+            if stale {
+                ui.colored_label(ui.visuals().warn_fg_color, "edited since")
+                    .on_hover_text("The edit has changed since it was sent");
+            }
+            again = ui
+                .small_button("Send Again")
+                .on_hover_text("Send this photo's edit to Photos again")
+                .clicked();
+        });
+        if again {
+            let id = crate::jobs::photo_id(photo);
+            crate::views::push::open_for(app, &[id]);
+        }
+    }
 }
 
 /// The library worker's answer to `LoadFromPhotos`.
-pub fn loaded(app: &mut ShoeboxApp, photo: PathBuf, found: Option<(ResourceKind, i64)>) {
+pub fn loaded(
+    app: &mut ShoeboxApp,
+    photo: PathBuf,
+    found: Option<(ResourceKind, i64)>,
+    sent: Option<crate::jobs::SentToPhotos>,
+) {
     if app.icloud.asked.as_ref() == Some(&photo) {
-        app.icloud.origin = Some((photo, found));
+        app.icloud.origin = Some((photo, found, sent));
     }
 }
 
@@ -523,6 +580,12 @@ fn favourite_name(f: Favourite) -> String {
 }
 
 impl ShoeboxApp {
+    /// A send finished: the Info panel's row asks again.
+    pub(crate) fn icloud_sent(&mut self) {
+        self.icloud.asked = None;
+        self.icloud.origin = None;
+    }
+
     /// The iCloud Photos plan's new and copied-before counts (tests).
     pub fn icloud_counts(&self) -> Option<(usize, usize)> {
         let p = &self.icloud.planned.as_ref()?.plan;

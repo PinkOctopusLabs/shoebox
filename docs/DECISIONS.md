@@ -4119,3 +4119,51 @@ PHOTOS-SPEC Phase 4, against the fake library (`views/icloud.rs`).
   out, an album made a keyword, nothing downloaded before confirming, the
   copies named by the template with ★5 and the album keyword, the Info
   row, nothing new the second time, Settings' tab, undo from History.
+
+## iCloud Photos: Send to Photos (2026-10-23)
+PHOTOS-SPEC Phase 5 (`photos::push`, `views/push.rs`), against the fake
+library; PhotoKit's writes (`shoebox-photos/src/sys.rs`: create, edit,
+revert, delete, albums) wait for a test account.
+- **Send to Photos…** in the photo menu, for the selection (each tile's
+  edit, a virtual copy's too), and **Send Again** in the Info panel. The
+  dialog's table says what each photo becomes: a new photo; an edit of its
+  photo in Photos (warning when that replaces an edit made in Photos, and
+  naming the library's `-photos` copy of it, or saying it'll be lost from
+  Photos); an update of an earlier send; or not sent (up to date, already
+  in Photos and not edited here, a movie). Not a destination in the export
+  dialog: one dialog with its own table reads more clearly (OPEN-ITEMS).
+- **Files are exports.** New photos use a chosen JPEG, PNG or TIFF preset
+  or Shoebox's own "Photos (JPEG, full size)" (quality 92, 4:4:4, Display
+  P3, all metadata); edits of an asset in Photos are always that JPEG
+  (PhotoKit's rule). They render as an export job with a `tag`, into
+  `<cache>/photos-staging/push/<tag>/`, named as the photo; the export's
+  ExportDone goes to the send, not the export notices; the Photos thread
+  sends them, then removes them.
+- **Records:** `.shoebox/photos/pushed-<run>.json` in the photo's root
+  (asset key → local id, the photo relative to the root, copy, created or
+  edited, the edit's preview key, when, batch), written in a batch of kind
+  `photos-push` (`FileOps::begin_push`). Newest record per asset wins. A
+  sync leaves out assets Shoebox created (`Plan::sent`); edits Shoebox made
+  are Shoebox's by their adjustment format, so they're never "edited again
+  in Photos".
+- **Undo** (⌘Z or History) of a `photos-push` batch goes to the Photos
+  thread first (`LibraryEvent::UndoPush`): it deletes the assets Shoebox
+  made (to Recently Deleted) and reverts the edits to the original, then
+  the library worker undoes the batch (`UndoPushed`; never redone: sending
+  again does that). Refused, changing nothing, if an asset was edited in
+  Photos more than a minute after the send. Reverting drops every edit, so
+  undoing an update goes back to the original, not to the earlier send;
+  album membership stays.
+- **Development guard:** debug builds' `PhotoKitSource` writes only to a
+  library with an album named `Shoebox test library`; release builds write
+  as the person asks.
+- **Not built:** the `shoebox:PushedFrom` marker in sent files (the
+  records are the guard; the marker would cover lost records), the grid
+  badge for photos edited since they were sent (the Info row says "edited
+  since"), and an edit made in Photos to a photo Shoebox created is never
+  imported back. OPEN-ITEMS.
+- **Tests:** core `sending_to_photos` (each action, the send, up to date
+  and update, a sync afterwards bringing nothing back, undo in Photos then
+  the records) and `undoing_a_send_is_refused_after_a_change_in_photos`;
+  UI `send_to_photos` (the dialog's rows, a rendered JPEG becoming a new
+  asset, the Info row, up to date, ⌘Z taking it back out of Photos).

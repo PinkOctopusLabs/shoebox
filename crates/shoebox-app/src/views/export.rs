@@ -38,7 +38,7 @@ pub struct State {
 }
 
 /// The photos to export: the selection, else the current photo.
-fn targets(app: &ShoeboxApp) -> Vec<PhotoId> {
+pub(crate) fn targets(app: &ShoeboxApp) -> Vec<PhotoId> {
     let sel = app.selected_in_order();
     if sel.is_empty() {
         app.current.into_iter().collect()
@@ -86,6 +86,42 @@ pub fn reexport(app: &mut ShoeboxApp, row: &shoebox_core::cache::ExportRow) {
 }
 
 fn send(app: &mut ShoeboxApp, ids: &[PhotoId], presets: Vec<Preset>, replaces: Option<PathBuf>) {
+    let items = items(app, ids, replaces);
+    if items.is_empty() {
+        return;
+    }
+    app.export.progress = Some((0, items.len() * presets.len()));
+    let (roots, reference) = roots(app);
+    app.developer.export(ExportJob {
+        items,
+        presets,
+        roots,
+        reference,
+        on_clash: None,
+        tag: None,
+    });
+}
+
+/// The library's folders and its reference folders, for an export job.
+pub(crate) fn roots(app: &ShoeboxApp) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let roots = app.catalog.roots.iter().map(|r| r.path.clone()).collect();
+    let reference = app
+        .catalog
+        .roots
+        .iter()
+        .filter(|r| r.role == shoebox_core::scan::Role::Reference)
+        .map(|r| r.path.clone())
+        .collect();
+    (roots, reference)
+}
+
+/// What exporting these tiles renders: each photo's (or copy's) edit as it
+/// is now. Movies are left out.
+pub(crate) fn items(
+    app: &ShoeboxApp,
+    ids: &[PhotoId],
+    replaces: Option<PathBuf>,
+) -> Vec<ExportItem> {
     let mut items = Vec::new();
     for &id in ids {
         let Some(idx) = app.index(id) else { continue };
@@ -140,25 +176,7 @@ fn send(app: &mut ShoeboxApp, ids: &[PhotoId], presets: Vec<Preset>, replaces: O
             replaces: replaces.clone(),
         });
     }
-    if items.is_empty() {
-        return;
-    }
-    app.export.progress = Some((0, items.len() * presets.len()));
-    let roots = app.catalog.roots.iter().map(|r| r.path.clone()).collect();
-    let reference = app
-        .catalog
-        .roots
-        .iter()
-        .filter(|r| r.role == shoebox_core::scan::Role::Reference)
-        .map(|r| r.path.clone())
-        .collect();
-    app.developer.export(ExportJob {
-        items,
-        presets,
-        roots,
-        reference,
-        on_clash: None,
-    });
+    items
 }
 
 /// ⌥⇧⌘E: the last export's presets on the selection.

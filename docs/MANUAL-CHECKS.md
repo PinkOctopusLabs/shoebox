@@ -24,7 +24,7 @@ they're run now, together, before the release. This file is the runbook.
   references. darktable, RawTherapee, Preview, Photos and Finder are fine
   where a check asks whether a file opens elsewhere.
 
-**62 checks** (58 carried over, 2 gate verdicts added, 2 for iCloud Photos), plus one already
+**63 checks** (58 carried over, 2 gate verdicts added, 3 for iCloud Photos), plus one already
 done:
 
 | Area | Checks |
@@ -39,7 +39,7 @@ done:
 | [8. Merges](#8-merges) | 10 |
 | [9. Export](#9-export) | 7 |
 | [10. Last: the gate verdicts and goldens](#10-last-the-gate-verdicts-and-goldens) | 3 |
-| [11. iCloud Photos (a test macOS account)](#11-icloud-photos-a-test-macos-account) | 2 |
+| [11. iCloud Photos (a test macOS account)](#11-icloud-photos-a-test-macos-account) | 3 |
 
 ## The gates
 
@@ -705,4 +705,17 @@ library is a test library (CLAUDE.md, safety rule 9), never in yours.
   Find photos offers only the rest; quitting mid-copy asks first; the Info
   panel says "From iCloud Photos" on a copy; favourites have ★5, the
   album's photos are in its event; History's Undo takes the copies back.
+- [ ] **Send to Photos** (PHOTOS-SPEC Phase 5; added 2026-10-23), in the
+  test account, after the import. Edit a photo that came from Photos and
+  one of the library's own (a fixture NEF) in Develop; select both, Send to
+  Photos…. Passes: the table says "An edit of its photo in Photos" and "A
+  new photo in Photos"; macOS asks to allow the change; in Photos the
+  edited one shows the edit and Image › Revert to Original brings the
+  original back; the NEF is a new JPEG with its date; with "Add to the
+  album" it's in that album. Sending again: "up to date"; change the edit
+  and send: "Updates what was sent before", and Photos has no second copy.
+  Find photos in Import: nothing new. ⌘Z: macOS asks to delete the new one
+  (Recently Deleted) and the edit is reverted. Also edit the photo edited
+  earlier in Photos and send it: the table warns its Photos edit is
+  replaced and names the `-photos` copy.
 

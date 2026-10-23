@@ -18,7 +18,7 @@ use shoebox_core::photos::ledger::{AlbumChoice, Ledgers};
 use shoebox_core::photos::place::{Context, LibraryIndex};
 use shoebox_core::photos::plan::{self, Options, Plan};
 use shoebox_core::photos::sync::{self, Batches, Job, Progress, Report};
-use shoebox_core::photos::{Access, Library, PhotoSource};
+use shoebox_core::photos::{Access, Library, PhotoSource, push};
 use shoebox_core::template::Template;
 use shoebox_core::{CoreError, Result};
 
@@ -50,6 +50,19 @@ pub enum Command {
     Plan(Box<PlanRequest>),
     /// Run the last plan with these album choices (by album id).
     Run(HashMap<String, AlbumChoice>),
+    /// What sending these photos to Photos would do.
+    PlanPush {
+        items: Vec<push::Item>,
+        roots: Vec<PathBuf>,
+    },
+    /// Send rendered files to Photos (and remove them from the cache).
+    Push {
+        rendered: Vec<push::Rendered>,
+        roots: Vec<PathBuf>,
+        album: Option<String>,
+    },
+    /// Undo a send in Photos, then have the library undo its batch.
+    UndoPush { batch: i64, roots: Vec<PathBuf> },
 }
 
 /// A plan, ready to show.
@@ -67,6 +80,10 @@ pub enum Event {
     Progress(Progress),
     Done(Report),
     Failed(String),
+    PushPlanned(Vec<push::Row>),
+    Pushed(push::Report),
+    /// A send undone in Photos (how many photos), or why not.
+    PushUndone(std::result::Result<usize, String>),
 }
 
 /// The thread's handle.
@@ -128,6 +145,28 @@ impl Worker<'_> {
             .map_err(|_| CoreError::Photos("the library has closed".into()))?;
         rx.recv()
             .map_err(|_| CoreError::Photos("the library has closed".into()))?
+    }
+}
+
+/// The library worker, for a send's batch (kind "photos-push").
+struct PushWorker<'a>(Worker<'a>);
+
+impl Batches for PushWorker<'_> {
+    fn begin(&self, label: &str) -> Result<i64> {
+        self.0.ask(PhotosOp::BeginPush(label.to_owned()))
+    }
+
+    fn step(
+        &self,
+        batch: i64,
+        copies: Vec<PlannedCopy>,
+        writes: Vec<(PathBuf, Vec<u8>)>,
+    ) -> Result<()> {
+        self.0.step(batch, copies, writes)
+    }
+
+    fn end(&self, batch: i64) -> Result<()> {
+        self.0.end(batch)
     }
 }
 
@@ -194,6 +233,57 @@ fn worker(
                 });
                 emit(Event::Planned(planned.clone()));
                 last = Some((*req, planned));
+            }
+            Command::PlanPush { items, roots } => {
+                let access = source.request_access();
+                emit(Event::Access(access));
+                if !matches!(access, Access::Full | Access::Limited) {
+                    continue;
+                }
+                let ledgers = Ledgers::load(&roots);
+                let look = push::assets_to_look_up(&items, &ledgers, &roots);
+                match source.lookup(&look) {
+                    Ok(now) => emit(Event::PushPlanned(push::plan(
+                        &items, &ledgers, &roots, &now,
+                    ))),
+                    Err(e) => emit(Event::Failed(e.to_string())),
+                }
+            }
+            Command::Push {
+                rendered,
+                roots,
+                album,
+            } => {
+                let mut ledgers = Ledgers::load(&roots);
+                let run_id = jiff::Zoned::now().strftime("%Y%m%dT%H%M%S").to_string();
+                let r = push::run(
+                    source,
+                    &PushWorker(Worker(library)),
+                    &mut ledgers,
+                    &roots,
+                    &rendered,
+                    album.as_deref(),
+                    &run_id,
+                    "send to Photos",
+                );
+                // The renders are the cache's own files.
+                for f in &rendered {
+                    let _ = std::fs::remove_file(&f.file);
+                }
+                match r {
+                    Ok(r) => emit(Event::Pushed(r)),
+                    Err(e) => emit(Event::Failed(e.to_string())),
+                }
+            }
+            Command::UndoPush { batch, roots } => {
+                let ledgers = Ledgers::load(&roots);
+                match push::undo(source, &ledgers, batch) {
+                    Ok(n) => {
+                        let _ = library.send(LibraryCommand::UndoPushed(batch));
+                        emit(Event::PushUndone(Ok(n)));
+                    }
+                    Err(e) => emit(Event::PushUndone(Err(e.to_string()))),
+                }
             }
             Command::Run(albums) => {
                 let Some((req, planned)) = last.take() else {

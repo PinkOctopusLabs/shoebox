@@ -202,6 +202,9 @@ pub struct ExportJob {
     pub reference: Vec<PathBuf>,
     /// What to do where a file is already there; None: ask first.
     pub on_clash: Option<Clash>,
+    /// Echoed back in `ExportDone`: renders for something else than an
+    /// export (a send to Photos) say whose they are.
+    pub tag: Option<u64>,
 }
 
 /// An export onto a file that's already there, as the person chose.
@@ -303,6 +306,8 @@ pub enum Event {
         /// Files for the library, in the cache: for the library worker to
         /// copy in (`LibraryCommand::AddExports`).
         into_library: Vec<LibraryExport>,
+        /// The job's tag.
+        tag: Option<u64>,
     },
     /// The export presets (saved, or the starters).
     Presets(Vec<Preset>),
@@ -1298,6 +1303,7 @@ fn run_export(
         errors: p.errors,
         no_metadata: exiftool.is_none(),
         into_library: into_library.into_iter().map(|(_, c)| c).collect(),
+        tag: job.tag,
     });
 }
 
@@ -1686,6 +1692,7 @@ mod tests {
             roots: vec![t.path().join("lib")],
             reference: Vec::new(),
             on_clash: Some(Clash::NewFile),
+            tag: None,
         };
         let events = Mutex::new(Vec::new());
         let dngs = DngCache::new(&t.path().join("cache"), 1 << 30);
@@ -1798,6 +1805,7 @@ mod tests {
             roots: vec![lib.clone()],
             reference: Vec::new(),
             on_clash: Some(Clash::NewFile),
+            tag: None,
         };
         let dngs = DngCache::new(&t.path().join("cache"), 1 << 30);
         let run = |job: &ExportJob| {

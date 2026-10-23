@@ -895,7 +895,13 @@ pub fn poll(app: &mut ShoeboxApp) {
                 errors,
                 no_metadata,
                 into_library,
+                tag,
             } => {
+                if let Some(tag) = tag {
+                    app.export.progress = None;
+                    super::push::rendered(app, tag, written, errors);
+                    continue;
+                }
                 if !into_library.is_empty() {
                     app.command(LibraryCommand::AddExports(into_library));
                 }

@@ -21,7 +21,7 @@ block2 = "0.6.2"
 objc2 = "0.6.5"
 objc2-core-location = { version = "0.3.2", default-features = false, features = ["std", "CLLocation"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSBundle", "NSData", "NSDate", "NSDictionary", "NSEnumerator", "NSError", "NSObject", "NSString", "NSURL"] }
-objc2-photos = { version = "0.3.2", default-features = false, features = ["std", "block2", "objc2-core-location", "PHAsset", "PHAssetResource", "PHAssetResourceManager", "PHCloudIdentifier", "PHCollection", "PHFetchOptions", "PHFetchResult", "PHObject", "PHPhotoLibrary", "PhotosTypes"] }
+objc2-photos = { version = "0.3.2", default-features = false, features = ["std", "block2", "dispatch2", "objc2-core-location", "PHAdjustmentData", "PHAsset", "PHAssetChangeRequest", "PHAssetCollectionChangeRequest", "PHAssetCreationRequest", "PHAssetResource", "PHAssetResourceManager", "PHChangeRequest", "PHCloudIdentifier", "PHCollection", "PHContentEditingInput", "PHContentEditingOutput", "PHFetchOptions", "PHFetchResult", "PHObject", "PHPhotoLibrary", "PhotosTypes"] }
 
 [dev-dependencies]
 anyhow.workspace = true

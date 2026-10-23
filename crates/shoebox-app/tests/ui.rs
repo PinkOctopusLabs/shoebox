@@ -6684,3 +6684,149 @@ fn import_from_icloud_photos() {
     wait_for(&mut h, Duration::from_secs(30), "undo", |_| !fav.exists());
     assert!(!album.exists());
 }
+
+/// PHOTOS-SPEC Phase 5: Send to Photos against a fake Photos library. A
+/// photo copied from Photos and not edited isn't sent; one of the
+/// library's own becomes a new photo there (rendered as an export); the
+/// Info panel says so; sending again is up to date; History's Undo takes it
+/// back out of Photos.
+#[test]
+fn send_to_photos() {
+    use shoebox_core::photos::fake::FakeSource;
+    use shoebox_core::photos::{Access, Asset, AssetId, Media, Resource, ResourceKind};
+    let t = tempfile::tempdir().unwrap();
+    let base = t.path().canonicalize().unwrap();
+    let lib = base.join("library");
+    std::fs::create_dir_all(&lib).unwrap();
+    let img = |n: u64, when: &'static str| {
+        let shot = shoebox_fixtures::Shot {
+            datetime: when,
+            subsec: "",
+            orientation: 1,
+            serial: "1",
+        };
+        let j = shoebox_fixtures::jpeg(&shoebox_fixtures::scene(n, 320, 240), 85).unwrap();
+        shoebox_fixtures::with_exif(&j, &shot)
+    };
+    std::fs::write(lib.join("mine.jpg"), img(9, "2020:01:01 10:00:00")).unwrap();
+    let fake = std::sync::Arc::new(FakeSource::new());
+    fake.answer(Access::Full);
+    let bytes = img(1, "2024:06:03 14:15:02");
+    fake.add(
+        Asset {
+            id: AssetId {
+                cloud: Some("C1".into()),
+                local: "L1".into(),
+            },
+            media: Media::Photo,
+            created: Some("2024-06-03T05:15:02Z".parse().unwrap()),
+            modified: None,
+            location: None,
+            favourite: false,
+            hidden: false,
+            burst: None,
+            width: 320,
+            height: 240,
+            resources: vec![Resource {
+                kind: ResourceKind::Original,
+                file_name: "IMG_0001.JPG".into(),
+                size: Some(bytes.len() as u64),
+            }],
+            albums: vec![],
+            edited: None,
+        },
+        vec![bytes],
+    );
+    let mut p = paths(&base, std::slice::from_ref(&lib));
+    p.photos = fake.clone();
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+
+    // Copy the Photos one in first.
+    h.get_by_label("Import…").click();
+    h.run_steps(2);
+    h.get_by_label("iCloud Photos").click();
+    h.run_steps(2);
+    h.get_by_label("Find photos").click();
+    wait_for(&mut h, Duration::from_secs(30), "plan", |a| {
+        a.icloud_counts().is_some()
+    });
+    h.get_by_label("Import 1 photo").click();
+    wait_for(&mut h, Duration::from_secs(30), "import", |a| {
+        a.icloud_report().is_some()
+    });
+    wait_for(&mut h, Duration::from_secs(30), "catalog", |a| {
+        a.photo_count() == 2
+    });
+
+    // Both in the grid, both selected, Send to Photos.
+    h.get_by_label("Grid").click();
+    h.run_steps(2);
+    h.get_by_label("mine.jpg").click();
+    h.get_by_label("20240603-141502.jpg")
+        .click_modifiers(egui::Modifiers::COMMAND);
+    h.run_steps(2);
+    h.state_mut().open_send_to_photos();
+    wait_for(&mut h, Duration::from_secs(30), "send plan", |a| {
+        a.send_to_photos_rows().len() == 2
+    });
+    let rows = h.state().send_to_photos_rows();
+    assert_eq!(rows["mine.jpg"], "A new photo in Photos");
+    assert!(rows["20240603-141502.jpg"].starts_with("Not sent: already in Photos"));
+    h.run_steps(3);
+    snapshot(&mut h, "push-1-dialog");
+    h.get_by_label("Send 1 photo").click();
+    wait_for(&mut h, Duration::from_secs(60), "sent", |a| {
+        !a.send_to_photos_open()
+    });
+    assert_eq!(fake.pushes(), 1);
+    let sent = fake.asset("pushed-1").expect("a new asset in Photos");
+    assert_eq!(sent.resources[0].file_name, "mine.jpg");
+    assert!(
+        fake.file("pushed-1", ResourceKind::Original)
+            .unwrap()
+            .starts_with(&[0xFF, 0xD8]),
+        "a JPEG"
+    );
+
+    // The Info panel says it was sent.
+    h.get_by_label("mine.jpg").click();
+    let start = Instant::now();
+    while h.query_by_label("Sent to Photos").is_none() {
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "no Sent to Photos row"
+        );
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    snapshot(&mut h, "push-2-info");
+
+    // Again: up to date.
+    h.state_mut().open_send_to_photos();
+    wait_for(&mut h, Duration::from_secs(30), "again", |a| {
+        a.send_to_photos_rows()
+            .get("mine.jpg")
+            .is_some_and(|r| r.contains("up to date"))
+    });
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+
+    // Undo (the toolbar's, as ⌘Z) takes the newest batch, the send, back
+    // out of Photos first, and its record with it.
+    h.get_by_label("History").click();
+    wait_for(&mut h, Duration::from_secs(10), "history", |a| {
+        a.batches().len() == 2
+    });
+    h.run_steps(2);
+    h.get_all_by_label("Undo").next().unwrap().click();
+    wait_for(&mut h, Duration::from_secs(30), "undone in Photos", |_| {
+        fake.asset("pushed-1").is_none()
+    });
+    h.state_mut().open_send_to_photos();
+    wait_for(&mut h, Duration::from_secs(30), "new again", |a| {
+        a.send_to_photos_rows()
+            .get("mine.jpg")
+            .is_some_and(|r| r == "A new photo in Photos")
+    });
+}

@@ -469,3 +469,204 @@ fn a_stop_or_a_full_disk_copies_nothing_more() {
     let (p, _) = w.plan();
     assert_eq!(p.new.len(), 5);
 }
+
+/// Phase 5: sending to Photos. A photo that came from Photos goes back as
+/// an edit of its asset (one with a Photos edit says it replaces it); any
+/// other photo becomes a new asset; unedited ones from Photos and movies
+/// aren't sent; sending again is up to date or an update of the same
+/// asset; a sync afterwards brings nothing back; undo reverts in Photos and
+/// takes the records back.
+#[test]
+fn sending_to_photos() {
+    use shoebox_core::photos::push::{self, Action, Item, Rendered};
+    let mut w = World::new();
+    library(&w);
+    let lib = w.lib.clone();
+    w.sync(&lib);
+    let mine = lib.join("other/DSC_0001.jpg");
+    std::fs::create_dir_all(mine.parent().unwrap()).unwrap();
+    std::fs::write(&mine, photo(50, &shot("2025:01:01 10:00:00", ""))).unwrap();
+    let item = |p: PathBuf, hash: Option<&str>, video: bool| Item {
+        photo: p,
+        copy: "main".into(),
+        render_hash: hash.map(Into::into),
+        video,
+    };
+    let fav = lib.join("2024/2024-06-03/20240603-141502-120.jpg");
+    let edited_in_photos = lib.join("2024/2024-09-01/20240901-100000.jpg");
+    let items = vec![
+        item(fav.clone(), Some("e1"), false),
+        item(edited_in_photos.clone(), Some("e4"), false),
+        item(mine.clone(), Some("m1"), false),
+        item(lib.join("2024/2024-07-01/20240701-140000.jpg"), None, false),
+        item(
+            lib.join("2024/2024-08-01/20240801-090000-5.mov"),
+            None,
+            true,
+        ),
+    ];
+    let roots = w.roots();
+    let ledgers = Ledgers::load(&roots);
+    let look = push::assets_to_look_up(&items, &ledgers, &roots);
+    let now = w.source.lookup(&look).unwrap();
+    let rows = push::plan(&items, &ledgers, &roots, &now);
+    assert!(
+        matches!(&rows[0].action, Action::Edit { asset, replaces: false, kept: None } if asset.local == "L1")
+    );
+    match &rows[1].action {
+        Action::Edit {
+            asset,
+            replaces,
+            kept,
+        } => {
+            assert_eq!(asset.local, "L4");
+            assert!(replaces, "asset 4 has an edit made in Photos");
+            assert_eq!(
+                kept.as_deref(),
+                Some(
+                    lib.join("2024/2024-09-01/20240901-100000-photos.jpg")
+                        .as_path()
+                )
+            );
+        }
+        a => panic!("{a:?}"),
+    }
+    assert_eq!(rows[2].action, Action::New);
+    assert_eq!(rows[3].action, Action::InPhotos);
+    assert_eq!(rows[4].action, Action::Video);
+
+    // Send the three, from renders in a cache folder.
+    let cache = w.base.join("cache/push");
+    std::fs::create_dir_all(&cache).unwrap();
+    let rendered: Vec<Rendered> = rows
+        .iter()
+        .filter(|r| r.action.sends())
+        .enumerate()
+        .map(|(i, r)| {
+            let f = cache.join(format!("{i}.jpg"));
+            std::fs::write(&f, format!("render {i}")).unwrap();
+            Rendered {
+                row: r.clone(),
+                file: f,
+            }
+        })
+        .collect();
+    let mut ledgers = Ledgers::load(&roots);
+    let report = push::run(
+        &w.source,
+        &w.fo,
+        &mut ledgers,
+        &roots,
+        &rendered,
+        Some("From Shoebox"),
+        "run1",
+        "send to Photos",
+    )
+    .unwrap();
+    assert_eq!(
+        (report.created, report.edited, report.failed.len()),
+        (1, 2, 0),
+        "{report:?}"
+    );
+    assert_eq!(
+        w.source.asset("L1").unwrap().edited,
+        Some(EditedBy::Shoebox)
+    );
+    assert_eq!(
+        w.source.file("L1", ResourceKind::Edited).unwrap(),
+        b"render 0"
+    );
+    assert_eq!(w.source.album_members("From Shoebox").len(), 3);
+
+    // Again: unchanged ones are up to date; a new edit updates the asset.
+    let ledgers = Ledgers::load(&roots);
+    let again = push::plan(
+        &[
+            item(fav.clone(), Some("e1"), false),
+            item(mine.clone(), Some("m2"), false),
+        ],
+        &ledgers,
+        &roots,
+        &[],
+    );
+    assert_eq!(again[0].action, Action::UpToDate);
+    assert!(matches!(
+        &again[1].action,
+        Action::Update { created: true, .. }
+    ));
+
+    // A sync brings nothing back: not the new asset, not the edits.
+    let downloads = w.source.downloads();
+    let (p, _) = w.plan();
+    assert!(p.new.is_empty() && p.updated.is_empty(), "{p:?}");
+    assert_eq!(p.sent, 1);
+    assert_eq!(w.source.downloads(), downloads);
+
+    // Undo: in Photos first, then the records.
+    let batch = report.batch.unwrap();
+    assert_eq!(push::undo(&w.source, &ledgers, batch).unwrap(), 3);
+    assert_eq!(w.source.asset("L1").unwrap().edited, None);
+    // The asset Shoebox made is gone; the edited ones stay in the album
+    // (undo reverts the edit, not the album).
+    let left = w.source.album_members("From Shoebox");
+    assert_eq!(left.len(), 2, "{left:?}");
+    assert!(left.iter().all(|l| !l.starts_with("pushed-")));
+    w.fo.undo(batch).unwrap();
+    let ledgers = Ledgers::load(&roots);
+    assert!(
+        push::plan(&[item(mine, Some("m1"), false)], &ledgers, &roots, &[])[0].action
+            == Action::New
+    );
+}
+
+#[test]
+fn undoing_a_send_is_refused_after_a_change_in_photos() {
+    use shoebox_core::photos::push::{self, Item, Rendered};
+    let mut w = World::new();
+    library(&w);
+    let lib = w.lib.clone();
+    w.sync(&lib);
+    let roots = w.roots();
+    let mut ledgers = Ledgers::load(&roots);
+    let fav = lib.join("2024/2024-06-03/20240603-141502-120.jpg");
+    let rows = push::plan(
+        &[Item {
+            photo: fav,
+            copy: "main".into(),
+            render_hash: Some("e1".into()),
+            video: false,
+        }],
+        &ledgers,
+        &roots,
+        &[],
+    );
+    let f = w.base.join("r.jpg");
+    std::fs::write(&f, b"render").unwrap();
+    let report = push::run(
+        &w.source,
+        &w.fo,
+        &mut ledgers,
+        &roots,
+        &[Rendered {
+            row: rows[0].clone(),
+            file: f,
+        }],
+        None,
+        "run1",
+        "send to Photos",
+    )
+    .unwrap();
+    // Edited again on a phone, later.
+    w.source.update("L1", |a, _| {
+        a.edited = Some(EditedBy::Other("com.apple.photo".into()));
+        a.modified = Some("2099-01-01T00:00:00Z".parse().unwrap());
+    });
+    let ledgers = Ledgers::load(&roots);
+    let r = push::undo(&w.source, &ledgers, report.batch.unwrap());
+    assert!(r.is_err(), "{r:?}");
+    assert_eq!(
+        w.source.asset("L1").unwrap().edited,
+        Some(EditedBy::Other("com.apple.photo".into())),
+        "left as it is"
+    );
+}

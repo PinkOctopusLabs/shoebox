@@ -427,12 +427,25 @@ pub enum LibraryCommand {
         PhotosOp,
         crossbeam_channel::Sender<Result<i64, shoebox_core::CoreError>>,
     ),
+    /// A send to Photos was undone there: now undo its batch (its records).
+    UndoPushed(i64),
+}
+
+/// A photo's last send to Photos (its main edit's).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SentToPhotos {
+    /// When (ms since 1970).
+    pub at: i64,
+    /// The edit sent (None: unedited).
+    pub render_hash: Option<String>,
 }
 
 /// What an iCloud Photos sync asks of the library worker.
 #[derive(Debug)]
 pub enum PhotosOp {
     Begin(String),
+    /// A send to Photos' batch.
+    BeginPush(String),
     Step {
         batch: i64,
         copies: Vec<shoebox_core::fileops::PlannedCopy>,
@@ -671,7 +684,14 @@ pub enum LibraryEvent {
     Exports(PathBuf, Vec<(shoebox_core::cache::ExportRow, bool)>),
     /// Whether a file came from iCloud Photos: what it was there and when
     /// it was synced (ms).
-    FromPhotos(PathBuf, Option<(shoebox_core::photos::ResourceKind, i64)>),
+    FromPhotos(
+        PathBuf,
+        Option<(shoebox_core::photos::ResourceKind, i64)>,
+        Option<SentToPhotos>,
+    ),
+    /// Undo asked for a send to Photos: the Photos thread undoes it there
+    /// first, then sends `UndoPushed`.
+    UndoPush(i64),
     /// Edit files whose photo wasn't found after a scan (kept, never
     /// deleted; listed in Settings).
     Unattached(Vec<PathBuf>),
@@ -816,6 +836,16 @@ impl Library {
     }
 }
 
+/// Whether `batch` is a send to Photos (undone there first).
+fn is_push(fileops: &FileOps, batch: i64) -> bool {
+    fileops
+        .journal()
+        .batch(batch)
+        .ok()
+        .flatten()
+        .is_some_and(|b| b.kind == shoebox_core::fileops::PUSH_KIND)
+}
+
 /// Sends `ImportEnded` when dropped.
 struct Ended<'a>(&'a dyn Fn(LibraryEvent));
 
@@ -930,7 +960,11 @@ fn library_worker(
     let mut import_plan: Option<shoebox_core::import::Plan> = None;
     // Library files iCloud Photos syncs recorded, read when first asked
     // for and dropped when a command could change the records.
-    let mut from_photos: Option<HashMap<PathBuf, (shoebox_core::photos::ResourceKind, i64)>> = None;
+    #[allow(clippy::type_complexity)]
+    let mut from_photos: Option<(
+        HashMap<PathBuf, (shoebox_core::photos::ResourceKind, i64)>,
+        shoebox_core::photos::ledger::Ledgers,
+    )> = None;
     let mut import_scan: Option<(
         shoebox_core::import::Scan,
         PathBuf,
@@ -1212,6 +1246,12 @@ fn library_worker(
                     (&mut redo, &mut undo)
                 };
                 let Some(batch) = from.pop() else { continue };
+                if is_push(&fileops, batch) {
+                    // Undone in Photos first; kept on the stack until then.
+                    from.push(batch);
+                    emit(LibraryEvent::UndoPush(batch));
+                    continue;
+                }
                 match undo_batch(batch, &fileops, &mut catalog, &mut cache, &emit) {
                     Ok(u) => to.push(u),
                     Err(e) => emit(LibraryEvent::Error(format!(
@@ -1245,6 +1285,21 @@ fn library_worker(
                     history(&undo, &redo);
                 }
                 (false, false)
+            }
+            LibraryCommand::UndoBatch(batch) if is_push(&fileops, batch) => {
+                emit(LibraryEvent::UndoPush(batch));
+                (false, false)
+            }
+            LibraryCommand::UndoPushed(batch) => {
+                // Never redone: sending again does it.
+                let r = undo_batch(batch, &fileops, &mut catalog, &mut cache, &emit);
+                if r.is_ok() {
+                    undo.retain(|&b| b != batch);
+                    history(&undo, &redo);
+                }
+                emit(LibraryEvent::BatchUndone(r));
+                batches(&fileops);
+                (false, true)
             }
             LibraryCommand::UndoBatch(batch) => {
                 let r = undo_batch(batch, &fileops, &mut catalog, &mut cache, &emit);
@@ -1441,6 +1496,7 @@ fn library_worker(
                 let stop = std::sync::atomic::AtomicBool::new(false);
                 let (answer, closed) = match op {
                     PhotosOp::Begin(label) => (fileops.begin_import(&label), None),
+                    PhotosOp::BeginPush(label) => (fileops.begin_push(&label), None),
                     PhotosOp::Step {
                         batch,
                         copies,
@@ -1761,13 +1817,19 @@ fn library_worker(
                 (false, true)
             }
             LibraryCommand::LoadFromPhotos(photo) => {
-                let index = from_photos.get_or_insert_with(|| {
-                    let roots: Vec<PathBuf> =
-                        settings.roots.iter().map(|r| r.path.clone()).collect();
-                    shoebox_core::photos::ledger::Ledgers::load(&roots).files(&roots)
+                let roots: Vec<PathBuf> = settings.roots.iter().map(|r| r.path.clone()).collect();
+                let (index, ledgers) = from_photos.get_or_insert_with(|| {
+                    let l = shoebox_core::photos::ledger::Ledgers::load(&roots);
+                    (l.files(&roots), l)
                 });
                 let found = index.get(&photo).copied();
-                emit(LibraryEvent::FromPhotos(photo, found));
+                let sent = ledgers
+                    .pushed_from(&roots, &photo, shoebox_core::edits::MAIN)
+                    .map(|(_, p)| SentToPhotos {
+                        at: p.pushed_at,
+                        render_hash: p.render_hash.clone(),
+                    });
+                emit(LibraryEvent::FromPhotos(photo, found, sent));
                 (false, false)
             }
             LibraryCommand::LoadExports(photo) => {

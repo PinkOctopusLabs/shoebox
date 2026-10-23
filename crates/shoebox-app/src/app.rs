@@ -566,6 +566,9 @@ pub struct ShoeboxApp {
     pub(crate) ppl: crate::people::PeopleState,
     pub(crate) photos: crate::photos::Photos,
     pub(crate) icloud: views::icloud::State,
+    pub(crate) push: views::push::State,
+    /// Where a send to Photos renders its files.
+    pub(crate) photos_push_dir: PathBuf,
 }
 
 impl ShoeboxApp {
@@ -614,6 +617,7 @@ impl ShoeboxApp {
                 c3.request_repaint()
             });
         let c6 = ctx.clone();
+        let photos_push_dir = views::push::dir(&paths.photos_staging);
         let photos = crate::photos::Photos::new(
             paths.photos,
             library.sender(),
@@ -737,6 +741,8 @@ impl ShoeboxApp {
             ppl: Default::default(),
             photos,
             icloud: Default::default(),
+            push: Default::default(),
+            photos_push_dir,
         }
     }
 
@@ -1324,8 +1330,13 @@ impl ShoeboxApp {
             match ev {
                 LibraryEvent::Edits(list) => self.note_edits(list),
                 LibraryEvent::Exports(photo, rows) => views::export::loaded(self, photo, rows),
-                LibraryEvent::FromPhotos(photo, found) => {
-                    views::icloud::loaded(self, photo, found);
+                LibraryEvent::FromPhotos(photo, found, sent) => {
+                    views::icloud::loaded(self, photo, found, sent);
+                }
+                LibraryEvent::UndoPush(batch) => {
+                    let roots = self.settings.roots.iter().map(|r| r.path.clone()).collect();
+                    self.photos
+                        .send(crate::photos::Command::UndoPush { batch, roots });
                 }
                 LibraryEvent::Unattached(paths) => self.unattached = paths,
                 LibraryEvent::EditLoaded {
@@ -4488,6 +4499,7 @@ impl eframe::App for ShoeboxApp {
         views::files::dialogs(self, &ctx);
         views::settings::show(self, &ctx);
         views::export::dialog(self, &ctx);
+        views::push::dialog(self, &ctx);
         views::merge::dialog(self, &ctx);
         views::presets::copy_window(self, &ctx);
         self.scroll_to_current = false;

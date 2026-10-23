@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
-use super::model::{Access, AssetId, Library, ResourceKind};
+use super::model::{Access, Asset, AssetId, Library, PushRequest, ResourceKind};
 use crate::error::Result;
 
 pub trait PhotoSource: Send + Sync {
@@ -29,4 +29,16 @@ pub trait PhotoSource: Send + Sync {
         progress: &(dyn Fn(f64) + Sync),
         stop: &AtomicBool,
     ) -> Result<()>;
+
+    /// These assets as Photos has them now (those still there).
+    fn lookup(&self, ids: &[AssetId]) -> Result<Vec<Asset>>;
+
+    /// Put a rendered file into Photos: a new asset, or an edit of one
+    /// (macOS asks the person to allow changing it). The asset's id.
+    fn push(&self, req: &PushRequest) -> Result<AssetId>;
+
+    /// Undo a push: delete an asset Shoebox made (`created`; it goes to
+    /// Recently Deleted, macOS asks first), or revert an edited asset to
+    /// its original.
+    fn undo_push(&self, id: &AssetId, created: bool) -> Result<()>;
 }

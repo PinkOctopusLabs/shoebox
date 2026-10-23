@@ -55,6 +55,9 @@ pub enum TrashMode {
     Folder(PathBuf),
 }
 
+/// The batch kind of a send to iCloud Photos.
+pub const PUSH_KIND: &str = "photos-push";
+
 /// Where an import's steps go: a batch of their own, or one begun earlier.
 enum ImportInto<'a> {
     New(&'a str),
@@ -733,6 +736,13 @@ impl FileOps {
     ) -> Result<()> {
         self.import_in(ImportInto::Batch(batch), copies, writes, progress, stop)
             .map(|_| ())
+    }
+
+    /// Like [`Self::begin_import`], for a send to iCloud Photos: its steps
+    /// only write its records; undoing it also undoes the send in Photos,
+    /// which the app does first (batch kind [`PUSH_KIND`]).
+    pub fn begin_push(&self, label: &str) -> Result<i64> {
+        self.journal.begin_batch(PUSH_KIND, label, None)
     }
 
     /// Close a batch from [`Self::begin_import`] once its steps have run.

@@ -6,7 +6,9 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use super::model::{Access, Asset, AssetId, Library, ResourceKind};
+use super::model::{
+    Access, Asset, AssetId, EditedBy, Library, Media, PushRequest, Resource, ResourceKind,
+};
 use super::source::PhotoSource;
 use crate::error::{CoreError, Result, io};
 
@@ -14,6 +16,7 @@ use crate::error::{CoreError, Result, io};
 pub struct FakeSource {
     state: Mutex<State>,
     downloads: AtomicUsize,
+    pushes: AtomicUsize,
 }
 
 #[derive(Default)]
@@ -84,6 +87,43 @@ impl FakeSource {
         if let Ok(mut s) = self.state.lock() {
             s.answer = Some(access);
         }
+    }
+
+    /// Pushes so far (new assets and edits).
+    pub fn pushes(&self) -> usize {
+        self.pushes.load(Ordering::Relaxed)
+    }
+
+    /// The asset with this local id, as it is now.
+    pub fn asset(&self, local: &str) -> Option<Asset> {
+        let s = self.state.lock().ok()?;
+        s.library
+            .assets
+            .iter()
+            .find(|a| a.id.local == local)
+            .cloned()
+    }
+
+    /// The bytes of one of an asset's files.
+    pub fn file(&self, local: &str, kind: ResourceKind) -> Option<Vec<u8>> {
+        let s = self.state.lock().ok()?;
+        s.files.get(&(local.to_owned(), kind)).cloned()
+    }
+
+    /// Albums by name, with their assets' local ids.
+    pub fn album_members(&self, name: &str) -> Vec<String> {
+        let Ok(s) = self.state.lock() else {
+            return Vec::new();
+        };
+        let Some(al) = s.library.albums.iter().find(|a| a.name == name) else {
+            return Vec::new();
+        };
+        s.library
+            .assets
+            .iter()
+            .filter(|a| a.albums.contains(&al.id))
+            .map(|a| a.id.local.clone())
+            .collect()
     }
 
     /// Files downloaded so far.
@@ -158,6 +198,134 @@ impl PhotoSource for FakeSource {
         std::fs::write(to, bytes).map_err(io(to))?;
         progress(1.0);
         self.downloads.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn lookup(&self, ids: &[AssetId]) -> Result<Vec<Asset>> {
+        let s = self
+            .state
+            .lock()
+            .map_err(|_| CoreError::Photos("fake library poisoned".into()))?;
+        Ok(s.library
+            .assets
+            .iter()
+            .filter(|a| ids.iter().any(|i| i.local == a.id.local))
+            .cloned()
+            .collect())
+    }
+
+    fn push(&self, req: &PushRequest) -> Result<AssetId> {
+        let bytes = std::fs::read(&req.file).map_err(io(&req.file))?;
+        let mut s = self
+            .state
+            .lock()
+            .map_err(|_| CoreError::Photos("fake library poisoned".into()))?;
+        let name = req
+            .file
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let now = jiff::Timestamp::now();
+        let id = match &req.edit_of {
+            Some(of) => {
+                let a = s
+                    .library
+                    .assets
+                    .iter_mut()
+                    .find(|a| a.id.local == of.local)
+                    .ok_or_else(|| CoreError::Photos(format!("{} isn't in Photos", of.local)))?;
+                a.edited = Some(EditedBy::Shoebox);
+                a.modified = Some(now);
+                a.resources.retain(|r| r.kind != ResourceKind::Edited);
+                a.resources.push(Resource {
+                    kind: ResourceKind::Edited,
+                    file_name: "FullSizeRender.jpg".into(),
+                    size: Some(bytes.len() as u64),
+                });
+                let id = a.id.clone();
+                s.files
+                    .insert((id.local.clone(), ResourceKind::Edited), bytes);
+                id
+            }
+            None => {
+                let n = s.library.assets.len();
+                let id = AssetId {
+                    cloud: None,
+                    local: format!("pushed-{n}"),
+                };
+                s.library.assets.push(Asset {
+                    id: id.clone(),
+                    media: Media::Photo,
+                    created: Some(now),
+                    modified: Some(now),
+                    location: None,
+                    favourite: false,
+                    hidden: false,
+                    burst: None,
+                    width: 0,
+                    height: 0,
+                    resources: vec![Resource {
+                        kind: ResourceKind::Original,
+                        file_name: name,
+                        size: Some(bytes.len() as u64),
+                    }],
+                    albums: Vec::new(),
+                    edited: None,
+                });
+                s.files
+                    .insert((id.local.clone(), ResourceKind::Original), bytes);
+                id
+            }
+        };
+        if let Some(album) = &req.album {
+            let existing = s
+                .library
+                .albums
+                .iter()
+                .find(|a| &a.name == album)
+                .map(|a| a.id.clone());
+            let album_id = match existing {
+                Some(a) => a,
+                None => {
+                    let a = format!("album-{}", s.library.albums.len());
+                    s.library.albums.push(super::model::Album {
+                        id: a.clone(),
+                        name: album.clone(),
+                        folders: Vec::new(),
+                    });
+                    a
+                }
+            };
+            if let Some(a) = s.library.assets.iter_mut().find(|a| a.id.local == id.local)
+                && !a.albums.contains(&album_id)
+            {
+                a.albums.push(album_id);
+            }
+        }
+        self.pushes.fetch_add(1, Ordering::Relaxed);
+        Ok(id)
+    }
+
+    fn undo_push(&self, id: &AssetId, created: bool) -> Result<()> {
+        let mut s = self
+            .state
+            .lock()
+            .map_err(|_| CoreError::Photos("fake library poisoned".into()))?;
+        if created {
+            s.library.assets.retain(|a| a.id.local != id.local);
+            s.files.retain(|(l, _), _| l != &id.local);
+            return Ok(());
+        }
+        let a = s
+            .library
+            .assets
+            .iter_mut()
+            .find(|a| a.id.local == id.local)
+            .ok_or_else(|| CoreError::Photos(format!("{} isn't in Photos", id.local)))?;
+        a.edited = None;
+        a.modified = Some(jiff::Timestamp::now());
+        a.resources.retain(|r| r.kind != ResourceKind::Edited);
+        s.files.remove(&(id.local.clone(), ResourceKind::Edited));
         Ok(())
     }
 }

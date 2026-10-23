@@ -88,6 +88,8 @@ pub struct Plan {
     pub hidden: usize,
     /// Left out: burst frames nobody kept.
     pub burst_frames: usize,
+    /// Left out: made in Photos by Shoebox (sent there).
+    pub sent: usize,
     /// Albums with assets this sync copies or copied before.
     pub albums: Vec<AlbumRow>,
     /// Bytes to download, as far as Photos says, and how many files it
@@ -159,6 +161,10 @@ pub fn plan(
             && !b.picked
         {
             out.burst_frames += 1;
+            continue;
+        }
+        if ledgers.pushed(&a.id).is_some_and(|(_, p)| p.created) {
+            out.sent += 1;
             continue;
         }
         match ledgers.find(&a.id) {

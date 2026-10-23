@@ -226,6 +226,13 @@ Defaults that are guesses so far.
 
 ### Library
 
+- [ ] **iCloud Photos: "probably already in the library".** Hold back a
+  Photos asset when the library has a photo taken at the same moment (to
+  the sub-second) with the same proportions, before downloading it, with
+  Import anyway: catches earlier exports in another format (JPEG, edited),
+  which the byte check can't. Also match cloud-only placeholders by name,
+  size and date when the sync record is lost, and a large-scale "import
+  twice after partial exports, copy nothing" test. M. Deferred 2026-10-23.
 - [ ] **iCloud Photos: Re-import missing.** PHOTOS-SPEC's Settings button
   to copy again photos whose copies are gone from the library (not just
   moved). Needs the library's files hashed to tell. M. Source: DECISIONS
@@ -233,6 +240,16 @@ Defaults that are guesses so far.
 - [ ] **iCloud Photos: Rebuild sync record** as its own button (a sync
   already rebuilds lost records by hash, but downloads to do it). S–M.
   Source: same.
+- [ ] **Send to Photos: the `shoebox:PushedFrom` marker** in sent files, so
+  a sync with lost records still knows Shoebox's own photos. S–M (export's
+  metadata writing). Source: DECISIONS "iCloud Photos: Send to Photos".
+- [ ] **Send to Photos: grid badge** for photos edited since they were sent
+  (only the Info row says so now). S. Source: same.
+- [ ] **Send to Photos: Photos as an export destination** in the export
+  dialog, beside the Send dialog. S. Source: same. (The person may rethink
+  exports as a whole: deferred 2026-10-23.)
+- [ ] **Send to Photos: undoing an update** goes back to the original, not
+  to the earlier send; undo leaves album membership. S–M. Source: same.
 - [ ] **iCloud Photos: quick re-sync by change token.** Every sync lists
   every asset now; `fetchPersistentChangesSinceToken` would list only
   what changed. M. Source: DECISIONS "iCloud Photos: PhotoKit".

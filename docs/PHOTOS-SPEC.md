@@ -1,6 +1,6 @@
 # Shoebox — iCloud Photos Spec
 
-Oct 20, 2026 · Accepted; Phases 1–2 built Oct 22, Phases 3–4 Oct 23
+Oct 20, 2026 · Accepted; Phases 1–2 built Oct 22, Phases 3–5 Oct 23
 
 Copy photos out of the Mac's Photos library (and so iCloud Photos) into a Shoebox library root, sync again later without copying anything twice, and send a photo, usually one edited in Develop, back into Photos. Once this spec is accepted, it is the source of truth for the feature the way `docs/EDITING-SPEC.md` is for editing.
 
@@ -206,7 +206,7 @@ shoebox-app
 
 Each phase is one reviewable chunk, finished with `cargo fmt`, `clippy -D warnings` and `cargo test`.
 
-**Status (2026-10-23):** Phases 1–4 are built (DECISIONS "iCloud Photos: the core", "iCloud Photos: PhotoKit", "iCloud Photos: the Import screen"). Settings' Re-import missing and Rebuild sync record aren't (OPEN-ITEMS). The probe and the first run in the app wait for a test account (MANUAL-CHECKS, section 11). Phase 5 (push) is next.
+**Status (2026-10-23):** Phases 1–5 are built (DECISIONS "iCloud Photos: the core", "…: PhotoKit", "…: the Import screen", "…: Send to Photos"); what's left of them is in OPEN-ITEMS. Everything runs against the fake library in tests; the probe and the checks in a test account (MANUAL-CHECKS, section 11) come next, then Phase 6.
 
 **Phase 0 — Spike (in a test macOS account)**
 - Create the test account and its test Photos library: about 200 synthetic assets from `shoebox-fixtures` (HEIC, JPEG with and without EXIF, a Live Photo pair, a RAW+JPEG pair, a video, a few edited in Photos, two albums in a folder, favourites, one hidden), with the `Shoebox test library` album.
