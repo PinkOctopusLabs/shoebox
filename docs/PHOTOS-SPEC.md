@@ -103,7 +103,7 @@ These follow the folder-names feature: the plan lists each album with what it be
 
 ## Sync ledger
 
-What's been copied is recorded per library root in `<root>/.shoebox/photos/`, beside `collections.json` and `events.json`, so it survives a catalog rebuild and travels with the library. Each step of a sync (a few assets) writes its records as a **new** file, `synced-<run>-<n>.json`, in the sync's batch, together with that step's copies; files are never rewritten. When several files have the same asset, the newest record wins. This keeps the journal small (a 30k-asset first sync would otherwise store a growing multi-megabyte file before and after every step), and undo works for free: undoing a sync empties its own files, so the records from before it come back. `choices.json` holds what each album became and the change token, and is rewritten each run.
+What's been copied is recorded per library root in `<root>/.shoebox/photos/`, beside `collections.json` and `events.json`, so it survives a catalog rebuild and travels with the library. Each step of a sync (a few assets) **appends** its records, one JSON line an asset, to the sync's own log, `synced-<run>-<n>.jsonl`, in the sync's batch, together with that step's copies; when a log passes about 1 MB the next step starts `-<n+1>`, so a 30k-asset first sync makes about 16 files. Logs are only ever appended to (fileops journals just each step's bytes and where they start); nothing is rewritten or deleted. When several records have the same asset, the newest wins. This keeps the journal small (a 30k-asset first sync would otherwise store a growing multi-megabyte file before and after every step), and undo works for free: undoing a sync cuts its lines off its logs, so the records from before it are what's left. A line cut short when the app stopped is finished by crash recovery's resume, or cut off by its roll back, and skipped when read. Syncs before the logs wrote a file per step (`synced-<run>-<n>.json`); those are still read, as they were. `choices.json` holds what each album became and the change token, and is rewritten each run.
 
 ```json
 {
@@ -176,7 +176,7 @@ shoebox-core::photos          (pure Rust, no PhotoKit)
                download(resource, to path, progress, cancel), push(…)
   model.rs     Asset, Resource, ResourceKind, Album, PushRequest, PushResult
   ledger.rs    .shoebox/photos/: load across roots, newest record wins,
-               a new record file per sync step
+               a sync's steps appended to its logs (rolled at ~1 MB)
   sync.rs      the driver: download, place, copy in steps of one batch
   plan.rs      assets + ledgers → import::Plan (reuses import::decide),
                album/mark mapping, sidecar dates and GPS

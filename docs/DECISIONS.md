@@ -4282,3 +4282,38 @@ step pending (`FileOps::close_finished_interrupted`; not interrupted
 undos); ones with a step still to run are asked about as before (SPEC
 safety rule 8). Test: `interrupted_batches_with_nothing_left_are_closed`.
 
+## iCloud Photos: the sync record as logs (2026-10-23)
+The record's one file per step (20 assets) had made 1,485 files (16.5 MB)
+in a real library's `.shoebox/photos` after two syncs. On a cloud drive
+each is an item to upload, any of them can be moved off the Mac, and the
+next sync's plan reads them all; and they only ever grew. Supersedes "the
+sync record is a folder, not one file" in "iCloud Photos: the core".
+- **Logs, appended to.** Each step appends its records (a compact JSON line
+  an asset: `key` plus the entry's fields) to `synced-<run>-<n>.jsonl`;
+  a step that would take a log past 1 MB (`ledger::ROLL_AT`) starts the
+  next (`ledger::Segment`, kept per root by the sync). The two syncs above
+  would be about 17 files; a 30k first sync, about 16. During a sync a
+  cloud drive uploads the newest log again as it grows, up to 1 MB at a
+  time; rolling bounds that.
+- **fileops: append and truncate.** A write to a `.jsonl` in `.shoebox`
+  is an append (`planned_write` → `Planned::Append`), never a rewrite. The
+  journal row (`append`) holds where it starts (`size`), the bytes
+  (`payload`) and their BLAKE3; nothing of what was there. It runs only if
+  the file is still that long, and syncs before returning. Undo is a
+  `truncate` row (`Planned::Truncate`: back to that length, only if the
+  file ends with exactly those bytes; it keeps them, so redo, an undo of
+  the undo, appends them again). Undo checks each log's length step by
+  step, so a batch's many appends to one log undo newest first. Resume
+  after a crash: an append fully there is marked done; a part of one (ours:
+  a prefix of its bytes) is cut off and written again. Nothing is deleted:
+  undoing a log's first append leaves it empty, as an undone `.json` is
+  left `{}`.
+- **Old files.** `synced-*.json` step files are read as before, with the
+  logs; the newest record wins across both. Nothing is converted.
+- Push records (`pushed-<run>.json`, one per send) and `choices.json` are
+  unchanged.
+- Tests: `app_logs_are_appended_undone_and_redone`,
+  `an_app_log_changed_since_is_not_undone`, `an_interrupted_append_resumes`
+  (fileops); `old_step_files_are_read_with_the_logs`,
+  `logs_roll_over_and_skip_a_cut_line` (ledger);
+  `first_sync_names_marks_and_records` checks one log for a three-step sync.

@@ -295,14 +295,14 @@ pub fn run(
     for ((root, id), e) in synced_entries(plan, job, ledgers) {
         records.entry(root).or_default().push((id, e));
     }
-    let mut step_n = 0usize;
+    // Each root's record file this run is appending to.
+    let mut segments: HashMap<usize, ledger::Segment> = HashMap::new();
     let mut flush = |copies: Vec<PlannedCopy>,
                      mut writes: Vec<(PathBuf, Vec<u8>)>,
                      records: &mut HashMap<usize, Vec<(AssetId, Entry)>>,
                      cx: &mut Context<'_>,
                      ledgers: &mut Ledgers|
      -> Result<()> {
-        step_n += 1;
         for (root, list) in records.drain() {
             if list.is_empty() {
                 continue;
@@ -310,7 +310,7 @@ pub fn run(
             writes.push(ledger::plan_synced(
                 &job.roots[root],
                 job.run,
-                step_n,
+                segments.entry(root).or_default(),
                 &list,
             )?);
             for (id, e) in list {

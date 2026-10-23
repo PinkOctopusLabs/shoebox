@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS journal (
     batch_id INTEGER NOT NULL REFERENCES batches(id),
     seq      INTEGER NOT NULL,
     ts       INTEGER NOT NULL,
-    op       TEXT NOT NULL,     -- move | mkdir | sidecar | copy | trash
+    op       TEXT NOT NULL,     -- move | mkdir | sidecar | copy | trash | append | truncate
     src      TEXT NOT NULL,
     dst      TEXT NOT NULL,
     size     INTEGER,
@@ -47,6 +47,12 @@ pub enum Op {
     /// `dst` where it went (= `src` for the system Trash, which can't be
     /// undone from here: Finder's Put Back does that).
     Trash,
+    /// Bytes added to the end of an app log (`.shoebox/…/*.jsonl`): `size`
+    /// is where they start, `payload` the bytes, `after_hash` their BLAKE3.
+    Append,
+    /// An app log cut back to `size` bytes (undoing appends): `payload` is
+    /// what was cut, `after_hash` its BLAKE3.
+    Truncate,
 }
 
 impl Op {
@@ -57,6 +63,8 @@ impl Op {
             Op::Sidecar => "sidecar",
             Op::Copy => "copy",
             Op::Trash => "trash",
+            Op::Append => "append",
+            Op::Truncate => "truncate",
         }
     }
     fn parse(s: &str) -> Result<Self> {
@@ -66,6 +74,8 @@ impl Op {
             "sidecar" => Ok(Op::Sidecar),
             "copy" => Ok(Op::Copy),
             "trash" => Ok(Op::Trash),
+            "append" => Ok(Op::Append),
+            "truncate" => Ok(Op::Truncate),
             other => Err(CoreError::Invalid(format!("unknown journal op {other:?}"))),
         }
     }
@@ -256,6 +266,36 @@ impl Journal {
                 before,
                 &after_hash.as_bytes()[..],
                 payload
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Record a pending append or truncate of an app log: where it starts
+    /// (`at`) and the bytes added or cut.
+    pub fn record_span(
+        &self,
+        batch: i64,
+        seq: usize,
+        op: Op,
+        path: &Path,
+        at: u64,
+        bytes: &[u8],
+    ) -> Result<i64> {
+        let p = path_str(path)?;
+        let after_hash = blake3::hash(bytes);
+        self.conn.execute(
+            "INSERT INTO journal(batch_id, seq, ts, op, src, dst, size, status, after_hash, payload)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, 'pending', ?7, ?8)",
+            params![
+                batch,
+                seq as i64,
+                now_ms(),
+                op.as_str(),
+                p,
+                at as i64,
+                &after_hash.as_bytes()[..],
+                bytes
             ],
         )?;
         Ok(self.conn.last_insert_rowid())

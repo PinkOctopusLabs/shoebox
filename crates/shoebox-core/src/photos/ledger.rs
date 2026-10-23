@@ -2,13 +2,15 @@
 //! root, so a later sync copies only new ones.
 //!
 //! It lives in the root (`<root>/.shoebox/photos/`), like events and
-//! collections, so it survives a catalog rebuild. Each sync writes its
-//! records as new files, a few assets at a time, in the sync's own batch
-//! (`synced-<run>-<n>.json`), and never rewrites them: the journal keeps
-//! only small files, and undoing a sync empties exactly its files, so the
-//! records from before it come back. When several files have the same
-//! asset, the latest record wins. `choices.json` holds what each album
-//! becomes and the change token, rewritten each run.
+//! collections, so it survives a catalog rebuild. Each sync appends its
+//! records, a step's assets at a time and one JSON line each, to files of
+//! its own (`synced-<run>-<n>.jsonl`, a new one once one passes about
+//! 1 MB), in the sync's batch: the journal keeps only what each step adds,
+//! and undoing a sync cuts exactly its lines off, so the records from
+//! before it are what's left. Syncs before these logs wrote a file per
+//! step (`synced-<run>-<n>.json`); those are read as they were. When
+//! several records have the same asset, the latest wins. `choices.json`
+//! holds what each album becomes and the change token, rewritten each run.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -71,6 +73,33 @@ impl Entry {
     }
 }
 
+/// A record as a line of a sync's log.
+#[derive(Serialize)]
+struct LineOut<'a> {
+    key: &'a str,
+    #[serde(flatten)]
+    entry: &'a Entry,
+}
+
+#[derive(Deserialize)]
+struct LineIn {
+    key: String,
+    #[serde(flatten)]
+    entry: Entry,
+}
+
+/// A sync's record file grows to about this before the next is started.
+pub const ROLL_AT: u64 = 1 << 20;
+
+/// Which of a sync's record files in a root it's appending to, and how
+/// long that is.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Segment {
+    n: u32,
+    len: u64,
+}
+
+/// A step's records before these logs (one file per step).
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct SyncedFile {
     #[serde(default)]
@@ -178,6 +207,7 @@ impl Ledgers {
                     p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
                         (n.starts_with("synced-") || n.starts_with("pushed-"))
                             && n.ends_with(".json")
+                            || n.starts_with("synced-") && n.ends_with(".jsonl")
                     })
                 })
                 .collect();
@@ -199,6 +229,12 @@ impl Ledgers {
                         if newer {
                             out.pushed.insert(key, (i, e));
                         }
+                    }
+                    continue;
+                }
+                if p.extension().is_some_and(|e| e == "jsonl") {
+                    for line in read_lines(&p) {
+                        out.insert(i, line.key, line.entry);
                     }
                     continue;
                 }
@@ -364,24 +400,67 @@ fn read_json<T: serde::de::DeserializeOwned>(p: &Path) -> Option<T> {
     }
 }
 
-/// The file recording these assets for one step of a sync (`run`: the
-/// sync's start, `n`: the step), as a write for its batch. The folder is
-/// made here (inside `.shoebox`, as collections' is).
+/// A log's records. A line that can't be read (cut short when the app
+/// stopped, before its batch was resumed) is skipped.
+fn read_lines(p: &Path) -> Vec<LineIn> {
+    let bytes = match std::fs::read(p) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("photos: can't read {}: {e}", p.display());
+            return Vec::new();
+        }
+    };
+    let mut skipped = 0;
+    let lines = bytes
+        .split(|b| *b == b'\n')
+        .filter(|l| !l.is_empty())
+        .filter_map(|l| serde_json::from_slice(l).map_err(|_| skipped += 1).ok())
+        .collect();
+    if skipped > 0 {
+        tracing::warn!(
+            "photos: ignoring {skipped} unreadable lines in {}",
+            p.display()
+        );
+    }
+    lines
+}
+
+/// The records of one step of a sync (`run`: the sync's start), as lines
+/// to append to its log in this root, `segment` saying which (a new one
+/// once it passes [`ROLL_AT`]). A write for its batch: fileops appends to
+/// `.jsonl` files. The folder is made here (inside `.shoebox`, as
+/// collections' is).
 pub fn plan_synced(
     root: &Path,
     run: &str,
-    n: usize,
+    segment: &mut Segment,
     assets: &[(AssetId, Entry)],
 ) -> Result<(PathBuf, Vec<u8>)> {
-    let body = SyncedFile {
-        schema: 1,
-        assets: assets.iter().map(|(id, e)| (id.key(), e.clone())).collect(),
-    };
-    let bytes = serde_json::to_vec_pretty(&body)
+    let mut bytes = Vec::new();
+    for (id, e) in assets {
+        let key = id.key();
+        serde_json::to_writer(
+            &mut bytes,
+            &LineOut {
+                key: &key,
+                entry: e,
+            },
+        )
         .map_err(|e| CoreError::Invalid(format!("photos record: {e}")))?;
+        bytes.push(b'\n');
+    }
+    let len = bytes.len() as u64;
+    if segment.n == 0 || segment.len > 0 && segment.len + len > ROLL_AT {
+        segment.n += 1;
+        segment.len = 0;
+    }
+    segment.len += len;
     let dir = dir_for(root);
     std::fs::create_dir_all(&dir).map_err(io(&dir))?;
-    Ok((dir.join(format!("synced-{run}-{n:05}.json")), bytes))
+    Ok((
+        dir.join(format!("synced-{run}-{:03}.jsonl", segment.n)),
+        bytes,
+    ))
 }
 
 /// The file recording these pushes (`run`: when), as a write for the push's
@@ -438,19 +517,34 @@ mod tests {
         }
     }
 
+    /// Append a step's records, as fileops does.
+    fn put(root: &Path, run: &str, seg: &mut Segment, assets: &[(AssetId, Entry)]) -> PathBuf {
+        let (p, bytes) = plan_synced(root, run, seg, assets).unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&p)
+            .and_then(|mut f| std::io::Write::write_all(&mut f, &bytes))
+            .unwrap();
+        p
+    }
+
     #[test]
     fn records_from_every_root_latest_wins() {
         let a = tempfile::tempdir().unwrap();
         let b = tempfile::tempdir().unwrap();
         let one = id(Some("C1"), "L1");
-        for (root, run, updated) in [(a.path(), "1", 1), (a.path(), "2", 5), (b.path(), "3", 3)] {
-            let (p, bytes) =
-                plan_synced(root, run, 1, &[(one.clone(), entry("L1", updated))]).unwrap();
-            std::fs::write(p, bytes).unwrap();
+        let mut b3 = Segment::default();
+        for (root, run, updated) in [(a.path(), "1", 1), (a.path(), "2", 5)] {
+            put(
+                root,
+                run,
+                &mut Segment::default(),
+                &[(one.clone(), entry("L1", updated))],
+            );
         }
-        let (p, bytes) =
-            plan_synced(b.path(), "3", 2, &[(id(None, "L2"), entry("L2", 1))]).unwrap();
-        std::fs::write(p, bytes).unwrap();
+        put(b.path(), "3", &mut b3, &[(one.clone(), entry("L1", 3))]);
+        put(b.path(), "3", &mut b3, &[(id(None, "L2"), entry("L2", 1))]);
         let l = Ledgers::load(&[a.path().into(), b.path().into()]);
         assert_eq!(l.len(), 2);
         let (root, e) = l.find(&one).unwrap();
@@ -463,14 +557,99 @@ mod tests {
     #[test]
     fn an_undone_record_reads_as_nothing() {
         let a = tempfile::tempdir().unwrap();
-        let (p, bytes) =
-            plan_synced(a.path(), "1", 1, &[(id(Some("C1"), "L1"), entry("L1", 1))]).unwrap();
-        std::fs::write(&p, bytes).unwrap();
-        // fileops' undo of a file it created leaves `{}`.
-        std::fs::write(&p, b"{}").unwrap();
-        std::fs::write(dir_for(a.path()).join("synced-junk.json"), b"not json").unwrap();
+        let p = put(
+            a.path(),
+            "1",
+            &mut Segment::default(),
+            &[(id(Some("C1"), "L1"), entry("L1", 1))],
+        );
+        // fileops' undo of the first append leaves the log empty, and of a
+        // step file from before the logs, `{}`.
+        std::fs::write(&p, b"").unwrap();
+        let dir = dir_for(a.path());
+        std::fs::write(dir.join("synced-0-00001.json"), b"{}").unwrap();
+        std::fs::write(dir.join("synced-junk.json"), b"not json").unwrap();
         let l = Ledgers::load(&[a.path().into()]);
         assert!(l.is_empty());
+    }
+
+    /// Step files from before the logs are read with them; the latest
+    /// record wins whichever kind it's in.
+    #[test]
+    fn old_step_files_are_read_with_the_logs() {
+        let a = tempfile::tempdir().unwrap();
+        let dir = dir_for(a.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = SyncedFile {
+            schema: 1,
+            assets: [
+                (id(Some("C1"), "L1").key(), entry("L1", 1)),
+                (id(Some("C2"), "L2").key(), entry("L2", 9)),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        std::fs::write(
+            dir.join("synced-20261023T131748-00001.json"),
+            serde_json::to_vec_pretty(&old).unwrap(),
+        )
+        .unwrap();
+        put(
+            a.path(),
+            "20261024T090000",
+            &mut Segment::default(),
+            &[
+                (id(Some("C1"), "L1"), entry("L1", 5)),
+                (id(Some("C2"), "L2"), entry("L2", 2)),
+            ],
+        );
+        let l = Ledgers::load(&[a.path().into()]);
+        assert_eq!(l.len(), 2);
+        assert_eq!(l.find(&id(Some("C1"), "L1")).unwrap().1.updated, 5);
+        assert_eq!(l.find(&id(Some("C2"), "L2")).unwrap().1.updated, 9);
+    }
+
+    /// A sync's records go into one log until it passes about 1 MB, then
+    /// the next; a line cut short is skipped.
+    #[test]
+    fn logs_roll_over_and_skip_a_cut_line() {
+        let a = tempfile::tempdir().unwrap();
+        let mut seg = Segment::default();
+        let mut paths = Vec::new();
+        let mut n = 0;
+        while paths.len() < 3 {
+            let step: Vec<_> = (0..20)
+                .map(|_| {
+                    n += 1;
+                    let local = format!("L{n}");
+                    (id(Some(&format!("C{n}")), &local), entry(&local, 1))
+                })
+                .collect();
+            let p = put(a.path(), "1", &mut seg, &step);
+            if paths.last() != Some(&p) {
+                paths.push(p);
+            }
+        }
+        let names: Vec<_> = paths
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "synced-1-001.jsonl",
+                "synced-1-002.jsonl",
+                "synced-1-003.jsonl"
+            ]
+        );
+        let len = std::fs::metadata(&paths[0]).unwrap().len();
+        assert!(len <= ROLL_AT && len > ROLL_AT - 20_000, "{len}");
+        // The last line, cut short.
+        let mut last = std::fs::read(&paths[2]).unwrap();
+        last.truncate(last.len() - 10);
+        std::fs::write(&paths[2], last).unwrap();
+        let l = Ledgers::load(&[a.path().into()]);
+        assert_eq!(l.len(), n - 1);
     }
 
     #[test]

@@ -348,6 +348,18 @@ fn first_sync_names_marks_and_records() {
     // One batch for the whole sync.
     let batches = w.fo.journal().batches().unwrap();
     assert_eq!(batches.len(), 1);
+    // Its steps' records in one log, a line an asset.
+    let dir = lib.join(".shoebox/photos");
+    let mut names: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names.len(), 2, "{names:?}");
+    assert_eq!(names[0], "choices.json");
+    assert!(names[1].starts_with("synced-") && names[1].ends_with("-001.jsonl"));
+    let log = std::fs::read_to_string(dir.join(&names[1])).unwrap();
+    assert_eq!(log.lines().count(), 5, "{log}");
 }
 
 #[test]

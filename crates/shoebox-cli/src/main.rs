@@ -833,6 +833,22 @@ fn undo_cmd(data_dir: &Path, batch: Option<i64>, yes: bool) -> Result<()> {
             fileops::Planned::Copy { src, dst, .. } => {
                 println!("{:<4} copy {} → {}", i + 1, src.display(), dst.display())
             }
+            fileops::Planned::Truncate { path, tail, .. } => {
+                println!(
+                    "{:<4} take {} bytes off the end of {}",
+                    i + 1,
+                    tail.len(),
+                    path.display()
+                )
+            }
+            fileops::Planned::Append { path, bytes } => {
+                println!(
+                    "{:<4} add {} bytes back to {}",
+                    i + 1,
+                    bytes.len(),
+                    path.display()
+                )
+            }
         }
     }
     if !confirm(&format!("Undo batch {batch} ({n} changes)?"), yes)? {

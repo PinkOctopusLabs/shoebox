@@ -9,7 +9,7 @@ mod sys;
 
 pub use sys::free_bytes;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,6 +44,29 @@ pub enum Planned {
         path: PathBuf,
         hash: [u8; 32],
     },
+    /// Add bytes to the end of an app log (`.shoebox/…/*.jsonl`), which is
+    /// only ever appended to: the journal keeps just the new bytes.
+    Append {
+        path: PathBuf,
+        bytes: Vec<u8>,
+    },
+    /// Cut an app log back to `len` bytes, if what follows is `tail`
+    /// (undoing appends).
+    Truncate {
+        path: PathBuf,
+        len: u64,
+        tail: Vec<u8>,
+    },
+}
+
+/// A write of a `.shoebox` file or sidecar as a step: an app log
+/// (`.jsonl`) is appended to, anything else replaced.
+pub fn planned_write(path: PathBuf, bytes: Vec<u8>) -> Planned {
+    if is_log(&path) {
+        Planned::Append { path, bytes }
+    } else {
+        Planned::Sidecar { path, bytes }
+    }
 }
 
 /// Where "Move to Trash" sends files.
@@ -123,6 +146,65 @@ fn app_dir_of(p: &Path) -> Option<&Path> {
 
 fn is_xmp(p: &Path) -> bool {
     p.extension().is_some_and(|e| e.eq_ignore_ascii_case("xmp"))
+}
+
+/// An app log: a `.jsonl` file in `.shoebox`, only ever appended to.
+fn is_log(p: &Path) -> bool {
+    p.extension().is_some_and(|e| e == "jsonl") && app_dir_of(p).is_some()
+}
+
+/// A file's length (0 if it isn't there).
+fn len_of(p: &Path) -> std::io::Result<u64> {
+    match std::fs::symlink_metadata(p) {
+        Ok(m) => Ok(m.len()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(e) => Err(e),
+    }
+}
+
+/// `n` bytes of a file from `at` (fewer if it ends first).
+fn read_span(p: &Path, at: u64, n: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(p)?;
+    f.seek(SeekFrom::Start(at))?;
+    let mut buf = Vec::with_capacity(n);
+    f.take(n as u64).read_to_end(&mut buf)?;
+    Ok(buf)
+}
+
+/// Add `bytes` to an app log that is `at` bytes long (made if it isn't
+/// there), on disk before this returns.
+fn append_at(p: &Path, at: u64, bytes: &[u8]) -> std::result::Result<(), String> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(p)
+        .map_err(|e| e.to_string())?;
+    let len = f.metadata().map_err(|e| e.to_string())?.len();
+    if len != at {
+        return Err(format!(
+            "is {len} bytes, not the {at} planned: changed since"
+        ));
+    }
+    f.write_all(bytes).map_err(|e| e.to_string())?;
+    f.sync_data().map_err(|e| e.to_string())
+}
+
+/// Cut an app log back to `len` bytes, if it is `tail` longer and ends
+/// with `tail`.
+fn truncate_to(p: &Path, len: u64, tail: &[u8]) -> std::result::Result<(), String> {
+    let now = len_of(p).map_err(|e| e.to_string())?;
+    let ends = read_span(p, len, tail.len()).map_err(|e| e.to_string())?;
+    if now != len + tail.len() as u64 || ends != tail {
+        return Err("changed since (by another app?)".into());
+    }
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(p)
+        .map_err(|e| e.to_string())?;
+    f.set_len(len).map_err(|e| e.to_string())?;
+    f.sync_data().map_err(|e| e.to_string())
 }
 
 fn exists(p: &Path) -> bool {
@@ -518,6 +600,8 @@ fn op_name(op: Op) -> &'static str {
         Op::Sidecar => "writing",
         Op::Copy => "copying",
         Op::Trash => "trashing",
+        Op::Append => "appending to",
+        Op::Truncate => "truncating",
     }
 }
 
@@ -650,7 +734,7 @@ impl FileOps {
             .chain(
                 writes
                     .into_iter()
-                    .map(|(path, bytes)| Planned::Sidecar { path, bytes }),
+                    .map(|(path, bytes)| planned_write(path, bytes)),
             )
             .collect();
         self.run("move", label, None, &ops, |_| Ok(()))
@@ -810,7 +894,7 @@ impl FileOps {
             .chain(
                 writes
                     .into_iter()
-                    .map(|(path, bytes)| Planned::Sidecar { path, bytes }),
+                    .map(|(path, bytes)| planned_write(path, bytes)),
             )
             .collect();
         let files = copies.len();
@@ -900,7 +984,7 @@ impl FileOps {
             .chain(
                 writes
                     .into_iter()
-                    .map(|(path, bytes)| Planned::Sidecar { path, bytes }),
+                    .map(|(path, bytes)| planned_write(path, bytes)),
             )
             .collect();
         self.run("import", label, None, &ops, |_| Ok(()))
@@ -946,7 +1030,7 @@ impl FileOps {
         .chain(
             writes
                 .into_iter()
-                .map(|(path, bytes)| Planned::Sidecar { path, bytes }),
+                .map(|(path, bytes)| planned_write(path, bytes)),
         )
         .collect();
         self.run("merge", label, None, &ops, |_| Ok(()))
@@ -978,7 +1062,7 @@ impl FileOps {
         }
         let ops: Vec<Planned> = writes
             .into_iter()
-            .map(|(path, bytes)| Planned::Sidecar { path, bytes })
+            .map(|(path, bytes)| planned_write(path, bytes))
             .collect();
         self.run("sidecar", label, None, &ops, |_| Ok(()))
     }
@@ -999,7 +1083,7 @@ impl FileOps {
         }
         let ops: Vec<Planned> = writes
             .into_iter()
-            .map(|(path, bytes)| Planned::Sidecar { path, bytes })
+            .map(|(path, bytes)| planned_write(path, bytes))
             .collect();
         self.run("edit", label, None, &ops, |_| Ok(()))
     }
@@ -1011,7 +1095,10 @@ impl FileOps {
         // The app's own files in a root (`.shoebox/events.json`,
         // `.shoebox/edits/…/DSC_1234.NEF.json`).
         let app_dir = app_dir_of(path);
-        let is_app_file = path.extension().is_some_and(|e| e == "json") && app_dir.is_some();
+        let is_app_file = path
+            .extension()
+            .is_some_and(|e| e == "json" || e == "jsonl")
+            && app_dir.is_some();
         if !is_xmp && !is_app_file {
             return Err(CoreError::Refused(format!(
                 "{} is not an .xmp sidecar or a .shoebox file; image files are never written",
@@ -1141,6 +1228,8 @@ impl FileOps {
         let mut seq = start;
         let mut dirs: HashSet<PathBuf> = HashSet::new();
         let mut trash_taken: HashSet<PathBuf> = HashSet::new();
+        // App logs' lengths once the plan's earlier appends have run.
+        let mut log_len: HashMap<PathBuf, u64> = HashMap::new();
         let mut mkdirs =
             |dst: &Path, seq: &mut usize, owners: &mut Vec<Option<usize>>| -> Result<()> {
                 let parent = dst.parent().unwrap_or(Path::new("/"));
@@ -1199,6 +1288,19 @@ impl FileOps {
                     };
                     j.record_sidecar(batch, seq, path, before.as_deref(), bytes)?;
                 }
+                Planned::Append { path, bytes } => {
+                    mkdirs(path, &mut seq, &mut owners)?;
+                    let at = match log_len.get(path) {
+                        Some(n) => *n,
+                        None => len_of(path).map_err(io(path))?,
+                    };
+                    j.record_span(batch, seq, Op::Append, path, at, bytes)?;
+                    log_len.insert(path.clone(), at + bytes.len() as u64);
+                }
+                Planned::Truncate { path, len, tail } => {
+                    j.record_span(batch, seq, Op::Truncate, path, *len, tail)?;
+                    log_len.insert(path.clone(), *len);
+                }
             }
             seq += 1;
             owners.push(Some(i));
@@ -1250,6 +1352,15 @@ impl FileOps {
                 let bytes = op.payload.as_deref().ok_or("journal row has no contents")?;
                 write_atomic(&op.dst, bytes).map_err(|e| e.to_string())
             }
+            Op::Append | Op::Truncate => {
+                let bytes = op.payload.as_deref().ok_or("journal row has no contents")?;
+                let at = op.size.ok_or("journal row has no offset")?;
+                if op.op == Op::Append {
+                    append_at(&op.dst, at, bytes)
+                } else {
+                    truncate_to(&op.dst, at, bytes)
+                }
+            }
         }
     }
 
@@ -1267,7 +1378,20 @@ impl FileOps {
             Op::Copy => hash_is(&op.dst),
             Op::Trash => !exists(&op.src) && (op.dst == op.src || exists(&op.dst)),
             Op::Sidecar => hash_is(&op.dst),
+            Op::Append => Self::appended(op),
+            Op::Truncate => op
+                .size
+                .is_some_and(|at| len_of(&op.dst).is_ok_and(|n| n == at)),
         }
+    }
+
+    /// Is an append's payload in its log, where it was planned?
+    fn appended(op: &OpRecord) -> bool {
+        let (Some(at), Some(bytes)) = (op.size, op.payload.as_deref()) else {
+            return false;
+        };
+        len_of(&op.dst).is_ok_and(|n| n >= at + bytes.len() as u64)
+            && read_span(&op.dst, at, bytes.len()).is_ok_and(|b| b == bytes)
     }
 
     /// Finish an interrupted batch: steps that already happened are marked
@@ -1327,6 +1451,22 @@ impl FileOps {
                     .check_unprotected(&op.src)
                     .and_then(|()| self.check_unprotected(&op.dst)),
                 Op::Mkdir => self.check_unprotected(&op.dst),
+                Op::Append => {
+                    // Part of it written when the app stopped (ours): cut
+                    // back to where it starts, then write it all.
+                    let (at, bytes) = (op.size.unwrap_or(0), op.payload.as_deref().unwrap_or(&[]));
+                    let now = len_of(&op.dst).unwrap_or(0);
+                    if now > at
+                        && now < at + bytes.len() as u64
+                        && let Ok(part) = read_span(&op.dst, at, (now - at) as usize)
+                        && bytes.starts_with(&part)
+                        && let Err(e) = truncate_to(&op.dst, at, &part)
+                    {
+                        tracing::warn!("{}: {e}", op.dst.display());
+                    }
+                    self.check_sidecar_target(&op.dst)
+                }
+                Op::Truncate => self.check_sidecar_target(&op.dst),
                 Op::Sidecar => {
                     let now = std::fs::read(&op.dst).ok();
                     if now != op.before {
@@ -1454,6 +1594,32 @@ impl FileOps {
                     });
                     out.push((op, back));
                 }
+                Op::Append | Op::Truncate => {
+                    let happened = match op.status {
+                        OpStatus::Done => true,
+                        OpStatus::Pending => Self::already_done(&op),
+                        OpStatus::Failed => false,
+                    };
+                    let (Some(at), Some(bytes)) = (op.size, op.payload.clone()) else {
+                        continue;
+                    };
+                    if !happened {
+                        continue;
+                    }
+                    let back = if op.op == Op::Append {
+                        Planned::Truncate {
+                            path: op.dst.clone(),
+                            len: at,
+                            tail: bytes,
+                        }
+                    } else {
+                        Planned::Append {
+                            path: op.dst.clone(),
+                            bytes,
+                        }
+                    };
+                    out.push((op, back));
+                }
                 Op::Sidecar => {
                     let current = std::fs::read(&op.dst).ok();
                     let wrote = current
@@ -1516,8 +1682,40 @@ impl FileOps {
         let plan = self.undo_plan(batch)?;
         // Undo is only allowed while it is consistent with the disk.
         let mut moves = Vec::new();
+        // App logs' lengths once the undo's earlier steps have run.
+        let mut log_len: HashMap<PathBuf, u64> = HashMap::new();
         for (op, back) in &plan {
             match back {
+                Planned::Truncate { path, len, tail } => {
+                    let now = match log_len.get(path) {
+                        Some(n) => *n,
+                        None => len_of(path).map_err(io(path))?,
+                    };
+                    let ends = read_span(path, *len, tail.len()).unwrap_or_default();
+                    if now != len + tail.len() as u64 || ends != *tail {
+                        return Err(CoreError::Refused(format!(
+                            "{} was changed since (by another app?); cannot undo",
+                            path.display()
+                        )));
+                    }
+                    self.check_sidecar_target(path)?;
+                    log_len.insert(path.clone(), *len);
+                }
+                Planned::Append { path, bytes } => {
+                    // Redoing appends: the log must end where they were cut.
+                    let now = match log_len.get(path) {
+                        Some(n) => *n,
+                        None => len_of(path).map_err(io(path))?,
+                    };
+                    if Some(now) != op.size {
+                        return Err(CoreError::Refused(format!(
+                            "{} was changed since (by another app?); cannot undo",
+                            path.display()
+                        )));
+                    }
+                    self.check_sidecar_target(path)?;
+                    log_len.insert(path.clone(), now + bytes.len() as u64);
+                }
                 Planned::Move(m) => {
                     let meta = std::fs::symlink_metadata(&m.src).map_err(|_| {
                         CoreError::Refused(format!(
@@ -1785,6 +1983,92 @@ mod tests {
         fo.undo(batch).unwrap();
         assert!(!root.join("lib/a.jpg").exists());
         assert!(root.join("trash/a.jpg").exists());
+    }
+
+    /// An app log is appended to, a step at a time: the journal keeps only
+    /// each step's bytes, undo cuts them off and redo puts them back.
+    #[test]
+    fn app_logs_are_appended_undone_and_redone() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        let fo = ops(&root, vec![]);
+        let log = root.join(".shoebox/photos/synced-1-001.jsonl");
+        let batch = fo.begin_import("sync").unwrap();
+        let none = AtomicBool::new(false);
+        for line in ["one\n", "two\n", "three\n"] {
+            fo.import_step(batch, &[], vec![(log.clone(), line.into())], &|_| {}, &none)
+                .unwrap();
+        }
+        fo.end_import(batch).unwrap();
+        assert_eq!(std::fs::read(&log).unwrap(), b"one\ntwo\nthree\n");
+        let appends: Vec<_> = fo
+            .journal()
+            .ops(batch)
+            .unwrap()
+            .into_iter()
+            .filter(|o| o.op == Op::Append)
+            .map(|o| (o.size, o.payload.unwrap()))
+            .collect();
+        assert_eq!(
+            appends,
+            [
+                (Some(0), b"one\n".to_vec()),
+                (Some(4), b"two\n".to_vec()),
+                (Some(8), b"three\n".to_vec())
+            ]
+        );
+
+        let undo = fo.undo(batch).unwrap();
+        assert_eq!(std::fs::read(&log).unwrap(), b"", "emptied, not deleted");
+        fo.undo(undo).unwrap();
+        assert_eq!(std::fs::read(&log).unwrap(), b"one\ntwo\nthree\n");
+    }
+
+    #[test]
+    fn an_app_log_changed_since_is_not_undone() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        let fo = ops(&root, vec![]);
+        let log = root.join(".shoebox/log.jsonl");
+        let batch = fo
+            .import("sync", &[], vec![(log.clone(), b"ours\n".to_vec())])
+            .unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log)
+            .and_then(|mut f| std::io::Write::write_all(&mut f, b"theirs\n"))
+            .unwrap();
+        assert!(matches!(fo.undo(batch), Err(CoreError::Refused(_))));
+        assert_eq!(std::fs::read(&log).unwrap(), b"ours\ntheirs\n");
+        // A log is never replaced: a second batch adds to it.
+        fo.import("sync", &[], vec![(log.clone(), b"more\n".to_vec())])
+            .unwrap();
+        assert_eq!(std::fs::read(&log).unwrap(), b"ours\ntheirs\nmore\n");
+    }
+
+    /// The app stopped part-way through writing an append: resuming writes
+    /// it whole, once; one that had finished isn't written again.
+    #[test]
+    fn an_interrupted_append_resumes() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        let fo = ops(&root, vec![]);
+        let log = root.join(".shoebox/log.jsonl");
+        touch(&log, "before\n");
+        let j = fo.journal();
+        for written in [&b"new l"[..], b"new line\n"] {
+            std::fs::write(&log, b"before\n").unwrap();
+            let batch = j.begin_batch("import", "sync", None).unwrap();
+            j.record_span(batch, 0, Op::Append, &log, 7, b"new line\n")
+                .unwrap();
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&log)
+                .and_then(|mut f| std::io::Write::write_all(&mut f, written))
+                .unwrap();
+            fo.resume(batch).unwrap();
+            assert_eq!(std::fs::read(&log).unwrap(), b"before\nnew line\n");
+        }
     }
 
     #[test]
