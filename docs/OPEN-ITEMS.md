@@ -125,7 +125,9 @@ Provisional choices the person should confirm or change.
   full runs from 2026-10-22, at its right-click on the copy (the copies
   row, then the menu's Delete, not on screen in 30 s); on 2026-10-23
   `develop_upright_levels_a_tilted_photo` and
-  `develop_colour_grading_wheel` failed the same way. They pass alone. A
+  `develop_colour_grading_wheel` failed the same way, and on 2026-10-24
+  `find_dates_reads_text_in_the_picture` (Vision's first load took about
+  45 s alone). They pass alone. A
   bisect (pass at e22cdf8, fail at 3444a2b) wasn't conclusive: the Mac's
   load average was 18–25 (Photos' mediaanalysisd, several users logged
   in). The test now waits for the row and the menu item rather than a

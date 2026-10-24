@@ -85,10 +85,13 @@ pub fn topbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     let width = (2.0 * side).min(560.0);
     let centre = egui::Rect::from_center_size(bar.center(), vec2(width.max(0.0), bar.height()));
     // Only the bar's empty space moves or zooms the window: clicks on its
-    // buttons (a quick double-click on one, say) must not.
-    let on_control = ui
-        .input(|i| i.pointer.interact_pos())
-        .is_some_and(|p| left.contains(p) || right.contains(p) || centre.contains(p));
+    // buttons (a quick double-click on one, say) must not. The middle is a
+    // control only where the search box is drawn (Duplicates, Import and
+    // the like show just their title there, which drags like the rest).
+    let search_shown = app.view.has_filters() && width >= 160.0;
+    let on_control = ui.input(|i| i.pointer.interact_pos()).is_some_and(|p| {
+        left.contains(p) || right.contains(p) || (search_shown && centre.contains(p))
+    });
     if !on_control {
         if drag.drag_started() {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
@@ -117,7 +120,14 @@ pub fn topbar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             if !app.view.has_filters() {
                 ui.with_layout(
                     egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-                    |ui| ui.weak(view_title(app.view)),
+                    // Not selectable: selecting text would take the drag
+                    // that moves the window.
+                    |ui| {
+                        ui.add(
+                            egui::Label::new(RichText::new(view_title(app.view)).weak())
+                                .selectable(false),
+                        )
+                    },
                 );
                 return;
             }

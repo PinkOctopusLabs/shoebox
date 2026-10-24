@@ -7392,3 +7392,59 @@ fn find_dates_waits_and_finds_for_chosen_photos() {
     h.run_steps(3);
     assert!(h.query_by_label("Look for clues (1 photo)").is_some());
 }
+
+/// The middle of the title bar moves the window on screens without the
+/// search box (Duplicates shows just its title there), and not where the
+/// search box is.
+#[test]
+fn the_title_bar_drags_where_there_is_no_search_box() {
+    let t = tempfile::tempdir().unwrap();
+    let base = t.path().canonicalize().unwrap();
+    let lib = base.join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    let img = shoebox_fixtures::jpeg(&shoebox_fixtures::scene(1, 320, 240), 85).unwrap();
+    std::fs::write(lib.join("a.jpg"), img).unwrap();
+    let p = paths(&base, std::slice::from_ref(&lib));
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+    let drags_at = |h: &mut Harness<'_, ShoeboxApp>, x: f32| {
+        let at = egui::pos2(x, 16.0);
+        h.event(egui::Event::PointerMoved(at));
+        h.event(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+        let mut started = false;
+        for k in 1..6 {
+            h.event(egui::Event::PointerMoved(
+                at + egui::vec2(8.0 * k as f32, 0.0),
+            ));
+            h.step();
+            started |= h.output().viewport_output.values().any(|v| {
+                v.commands
+                    .iter()
+                    .any(|c| matches!(c, egui::ViewportCommand::StartDrag))
+            });
+        }
+        h.event(egui::Event::PointerButton {
+            pos: at + egui::vec2(40.0, 0.0),
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.run_steps(2);
+        started
+    };
+    assert!(drags_at(&mut h, 1150.0), "the bar's empty space");
+    assert!(!drags_at(&mut h, 700.0), "the search box isn't a handle");
+    h.get_all_by_label("Duplicates").last().unwrap().click();
+    h.run_steps(3);
+    assert_eq!(h.state().view_name(), View::Duplicates);
+    assert!(
+        drags_at(&mut h, 700.0),
+        "Duplicates' title drags the window"
+    );
+}
