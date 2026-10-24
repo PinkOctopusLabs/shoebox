@@ -4,7 +4,8 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 
 use eframe::egui::{self, Color32, Rect, RichText, pos2, vec2};
 use shoebox_core::cache::Cache;
@@ -53,14 +54,25 @@ pub struct State {
     skipped: HashSet<String>,
     /// The groups and counts, kept until the clues or the catalog change.
     view: Option<Grouped>,
-    /// The catalog clues were last looked for in (new photos need theirs).
-    looked_in: usize,
     /// How many dated photos have the duplicate finder's hashes, of how
     /// many (the same-picture clue compares with those only).
     hashed: Option<(usize, usize)>,
     /// Bumped whenever clues arrive (the picture pass replaces a photo's).
     found: usize,
+    /// Find Date… on chosen photos: just these (dated or not), else every
+    /// undated photo.
+    scope: Option<Vec<PathBuf>>,
+    /// What the clue thread is doing, for the working panel.
+    stage: String,
+    working: Option<(PathBuf, &'static str)>,
+    /// The photos finished last, newest first, with what was found.
+    recent: std::collections::VecDeque<(PathBuf, String)>,
+    /// iCloud Photos record files left out (in the cloud only).
+    records_away: usize,
 }
+
+/// Photos finished shown in the working panel.
+const RECENT: usize = 12;
 
 /// What the view shows, worked out once per change.
 struct Grouped {
@@ -95,6 +107,12 @@ enum Found {
     Clues(PathBuf, Vec<Clue>),
     /// A second pass over this many photos (their pictures).
     More(usize),
+    /// What it's getting ready (with how far it has got).
+    Stage(String),
+    /// The photo it's on, and what it's doing to it.
+    Working(PathBuf, &'static str),
+    /// iCloud Photos record files left out, being in the cloud only.
+    RecordsAway(usize),
 }
 
 /// The clue thread: what it has done of how many.
@@ -102,6 +120,8 @@ struct Finder {
     rx: mpsc::Receiver<Found>,
     done: usize,
     total: usize,
+    /// Set to stop the thread (between photos).
+    stop: Arc<AtomicBool>,
 }
 
 // ---- Dates as text ----------------------------------------------------
@@ -365,11 +385,42 @@ struct Group {
 
 /// The undated photos that can be dated (not in reference folders).
 fn undated(app: &ShoeboxApp) -> Vec<usize> {
+    if let Some(chosen) = &app.dates.scope {
+        let set: HashSet<&Path> = chosen.iter().map(PathBuf::as_path).collect();
+        return (0..app.catalog.photos.len())
+            .filter(|&i| {
+                set.contains(app.catalog.photos[i].path.as_path()) && !app.catalog.is_reference(i)
+            })
+            .collect();
+    }
     (0..app.catalog.photos.len())
         .filter(|&i| {
             app.catalog.photos[i].meta.exif.capture_time.is_none() && !app.catalog.is_reference(i)
         })
         .collect()
+}
+
+/// Find Date… for the selection: Find dates on just those photos (dated or
+/// not), started at once.
+pub fn find_for_selection(app: &mut ShoeboxApp, ctx: &egui::Context) {
+    let photos = app.selected_paths();
+    if photos.is_empty() {
+        return;
+    }
+    stop(app);
+    app.dates.scope = Some(photos);
+    app.dates.view = None;
+    app.set_view(crate::app::View::Dates);
+    start(app, ctx);
+}
+
+/// Stop the clue thread (it ends after the step it's on).
+fn stop(app: &mut ShoeboxApp) {
+    if let Some(f) = app.dates.finder.take() {
+        f.stop.store(true, Ordering::Relaxed);
+    }
+    app.dates.working = None;
+    app.dates.stage.clear();
 }
 
 /// Start finding clues for the undated photos not looked at yet.
@@ -384,18 +435,29 @@ fn start(app: &mut ShoeboxApp, ctx: &egui::Context) {
     let (tx, rx) = mpsc::channel();
     let total = todo.len();
     let ctx = ctx.clone();
+    let halt = Arc::new(AtomicBool::new(false));
     let job = Job {
         catalog: app.catalog.clone(),
         cache_db: app.cache_db.clone(),
         embeddings_db: app.embeddings_db.clone(),
         people: app.ppl.view.clone(),
         todo,
+        stop: halt.clone(),
     };
+    app.dates.stage = "Starting".into();
+    app.dates.recent.clear();
     let spawned = std::thread::Builder::new()
         .name("find-dates".into())
         .spawn(move || find(&job, &tx, &ctx));
     match spawned {
-        Ok(_) => app.dates.finder = Some(Finder { rx, done: 0, total }),
+        Ok(_) => {
+            app.dates.finder = Some(Finder {
+                rx,
+                done: 0,
+                total,
+                stop: halt,
+            });
+        }
         Err(e) => tracing::warn!("find dates: {e}"),
     }
 }
@@ -408,6 +470,8 @@ struct Job {
     people: Option<std::sync::Arc<crate::people::PeopleView>>,
     /// The photos to find clues for (catalog indices).
     todo: Vec<usize>,
+    /// Stop between steps when set.
+    stop: Arc<AtomicBool>,
 }
 
 /// The clues for the photos of `job`, in two passes. First their own and
@@ -421,8 +485,22 @@ struct Job {
 /// first's.
 fn find(job: &Job, tx: &mpsc::Sender<Found>, ctx: &egui::Context) {
     let (catalog, todo) = (&*job.catalog, &job.todo);
+    let halted = || job.stop.load(Ordering::Relaxed);
+    let stage = |s: String| {
+        tracing::info!("find dates: {s}");
+        let _ = tx.send(Found::Stage(s));
+        ctx.request_repaint();
+    };
+    let began = std::time::Instant::now();
     let roots: Vec<PathBuf> = catalog.roots.iter().map(|r| r.path.clone()).collect();
-    let ledgers = Ledgers::load(&roots);
+    stage("Reading the iCloud Photos sync records".into());
+    // Records in the cloud only are left out: reading one waits for the
+    // drive to download it.
+    let (ledgers, away) = Ledgers::load_here(&roots);
+    if away > 0 {
+        tracing::info!("find dates: {away} sync record files in the cloud only, left out");
+        let _ = tx.send(Found::RecordsAway(away));
+    }
     let assets = ledgers
         .iter()
         .filter_map(|(_, r, e)| {
@@ -449,39 +527,68 @@ fn find(job: &Job, tx: &mpsc::Sender<Found>, ctx: &egui::Context) {
             .ok()
             .flatten()
     };
-    let hashed: Vec<(usize, Analysis)> = catalog
-        .photos
-        .iter()
-        .enumerate()
-        .filter(|(_, p)| p.meta.exif.capture_time.is_some())
-        .filter_map(|(i, p)| Some((i, cached(p)?)))
+    let dated_ones: Vec<usize> = (0..catalog.photos.len())
+        .filter(|&i| catalog.photos[i].meta.exif.capture_time.is_some())
         .collect();
-    let dated = catalog
-        .photos
-        .iter()
-        .filter(|p| p.meta.exif.capture_time.is_some())
-        .count();
+    let dated = dated_ones.len();
+    let mut hashed: Vec<(usize, Analysis)> = Vec::new();
+    for (n, &i) in dated_ones.iter().enumerate() {
+        if n % 2000 == 0 {
+            if halted() {
+                return;
+            }
+            stage(format!(
+                "Reading the duplicate finder's hashes · {} of {} dated photos",
+                thousands(n),
+                thousands(dated)
+            ));
+        }
+        if let Some(a) = cached(&catalog.photos[i]) {
+            hashed.push((i, a));
+        }
+    }
+    stage("Indexing the library (frames, sequences, folders)".into());
     let library = dating::Library::new(catalog, assets, hashed);
     let _ = tx.send(Found::Hashed {
         hashed: library.hashed(),
         dated,
     });
     tracing::info!(
-        "find dates: {} undated, {} dated photos hashed to compare with",
+        "find dates: {} to look at, {} dated photos hashed to compare with, ready in {:?}",
         todo.len(),
-        library.hashed()
+        library.hashed(),
+        began.elapsed()
     );
+    stage("Looking at each photo".into());
+    let working = |p: &Photo, what: &'static str| {
+        let _ = tx.send(Found::Working(p.path.clone(), what));
+    };
     // Each photo's clues as found, before ranking (ranking twice would
     // count agreement twice).
     let mut found: Vec<(usize, Vec<Clue>)> = Vec::with_capacity(todo.len());
     for (n, &i) in todo.iter().enumerate() {
+        if halted() {
+            return;
+        }
         let p = &catalog.photos[i];
+        working(
+            p,
+            if p.cloud {
+                "reading its name and folders (in the cloud only)"
+            } else {
+                "reading the dates in the file, its name and folders"
+            },
+        );
         let mut c = dating::clues(&p.path, Path::new(&p.rel), p.format, p.cloud);
         let own = cached(p).or_else(|| {
             (!p.cloud)
-                .then(|| shoebox_core::hash::analyze_path(&p.path).ok())
+                .then(|| {
+                    working(p, "hashing it, to find the same picture");
+                    shoebox_core::hash::analyze_path(&p.path).ok()
+                })
                 .flatten()
         });
+        working(p, "comparing with the library");
         c.extend(library.clues(i, own.as_ref()));
         let mut ranked = c.clone();
         dating::rank(&mut ranked);
@@ -510,6 +617,7 @@ fn find(job: &Job, tx: &mpsc::Sender<Found>, ctx: &egui::Context) {
     if tx.send(Found::More(found.len())).is_err() {
         return;
     }
+    stage("Loading search's embeddings and People".into());
     let by_path: HashMap<&Path, usize> = catalog
         .photos
         .iter()
@@ -551,11 +659,19 @@ fn find(job: &Job, tx: &mpsc::Sender<Found>, ctx: &egui::Context) {
         people.len()
     );
     let library = library.with_pictures(vectors, people);
+    stage(format!(
+        "Looking at the pictures of the {} without a sure date",
+        plural(found.len(), "photo")
+    ));
     for (n, (i, mut c)) in found.into_iter().enumerate() {
+        if halted() {
+            return;
+        }
         let p = &catalog.photos[i];
         let text = if p.cloud || p.format.is_movie() {
             Vec::new()
         } else {
+            working(p, "reading text in the picture (Vision)");
             shoebox_decode::render_path(
                 p.format,
                 &p.path,
@@ -572,6 +688,7 @@ fn find(job: &Job, tx: &mpsc::Sender<Found>, ctx: &egui::Context) {
             })
             .unwrap_or_default()
         };
+        working(p, "comparing with look-alikes and people");
         c.extend(library.picture_clues(i, &text));
         dating::rank(&mut c);
         if tx.send(Found::Clues(p.path.clone(), c)).is_err() {
@@ -595,10 +712,22 @@ fn poll(app: &mut ShoeboxApp) {
             Ok(Found::Clues(path, c)) => {
                 f.done += 1;
                 app.dates.found += 1;
+                let what = c
+                    .iter()
+                    .find(|c| !c.source.is_hint())
+                    .map_or_else(|| "no clues".to_owned(), clue_text);
+                app.dates.recent.push_front((path.clone(), what));
+                app.dates.recent.truncate(RECENT);
                 app.dates.clues.insert(path, c);
             }
             Ok(Found::Hashed { hashed, dated }) => app.dates.hashed = Some((hashed, dated)),
             Ok(Found::More(n)) => f.total += n,
+            Ok(Found::Stage(s)) => {
+                app.dates.stage = s;
+                app.dates.working = None;
+            }
+            Ok(Found::Working(p, what)) => app.dates.working = Some((p, what)),
+            Ok(Found::RecordsAway(n)) => app.dates.records_away = n,
             Err(mpsc::TryRecvError::Empty) => break,
             Err(mpsc::TryRecvError::Disconnected) => {
                 ended = true;
@@ -608,7 +737,15 @@ fn poll(app: &mut ShoeboxApp) {
     }
     if ended {
         app.dates.finder = None;
+        app.dates.working = None;
+        app.dates.stage.clear();
     }
+}
+
+/// What the clue thread is doing now, for Activity.
+pub fn stage(app: &ShoeboxApp) -> Option<&str> {
+    app.dates.finder.as_ref()?;
+    Some(app.dates.stage.as_str()).filter(|s| !s.is_empty())
 }
 
 /// The same-picture clue compares with the dated photos Duplicates has
@@ -697,12 +834,71 @@ fn file_note(app: &mut ShoeboxApp, ui: &mut egui::Ui, view: &Grouped) {
     });
 }
 
+/// What the clue thread is doing: its stage, the photo it's on and the
+/// step, and the photos finished last with what was found.
+fn working_panel(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    ui.add_space(4.0);
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(RichText::new(app.dates.stage.clone()).strong());
+        });
+        if let Some((path, what)) = app.dates.working.clone() {
+            ui.horizontal(|ui| {
+                ui.label(name_of(&path));
+                ui.weak(format!("· {what}"));
+            });
+        }
+        if app.dates.records_away > 0 {
+            ui.weak(format!(
+                "{} of the iCloud Photos sync record are in the cloud only, so their photos \
+                 aren't matched to their originals this time.",
+                plural(app.dates.records_away, "file")
+            ));
+        }
+        if !app.dates.recent.is_empty() {
+            ui.add_space(4.0);
+            ui.weak("Just looked at:");
+            egui::Grid::new("find-dates-recent")
+                .num_columns(2)
+                .spacing(vec2(12.0, 2.0))
+                .show(ui, |ui| {
+                    for (path, what) in &app.dates.recent {
+                        ui.label(name_of(path));
+                        ui.weak(what);
+                        ui.end_row();
+                    }
+                });
+        }
+    });
+}
+
+/// `57,000`.
+fn thousands(n: usize) -> String {
+    let d = n.to_string();
+    let mut out = String::new();
+    for (k, c) in d.chars().enumerate() {
+        if k > 0 && (d.len() - k).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn name_of(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 /// Forget the clues found and look again.
-fn look_again(app: &mut ShoeboxApp) {
+fn look_again(app: &mut ShoeboxApp, ctx: &egui::Context) {
     app.dates.clues.clear();
     app.dates.view = None;
     app.dates.hashed = None;
-    app.dates.looked_in = 0;
+    start(app, ctx);
 }
 
 /// How many photos have been looked at for clues.
@@ -855,20 +1051,43 @@ fn grouped(app: &mut ShoeboxApp) -> Grouped {
 /// Tasks → Find dates.
 pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     poll(app);
-    let catalog = std::sync::Arc::as_ptr(&app.catalog) as usize;
-    if app.dates.finder.is_none() && app.dates.looked_in != catalog {
-        app.dates.looked_in = catalog;
-        start(app, ui.ctx());
-    }
     let view = grouped(app);
     let (cloud, references) = (view.cloud, view.references);
+    let running = app.dates.finder.is_some();
+    // Photos not looked at yet (new ones, or none looked at at all).
+    let pending = if running {
+        0
+    } else {
+        undated(app)
+            .into_iter()
+            .filter(|&i| !app.dates.clues.contains_key(&app.catalog.photos[i].path))
+            .count()
+    };
     ui.horizontal_wrapped(|ui| {
         let n = view.undated;
         let s = if n == 1 { "" } else { "s" };
-        ui.label(RichText::new(format!("{n} undated photo{s}")).strong());
+        let what = if app.dates.scope.is_some() {
+            format!("{n} chosen photo{s}")
+        } else {
+            format!("{n} undated photo{s}")
+        };
+        ui.label(RichText::new(what).strong());
+        if app.dates.scope.is_some()
+            && !running
+            && ui
+                .small_button("All undated photos")
+                .on_hover_text("Back to every undated photo")
+                .clicked()
+        {
+            app.dates.scope = None;
+            app.dates.view = None;
+        }
         if let Some((done, total)) = progress(app) {
             ui.spinner();
             ui.weak(format!("looking for clues · {done} of {total}"));
+            if ui.small_button("Stop").clicked() {
+                stop(app);
+            }
         }
         if cloud > 0 {
             ui.weak(format!(
@@ -882,7 +1101,18 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 plural(references, "photo")
             ));
         }
-        if app.dates.finder.is_none()
+        if !running
+            && pending > 0
+            && pending < view.undated
+            && ui
+                .small_button(format!("Look at {} more", pending))
+                .on_hover_text("The photos not looked at yet")
+                .clicked()
+        {
+            start(app, ui.ctx());
+        }
+        if !running
+            && !app.dates.clues.is_empty()
             && ui
                 .small_button("Look again")
                 .on_hover_text(
@@ -891,7 +1121,7 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 )
                 .clicked()
         {
-            look_again(app);
+            look_again(app, ui.ctx());
         }
     });
     ui.weak(
@@ -901,6 +1131,25 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
          people, as hints to pick yourself). Accept dates each photo by its own suggestion; a date typed in \
          dates them all. Nothing is written without the dry run.",
     );
+    if !running && pending > 0 && pending == view.undated {
+        ui.add_space(6.0);
+        if ui
+            .button(
+                RichText::new(format!("Look for clues ({})", plural(pending, "photo"))).strong(),
+            )
+            .on_hover_text(
+                "Reads each photo's dates, name and folders, compares it with the library, \
+                 then reads the pictures of those without a sure date. It runs in the \
+                 background; Stop ends it, and what's found stays.",
+            )
+            .clicked()
+        {
+            start(app, ui.ctx());
+        }
+    }
+    if running {
+        working_panel(app, ui);
+    }
     duplicates_note(app, ui);
     file_note(app, ui, &view);
     let sure = sure_ones(&view, &app.dates.skipped);

@@ -686,6 +686,14 @@ pub fn photo_menu(app: &mut ShoeboxApp, resp: &egui::Response, pos: usize) {
             ui.close();
         }
         if ui
+            .button("Find Date…")
+            .on_hover_text("Look for clues to when the selected photos were taken (Find dates)")
+            .clicked()
+        {
+            dates::find_for_selection(app, ui.ctx());
+            ui.close();
+        }
+        if ui
             .button("Set Date…")
             .on_hover_text("Date the selected photos, or correct their date (in their sidecars)")
             .clicked()

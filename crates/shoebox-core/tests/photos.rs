@@ -1049,3 +1049,34 @@ fn interrupted_batches_with_nothing_left_are_closed() {
             .collect();
     assert_eq!(still, vec![left]);
 }
+
+/// Find dates reads the sync record without the files a cloud drive holds
+/// only (reading one would wait for the drive): they're left out, counted.
+#[test]
+fn the_record_can_be_read_without_cloud_only_files() {
+    let mut w = World::new();
+    library(&w);
+    let lib = w.lib.clone();
+    w.sync(&lib);
+    let roots = w.roots();
+    let (all, away) = Ledgers::load_here(&roots);
+    assert_eq!(away, 0);
+    assert!(!all.is_empty());
+    for e in std::fs::read_dir(lib.join(".shoebox/photos")).unwrap() {
+        let p = e.unwrap().path();
+        if p.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("synced-")
+        {
+            shoebox_core::cloud::pretend_cloud_only(&p);
+        }
+    }
+    let (here, away) = Ledgers::load_here(&roots);
+    assert_eq!(away, 1);
+    assert!(here.is_empty(), "its records are in the cloud only");
+    assert!(
+        !Ledgers::load(&roots).is_empty(),
+        "a sync still reads them all"
+    );
+}

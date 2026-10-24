@@ -7081,8 +7081,11 @@ fn find_dates_suggests_and_sets_dates() {
     settle(&mut h, Duration::from_secs(60));
 
     h.get_by_label("Find dates").click();
-    wait_for(&mut h, Duration::from_secs(20), "clues", |a| {
+    h.run_steps(2);
+    h.get_by_label_contains("Look for clues").click();
+    wait_for(&mut h, Duration::from_secs(60), "clues", |a| {
         shoebox_app::views::dates::looked_at(a) == 4
+            && shoebox_app::views::dates::progress(a).is_none()
     });
     h.run_steps(3);
     assert!(h.query_by_label_contains("4 undated photos").is_some());
@@ -7183,8 +7186,11 @@ fn find_dates_from_the_library_and_show_beside() {
     settle(&mut h, Duration::from_secs(60));
 
     h.get_by_label("Find dates").click();
-    wait_for(&mut h, Duration::from_secs(20), "clues", |a| {
+    h.run_steps(2);
+    h.get_by_label_contains("Look for clues").click();
+    wait_for(&mut h, Duration::from_secs(60), "clues", |a| {
         shoebox_app::views::dates::looked_at(a) == 1
+            && shoebox_app::views::dates::progress(a).is_none()
     });
     h.run_steps(3);
     assert!(
@@ -7238,6 +7244,8 @@ fn find_dates_reads_text_in_the_picture() {
     settle(&mut h, Duration::from_secs(60));
 
     h.get_by_label("Find dates").click();
+    h.run_steps(2);
+    h.get_by_label_contains("Look for clues").click();
     wait_for(&mut h, Duration::from_secs(120), "the picture pass", |a| {
         shoebox_app::views::dates::looked_at(a) == 1
             && shoebox_app::views::dates::progress(a).is_none()
@@ -7275,6 +7283,8 @@ fn find_dates_accepts_the_sure_ones_and_files_them() {
     settle(&mut h, Duration::from_secs(60));
 
     h.get_by_label("Find dates").click();
+    h.run_steps(2);
+    h.get_by_label_contains("Look for clues").click();
     wait_for(&mut h, Duration::from_secs(60), "clues", |a| {
         shoebox_app::views::dates::looked_at(a) == 2
             && shoebox_app::views::dates::progress(a).is_none()
@@ -7321,4 +7331,64 @@ fn find_dates_accepts_the_sure_ones_and_files_them() {
     );
     assert!(!undated.join("IMG_20190312_101530.jpg").exists());
     assert!(undated.join("IMG-20180701-WA0001.jpg").exists());
+}
+
+/// Find dates waits for its button; Find Date… in the photo menu looks at
+/// just the chosen photos, dated ones too, at once.
+#[test]
+fn find_dates_waits_and_finds_for_chosen_photos() {
+    let t = tempfile::tempdir().unwrap();
+    let base = t.path().canonicalize().unwrap();
+    let lib = base.join("lib/roll");
+    std::fs::create_dir_all(&lib).unwrap();
+    let jpg = |seed| shoebox_fixtures::jpeg(&shoebox_fixtures::scene(seed, 320, 240), 85).unwrap();
+    let shot = shoebox_fixtures::Shot {
+        datetime: "2019:03:12 10:00:00",
+        subsec: "",
+        orientation: 1,
+        serial: "1",
+    };
+    std::fs::write(
+        lib.join("IMG_20190312_100000.jpg"),
+        shoebox_fixtures::with_exif(&jpg(1), &shot),
+    )
+    .unwrap();
+    std::fs::write(lib.join("IMG_20180101_120000.jpg"), jpg(2)).unwrap();
+    let p = paths(&base, &[base.join("lib")]);
+    let mut h = harness(p, egui::vec2(1400.0, 900.0));
+    settle(&mut h, Duration::from_secs(60));
+
+    h.get_by_label("Find dates").click();
+    h.run_steps(10);
+    assert_eq!(
+        shoebox_app::views::dates::looked_at(h.state()),
+        0,
+        "nothing until asked"
+    );
+    assert!(h.query_by_label("Look for clues (1 photo)").is_some());
+
+    // The dated photo, chosen: Find Date… looks at it alone.
+    h.get_by_label("Grid").click();
+    h.run_steps(2);
+    h.get_by_label("IMG_20190312_100000.jpg").click();
+    h.run_steps(2);
+    h.get_by_label("IMG_20190312_100000.jpg").click_secondary();
+    h.run_steps(3);
+    h.get_by_label("Find Date…").click();
+    wait_for(&mut h, Duration::from_secs(20), "the chosen photo", |a| {
+        shoebox_app::views::dates::looked_at(a) == 1
+            && shoebox_app::views::dates::progress(a).is_none()
+    });
+    h.run_steps(3);
+    assert_eq!(h.state().view_name(), View::Dates);
+    assert!(h.query_by_label_contains("1 chosen photo").is_some());
+    assert!(
+        h.query_by_label_contains("12 March 2019, 10:00:00 · sure")
+            .is_some()
+    );
+
+    // Back to every undated photo: the other one, not looked at yet.
+    h.get_by_label("All undated photos").click();
+    h.run_steps(3);
+    assert!(h.query_by_label("Look for clues (1 photo)").is_some());
 }

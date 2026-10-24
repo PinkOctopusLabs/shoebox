@@ -4585,3 +4585,33 @@ SPEC "Dates".
   UI `find_dates_accepts_the_sure_ones_and_files_them` (snapshot
   `find-dates-file`).
 
+## Find dates: started by hand, shows its work (2026-10-24)
+Reported on 0.3.5: Find dates sat at "looking for clues · 0 of 3343" for a
+long time with nothing in the log; asked for a button to start it, a way
+to find the date of a particular photo, and the steps shown on screen.
+- **Why it sat there**: before looking at any photo the thread read the
+  whole iCloud Photos sync record, and 278 of its 1,485 files in
+  `.shoebox/photos` were cloud-only placeholders on Google Drive (`ls -lO`:
+  `dataless`). Each read waits for Drive to download the file, silently.
+  Find dates now reads it with `Ledgers::load_here`, which leaves out
+  cloud-only files and counts them (a sync still reads everything with
+  `Ledgers::load`); the working panel says how many were left out, and the
+  same-asset clue misses their photos this time. (Reading the duplicate
+  finder's hashes, one cache lookup per dated photo, is the next longest
+  step; it now reports how far it has got.)
+- **Started by hand**: nothing runs when the view opens. *Look for clues
+  (N photos)* starts it; afterwards *Look at N more* (photos new since)
+  and *Look again* (afresh). *Stop* sets a flag the thread checks between
+  photos (and every 2,000 hash lookups); what's found stays.
+- **The working panel** while it runs: the stage, logged too
+  (`find dates: …`, with the time it took to get ready), the photo it's
+  on and the step (`Found::Stage`, `Found::Working`), and the last 12
+  photos with their best suggestion or "no clues". Activity's row carries
+  the stage.
+- **Find Date…** (photo menu): Find dates for the selection only
+  (`State::scope`), dated photos too, started at once; *All undated
+  photos* goes back.
+- Tests: `the_record_can_be_read_without_cloud_only_files` (core); UI
+  `find_dates_waits_and_finds_for_chosen_photos`; the other Find dates UI
+  tests press the button.
+

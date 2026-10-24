@@ -52,7 +52,11 @@ impl Row {
 pub(crate) fn rows(app: &ShoeboxApp) -> Vec<Row> {
     let mut out = Vec::new();
     if let Some((done, total)) = crate::views::dates::progress(app) {
-        out.push(Row::new("Finding dates").progress(done, total));
+        let what = match crate::views::dates::stage(app) {
+            Some(s) => format!("Finding dates · {s}"),
+            None => "Finding dates".to_owned(),
+        };
+        out.push(Row::new(what).progress(done, total));
     }
     if let Some((p, _)) = &app.icloud.running {
         out.push(Row {

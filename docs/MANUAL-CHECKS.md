@@ -161,7 +161,10 @@ APFS clone, in folders by shoot.
 
 - [ ] **Find dates on real undated photos** (from 2026-10-23), on an APFS
   clone of the library (`cp -cR`), not the library itself. Open Tasks →
-  Find dates. Passes: it counts the undated photos as Grid's Undated does;
+  Find dates. Passes: nothing runs until Look for clues; it counts the
+  undated photos as Grid's Undated does; the working panel shows each
+  stage and photo as it goes (no long silent wait at the start), and Stop
+  stops it; Find Date… on one photo looks at it alone;
   the clues arrive in Activity's "Finding dates" and the groups make sense
   (WhatsApp and screenshot names, `-photos` edits by their names, scans by
   their folders); spot-check ten suggestions against what you know; Accept

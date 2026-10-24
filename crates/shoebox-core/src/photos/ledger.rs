@@ -205,11 +205,33 @@ impl Ledgers {
     /// Read the records of every root (unreadable files are skipped and
     /// logged; a file emptied by an undo reads as nothing).
     pub fn load(roots: &[PathBuf]) -> Self {
+        Self::load_from(roots, false).0
+    }
+
+    /// [`Self::load`] without the record files that are in a cloud drive
+    /// only (reading one waits for the drive to download it, which can take
+    /// minutes): for work that can go without them (Find dates). Returns
+    /// how many were left out.
+    pub fn load_here(roots: &[PathBuf]) -> (Self, usize) {
+        Self::load_from(roots, true)
+    }
+
+    fn load_from(roots: &[PathBuf], here_only: bool) -> (Self, usize) {
         let mut out = Ledgers::default();
+        let mut skipped = 0;
+        let away = |p: &Path| {
+            here_only
+                && std::fs::symlink_metadata(p).is_ok_and(|m| crate::cloud::is_cloud_only(p, &m))
+        };
         for (i, root) in roots.iter().enumerate() {
             let dir = dir_for(root);
-            out.choices
-                .push(read_json::<Choices>(&dir.join("choices.json")).unwrap_or_default());
+            let choices = dir.join("choices.json");
+            out.choices.push(if away(&choices) {
+                skipped += 1;
+                Choices::default()
+            } else {
+                read_json::<Choices>(&choices).unwrap_or_default()
+            });
             let Ok(rd) = std::fs::read_dir(&dir) else {
                 continue;
             };
@@ -225,6 +247,10 @@ impl Ledgers {
                 .collect();
             names.sort();
             for p in names {
+                if away(&p) {
+                    skipped += 1;
+                    continue;
+                }
                 let pushed = p
                     .file_name()
                     .and_then(|n| n.to_str())
@@ -258,7 +284,7 @@ impl Ledgers {
                 }
             }
         }
-        out
+        (out, skipped)
     }
 
     fn insert(&mut self, root: usize, key: String, e: Entry) {
