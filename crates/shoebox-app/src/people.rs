@@ -545,7 +545,13 @@ impl<F: Fn(Event)> Worker<F> {
                 self.status.skipped = 0;
                 self.readable = formats.len();
                 self.keys = keys;
-                self.grouped = None;
+                // Regrouping takes seconds on a big library, and the catalog
+                // is republished every few seconds while a cloud drive sends
+                // files: only moves and removals make it due at once, or it
+                // would run again and again with no time left to scan.
+                if r.followed > 0 || r.removed > 0 {
+                    self.grouped = None;
+                }
             }
             Err(e) => self.status.model = ModelState::Failed(e.to_string()),
         }

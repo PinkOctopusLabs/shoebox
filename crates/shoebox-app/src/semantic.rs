@@ -563,7 +563,13 @@ impl<F: Fn(Event)> Worker<F> {
                 self.readable = formats.len();
                 self.keys = keys;
                 self.formats = formats;
-                self.tagged = None;
+                // Tagging takes seconds on a big library, and the catalog
+                // is republished every few seconds while a cloud drive sends
+                // files: only moves and removals make it due at once, or it
+                // would run again and again with no time left to index.
+                if r.followed > 0 || r.removed > 0 {
+                    self.tagged = None;
+                }
             }
             Err(e) => self.status.model = ModelState::Failed(e.to_string()),
         }
