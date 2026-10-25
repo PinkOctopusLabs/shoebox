@@ -7208,12 +7208,16 @@ fn find_dates_suggests_and_sets_dates() {
     std::fs::create_dir_all(&chat).unwrap();
     std::fs::write(chat.join("IMG_20190312_101530.jpg"), img(1)).unwrap();
     std::fs::write(chat.join("IMG_20190312_181002.jpg"), img(2)).unwrap();
-    let trip = lib.join("Scans/March 2014");
+    let trip = lib.join("_undated/Scans/March 2014");
     std::fs::create_dir_all(&trip).unwrap();
     std::fs::write(trip.join("scan1.jpg"), img(3)).unwrap();
-    let none = lib.join("Misc");
+    let none = lib.join("_undated/Misc");
     std::fs::create_dir_all(&none).unwrap();
     std::fs::write(none.join("photo.jpg"), img(4)).unwrap();
+    // Undated but filed by folder outside `_undated/`: left as it is.
+    let filed = lib.join("2014");
+    std::fs::create_dir_all(&filed).unwrap();
+    std::fs::write(filed.join("shared.jpg"), img(5)).unwrap();
     let p = paths(&base, std::slice::from_ref(&lib));
     let mut h = harness(p, egui::vec2(1400.0, 900.0));
     settle(&mut h, Duration::from_secs(60));
@@ -7226,7 +7230,10 @@ fn find_dates_suggests_and_sets_dates() {
             && shoebox_app::views::dates::progress(a).is_none()
     });
     h.run_steps(3);
-    assert!(h.query_by_label_contains("4 undated photos").is_some());
+    assert!(
+        h.query_by_label_contains("4 undated photos in _undated/")
+            .is_some()
+    );
     assert!(
         h.query_by_label_contains("12 March 2019, each at its own time · sure")
             .is_some(),
@@ -7299,7 +7306,7 @@ fn find_dates_from_the_library_and_show_beside() {
     let t = tempfile::tempdir().unwrap();
     let base = t.path().canonicalize().unwrap();
     let lib = base.join("lib");
-    let roll = lib.join("roll");
+    let roll = lib.join("_undated/roll");
     std::fs::create_dir_all(&roll).unwrap();
     let shot = |dt: &'static str| shoebox_fixtures::Shot {
         datetime: dt,
@@ -7369,7 +7376,7 @@ fn find_dates_from_the_library_and_show_beside() {
 fn find_dates_reads_text_in_the_picture() {
     let t = tempfile::tempdir().unwrap();
     let base = t.path().canonicalize().unwrap();
-    let lib = base.join("lib/Misc");
+    let lib = base.join("lib/_undated/Misc");
     std::fs::create_dir_all(&lib).unwrap();
     let ticket = shoebox_fixtures::printed("25/12/2003", 10);
     std::fs::write(
@@ -7477,7 +7484,7 @@ fn find_dates_accepts_the_sure_ones_and_files_them() {
 fn find_dates_waits_and_finds_for_chosen_photos() {
     let t = tempfile::tempdir().unwrap();
     let base = t.path().canonicalize().unwrap();
-    let lib = base.join("lib/roll");
+    let lib = base.join("lib/_undated/roll");
     std::fs::create_dir_all(&lib).unwrap();
     let jpg = |seed| shoebox_fixtures::jpeg(&shoebox_fixtures::scene(seed, 320, 240), 85).unwrap();
     let shot = shoebox_fixtures::Shot {

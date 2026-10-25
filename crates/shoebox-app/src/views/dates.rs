@@ -1,6 +1,7 @@
 //! Dates (SPEC "Dates"): Set date… for the selection (a dry run, then one
-//! batch), and Tasks → Find dates: clues for the undated photos, found on a
-//! thread of its own (`shoebox_core::dating`), grouped for review.
+//! batch), and Tasks → Find dates: clues for the undated photos in
+//! `_undated/`, found on a thread of its own (`shoebox_core::dating`),
+//! grouped for review.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -383,7 +384,17 @@ struct Group {
     others: Vec<(Clue, usize)>,
 }
 
-/// The undated photos that can be dated (not in reference folders).
+/// Whether a photo (`rel`, its path in its root) is in `_undated/`.
+fn in_undated(rel: &str) -> bool {
+    Path::new(rel)
+        .components()
+        .next()
+        .is_some_and(|f| f.as_os_str() == "_undated")
+}
+
+/// The undated photos that can be dated: those in `_undated/` (photos
+/// filed by folder elsewhere are left as they are; Find Date… takes any),
+/// not in reference folders.
 fn undated(app: &ShoeboxApp) -> Vec<usize> {
     if let Some(chosen) = &app.dates.scope {
         let set: HashSet<&Path> = chosen.iter().map(PathBuf::as_path).collect();
@@ -395,7 +406,8 @@ fn undated(app: &ShoeboxApp) -> Vec<usize> {
     }
     (0..app.catalog.photos.len())
         .filter(|&i| {
-            app.catalog.photos[i].meta.exif.capture_time.is_none() && !app.catalog.is_reference(i)
+            let p = &app.catalog.photos[i];
+            p.meta.exif.capture_time.is_none() && in_undated(&p.rel) && !app.catalog.is_reference(i)
         })
         .collect()
 }
@@ -1011,10 +1023,7 @@ fn dated_in_undated(app: &ShoeboxApp, approximate: bool) -> Vec<PathBuf> {
             let p = &c.photos[i];
             p.meta.exif.capture_time.is_some()
                 && !c.is_reference(i)
-                && Path::new(&p.rel)
-                    .components()
-                    .next()
-                    .is_some_and(|f| f.as_os_str() == "_undated")
+                && in_undated(&p.rel)
                 && matches!(p.meta.precision(), Precision::Month | Precision::Year) == approximate
         })
         .map(|i| c.photos[i].path.clone())
@@ -1038,7 +1047,9 @@ fn grouped(app: &mut ShoeboxApp) -> Grouped {
                 cloud: all.iter().filter(|&&i| photos[i].cloud).count(),
                 references: (0..photos.len())
                     .filter(|&i| {
-                        photos[i].meta.exif.capture_time.is_none() && app.catalog.is_reference(i)
+                        photos[i].meta.exif.capture_time.is_none()
+                            && in_undated(&photos[i].rel)
+                            && app.catalog.is_reference(i)
                     })
                     .count(),
                 filable: dated_in_undated(app, false),
@@ -1069,14 +1080,14 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         let what = if app.dates.scope.is_some() {
             format!("{n} chosen photo{s}")
         } else {
-            format!("{n} undated photo{s}")
+            format!("{n} undated photo{s} in _undated/")
         };
         ui.label(RichText::new(what).strong());
         if app.dates.scope.is_some()
             && !running
             && ui
                 .small_button("All undated photos")
-                .on_hover_text("Back to every undated photo")
+                .on_hover_text("Back to every undated photo in _undated/")
                 .clicked()
         {
             app.dates.scope = None;
