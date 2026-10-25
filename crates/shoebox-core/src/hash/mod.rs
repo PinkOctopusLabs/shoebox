@@ -127,20 +127,57 @@ pub fn analyze_path(path: &Path) -> Result<Analysis> {
 }
 
 /// A movie: exact copies only (BLAKE3, streamed, so a big clip isn't read
-/// into memory), with its size from the header. No perceptual hashes.
+/// into memory), with its size and date as browsing reads them (the cache
+/// keeps this analysis's as the file's metadata). No perceptual hashes.
 fn analyze_movie(path: &Path, format: Format) -> Result<Analysis> {
-    let info = shoebox_decode::movie_info(format, path).ok();
+    let meta = crate::meta::read(path, format).unwrap_or_default();
     let mut f = std::fs::File::open(path).map_err(io(path))?;
     let mut h = blake3::Hasher::new();
     h.update_reader(&mut f).map_err(io(path))?;
     Ok(Analysis {
         blake3: *h.finalize().as_bytes(),
         image_data_hash: None,
-        width: info.as_ref().and_then(|i| i.width),
-        height: info.as_ref().and_then(|i| i.height),
-        exif: crate::exif::ExifInfo::default(),
+        width: meta.width,
+        height: meta.height,
+        exif: meta.exif,
         hashes: Vec::new(),
         luma_stddev: None,
         error: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The cache keeps a movie's analysis as its metadata, so it must keep
+    /// the date (it once didn't, and every hashed movie became undated).
+    #[test]
+    fn a_movies_analysis_keeps_its_date() {
+        let bx = |kind: &[u8], body: &[u8]| {
+            let mut v = ((body.len() + 8) as u32).to_be_bytes().to_vec();
+            v.extend_from_slice(kind);
+            v.extend_from_slice(body);
+            v
+        };
+        let mut mvhd = vec![0u8; 100];
+        let qt = (1_556_000_000_i64 + 2_082_844_800) as u32;
+        mvhd[4..8].copy_from_slice(&qt.to_be_bytes());
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join("clip.mov");
+        std::fs::write(
+            &path,
+            [bx(b"ftyp", b"qt  "), bx(b"moov", &bx(b"mvhd", &mvhd))].concat(),
+        )
+        .unwrap();
+        let a = analyze_path(&path).unwrap();
+        assert_eq!(
+            a.exif.capture_time,
+            crate::meta::read(&path, Format::Mov)
+                .unwrap()
+                .exif
+                .capture_time
+        );
+        assert!(a.exif.capture_time.is_some());
+    }
 }

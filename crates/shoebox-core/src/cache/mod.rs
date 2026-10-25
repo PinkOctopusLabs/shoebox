@@ -58,7 +58,7 @@ fn label_from(s: Option<String>) -> Option<Label> {
     s.and_then(|s| Label::ALL.into_iter().find(|l| l.name() == s))
 }
 
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 /// Rebuildable tables, dropped when the schema version changes.
 /// `dupe_ignores` holds user decisions and is never dropped.
@@ -179,7 +179,7 @@ impl Cache {
                 "cache schema {version} is newer than this build ({SCHEMA_VERSION})"
             )));
         }
-        // 8 and 9 add columns; a rebuild would throw away every hash, and
+        // 8 and 9 add columns, 10 re-reads some rows; a rebuild would throw away every hash, and
         // what's known of cloud-only files. Rows from before 9 have the
         // sidecars' dates in `exif` (they stay until the file is read again).
         if version == 7 {
@@ -187,6 +187,15 @@ impl Cache {
         }
         if version == 7 || version == 8 {
             conn.execute_batch("ALTER TABLE marks ADD COLUMN date TEXT")?;
+        }
+        if (7..=9).contains(&version) {
+            // Before 10, hashing a movie for duplicates cached it without its
+            // date: read those movies' metadata again.
+            conn.execute_batch(
+                "UPDATE files SET meta_version = NULL
+                 WHERE lower(ext) IN ('mov', 'mp4', 'mpg')
+                   AND id IN (SELECT file_id FROM exif WHERE capture_time IS NULL)",
+            )?;
         } else if version != 0 && version < SCHEMA_VERSION {
             tracing::info!("cache schema {version} is out of date; rebuilding");
             for t in REBUILDABLE {
@@ -876,6 +885,38 @@ mod tests {
         let blake3: Vec<u8> = cache
             .conn
             .query_row("SELECT blake3 FROM files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(blake3, vec![0x00, 0xff]);
+    }
+
+    /// Schema 9 → 10: movies cached without a date (hashing them dropped
+    /// it) are read again; their hashes, and every other row, stay.
+    #[test]
+    fn schema_9_reads_undated_movies_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(include_str!("schema.sql")).unwrap();
+            conn.execute_batch(
+                "INSERT INTO roots(id, path) VALUES (1, '/photos');
+                 INSERT INTO files(id, root_id, rel_path, ext, size, mtime, blake3, meta_version)
+                   VALUES (1, 1, 'a.mov', 'mov', 10, 20, x'00ff', 4),
+                          (2, 1, 'b.mov', 'mov', 10, 20, x'00ff', 4),
+                          (3, 1, 'c.png', 'png', 10, 20, x'00ff', 4);
+                 INSERT INTO exif(file_id, capture_time) VALUES
+                   (1, NULL), (2, '2019:03:12 10:15:30'), (3, NULL);",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 9).unwrap();
+        }
+        let cache = Cache::open(&path).unwrap();
+        let mut known: Vec<String> = cache.load_meta(1).unwrap().into_keys().collect();
+        known.sort();
+        assert_eq!(known, ["b.mov", "c.png"]);
+        let blake3: Vec<u8> = cache
+            .conn
+            .query_row("SELECT blake3 FROM files WHERE id = 1", [], |r| r.get(0))
             .unwrap();
         assert_eq!(blake3, vec![0x00, 0xff]);
     }
