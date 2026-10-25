@@ -130,7 +130,11 @@ fn review_auto_select_apply_and_undo() {
     let mut decisions: HashMap<PathBuf, Decision> = HashMap::new();
     let mut proposed: BTreeMap<String, Decision> = BTreeMap::new();
     for g in &r.groups {
-        for (e, d) in g.entries.iter().zip(review::auto_select(&r, g)) {
+        for (e, d) in
+            g.entries
+                .iter()
+                .zip(review::auto_select(&r, g, review::AutoSelect::SameMoment))
+        {
             decisions.insert(r.files[e.file].path.clone(), d);
             proposed.insert(name(&r, e.file), d);
         }
@@ -156,6 +160,48 @@ fn review_auto_select_apply_and_undo() {
     .map(|(k, v)| (k.to_owned(), v))
     .collect();
     assert_eq!(proposed, expected);
+
+    // Identical only: just the same file or image data; near-identical
+    // only: those and the near-identical copies taken at the same moment.
+    let moved = |mode| -> Vec<String> {
+        let mut v: Vec<String> = r
+            .groups
+            .iter()
+            .flat_map(|g| {
+                g.entries
+                    .iter()
+                    .zip(review::auto_select(&r, g, mode))
+                    .filter(|(_, d)| *d == Move)
+                    .map(|(e, _)| name(&r, e.file))
+            })
+            .collect();
+        v.sort();
+        v
+    };
+    let identical = moved(review::AutoSelect::Identical);
+    assert_eq!(
+        identical,
+        [
+            "scan/recovered/f0001.jpg",
+            "scan/recovered/f0002.jpg",
+            "scan/recovered/f0004.jpg",
+            "scan/recovered/f0006.jpg"
+        ]
+    );
+    // Every copy taken at the same moment here is near-identical.
+    let near = moved(review::AutoSelect::NearIdentical);
+    assert_eq!(near, moved(review::AutoSelect::SameMoment));
+    assert!(identical.iter().all(|f| near.contains(f)) && near.len() == 7);
+    for g in &r.groups {
+        for e in &g.entries {
+            if identical.contains(&name(&r, e.file)) {
+                let (_, m) = e.best.unwrap();
+                assert_eq!(m.percent(), 100);
+            } else if let Some((_, m)) = e.best {
+                assert!(m.percent() < 100, "{}: {m:?}", name(&r, e.file));
+            }
+        }
+    }
 
     // Unsafe decisions are refused.
     let path = |n: &str| lib.join(n);

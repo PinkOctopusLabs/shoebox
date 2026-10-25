@@ -100,7 +100,9 @@ pub(crate) fn rows(app: &ShoeboxApp) -> Vec<Row> {
             since: Some(item.started),
             ..Row::new(item.what.clone())
         };
+        // The search runs beside the library's other work.
         if app.dupes.running
+            && item.what == "Finding duplicates"
             && let Some((done, total)) = app.dupes.progress.filter(|(d, t)| d < t)
         {
             row = row.progress(done, total);

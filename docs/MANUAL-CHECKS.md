@@ -135,6 +135,14 @@ APFS clone, in folders by shoot.
     when Drive wrote it), and opens in QuickTime Player;
   - Find duplicates includes them (an ARW and its JPEG are a stack, not
     duplicates).
+- [ ] **Duplicates beside other work** (from 2026-10-25), on the whole
+  library with hashes not yet cached (a first run takes hours): while
+  Finding duplicates runs, Move to Trash a photo (and ⌘Z it back), rename
+  one and rate some; each happens at once, and Activity shows the search
+  and the move as separate rows. When it finishes: matches show a
+  percentage (100% only for identical files and the same image data);
+  Auto-select with Identical only marks only 100% copies to move, and
+  Near-identical leaves the Similar ones undecided.
 - [ ] **A camera DNG from another app** (from 2026-10-22): a DNG from Adobe
   DNG Converter (of a Z f NEF, with its default medium preview) and one
   from a phone or another camera (a Pixel or iPhone ProRAW, a Leica or

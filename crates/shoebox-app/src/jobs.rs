@@ -1022,7 +1022,7 @@ impl Library {
         let (events, redraw, fetching) = (ev_tx.clone(), repaint.clone(), board.clone());
         let spawned = std::thread::Builder::new()
             .name("library".into())
-            .spawn(move || library_worker(&paths, &ctx_rx, &ev_tx, &*repaint, &stop, &board));
+            .spawn(move || library_worker(&paths, &ctx_rx, &ev_tx, repaint, &stop, &board));
         if let Err(e) = spawned {
             tracing::error!("could not start library thread: {e}");
         }
@@ -1134,7 +1134,7 @@ impl LibraryCommand {
             C::LoadHistory | C::LoadBatch { .. } => "Reading history".into(),
             C::ResumeBatch { .. } => "Resuming an operation".into(),
             C::Eject { .. } => "Ejecting".into(),
-            C::FindDuplicates { .. } => "Finding duplicates".into(),
+            C::FindDuplicates { .. } => "Starting a duplicate search".into(),
             C::PreviewDuplicates { .. } => "Planning duplicates".into(),
             C::ApplyDuplicates { .. } => "Moving duplicates".into(),
             C::Download { .. } => "Downloading".into(),
@@ -1236,7 +1236,7 @@ fn library_worker(
     paths: &LibraryPaths,
     commands: &Receiver<LibraryCommand>,
     events: &Sender<LibraryEvent>,
-    repaint: &(dyn Fn() + Send + Sync),
+    repaint: Arc<dyn Fn() + Send + Sync>,
     import_stop: &std::sync::atomic::AtomicBool,
     board: &Board,
 ) {
@@ -1273,6 +1273,19 @@ fn library_worker(
     let mut dupes: Option<Review> = None;
     // The files the last find was limited to (found again after applying).
     let mut dupes_only: Option<Arc<HashSet<PathBuf>>> = None;
+    // Duplicate searches run on a thread of their own (hashing a large
+    // library takes hours, and moves, renames and the Trash mustn't wait):
+    // one at a time, the latest asked for while one runs next.
+    let (found_tx, found_rx) = crossbeam_channel::unbounded::<Result<Review, String>>();
+    let mut dupes_running = false;
+    let mut dupes_next: Option<shoebox_core::dupes::Config> = None;
+    let search = DupeSearch {
+        cache_db: paths.cache_db.clone(),
+        events: events.clone(),
+        repaint: repaint.clone(),
+        board: board.clone(),
+        done: found_tx,
+    };
     // The last import plan, run as planned when confirmed, and the scan it
     // came from (with where to and how named), for planning again.
     let mut import_plan: Option<shoebox_core::import::Plan> = None;
@@ -1349,9 +1362,28 @@ fn library_worker(
                 Ok(paths) => Command::Changed(paths),
                 Err(_) => continue,
             },
+            recv(found_rx) -> r => match r {
+                Ok(r) => Command::Found(r),
+                Err(_) => continue,
+            },
         };
         let cmd = match cmd {
             Command::App(c) => c,
+            Command::Found(r) => {
+                dupes_running = false;
+                match r {
+                    Ok(r) => {
+                        emit(LibraryEvent::Duplicates(Arc::new(r.clone())));
+                        dupes = Some(r);
+                    }
+                    Err(e) => emit(LibraryEvent::Error(format!("finding duplicates: {e}"))),
+                }
+                if let Some(config) = dupes_next.take() {
+                    dupes_running = true;
+                    search.start(&settings, &catalog, config, dupes_only.clone());
+                }
+                continue;
+            }
             Command::Changed(paths) => {
                 let _task = board.start(
                     Kind::Library,
@@ -1626,9 +1658,12 @@ fn library_worker(
                         &publish,
                         &emit,
                     );
-                    let only = dupes_only.as_deref();
-                    find_dupes(
-                        &mut cache, &settings, &catalog, config, only, &mut dupes, &emit,
+                    search.find(
+                        (&mut dupes_running, &mut dupes_next),
+                        &settings,
+                        &catalog,
+                        config,
+                        dupes_only.clone(),
                     );
                     (false, false)
                 } else {
@@ -1964,9 +1999,12 @@ fn library_worker(
             }
             LibraryCommand::FindDuplicates(config, only) => {
                 dupes_only = only;
-                let only = dupes_only.as_deref();
-                find_dupes(
-                    &mut cache, &settings, &catalog, config, only, &mut dupes, &emit,
+                search.find(
+                    (&mut dupes_running, &mut dupes_next),
+                    &settings,
+                    &catalog,
+                    config,
+                    dupes_only.clone(),
                 );
                 (false, false)
             }
@@ -2007,9 +2045,12 @@ fn library_worker(
                             &publish,
                             &emit,
                         );
-                        let only = dupes_only.as_deref();
-                        find_dupes(
-                            &mut cache, &settings, &catalog, config, only, &mut dupes, &emit,
+                        search.find(
+                            (&mut dupes_running, &mut dupes_next),
+                            &settings,
+                            &catalog,
+                            config,
+                            dupes_only.clone(),
                         );
                     }
                     Err(e) => emit(LibraryEvent::DupePreview(Err(e))),
@@ -2751,42 +2792,86 @@ fn edits_moved(
     }
 }
 
-/// Run duplicate detection and publish the groups.
-fn find_dupes(
-    cache: &mut shoebox_core::cache::Cache,
-    settings: &Settings,
-    catalog: &Catalog,
-    config: shoebox_core::dupes::Config,
-    only: Option<&HashSet<PathBuf>>,
-    dupes: &mut Option<Review>,
-    emit: &(dyn Fn(LibraryEvent) + Sync),
-) {
-    let progress = |done: usize, total: usize| {
-        if done.is_multiple_of(16) || done == total {
-            emit(LibraryEvent::DupeProgress { done, total });
-        }
-    };
-    let settled: std::collections::HashSet<PathBuf> =
-        catalog.links.iter().map(|l| l.file.clone()).collect();
-    match review::find(
-        cache,
-        settings.scan_roots(),
-        config,
-        &settled,
-        only,
-        &progress,
+/// Starts duplicate searches on a thread of their own, each with its own
+/// connection to the cache; the result comes back to the library worker.
+struct DupeSearch {
+    cache_db: PathBuf,
+    events: Sender<LibraryEvent>,
+    repaint: Arc<dyn Fn() + Send + Sync>,
+    board: Board,
+    done: Sender<Result<Review, String>>,
+}
+
+impl DupeSearch {
+    /// Search now, or (with one running) once it ends.
+    fn find(
+        &self,
+        (running, next): (&mut bool, &mut Option<shoebox_core::dupes::Config>),
+        settings: &Settings,
+        catalog: &Catalog,
+        config: shoebox_core::dupes::Config,
+        only: Option<Arc<HashSet<PathBuf>>>,
     ) {
-        Ok(r) => {
-            tracing::info!(
-                "{} duplicate groups ({} files analysed, {} cached)",
-                r.groups.len(),
-                r.stats.analyzed,
-                r.stats.cached
-            );
-            emit(LibraryEvent::Duplicates(Arc::new(r.clone())));
-            *dupes = Some(r);
+        if *running {
+            *next = Some(config);
+        } else {
+            *running = true;
+            self.start(settings, catalog, config, only);
         }
-        Err(e) => emit(LibraryEvent::Error(format!("finding duplicates: {e}"))),
+    }
+
+    fn start(
+        &self,
+        settings: &Settings,
+        catalog: &Catalog,
+        config: shoebox_core::dupes::Config,
+        only: Option<Arc<HashSet<PathBuf>>>,
+    ) {
+        let roots = settings.scan_roots();
+        let settled: HashSet<PathBuf> = catalog.links.iter().map(|l| l.file.clone()).collect();
+        let (cache_db, events, repaint, board, done) = (
+            self.cache_db.clone(),
+            self.events.clone(),
+            self.repaint.clone(),
+            self.board.clone(),
+            self.done.clone(),
+        );
+        let run = move || {
+            let _task = board.start(Kind::Library, "Finding duplicates", None);
+            let progress = |done: usize, total: usize| {
+                if done.is_multiple_of(16) || done == total {
+                    let _ = events.send(LibraryEvent::DupeProgress { done, total });
+                    repaint();
+                }
+            };
+            let r = shoebox_core::cache::Cache::open(&cache_db)
+                .and_then(|mut cache| {
+                    review::find(
+                        &mut cache,
+                        roots,
+                        config,
+                        &settled,
+                        only.as_deref(),
+                        &progress,
+                    )
+                })
+                .map_err(|e| e.to_string());
+            if let Ok(r) = &r {
+                tracing::info!(
+                    "{} duplicate groups ({} files analysed, {} cached)",
+                    r.groups.len(),
+                    r.stats.analyzed,
+                    r.stats.cached
+                );
+            }
+            let _ = done.send(r);
+        };
+        if let Err(e) = std::thread::Builder::new()
+            .name("find-duplicates".into())
+            .spawn(run)
+        {
+            let _ = self.done.send(Err(e.to_string()));
+        }
     }
 }
 
@@ -2843,6 +2928,8 @@ fn apply_dupes(
 enum Command {
     App(LibraryCommand),
     Changed(Vec<PathBuf>),
+    /// A duplicate search ended.
+    Found(Result<Review, String>),
 }
 
 #[cfg(test)]

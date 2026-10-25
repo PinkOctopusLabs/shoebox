@@ -217,6 +217,8 @@ pub struct DupeState {
     /// When the count last moved (Activity says when it has stopped).
     pub progress_at: Option<Instant>,
     pub config: shoebox_core::dupes::Config,
+    /// Which copies Auto-select marks to move.
+    pub auto: shoebox_core::review::AutoSelect,
     pub decisions: HashMap<PathBuf, Decision>,
     /// The group open in Compare or Survey.
     pub open: Option<usize>,
@@ -2987,10 +2989,10 @@ impl ShoeboxApp {
             if group.is_some_and(|x| x != gi) {
                 continue;
             }
-            for (e, d) in g
-                .entries
-                .iter()
-                .zip(shoebox_core::review::auto_select(&r, g))
+            for (e, d) in
+                g.entries
+                    .iter()
+                    .zip(shoebox_core::review::auto_select(&r, g, self.dupes.auto))
             {
                 self.dupes.decisions.insert(r.files[e.file].path.clone(), d);
             }

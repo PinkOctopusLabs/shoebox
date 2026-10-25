@@ -867,7 +867,8 @@ fn organise_marks_stacks_and_filters() {
     assert!(
         h.query_by_label_contains("JPG  (").is_some(),
         "the menu stays open for more"
-    );}
+    );
+}
 
 /// Several folders at once (⌘-click), photos added to an event from the
 /// photo menu, and one source at a time: an event replaces the folders.
@@ -1144,7 +1145,7 @@ fn duplicates_within_a_scope() {
     );
 
     // Back to everything from the In menu.
-    h.get_by_role(egui::accesskit::Role::ComboBox).click(); // In: Trip
+    h.get_by_value("Trip").click(); // In: Trip
     h.run_steps(2);
     h.get_by_label("All photos").click();
     h.run_steps(2);
@@ -1436,6 +1437,27 @@ fn undated_cleanup_in_the_app() {
     assert_eq!(h.state().dupe_groups(), Some(5));
     settle(&mut h, Duration::from_secs(30));
     snapshot(&mut h, "10-duplicates");
+    // Each match says how alike: 100% only for the same file or image data.
+    assert!(
+        h.query_all_by_label_contains("Same image data · 100%")
+            .next()
+            .is_some()
+    );
+
+    // Identical only: the carved preview moves, the resized copy waits.
+    h.get_by_value("Same moment").click();
+    h.run_steps(2);
+    h.get_by_label("Identical only").click();
+    h.run_steps(2);
+    h.get_by_label("Auto-select all").click();
+    h.run_steps(2);
+    assert_eq!(h.state().decision_of("f0001.jpg"), Decision::Move);
+    assert_eq!(h.state().decision_of("f0003.jpg"), Decision::Undecided);
+    h.get_by_label("Clear decisions").click();
+    h.get_by_value("Identical only").click();
+    h.run_steps(2);
+    h.get_by_label("Same moment").click();
+    h.run_steps(2);
 
     h.get_by_label("Auto-select all").click();
     h.run_steps(2);

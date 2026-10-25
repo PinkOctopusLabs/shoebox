@@ -8,6 +8,7 @@ use std::path::Path;
 
 use eframe::egui::{self, Color32, Rect, RichText, pos2, vec2};
 use shoebox_core::dupes::Level;
+use shoebox_core::review::AutoSelect;
 use shoebox_core::review::{Decision, Entry, Review};
 use shoebox_core::scan::Role;
 
@@ -48,7 +49,7 @@ fn decision_colour(d: Decision) -> Color32 {
 }
 
 /// How a file matches its closest copy: "Same image data as x.nef",
-/// "Near-identical · 3", with "other exposure" or "unconfirmed" when it
+/// "Near-identical · 95%" (how alike: `Match::percent`), with "other exposure" or "unconfirmed" when it
 /// isn't proposed for moving.
 pub fn match_text(r: &Review, keeper: usize, e: &Entry) -> String {
     let Some((other, m)) = e.best else {
@@ -57,10 +58,10 @@ pub fn match_text(r: &Review, keeper: usize, e: &Entry) -> String {
     let level = match m.level {
         Level::Exact => "Identical file".to_owned(),
         Level::ImageData => "Same image data".to_owned(),
-        Level::NearIdentical => format!("Near-identical · {}", m.distance),
-        Level::Similar => format!("Similar · {}", m.distance),
+        Level::NearIdentical => "Near-identical".to_owned(),
+        Level::Similar => "Similar".to_owned(),
     };
-    let mut s = level;
+    let mut s = format!("{level} · {}%", m.percent());
     if other != keeper {
         let name = r.files[other]
             .path
@@ -180,7 +181,7 @@ pub fn group_bar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         ui.separator();
         if ui
             .button("Auto-select")
-            .on_hover_text("Keep the reference copy (else NEF > TIFF > JPG, then the largest); move other copies taken at the same moment")
+            .on_hover_text(auto_hint(app.dupes.auto))
             .clicked()
         {
             app.auto_select(Some(g));
@@ -188,6 +189,34 @@ pub fn group_bar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         apply_button(app, ui);
     });
     ui.add_space(4.0);
+}
+
+/// Which copies Auto-select marks to move.
+fn auto_combo(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    egui::ComboBox::from_id_salt("dupes-auto")
+        .selected_text(app.dupes.auto.name())
+        .show_ui(ui, |ui| {
+            for m in AutoSelect::ALL {
+                ui.selectable_value(&mut app.dupes.auto, m, m.name())
+                    .on_hover_text(auto_hint(m));
+            }
+        })
+        .response
+        .on_hover_text("Which copies Auto-select marks to move");
+}
+
+fn auto_hint(m: AutoSelect) -> &'static str {
+    match m {
+        AutoSelect::SameMoment => {
+            "Keep the reference copy (else NEF > TIFF > JPG, then the largest); move the other copies taken at the same moment or with no capture time to tell; leave other exposures (burst frames) undecided"
+        }
+        AutoSelect::NearIdentical => {
+            "Keep the reference copy (else NEF > TIFF > JPG, then the largest); move only identical and near-identical copies taken at the same moment; leave similar ones undecided"
+        }
+        AutoSelect::Identical => {
+            "Keep the reference copy (else NEF > TIFF > JPG, then the largest); move only identical files and copies with the same image data (100%); leave everything else undecided"
+        }
+    }
 }
 
 fn apply_button(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
@@ -272,7 +301,7 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         let cfg = &mut app.dupes.config;
         ui.label("Similar ≤");
         ui.add(egui::Slider::new(&mut cfg.threshold, 0..=16))
-            .on_hover_text("Largest perceptual distance (bits) that counts as a match");
+            .on_hover_text("Largest perceptual distance (bits of 64) that counts as a match. Matches show how alike they are: 100% only for an identical file or the same image data");
         ui.label("Near-identical ≤");
         ui.add(egui::Slider::new(&mut cfg.near_identical, 0..=8));
         cfg.near_identical = cfg.near_identical.min(cfg.threshold);
@@ -331,9 +360,10 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             );
         }
         ui.separator();
+        auto_combo(app, ui);
         if ui
             .button("Auto-select all")
-            .on_hover_text("Keep the reference copy (else NEF > TIFF > JPG, then the largest); move the other copies taken at the same moment or with no capture time to tell; leave other exposures (burst frames) undecided")
+            .on_hover_text(auto_hint(app.dupes.auto))
             .clicked()
         {
             app.auto_select(None);
@@ -383,8 +413,8 @@ fn group_row(app: &mut ShoeboxApp, ui: &mut egui::Ui, r: &Review, gi: usize, row
             .map(|m| match m.level {
                 Level::Exact => "identical files".to_owned(),
                 Level::ImageData => "same image data".to_owned(),
-                Level::NearIdentical => format!("near-identical (≤ {})", m.distance),
-                Level::Similar => format!("similar (≤ {})", m.distance),
+                Level::NearIdentical => format!("near-identical (≥ {}%)", m.percent()),
+                Level::Similar => format!("similar (≥ {}%)", m.percent()),
             })
             .unwrap_or_default();
         ui.label(RichText::new(format!("{}", row + 1)).strong());
@@ -392,7 +422,11 @@ fn group_row(app: &mut ShoeboxApp, ui: &mut egui::Ui, r: &Review, gi: usize, row
         if g.has_reference {
             ui.weak("· has a reference copy");
         }
-        if ui.small_button("Auto-select").clicked() {
+        if ui
+            .small_button("Auto-select")
+            .on_hover_text(auto_hint(app.dupes.auto))
+            .clicked()
+        {
             app.auto_select(Some(gi));
         }
         let open = if g.entries.len() == 2 {

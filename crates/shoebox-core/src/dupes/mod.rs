@@ -73,6 +73,21 @@ pub struct Match {
     pub rotation: u16,
 }
 
+impl Match {
+    /// How alike the two are, as a percentage: 100 only for identical
+    /// files or the same image data; a perceptual match from its distance
+    /// over the 64-bit hashes, at most 99 (a resized copy can match at 0
+    /// without being the same file). A measure of likeness, not a
+    /// probability of being a duplicate.
+    pub fn percent(&self) -> u8 {
+        if self.level <= Level::ImageData {
+            return 100;
+        }
+        let d = self.distance.min(64);
+        (100 - (d * 100).div_ceil(64)).min(99) as u8
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
     /// Maximum combined Hamming distance (inclusive) for a perceptual match.

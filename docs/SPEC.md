@@ -189,11 +189,11 @@ Three levels of match, all cached per file so a second scan only hashes new or c
 
 **Review (in the app)**
 
-1. Tasks → Duplicates lists groups as thumbnail strips with distance, dimensions and paths; the size slider in the bar under the list makes the thumbnails larger (sharper ones load as they grow).
+1. Tasks → Duplicates lists groups as thumbnail strips with how alike each match is, dimensions and paths (a percentage: 100% only for an identical file or the same image data; a perceptual match from its distance over the 64-bit hashes, at most 99%: a likeness, not a probability). The search runs beside the library's other work, so moving, renaming or trashing photos doesn't wait for it; the size slider in the bar under the list makes the thumbnails larger (sharper ones load as they grow).
    - **In** chooses where to look: All photos (the default), a folder, an event or a collection. Within a folder, event or collection, only its own photos are compared with each other (every file of their stacks), so both files of every match are in it and nothing outside is listed or moved. A folder's, event's or collection's menu has **Find Duplicates in …**, which opens Duplicates and searches there. After applying or undoing, the search runs again in the same place.
 2. Opening a group shows it in Compare (2 files) or Survey (3+).
 3. Per file: keep, move to `_duplicates/`, add to stack as a variant, or ignore.
-4. **Auto-select** rules mark the rest of each group in one go: keep the reference copy, then NEF over TIFF over JPG, then the highest resolution; mark the other copies to move to `_duplicates/` when they were taken at the same moment or have no capture time to tell (a resized export, a carved preview). Other exposures (burst frames, dated at another moment than the copy they match, or than the kept copy when that copy is undated) stay undecided for a person.
+4. **Auto-select** rules mark the rest of each group in one go: keep the reference copy, then NEF over TIFF over JPG, then the highest resolution; mark the other copies to move to `_duplicates/` when they were taken at the same moment or have no capture time to tell (a resized export, a carved preview). Other exposures (burst frames, dated at another moment than the copy they match, or than the kept copy when that copy is undated) stay undecided for a person. A menu beside it narrows what's marked to move: **Same moment** (the above, the default), **Near-identical** (only identical and near-identical copies taken at the same moment) or **Identical only** (only identical files and the same image data, whatever their capture times say); everything else stays undecided.
 5. Move marked files, as one undoable batch.
 
 **Headless (CLI)**

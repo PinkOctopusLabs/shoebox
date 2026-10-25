@@ -306,21 +306,60 @@ pub fn find(
 /// resolution), keep other reference files, move the copies taken at the
 /// same moment (or with no capture time to tell, like a resized export or
 /// a carved preview), and leave other exposures (a burst's neighbours,
-/// different photos) for a person to look at.
-pub fn auto_select(r: &Review, g: &Group) -> Vec<Decision> {
+/// different photos) for a person to look at. `mode` narrows which copies
+/// are moved ([`AutoSelect`]).
+pub fn auto_select(r: &Review, g: &Group, mode: AutoSelect) -> Vec<Decision> {
     g.entries
         .iter()
         .enumerate()
         .map(|(k, e)| {
+            let level = e.best.map(|(_, m)| m.level);
+            let move_it = match mode {
+                AutoSelect::Identical => level.is_some_and(|l| l <= dupes::Level::ImageData),
+                AutoSelect::NearIdentical => {
+                    e.same_exposure && level.is_some_and(|l| l <= dupes::Level::NearIdentical)
+                }
+                AutoSelect::SameMoment => e.same_exposure,
+            };
             if k == 0 || r.files[e.file].role == Role::Reference {
                 Decision::Keep
-            } else if e.same_exposure {
+            } else if move_it {
                 Decision::Move
             } else {
                 Decision::Undecided
             }
         })
         .collect()
+}
+
+/// Which copies auto-select marks to move (the rest stay undecided).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AutoSelect {
+    /// Copies taken at the same moment as the one kept, or with no capture
+    /// time to tell.
+    #[default]
+    SameMoment,
+    /// Of those, only identical and near-identical ones.
+    NearIdentical,
+    /// Only identical files and the same image data (100%), whatever their
+    /// capture times say.
+    Identical,
+}
+
+impl AutoSelect {
+    pub const ALL: [AutoSelect; 3] = [
+        AutoSelect::SameMoment,
+        AutoSelect::NearIdentical,
+        AutoSelect::Identical,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            AutoSelect::SameMoment => "Same moment",
+            AutoSelect::NearIdentical => "Near-identical",
+            AutoSelect::Identical => "Identical only",
+        }
+    }
 }
 
 /// What applying the decisions will do.
