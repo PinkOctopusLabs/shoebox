@@ -135,6 +135,14 @@ APFS clone, in folders by shoot.
     when Drive wrote it), and opens in QuickTime Player;
   - Find duplicates includes them (an ARW and its JPEG are a stack, not
     duplicates).
+- [ ] **Movies play in the loupe** (from 2026-10-26), on the library's
+  own: an iPhone clip held upright, an iPhone HDR clip, a 4K one, a long
+  one (over an hour if there is one), an MP4 from another app and an MPG
+  of 28 Jul 2018. Passes: each plays smoothly with its sound, upright,
+  its colours as in QuickTime Player (HDR ones not washed out); the
+  scrubber and Space work; the sound button mutes it; moving to the next
+  photo or back to the grid stops the sound at once; Open in QuickTime
+  Player pauses it here. DECISIONS "Movies play in the loupe".
 - [ ] **Duplicates beside other work** (from 2026-10-25), on the whole
   library with hashes not yet cached (a first run takes hours): while
   Finding duplicates runs, Move to Trash a photo (and ⌘Z it back), rename

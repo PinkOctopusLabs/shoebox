@@ -296,6 +296,9 @@ Defaults that are guesses so far.
   DECISIONS "M5 file operations and import".
 - [ ] **Shutter count for other makes** through ExifTool when installed, as
   SPEC allows. S. Source: DECISIONS "Shutter count, GPS from sidecars".
+- [ ] **Play a Live Photo's video** from its photo in the loupe (the
+  stack's MOV; held or with a button, as Photos does). S. Source: DECISIONS
+  "Movies play in the loupe".
 - [ ] **Perceptual duplicates for movies** (exact copies only now). M.
   Source: DECISIONS "Live Photos and movies (MOV)".
 - [ ] **The loupe at 100% on an edited photo** shows the 2560 px preview;

@@ -3247,8 +3247,10 @@ fn analysis_real_library() {
 }
 
 /// A Live Photo (JPG + MOV, one base name) stacks as one photo; lone clips
-/// (MOV and MP4) show their poster frames, and the loupe offers to open it. Needs ffmpeg to
-/// make the movies (skipped without it).
+/// (MOV and MP4) show their poster frames, and play in the loupe (Play or
+/// Space; stopped on leaving it), or open in QuickTime Player. Needs ffmpeg
+/// to make the movies (skipped without it). Frames themselves need the main
+/// thread's run loop, which tests don't have: `tests/video.rs` checks them.
 #[test]
 fn live_photos_and_movies() {
     let t = tempfile::tempdir().unwrap();
@@ -3287,13 +3289,41 @@ fn live_photos_and_movies() {
     h.run_steps(2);
     h.state_mut().set_view(View::Loupe);
     settle(&mut h, Duration::from_secs(30));
-    assert!(h.query_by_label("▶ Open in QuickTime Player").is_some());
+    assert!(h.query_by_label("Open in QuickTime Player").is_some());
     assert_eq!(
         h.state().failed_count(),
         0,
         "the full-size poster loads too"
     );
+    assert_eq!(h.state().movie(), None, "nothing plays until asked");
     snapshot(&mut h, "movies-2-loupe");
+
+    h.get_by_label("Play").click();
+    h.run_steps(3);
+    assert_eq!(h.state().movie(), Some(("phone.mp4".into(), None)));
+    assert!(h.query_by_label("Play").is_none(), "the big button goes");
+    h.get_by_label(shoebox_app::icons::SOUND_ON).click();
+    h.run_steps(2);
+    assert!(
+        h.query_by_label(shoebox_app::icons::SOUND_OFF).is_some(),
+        "sound off"
+    );
+    snapshot(&mut h, "movies-3-playing");
+
+    // Another clip: the first stops; Space plays this one.
+    h.state_mut().set_view(View::Grid);
+    h.run_steps(2);
+    h.get_by_label("clip.mov").click();
+    h.run_steps(2);
+    h.state_mut().set_view(View::Loupe);
+    h.run_steps(3);
+    assert_eq!(h.state().movie(), None);
+    h.key_press(egui::Key::Space);
+    h.run_steps(3);
+    assert_eq!(h.state().movie(), Some(("clip.mov".into(), None)));
+    h.state_mut().set_view(View::Grid);
+    h.run_steps(2);
+    assert_eq!(h.state().movie(), None, "leaving the loupe stops it");
 }
 
 /// Develop: a raw photo (a synthetic DNG, which rawler reads whatever its

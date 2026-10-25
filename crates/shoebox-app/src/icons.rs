@@ -27,9 +27,13 @@ pub const REJECT: &str = "\u{E4F8}";
 pub const FACES: &str = "\u{E6FC}";
 pub const ALPHABETICAL: &str = "\u{E6EE}";
 pub const CLOUD: &str = "\u{E1AA}";
+pub const PLAY: &str = "\u{E3D0}";
+pub const PAUSE: &str = "\u{E39E}";
+pub const SOUND_ON: &str = "\u{E44A}";
+pub const SOUND_OFF: &str = "\u{E45C}";
 
 /// Every icon (the glyph test checks each is in the font).
-pub const ALL: [&str; 22] = [
+pub const ALL: [&str; 26] = [
     SIDEBAR,
     UNDO,
     REDO,
@@ -52,6 +56,10 @@ pub const ALL: [&str; 22] = [
     FACES,
     ALPHABETICAL,
     CLOUD,
+    PLAY,
+    PAUSE,
+    SOUND_ON,
+    SOUND_OFF,
 ];
 
 /// Add the icon font after the text font, so ordinary text keeps its own

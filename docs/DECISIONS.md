@@ -4615,3 +4615,40 @@ to find the date of a particular photo, and the steps shown on screen.
   `find_dates_waits_and_finds_for_chosen_photos`; the other Find dates UI
   tests press the button.
 
+## Movies play in the loupe (2026-10-26)
+Asked for: play a movie in the app rather than opening QuickTime Player.
+This lifts the spec's v1 non-goal "Video playback beyond a poster frame"
+(DECISIONS "Live Photos and movies (MOV)" had the loupe offer QuickTime
+only); editing or trimming movies stays out.
+- **AVFoundation** (`video.rs`, the app's FFI file for it): an `AVPlayer`
+  decodes (in hardware), keeps time and plays the sound; an
+  `AVPlayerItemVideoOutput` hands over the frame due now, polled each
+  frame the UI draws while playing, as BGRA copied into an egui texture.
+  No frames are decoded by Shoebox. The UI thread reads only the movie's
+  header, on Play (`tracksWithMediaType:` for the track's size and turn:
+  milliseconds for a file that's here; a cloud-only movie isn't opened
+  until the loupe has downloaded it).
+- **Colour**: the output asks AVFoundation for the display's colour space
+  (`AVVideoColorPropertiesKey`: P3 D65 primaries with the sRGB transfer
+  when the window is tagged Display P3, else Rec. 709 primaries), so clips
+  match their poster frames and photos. HDR clips (an iPhone's HLG) are
+  tone mapped to SDR by AVFoundation; EDR display is out of scope (as for
+  photos).
+- **Size**: frames at most 2560 px long (`kCVPixelBufferWidthKey`/
+  `HeightKey`, scaled by AVFoundation): a 4K clip would be 33 MB a frame
+  to copy and upload; 2560 fills the loupe on a 5K screen.
+- **Turning**: frames come as stored; the track's `preferredTransform`
+  gives quarter turns, and the loupe draws the texture as a mesh with its
+  corners' UVs turned (no copy). `tests/video.rs` checks the direction
+  against AVFoundation's own upright poster.
+- **The main thread**: AVFoundation reports (an item's status, frames)
+  through the main run loop, which the app's event loop turns. Tests have
+  none: `tests/video.rs` runs on the main thread (`harness = false`) and
+  turns it while waiting (`video::run_main_loop`); the UI test checks the
+  controls, Space and stopping but can't see frames.
+- **Controls**: a large Play button over the poster until it starts; the
+  bar (play/pause, time, scrubber with exact seeks, time length, sound
+  on/off (kept for the session), Open in QuickTime Player, which pauses
+  it). Space plays/pauses a movie and Z zooms; playing from the end starts
+  over. Moving to another photo or leaving the loupe drops the player,
+  which stops it.

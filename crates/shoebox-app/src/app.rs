@@ -385,6 +385,8 @@ pub struct LoupeState {
     pub original: bool,
     /// What was last drawn: the original or not, and the image's size.
     pub drawn: Option<(bool, [usize; 2])>,
+    /// The movie playing or paused here (dropping it stops it).
+    pub movie: Option<Box<crate::views::movie::Playback>>,
 }
 
 /// A folder in the left panel, with the recursive count of photos (stacks
@@ -516,6 +518,8 @@ pub struct ShoeboxApp {
     display: Option<crate::display::DisplayTagger>,
     /// Colour space images are rendered in for this display.
     pub(crate) target: shoebox_decode::Target,
+    /// Movies play without sound (the loupe's speaker button).
+    pub(crate) movie_muted: bool,
     /// Develop: the photo being edited.
     pub(crate) develop: views::develop::State,
     /// The develop thread (prepares raw photos).
@@ -721,6 +725,7 @@ impl ShoeboxApp {
             scroll_to_latest: true,
             display,
             target,
+            movie_muted: false,
             develop: Default::default(),
             developer,
             objects,
@@ -1328,6 +1333,15 @@ impl ShoeboxApp {
     /// Images that couldn't be displayed (tests).
     pub fn failed_count(&self) -> usize {
         self.textures.failed.len()
+    }
+
+    /// The movie open in the loupe to play, and whether it can't play
+    /// (tests).
+    pub fn movie(&self) -> Option<(String, Option<String>)> {
+        self.loupe.movie.as_ref().map(|m| {
+            let name = m.path.file_name().map(|n| n.to_string_lossy().into_owned());
+            (name.unwrap_or_default(), m.error())
+        })
     }
 
     /// Whether any filter is set (tests).
@@ -4631,7 +4645,9 @@ impl ShoeboxApp {
                 }
             }
         }
-        if self.view == View::Loupe && (pressed(egui::Key::Space) || pressed(egui::Key::Z)) {
+        if self.view == View::Loupe && pressed(egui::Key::Space) && views::movie::showing(self) {
+            views::movie::toggle(self);
+        } else if self.view == View::Loupe && (pressed(egui::Key::Space) || pressed(egui::Key::Z)) {
             self.loupe.zoom = match self.loupe.zoom {
                 Zoom::Fit => Zoom::Scale(1.0),
                 Zoom::Scale(_) => Zoom::Fit,
@@ -4647,6 +4663,10 @@ impl eframe::App for ShoeboxApp {
             ui.ctx().input(|i| i.max_texture_side) as u32,
             std::sync::atomic::Ordering::Relaxed,
         );
+        // A movie stops once the loupe isn't showing it.
+        if self.view != View::Loupe {
+            self.loupe.movie = None;
+        }
         let ctx = ui.ctx().clone();
         if let Some(d) = &self.display {
             d.ensure();

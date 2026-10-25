@@ -1,9 +1,10 @@
 //! Loupe: one image, fit to the window. Shows the 1024 px thumbnail at once,
 //! then the full decode. Space/Z toggles fit and 100%; pinch or ⌘-scroll
 //! zooms about the cursor; scroll or drag pans; arrows move (handled in app).
-//! Each photo opens at Fit. \ shows an edited photo as it was before.
+//! Each photo opens at Fit. \ shows an edited photo as it was before. A
+//! movie plays here (`movie`).
 
-use eframe::egui::{self, Color32, Rect, RichText, pos2, vec2};
+use eframe::egui::{self, Color32, Rect, pos2, vec2};
 
 use crate::app::{ShoeboxApp, Zoom};
 use crate::jobs::{Priority, Size};
@@ -106,7 +107,12 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     app.loupe.pan = app.loupe.pan.clamp(-slack, slack);
 
     let target = Rect::from_center_size(rect.center() + app.loupe.pan, shown);
+    let (cloud, is_movie) = (photo.cloud, photo.format.is_movie());
+    // A movie's frames once it plays, over its poster until then.
+    let playing =
+        is_movie && super::movie::draw(app.loupe.movie.as_deref_mut(), ui, &painter, target);
     match tex {
+        _ if playing => {}
         Some(t) => {
             painter.image(
                 t.id(),
@@ -125,7 +131,7 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 .iter()
                 .find(|(k, _)| k.photo == id)
                 .map_or(
-                    if photo.cloud {
+                    if cloud {
                         "Downloading from the cloud…".to_owned()
                     } else {
                         "Loading…".to_owned()
@@ -168,21 +174,8 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         egui::FontId::proportional(12.0),
         Color32::from_gray(170),
     );
-    // A movie shows its poster frame; playing it is QuickTime's job.
-    let photo = &app.catalog.photos[idx];
-    if photo.format.is_movie() {
-        let path = photo.path.clone();
-        let at = rect.center_bottom() + vec2(0.0, -40.0);
-        let area = egui::Area::new(ui.scope_id().with("movie"))
-            .fixed_pos(at - vec2(120.0, 14.0))
-            .order(egui::Order::Foreground);
-        area.show(ui.ctx(), |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Video (poster frame)").color(Color32::from_gray(200)));
-                if ui.button("▶ Open in QuickTime Player").clicked() {
-                    crate::app::open_file(&path);
-                }
-            });
-        });
+    if is_movie {
+        super::movie::play_button(app, ui, rect);
+        super::movie::controls(app, ui, rect);
     }
 }

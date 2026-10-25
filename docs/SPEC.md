@@ -20,7 +20,7 @@ Shoebox is a fast, local-first macOS app, written in Rust with egui, for browsin
 - RAW development or pixel editing. DxO PhotoLab does this.
 - A proprietary catalog. The SQLite database is a cache that can be rebuilt from files and sidecars at any time.
 - Cloud sync, sharing, multi-user access, or library roots on network shares. (Copying from iCloud Photos and sending photos back to it, by hand, is covered by `docs/PHOTOS-SPEC.md`: an import plus an explicit push, not two-way sync.) (A folder a cloud drive keeps on the Mac, such as Google Drive's, can be a root; files that are in the cloud only are handled as below.)
-- Video playback beyond a poster frame.
+- Video editing or trimming (movies play in the loupe; anything more is QuickTime's).
 - Windows and Linux builds. Keep the code portable, but only ship and test on macOS.
 
 ## Context
@@ -85,7 +85,7 @@ Six views share one selection, so switching view never loses your place.
 | --- | --- | --- |
 | Grid | G | Virtualised grid (only visible rows are laid out). Thumbnails 96–512 px. Badges for rating, flag, label colour, file type and stack count. Click, Shift-click range, Cmd-click toggle. Optional day headers. |
 | Masonry | M | Thumbnails at their true aspect ratio, uncropped, in columns of equal width; each stack goes into the shortest column in date order. A setting switches to justified rows (equal row height), which keeps strict left-to-right date order. Layout comes from EXIF width, height and orientation, so it is ready before any thumbnail decodes. Virtualised like Grid, with the same badges and selection. |
-| Loupe | E | One image, fit to window. Space or Z toggles 100%; scroll or pinch zooms; drag pans; arrows move. Shows the embedded preview immediately, then the full decode. NEFs display their embedded full-size JPEG (no demosaic in v1). |
+| Loupe | E | One image, fit to window. Space or Z toggles 100%; scroll or pinch zooms; drag pans; arrows move. Shows the embedded preview immediately, then the full decode. NEFs display their embedded full-size JPEG (no demosaic in v1). A movie shows its poster frame with a play button and plays in place (AVFoundation, with sound): a bar under it has play/pause, the time, a scrubber, sound on/off and Open in QuickTime Player; Space plays and pauses (Z still zooms). It stops on moving to another photo or leaving the loupe. A movie in the cloud only plays once it has downloaded. |
 | Compare | C | Two images side by side with synced zoom and pan. One is the "select", the other the "candidate"; arrows step the candidate. Used by duplicate review. |
 | Survey | N | 2–9 selected images tiled to fit, for picking the best of a burst. Remove a tile with its X; flag or rate in place. |
 | Timeline | T | Stacks grouped by month and day, with a heat strip of shooting days; click a day to jump to it in Grid. Can follow after v1. |

@@ -20,6 +20,7 @@ pub mod loupe;
 pub mod map;
 pub mod masonry;
 pub mod merge;
+pub mod movie;
 pub mod point_colour;
 pub mod presets;
 pub mod push;
