@@ -561,6 +561,9 @@ pub enum LibraryCommand {
     /// Find duplicate groups across the library (hashing what isn't cached).
     /// Find duplicates, among just these files when given (a scope).
     FindDuplicates(shoebox_core::dupes::Config, Option<Arc<HashSet<PathBuf>>>),
+    /// Group the last search's files again at another threshold (nothing
+    /// is read: the list follows the slider).
+    RegroupDuplicates(shoebox_core::dupes::Config),
     /// Work out what applying these decisions would do (the dry-run table).
     PreviewDuplicates(HashMap<PathBuf, Decision>),
     /// Apply them: moves to `_duplicates/` and stack links as one undoable
@@ -1146,6 +1149,7 @@ impl LibraryCommand {
             C::ResumeBatch { .. } => "Resuming an operation".into(),
             C::Eject { .. } => "Ejecting".into(),
             C::FindDuplicates { .. } => "Starting a duplicate search".into(),
+            C::RegroupDuplicates { .. } => "Grouping duplicates".into(),
             C::PreviewDuplicates { .. } => "Planning duplicates".into(),
             C::ApplyDuplicates { .. } => "Moving duplicates".into(),
             C::Download { .. } => "Downloading".into(),
@@ -2017,6 +2021,14 @@ fn library_worker(
                     config,
                     dupes_only.clone(),
                 );
+                (false, false)
+            }
+            LibraryCommand::RegroupDuplicates(config) => {
+                if let Some(r) = dupes.as_ref() {
+                    let r = review::regroup(r.found.clone(), config);
+                    emit(LibraryEvent::Duplicates(Arc::new(r.clone())));
+                    dupes = Some(r);
+                }
                 (false, false)
             }
             LibraryCommand::PreviewDuplicates(decisions) => {

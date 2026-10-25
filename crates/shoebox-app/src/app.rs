@@ -219,6 +219,8 @@ pub struct DupeState {
     pub config: shoebox_core::dupes::Config,
     /// Which copies Auto-select marks to move.
     pub auto: shoebox_core::review::AutoSelect,
+    /// The list is being grouped again at another threshold.
+    pub regrouping: bool,
     pub decisions: HashMap<PathBuf, Decision>,
     /// The group open in Compare or Survey.
     pub open: Option<usize>,
@@ -902,7 +904,12 @@ impl ShoeboxApp {
 
     /// The duplicate search is idle and its result is in.
     pub fn dupes_idle(&self) -> bool {
-        !self.dupes.running && self.dupes.review.is_some()
+        !self.dupes.running && !self.dupes.regrouping && self.dupes.review.is_some()
+    }
+
+    /// Auto-select's rule, as its slider and checkbox set it.
+    pub fn set_dupe_auto(&mut self, rule: shoebox_core::review::AutoSelect) {
+        self.dupes.auto = rule;
     }
 
     pub fn dupe_message(&self) -> Option<&str> {
@@ -1567,6 +1574,7 @@ impl ShoeboxApp {
                 }
                 LibraryEvent::Duplicates(r) => {
                     self.dupes.running = false;
+                    self.dupes.regrouping = false;
                     self.dupes.progress = None;
                     self.dupes.progress_at = None;
                     // Groups are renumbered: go back to the list.
@@ -1576,6 +1584,8 @@ impl ShoeboxApp {
                         self.view = View::Duplicates;
                     }
                     self.dupes.review = Some(r);
+                    // The slider moved while it was being found.
+                    self.regroup_dupes();
                 }
                 LibraryEvent::DupeProgress { done, total } => {
                     self.dupes.running = true;
@@ -2899,6 +2909,36 @@ impl ShoeboxApp {
         )
     }
 
+    /// Show matches at least this alike (as a distance): the list is
+    /// grouped again from the last search, one regroup at a time.
+    pub fn set_dupe_threshold(&mut self, threshold: u32) {
+        let c = &mut self.dupes.config;
+        if c.threshold == threshold {
+            return;
+        }
+        c.threshold = threshold;
+        c.near_identical = shoebox_core::dupes::DEFAULT_NEAR_IDENTICAL.min(threshold);
+        self.regroup_dupes();
+    }
+
+    /// Group the last search again at the slider's threshold, unless a
+    /// search or a regroup is under way (its result asks again).
+    fn regroup_dupes(&mut self) {
+        let wanted = self.dupes.config;
+        if self.dupes.running
+            || self.dupes.regrouping
+            || self
+                .dupes
+                .review
+                .as_ref()
+                .is_none_or(|r| r.config.threshold == wanted.threshold)
+        {
+            return;
+        }
+        self.dupes.regrouping = true;
+        self.library.send(LibraryCommand::RegroupDuplicates(wanted));
+    }
+
     pub fn find_duplicates(&mut self) {
         self.dupes.running = true;
         self.dupes.progress_at = Some(Instant::now());
@@ -3052,11 +3092,17 @@ impl ShoeboxApp {
     }
 
     /// Files marked to move (for the Apply button).
+    /// Files marked to move among those listed (a decision stays with a
+    /// file the slider hides, and comes back with it; applying leaves it
+    /// out).
     pub(crate) fn marked_to_move(&self) -> usize {
-        self.dupes
-            .decisions
-            .values()
-            .filter(|d| **d == Decision::Move)
+        let Some(r) = &self.dupes.review else {
+            return 0;
+        };
+        r.groups
+            .iter()
+            .flat_map(|g| &g.entries)
+            .filter(|e| self.dupes.decisions.get(&r.files[e.file].path) == Some(&Decision::Move))
             .count()
     }
 

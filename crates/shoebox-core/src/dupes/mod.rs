@@ -75,18 +75,27 @@ pub struct Match {
 
 impl Match {
     /// How alike the two are, as a percentage: 100 only for identical
-    /// files or the same image data; a perceptual match from its distance
-    /// over the 64-bit hashes, at most 99 (a resized copy can match at 0
-    /// without being the same file). A measure of likeness, not a
-    /// probability of being a duplicate.
+    /// files or the same image data, else [`percent`] of the distance.
     pub fn percent(&self) -> u8 {
         if self.level <= Level::ImageData {
-            return 100;
+            100
+        } else {
+            percent(self.distance)
         }
-        let d = self.distance.min(64);
-        (100 - (d * 100).div_ceil(64)).min(99) as u8
     }
 }
+
+/// How alike a perceptual match at `distance` (bits of the 64-bit hashes
+/// that differ) is, as a percentage: at most 99, since a resized copy can
+/// match at 0 without being the same file. A likeness, not a probability
+/// of being a duplicate (two frames of a burst can be 95%).
+pub fn percent(distance: u32) -> u8 {
+    let d = distance.min(64);
+    (100 - (d * 100).div_ceil(64)).min(99) as u8
+}
+
+/// The largest distance the threshold can be set to (75%).
+pub const MAX_THRESHOLD: u32 = 16;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Config {

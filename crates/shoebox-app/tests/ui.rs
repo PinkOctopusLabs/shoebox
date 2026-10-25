@@ -1444,20 +1444,36 @@ fn undated_cleanup_in_the_app() {
             .is_some()
     );
 
-    // Identical only: the carved preview moves, the resized copy waits.
-    h.get_by_value("Same moment").click();
-    h.run_steps(2);
-    h.get_by_label("Identical only").click();
-    h.run_steps(2);
+    // The slider narrows the list without searching again: at its
+    // strictest (99%), only the closest matches are left.
+    let files = h.state().dupe_files().len();
+    h.state_mut().set_dupe_threshold(0);
+    wait_for(&mut h, Duration::from_secs(30), "regroup", |a| {
+        a.dupes_idle()
+    });
+    assert!(h.state().dupe_files().len() < files);
+    h.state_mut()
+        .set_dupe_threshold(shoebox_core::dupes::DEFAULT_SIMILAR);
+    wait_for(&mut h, Duration::from_secs(30), "regroup", |a| {
+        a.dupes_idle()
+    });
+    assert_eq!(h.state().dupe_files().len(), files);
+
+    // Auto-select at 100% (the default): the carved preview moves, the
+    // resized copy waits.
+    assert!(h.query_by_label("Only taken at the same moment").is_some());
     h.get_by_label("Auto-select all").click();
     h.run_steps(2);
     assert_eq!(h.state().decision_of("f0001.jpg"), Decision::Move);
     assert_eq!(h.state().decision_of("f0003.jpg"), Decision::Undecided);
     h.get_by_label("Clear decisions").click();
-    h.get_by_value("Identical only").click();
     h.run_steps(2);
-    h.get_by_label("Same moment").click();
-    h.run_steps(2);
+    // Down to the lowest, taken at the same moment.
+    h.state_mut()
+        .set_dupe_auto(shoebox_core::review::AutoSelect {
+            up_to: Some(shoebox_core::dupes::MAX_THRESHOLD),
+            same_moment: true,
+        });
 
     h.get_by_label("Auto-select all").click();
     h.run_steps(2);
@@ -1709,6 +1725,11 @@ fn real_undated_cleanup() {
         a.dupes_idle()
     });
     eprintln!("find: {:.1} s", start.elapsed().as_secs_f64());
+    h.state_mut()
+        .set_dupe_auto(shoebox_core::review::AutoSelect {
+            up_to: Some(shoebox_core::dupes::MAX_THRESHOLD),
+            same_moment: true,
+        });
     h.get_by_label("Auto-select all").click();
     h.run_steps(2);
     settle(&mut h, Duration::from_secs(120));

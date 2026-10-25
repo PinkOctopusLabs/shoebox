@@ -87,6 +87,22 @@ pub struct Review {
     pub groups: Vec<Group>,
     pub config: Config,
     pub stats: pipeline::Stats,
+    /// What the search read, to group again at another threshold
+    /// ([`regroup`]) without reading a file.
+    pub found: std::sync::Arc<Found>,
+}
+
+/// A search's files and hashes before grouping: the slow part of
+/// [`find`] (scanning, hashing), kept so the list can follow the
+/// threshold as it moves.
+#[derive(Default)]
+pub struct Found {
+    roots: Vec<Root>,
+    analyzed: Vec<pipeline::Analyzed>,
+    items: Vec<dupes::Item>,
+    ignored: HashSet<(Digest, Digest)>,
+    settled: HashSet<PathBuf>,
+    stats: pipeline::Stats,
 }
 
 /// What a person decided for one file of a group.
@@ -125,7 +141,38 @@ pub fn find(
     }
     let (analyzed, stats) = pipeline::analyze_all_progress(cache, &roots, files, progress)?;
     let items = pipeline::items(&roots, &analyzed);
-    let ignored = cache.ignored_pairs()?;
+    let found = Found {
+        ignored: cache.ignored_pairs()?,
+        settled: settled.clone(),
+        roots,
+        analyzed,
+        items,
+        stats,
+    };
+    Ok(regroup(std::sync::Arc::new(found), config))
+}
+
+impl std::fmt::Debug for Found {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Found")
+            .field("files", &self.items.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Group a search's files again at another threshold (fast: nothing is
+/// read).
+pub fn regroup(found: std::sync::Arc<Found>, config: Config) -> Review {
+    let Found {
+        roots,
+        analyzed,
+        items,
+        ignored,
+        settled,
+        stats,
+    } = &*found;
+    let roots = roots.clone();
+    let stats = *stats;
     let is_ignored = |a: usize, b: usize| {
         if settled.contains(&analyzed[a].file.path) || settled.contains(&analyzed[b].file.path) {
             return true;
@@ -133,7 +180,7 @@ pub fn find(
         let (x, y) = (items[a].blake3, items[b].blake3);
         ignored.contains(&if x <= y { (x, y) } else { (y, x) })
     };
-    let raw = dupes::find_groups_ignoring(&items, &config, &is_ignored);
+    let raw = dupes::find_groups_ignoring(items, &config, &is_ignored);
 
     // Keep only files that are in a group, renumbered.
     let mut index: HashMap<usize, usize> = HashMap::new();
@@ -292,13 +339,14 @@ pub fn find(
             }
         })
         .collect();
-    Ok(Review {
+    Review {
         roots,
         files,
         groups,
         config,
         stats,
-    })
+        found,
+    }
 }
 
 /// Proposed decisions for a group, entry by entry: keep the keeper (the
@@ -306,21 +354,18 @@ pub fn find(
 /// resolution), keep other reference files, move the copies taken at the
 /// same moment (or with no capture time to tell, like a resized export or
 /// a carved preview), and leave other exposures (a burst's neighbours,
-/// different photos) for a person to look at. `mode` narrows which copies
-/// are moved ([`AutoSelect`]).
-pub fn auto_select(r: &Review, g: &Group, mode: AutoSelect) -> Vec<Decision> {
+/// different photos) for a person to look at. `rule` says how alike a
+/// copy must be to be moved ([`AutoSelect`]).
+pub fn auto_select(r: &Review, g: &Group, rule: AutoSelect) -> Vec<Decision> {
     g.entries
         .iter()
         .enumerate()
         .map(|(k, e)| {
-            let level = e.best.map(|(_, m)| m.level);
-            let move_it = match mode {
-                AutoSelect::Identical => level.is_some_and(|l| l <= dupes::Level::ImageData),
-                AutoSelect::NearIdentical => {
-                    e.same_exposure && level.is_some_and(|l| l <= dupes::Level::NearIdentical)
-                }
-                AutoSelect::SameMoment => e.same_exposure,
-            };
+            let move_it = e.best.is_some_and(|(_, m)| {
+                m.level <= dupes::Level::ImageData
+                    || (rule.up_to.is_some_and(|d| m.distance <= d)
+                        && (e.same_exposure || !rule.same_moment))
+            });
             if k == 0 || r.files[e.file].role == Role::Reference {
                 Decision::Keep
             } else if move_it {
@@ -333,31 +378,23 @@ pub fn auto_select(r: &Review, g: &Group, mode: AutoSelect) -> Vec<Decision> {
 }
 
 /// Which copies auto-select marks to move (the rest stay undecided).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum AutoSelect {
-    /// Copies taken at the same moment as the one kept, or with no capture
-    /// time to tell.
-    #[default]
-    SameMoment,
-    /// Of those, only identical and near-identical ones.
-    NearIdentical,
-    /// Only identical files and the same image data (100%), whatever their
-    /// capture times say.
-    Identical,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoSelect {
+    /// The largest perceptual distance marked ([`dupes::percent`] shows it
+    /// as a percentage); None marks only identical files and the same image
+    /// data (100%), which are always marked.
+    pub up_to: Option<u32>,
+    /// Below 100%, only copies taken at the same moment as the copy they
+    /// match, or with no capture time to tell (burst frames stay
+    /// undecided).
+    pub same_moment: bool,
 }
 
-impl AutoSelect {
-    pub const ALL: [AutoSelect; 3] = [
-        AutoSelect::SameMoment,
-        AutoSelect::NearIdentical,
-        AutoSelect::Identical,
-    ];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            AutoSelect::SameMoment => "Same moment",
-            AutoSelect::NearIdentical => "Near-identical",
-            AutoSelect::Identical => "Identical only",
+impl Default for AutoSelect {
+    fn default() -> Self {
+        Self {
+            up_to: None,
+            same_moment: true,
         }
     }
 }

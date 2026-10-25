@@ -127,14 +127,15 @@ fn review_auto_select_apply_and_undo() {
         ]]
     );
 
+    // Any copy as alike as a match can be, if taken at the same moment.
+    let every = review::AutoSelect {
+        up_to: Some(shoebox_core::dupes::MAX_THRESHOLD),
+        same_moment: true,
+    };
     let mut decisions: HashMap<PathBuf, Decision> = HashMap::new();
     let mut proposed: BTreeMap<String, Decision> = BTreeMap::new();
     for g in &r.groups {
-        for (e, d) in
-            g.entries
-                .iter()
-                .zip(review::auto_select(&r, g, review::AutoSelect::SameMoment))
-        {
+        for (e, d) in g.entries.iter().zip(review::auto_select(&r, g, every)) {
             decisions.insert(r.files[e.file].path.clone(), d);
             proposed.insert(name(&r, e.file), d);
         }
@@ -161,8 +162,9 @@ fn review_auto_select_apply_and_undo() {
     .collect();
     assert_eq!(proposed, expected);
 
-    // Identical only: just the same file or image data; near-identical
-    // only: those and the near-identical copies taken at the same moment.
+    // At 100% (the default): just the same file or image data; down to
+    // near-identical: those and the near-identical copies taken at the same
+    // moment; not only at the same moment: the burst frame too.
     let moved = |mode| -> Vec<String> {
         let mut v: Vec<String> = r
             .groups
@@ -178,7 +180,7 @@ fn review_auto_select_apply_and_undo() {
         v.sort();
         v
     };
-    let identical = moved(review::AutoSelect::Identical);
+    let identical = moved(review::AutoSelect::default());
     assert_eq!(
         identical,
         [
@@ -189,9 +191,41 @@ fn review_auto_select_apply_and_undo() {
         ]
     );
     // Every copy taken at the same moment here is near-identical.
-    let near = moved(review::AutoSelect::NearIdentical);
-    assert_eq!(near, moved(review::AutoSelect::SameMoment));
+    let near = moved(review::AutoSelect {
+        up_to: Some(shoebox_core::dupes::DEFAULT_NEAR_IDENTICAL),
+        same_moment: true,
+    });
+    assert_eq!(near, moved(every));
     assert!(identical.iter().all(|f| near.contains(f)) && near.len() == 7);
+    let any_time = moved(review::AutoSelect {
+        same_moment: false,
+        ..every
+    });
+    assert!(any_time.contains(&"scan/recovered/f0010.jpg".to_owned()));
+    assert_eq!(any_time.len(), 8);
+
+    // The list follows the threshold without reading a file again: at the
+    // strictest, only matches at 0 bits (99%) and 100% are left.
+    let strict = review::regroup(
+        r.found.clone(),
+        shoebox_core::dupes::Config {
+            threshold: 0,
+            near_identical: 0,
+        },
+    );
+    let worst = |r: &review::Review| {
+        r.groups
+            .iter()
+            .flat_map(|g| g.entries.iter().filter_map(|e| e.best))
+            .map(|(_, m)| m.distance)
+            .max()
+    };
+    assert_eq!(worst(&strict), Some(0));
+    assert!(worst(&r) > Some(0));
+    assert!(strict.files.len() < r.files.len());
+    let again = review::regroup(r.found.clone(), r.config);
+    assert_eq!(again.files.len(), r.files.len());
+    assert_eq!(again.groups.len(), r.groups.len());
     for g in &r.groups {
         for e in &g.entries {
             if identical.contains(&name(&r, e.file)) {

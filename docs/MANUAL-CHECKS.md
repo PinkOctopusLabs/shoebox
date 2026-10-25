@@ -141,8 +141,11 @@ APFS clone, in folders by shoot.
   one and rate some; each happens at once, and Activity shows the search
   and the move as separate rows. When it finishes: matches show a
   percentage (100% only for identical files and the same image data);
-  Auto-select with Identical only marks only 100% copies to move, and
-  Near-identical leaves the Similar ones undecided.
+  dragging Show matches ≥ narrows and widens the list at once, with no
+  Find again; Auto-select at 100% marks only 100% copies to move, and
+  lower with Only taken at the same moment leaves burst frames
+  undecided. Note what Show matches ≥ needs to be to find the real
+  copies without too many look-alikes (DECISIONS: the default).
 - [ ] **A camera DNG from another app** (from 2026-10-22): a DNG from Adobe
   DNG Converter (of a Z f NEF, with its default medium preview) and one
   from a phone or another camera (a Pixel or iPhone ProRAW, a Leica or

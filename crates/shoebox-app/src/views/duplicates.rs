@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use eframe::egui::{self, Color32, Rect, RichText, pos2, vec2};
-use shoebox_core::dupes::Level;
+use shoebox_core::dupes::{self, Level, MAX_THRESHOLD};
 use shoebox_core::review::AutoSelect;
 use shoebox_core::review::{Decision, Entry, Review};
 use shoebox_core::scan::Role;
@@ -191,31 +191,69 @@ pub fn group_bar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     ui.add_space(4.0);
 }
 
-/// Which copies Auto-select marks to move.
-fn auto_combo(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
-    egui::ComboBox::from_id_salt("dupes-auto")
-        .selected_text(app.dupes.auto.name())
-        .show_ui(ui, |ui| {
-            for m in AutoSelect::ALL {
-                ui.selectable_value(&mut app.dupes.auto, m, m.name())
-                    .on_hover_text(auto_hint(m));
-            }
-        })
-        .response
-        .on_hover_text("Which copies Auto-select marks to move");
+/// A slider over match distances (0 to [`MAX_THRESHOLD`] bits) shown as
+/// the percentage matches show, stricter to the right; with `hundred`, one
+/// more step at the right end, -1: 100% (identical files and the same
+/// image data only).
+fn percent_slider(ui: &mut egui::Ui, value: &mut i32, hundred: bool) -> egui::Response {
+    let top = if hundred { -1 } else { 0 };
+    ui.add(
+        egui::Slider::new(value, MAX_THRESHOLD as i32..=top)
+            .custom_formatter(|v, _| match v as i32 {
+                d if d < 0 => "100%".to_owned(),
+                d => format!("{}%", dupes::percent(d as u32)),
+            })
+            .custom_parser(move |t| {
+                let want: f64 = t.trim().trim_end_matches('%').trim().parse().ok()?;
+                // The strictest step at or below the percentage typed.
+                if want >= 100.0 && hundred {
+                    return Some(-1.0);
+                }
+                (0..=MAX_THRESHOLD)
+                    .rev()
+                    .find(|&d| f64::from(dupes::percent(d)) >= want)
+                    .or(Some(0))
+                    .map(f64::from)
+            }),
+    )
 }
 
-fn auto_hint(m: AutoSelect) -> &'static str {
-    match m {
-        AutoSelect::SameMoment => {
-            "Keep the reference copy (else NEF > TIFF > JPG, then the largest); move the other copies taken at the same moment or with no capture time to tell; leave other exposures (burst frames) undecided"
-        }
-        AutoSelect::NearIdentical => {
-            "Keep the reference copy (else NEF > TIFF > JPG, then the largest); move only identical and near-identical copies taken at the same moment; leave similar ones undecided"
-        }
-        AutoSelect::Identical => {
-            "Keep the reference copy (else NEF > TIFF > JPG, then the largest); move only identical files and copies with the same image data (100%); leave everything else undecided"
-        }
+/// "Auto-select copies ≥ 100%" and "Only taken at the same moment".
+fn auto_controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    ui.label("Auto-select copies ≥");
+    let rule = &mut app.dupes.auto;
+    let mut v = rule.up_to.map_or(-1, |d| d as i32);
+    percent_slider(ui, &mut v, true).on_hover_text(
+        "How alike a copy must be for Auto-select to mark it to move. \
+         100%: only identical files and the same image data",
+    );
+    rule.up_to = u32::try_from(v).ok();
+    ui.add_enabled(
+        rule.up_to.is_some(),
+        egui::Checkbox::new(&mut rule.same_moment, "Only taken at the same moment"),
+    )
+    .on_hover_text(
+        "Below 100%, mark only copies taken at the same moment as the copy they \
+         match (or with no capture time to tell). Burst frames look alike (often \
+         over 90%) but are different photos, so they stay undecided",
+    );
+}
+
+fn auto_hint(rule: AutoSelect) -> String {
+    let keep = "Keep the reference copy (else NEF > TIFF > JPG, then the largest)";
+    match rule.up_to {
+        None => format!(
+            "{keep}; move identical files and copies with the same image data (100%); leave the rest undecided"
+        ),
+        Some(d) => format!(
+            "{keep}; move identical copies, and copies {}% alike or more{}; leave the rest undecided",
+            dupes::percent(d),
+            if rule.same_moment {
+                " taken at the same moment"
+            } else {
+                ""
+            }
+        ),
     }
 }
 
@@ -298,13 +336,15 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         ui.heading("Duplicates");
         ui.separator();
         scope_combo(app, ui);
-        let cfg = &mut app.dupes.config;
-        ui.label("Similar ≤");
-        ui.add(egui::Slider::new(&mut cfg.threshold, 0..=16))
-            .on_hover_text("Largest perceptual distance (bits of 64) that counts as a match. Matches show how alike they are: 100% only for an identical file or the same image data");
-        ui.label("Near-identical ≤");
-        ui.add(egui::Slider::new(&mut cfg.near_identical, 0..=8));
-        cfg.near_identical = cfg.near_identical.min(cfg.threshold);
+        ui.label("Show matches ≥");
+        let mut v = app.dupes.config.threshold as i32;
+        percent_slider(ui, &mut v, false).on_hover_text(
+            "How alike two files must look to be listed. Identical files and the same \
+             image data (100%) are always found; below that, a resized, recompressed \
+             or edited copy. Lower finds more, and more look-alikes that aren't copies \
+             (burst frames, the same view)",
+        );
+        app.set_dupe_threshold(u32::try_from(v).unwrap_or(0));
         let label = if app.dupes.review.is_some() {
             "Find again"
         } else {
@@ -360,7 +400,7 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             );
         }
         ui.separator();
-        auto_combo(app, ui);
+        auto_controls(app, ui);
         if ui
             .button("Auto-select all")
             .on_hover_text(auto_hint(app.dupes.auto))
