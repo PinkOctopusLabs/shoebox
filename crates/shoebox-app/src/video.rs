@@ -56,6 +56,7 @@ impl Player {
         Status::Failed("Playing movies needs macOS".into())
     }
     pub fn set_muted(&self, _: bool) {}
+    pub fn set_volume(&self, _: f32) {}
     pub fn quarter_turns(&self) -> u8 {
         0
     }
@@ -384,6 +385,14 @@ mod mac {
             // SAFETY: as above.
             unsafe {
                 let _: () = msg_send![&*self.player, setMuted: Bool::new(muted)];
+            }
+        }
+
+        /// Volume from 0 to 1 (of the Mac's own).
+        pub fn set_volume(&self, volume: f32) {
+            // SAFETY: as above.
+            unsafe {
+                let _: () = msg_send![&*self.player, setVolume: volume.clamp(0.0, 1.0)];
             }
         }
 

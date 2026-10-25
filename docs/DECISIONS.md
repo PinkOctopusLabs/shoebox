@@ -4648,7 +4648,22 @@ only); editing or trimming movies stays out.
   controls, Space and stopping but can't see frames.
 - **Controls**: a large Play button over the poster until it starts; the
   bar (play/pause, time, scrubber with exact seeks, time length, sound
-  on/off (kept for the session), Open in QuickTime Player, which pauses
+  on/off and a volume slider (both kept for the session; turning the
+  volume up turns the sound on), Open in QuickTime Player, which pauses
   it). Space plays/pauses a movie and Z zooms; playing from the end starts
   over. Moving to another photo or leaving the loupe drops the player,
   which stops it.
+
+## Movies by length (2026-10-26)
+Asked for: a filter for movie length.
+- **The length** is the movie header's (`mov::MovInfo::duration_secs`, or
+  the MPEG stream's), kept as `ExifInfo::duration` and in the cache's
+  `exif.duration` (schema 11: the column added in place, and every movie's
+  header read again). Both writes of a row keep it: browsing's and the
+  duplicate finder's (which once dropped movies' dates the same way).
+- **The filter** offers ranges, not a slider: under 10 s (Live Photo-like
+  clips, accidental presses), 10 s to 1 min, 1 to 5 min, 5 to 20 min, over
+  20 min; only those the library has, with counts, several at once, as the
+  file type filter does. It matches a stack's primary, so a Live Photo (its
+  photo leads) is a photo and never a short clip. A movie whose length
+  can't be read matches none. Info shows the length (`m:ss`).

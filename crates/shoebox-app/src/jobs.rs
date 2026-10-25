@@ -761,6 +761,8 @@ pub struct Published {
     pub lenses: Vec<String>,
     /// File types and how many stacks have each (`query::types`).
     pub types: Vec<(&'static str, usize)>,
+    /// Movies' lengths and how many stacks each leads (`query::lengths`).
+    pub lengths: Vec<(shoebox_core::query::Length, usize)>,
     /// Photos whose file changed since the last publish (they reload).
     pub stale: HashSet<PhotoId>,
 }
@@ -799,6 +801,7 @@ impl Publisher {
             cameras: shoebox_core::query::distinct(catalog, |x| x.model.as_ref()),
             lenses: shoebox_core::query::distinct(catalog, |x| x.lens.as_ref()),
             types: shoebox_core::query::types(catalog),
+            lengths: shoebox_core::query::lengths(catalog),
             catalog: Arc::new(catalog.clone()),
         }
     }

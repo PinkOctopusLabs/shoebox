@@ -3285,6 +3285,21 @@ fn live_photos_and_movies() {
     assert_eq!(h.state().shown_count(), 3, "the Live Photo is one photo");
     assert_eq!(h.state().failed_count(), 0, "the clips' poster frames load");
     snapshot(&mut h, "movies-1-grid");
+    // By length: the two clips, not the Live Photo (a photo).
+    h.get_by_label("Filters").click();
+    h.run_steps(2);
+    h.get_by_value("Any length").click();
+    h.run_steps(2);
+    h.get_by_label("Under 10 s  (2)").click();
+    h.run_steps(3);
+    assert_eq!(h.state().shown_count(), 2);
+    snapshot(&mut h, "movies-length");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    h.state_mut().set_filter(Default::default());
+    h.get_by_label("Filters").click();
+    h.run_steps(3);
+    assert_eq!(h.state().shown_count(), 3);
     h.get_by_label("phone.mp4").click();
     h.run_steps(2);
     h.state_mut().set_view(View::Loupe);
@@ -3296,6 +3311,12 @@ fn live_photos_and_movies() {
         "the full-size poster loads too"
     );
     assert_eq!(h.state().movie(), None, "nothing plays until asked");
+    assert!(h.query_by_label("Volume").is_some(), "a volume slider");
+    assert!(
+        h.query_by_label("Length").is_some(),
+        "Info shows its length"
+    );
+    assert!(h.query_by_label("0:02").is_some());
     snapshot(&mut h, "movies-2-loupe");
 
     h.get_by_label("Play").click();

@@ -58,7 +58,7 @@ fn label_from(s: Option<String>) -> Option<Label> {
     s.and_then(|s| Label::ALL.into_iter().find(|l| l.name() == s))
 }
 
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 
 /// Rebuildable tables, dropped when the schema version changes.
 /// `dupe_ignores` holds user decisions and is never dropped.
@@ -179,7 +179,7 @@ impl Cache {
                 "cache schema {version} is newer than this build ({SCHEMA_VERSION})"
             )));
         }
-        // 8 and 9 add columns, 10 re-reads some rows; a rebuild would throw away every hash, and
+        // 8, 9 and 11 add columns, 10 and 11 re-read some rows; a rebuild would throw away every hash, and
         // what's known of cloud-only files. Rows from before 9 have the
         // sidecars' dates in `exif` (they stay until the file is read again).
         if version == 7 {
@@ -188,13 +188,14 @@ impl Cache {
         if version == 7 || version == 8 {
             conn.execute_batch("ALTER TABLE marks ADD COLUMN date TEXT")?;
         }
-        if (7..=9).contains(&version) {
-            // Before 10, hashing a movie for duplicates cached it without its
-            // date: read those movies' metadata again.
+        if (7..=10).contains(&version) {
+            // 11 keeps a movie's length (and before 10, hashing a movie for
+            // duplicates cached it without its date): read every movie's
+            // header again.
             conn.execute_batch(
-                "UPDATE files SET meta_version = NULL
-                 WHERE lower(ext) IN ('mov', 'mp4', 'mpg')
-                   AND id IN (SELECT file_id FROM exif WHERE capture_time IS NULL)",
+                "ALTER TABLE exif ADD COLUMN duration REAL;
+                 UPDATE files SET meta_version = NULL
+                 WHERE lower(ext) IN ('mov', 'mp4', 'mpg')",
             )?;
         } else if version != 0 && version < SCHEMA_VERSION {
             tracing::info!("cache schema {version} is out of date; rebuilding");
@@ -236,7 +237,7 @@ impl Cache {
                         f.luma_stddev,
                         e.capture_time, e.subsec, e.offset, e.make, e.model, e.serial, e.lens,
                         e.focal, e.fnumber, e.exposure, e.iso, e.orientation, e.gps_lat, e.gps_lon,
-                        e.shutter_count, e.nef_compression
+                        e.shutter_count, e.nef_compression, e.duration
                  FROM files f LEFT JOIN exif e ON e.file_id = f.id
                  WHERE f.root_id = ?1 AND f.rel_path = ?2 AND f.size = ?3 AND f.mtime = ?4
                    AND f.analyzer_version = ?5",
@@ -268,6 +269,7 @@ impl Cache {
                                 .zip(r.get::<_, Option<f64>>(20)?),
                             shutter_count: r.get(21)?,
                             nef_compression: r.get(22)?,
+                            duration: r.get(23)?,
                         },
                     ))
                 },
@@ -322,9 +324,9 @@ impl Cache {
             let mut exif = tx.prepare_cached(
                 "INSERT OR REPLACE INTO exif(file_id, capture_time, subsec, offset, make, model,
                     serial, lens, focal, fnumber, exposure, iso, width, height, orientation,
-                    gps_lat, gps_lon, shutter_count, nef_compression)
+                    gps_lat, gps_lon, shutter_count, nef_compression, duration)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                         ?18, ?19)",
+                         ?18, ?19, ?20)",
             )?;
             let mut marks = tx.prepare_cached(
                 "INSERT OR REPLACE INTO marks(file_id, rating, pick, label, keywords, sidecar, sidecar_sig, event,
@@ -369,6 +371,7 @@ impl Cache {
                     x.gps.map(|g| g.1),
                     x.shutter_count,
                     x.nef_compression,
+                    x.duration,
                 ])?;
                 let k = e.marks;
                 marks.execute(params![
@@ -423,7 +426,7 @@ impl Cache {
                     e.focal, e.fnumber, e.exposure, e.iso, e.orientation,
                     k.rating, k.pick, k.label, k.keywords, k.sidecar, k.sidecar_sig, k.event,
                     f.changed_at, f.change_source, e.gps_lat, e.gps_lon, e.shutter_count,
-                    k.gps_lat_e7, k.gps_lon_e7, e.nef_compression, k.date
+                    k.gps_lat_e7, k.gps_lon_e7, e.nef_compression, k.date, e.duration
              FROM files f LEFT JOIN exif e ON e.file_id = f.id
                           LEFT JOIN marks k ON k.file_id = f.id
              WHERE f.root_id = ?1 AND f.meta_version = ?2",
@@ -463,6 +466,7 @@ impl Cache {
                                 .zip(r.get::<_, Option<f64>>(27)?),
                             shutter_count: r.get(28)?,
                             nef_compression: r.get(31)?,
+                            duration: r.get(33)?,
                         },
                     },
                     marks: match r.get::<_, Option<u8>>(17)? {
@@ -755,9 +759,9 @@ impl Cache {
             let mut exif = tx.prepare_cached(
                 "INSERT OR REPLACE INTO exif(file_id, capture_time, subsec, offset, make, model,
                     serial, lens, focal, fnumber, exposure, iso, width, height, orientation,
-                    gps_lat, gps_lon, shutter_count, nef_compression)
+                    gps_lat, gps_lon, shutter_count, nef_compression, duration)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                         ?18, ?19)",
+                         ?18, ?19, ?20)",
             )?;
             let mut clear = tx.prepare_cached("DELETE FROM phash WHERE file_id = ?1")?;
             let mut ph = tx.prepare_cached(
@@ -804,6 +808,7 @@ impl Cache {
                     x.gps.map(|g| g.1),
                     x.shutter_count,
                     x.nef_compression,
+                    x.duration,
                 ])?;
                 clear.execute([id])?;
                 for (rot, h) in a.hashes.iter().enumerate() {
@@ -830,6 +835,7 @@ mod tests {
             conn.execute_batch(include_str!("schema.sql")).unwrap();
             conn.execute_batch(
                 "ALTER TABLE exif DROP COLUMN nef_compression;
+                 ALTER TABLE exif DROP COLUMN duration;
                  ALTER TABLE marks DROP COLUMN date;
                  INSERT INTO roots(id, path) VALUES (1, '/photos');
                  INSERT INTO files(id, root_id, rel_path, ext, size, mtime, blake3)
@@ -864,6 +870,7 @@ mod tests {
             conn.execute_batch(include_str!("schema.sql")).unwrap();
             conn.execute_batch(
                 "ALTER TABLE marks DROP COLUMN date;
+                 ALTER TABLE exif DROP COLUMN duration;
                  INSERT INTO roots(id, path) VALUES (1, '/photos');
                  INSERT INTO files(id, root_id, rel_path, ext, size, mtime, blake3, meta_version)
                    VALUES (1, 1, 'a.jpg', 'jpg', 10, 20, x'00ff', 4);
@@ -889,17 +896,19 @@ mod tests {
         assert_eq!(blake3, vec![0x00, 0xff]);
     }
 
-    /// Schema 9 → 10: movies cached without a date (hashing them dropped
-    /// it) are read again; their hashes, and every other row, stay.
+    /// Schema 9 → 11: every movie is read again (for its length, and its
+    /// date, which hashing it once dropped); their hashes, and every other
+    /// row, stay.
     #[test]
-    fn schema_9_reads_undated_movies_again() {
+    fn schema_9_reads_movies_again() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cache.sqlite");
         {
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch(include_str!("schema.sql")).unwrap();
             conn.execute_batch(
-                "INSERT INTO roots(id, path) VALUES (1, '/photos');
+                "ALTER TABLE exif DROP COLUMN duration;
+                 INSERT INTO roots(id, path) VALUES (1, '/photos');
                  INSERT INTO files(id, root_id, rel_path, ext, size, mtime, blake3, meta_version)
                    VALUES (1, 1, 'a.mov', 'mov', 10, 20, x'00ff', 4),
                           (2, 1, 'b.mov', 'mov', 10, 20, x'00ff', 4),
@@ -913,11 +922,69 @@ mod tests {
         let cache = Cache::open(&path).unwrap();
         let mut known: Vec<String> = cache.load_meta(1).unwrap().into_keys().collect();
         known.sort();
-        assert_eq!(known, ["b.mov", "c.png"]);
+        assert_eq!(known, ["c.png"]);
         let blake3: Vec<u8> = cache
             .conn
             .query_row("SELECT blake3 FROM files WHERE id = 1", [], |r| r.get(0))
             .unwrap();
         assert_eq!(blake3, vec![0x00, 0xff]);
+    }
+
+    /// A movie's length is kept by both writes of its row: browsing's and
+    /// the duplicate finder's.
+    #[test]
+    fn a_movies_length_is_kept() {
+        let mut cache = Cache::open_in_memory().unwrap();
+        let root = cache.root_id(Path::new("/photos"), false).unwrap();
+        let marks = CachedMarks {
+            marks: Marks::default(),
+            sidecar: None,
+            sig: String::new(),
+            date: None,
+        };
+        let meta = Meta {
+            exif: ExifInfo {
+                duration: Some(12.5),
+                ..ExifInfo::default()
+            },
+            ..Meta::default()
+        };
+        cache
+            .store_meta(&[MetaEntry {
+                root_id: root,
+                rel: "a.mov",
+                ext: "mov",
+                size: 10,
+                mtime_ns: 20,
+                meta: &meta,
+                marks: &marks,
+            }])
+            .unwrap();
+        let known = cache.load_meta(root).unwrap();
+        assert_eq!(known["a.mov"].meta.exif.duration, Some(12.5));
+        let analysis = Analysis {
+            blake3: [0; 32],
+            image_data_hash: None,
+            width: None,
+            height: None,
+            exif: meta.exif.clone(),
+            hashes: Vec::new(),
+            luma_stddev: None,
+            error: None,
+        };
+        cache
+            .store_all(&[Entry {
+                root_id: root,
+                rel: "a.mov",
+                ext: "mov",
+                size: 10,
+                mtime_ns: 20,
+                analysis: &analysis,
+            }])
+            .unwrap();
+        let known = cache.load_meta(root).unwrap();
+        assert_eq!(known["a.mov"].meta.exif.duration, Some(12.5));
+        let again = cache.lookup(root, "a.mov", 10, 20).unwrap().unwrap();
+        assert_eq!(again.exif.duration, Some(12.5));
     }
 }

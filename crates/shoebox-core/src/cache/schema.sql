@@ -49,7 +49,9 @@ CREATE TABLE IF NOT EXISTS exif (
     gps_lat       REAL,
     gps_lon       REAL,
     -- Nikon's NEFCompression tag value (13, 14: High efficiency).
-    nef_compression INTEGER
+    nef_compression INTEGER,
+    -- A movie's length in seconds.
+    duration      REAL
 );
 
 -- Effective culling marks (sidecar > embedded XMP > EXIF), and a signature

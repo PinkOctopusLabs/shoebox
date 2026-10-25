@@ -531,6 +531,7 @@ fn filter_bar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 }
             });
         types_menu(app, ui);
+        lengths_menu(app, ui);
         filters_button(app, ui);
         if !app.filter.is_empty() && ui.small_button("Clear").clicked() {
             app.filter = shoebox_core::query::Filter::default();
@@ -680,6 +681,7 @@ fn active_filters(f: &shoebox_core::query::Filter) -> usize {
         + usize::from(f.flag != FlagFilter::Any)
         + usize::from(f.label != LabelFilter::Any)
         + usize::from(!f.types.is_empty())
+        + usize::from(!f.lengths.is_empty())
         + extra_filters(f)
 }
 
@@ -709,6 +711,45 @@ fn types_menu(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                         app.filter.types.push(t.to_owned());
                     } else {
                         app.filter.types.retain(|x| x != t);
+                    }
+                }
+            }
+        });
+}
+
+/// Movie length: the ranges the library's movies are in, each with its
+/// count; several can be on. Only when there are movies (or it's set).
+fn lengths_menu(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    if app.lengths.is_empty() && app.filter.lengths.is_empty() {
+        return;
+    }
+    let text = match app.filter.lengths.as_slice() {
+        [] => "Any length".to_owned(),
+        [l] => l.label().to_owned(),
+        [l, rest @ ..] => format!("{} +{}", l.label(), rest.len()),
+    };
+    egui::ComboBox::from_id_salt("f-length")
+        .selected_text(text)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show_ui(ui, |ui| {
+            if ui
+                .selectable_label(app.filter.lengths.is_empty(), "Any length")
+                .on_hover_text("Movies of any length, and photos")
+                .clicked()
+            {
+                app.filter.lengths.clear();
+            }
+            for &(l, n) in &app.lengths {
+                let mut on = app.filter.lengths.contains(&l);
+                if ui
+                    .checkbox(&mut on, format!("{}  ({n})", l.label()))
+                    .changed()
+                {
+                    if on {
+                        app.filter.lengths.push(l);
+                        app.filter.lengths.sort();
+                    } else {
+                        app.filter.lengths.retain(|x| *x != l);
                     }
                 }
             }
@@ -1787,6 +1828,13 @@ fn details(app: &mut ShoeboxApp, ui: &mut egui::Ui, id: crate::jobs::PhotoId, id
         ("Aperture", opt(x.fnumber.map(|f| format!("f/{f:.1}")))),
         ("ISO", opt(x.iso.map(|i| i.to_string()))),
         ("Focal length", opt(x.focal.map(|f| format!("{f:.0} mm")))),
+        (
+            "Length",
+            opt(x
+                .duration
+                .filter(|_| photo.format.is_movie())
+                .map(crate::views::movie::clock)),
+        ),
         (
             "Dimensions",
             opt(photo

@@ -26,6 +26,8 @@ pub struct ExifInfo {
     /// A NEF's compression (`NEFCompression`, from its MakerNote), which says
     /// whether Develop can decode it directly.
     pub nef_compression: Option<u16>,
+    /// A movie's length in seconds, from its header.
+    pub duration: Option<f64>,
 }
 
 impl ExifInfo {
@@ -143,6 +145,7 @@ pub fn read(data: &[u8]) -> ExifInfo {
             }
             _ => None,
         },
+        duration: None,
     }
 }
 

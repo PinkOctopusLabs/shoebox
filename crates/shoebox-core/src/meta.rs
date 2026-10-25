@@ -170,7 +170,10 @@ fn movie(path: &Path, format: Format) -> Result<Meta> {
             path: path.to_path_buf(),
             source: e,
         })?;
-    let mut exif = ExifInfo::default();
+    let mut exif = ExifInfo {
+        duration: info.duration_secs,
+        ..ExifInfo::default()
+    };
     let local = movie_time(&info).or_else(|| {
         let modified = f.metadata().ok()?.modified().ok()?;
         let t = jiff::Timestamp::try_from(modified).ok()?;

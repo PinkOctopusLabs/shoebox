@@ -1,6 +1,6 @@
 //! Playing a movie in the loupe (AVFoundation through `crate::video`): the
 //! poster frame until it plays, then its frames; a bar with play/pause, the
-//! time, a scrubber, sound on or off and Open in QuickTime Player. Space
+//! time, a scrubber, sound on or off, volume and Open in QuickTime Player. Space
 //! plays and pauses. It stops when the loupe shows something else.
 
 use std::path::{Path, PathBuf};
@@ -43,6 +43,7 @@ fn open(app: &ShoeboxApp, path: &Path) -> Playback {
     let player = Player::open(path, MAX_EDGE, app.target);
     if let Ok(p) = &player {
         p.set_muted(app.movie_muted);
+        p.set_volume(app.movie_volume);
     }
     Playback {
         path: path.to_path_buf(),
@@ -149,7 +150,7 @@ pub fn draw(
 }
 
 /// `m:ss`, or `h:mm:ss` from an hour.
-fn clock(secs: f64) -> String {
+pub(crate) fn clock(secs: f64) -> String {
     let s = secs.max(0.0).floor() as u64;
     if s >= 3600 {
         format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
@@ -229,7 +230,30 @@ fn bar(app: &mut ShoeboxApp, ui: &mut egui::Ui, path: &Path, cloud: bool) {
             }
             crate::app::open_file(path);
         }
-        let muted = app.movie_muted;
+        // Volume, then the speaker to its left (laid out right to left).
+        let mut volume = app.movie_volume;
+        ui.spacing_mut().slider_width = 70.0;
+        let slider = ui
+            .add(egui::Slider::new(&mut volume, 0.0..=1.0).show_value(false))
+            .on_hover_text("Volume");
+        slider.widget_info(|| egui::WidgetInfo::slider(true, f64::from(volume), "Volume"));
+        if slider.changed() {
+            app.movie_volume = volume;
+            // Turning it up turns the sound on.
+            if volume > 0.0 {
+                app.movie_muted = false;
+            }
+            if let Some(p) = app
+                .loupe
+                .movie
+                .as_ref()
+                .and_then(|m| m.player.as_ref().ok())
+            {
+                p.set_volume(volume);
+                p.set_muted(app.movie_muted);
+            }
+        }
+        let muted = app.movie_muted || app.movie_volume == 0.0;
         let sound = if muted {
             crate::icons::SOUND_OFF
         } else {
@@ -241,6 +265,9 @@ fn bar(app: &mut ShoeboxApp, ui: &mut egui::Ui, path: &Path, cloud: bool) {
             .clicked()
         {
             app.movie_muted = !muted;
+            if !app.movie_muted && app.movie_volume == 0.0 {
+                app.movie_volume = 0.5;
+            }
             if let Some(p) = app
                 .loupe
                 .movie
@@ -248,6 +275,7 @@ fn bar(app: &mut ShoeboxApp, ui: &mut egui::Ui, path: &Path, cloud: bool) {
                 .and_then(|m| m.player.as_ref().ok())
             {
                 p.set_muted(app.movie_muted);
+                p.set_volume(app.movie_volume);
             }
         }
         ui.label(style(duration.map_or_else(|| "–:––".to_owned(), clock)));

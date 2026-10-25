@@ -504,6 +504,7 @@ pub struct ShoeboxApp {
     pub(crate) cameras: Vec<String>,
     pub(crate) lenses: Vec<String>,
     pub(crate) types: Vec<(&'static str, usize)>,
+    pub(crate) lengths: Vec<(shoebox_core::query::Length, usize)>,
     pub(crate) events: Vec<Event>,
     /// Member stacks per event id.
     pub(crate) event_members: HashMap<String, HashSet<usize>>,
@@ -520,6 +521,8 @@ pub struct ShoeboxApp {
     pub(crate) target: shoebox_decode::Target,
     /// Movies play without sound (the loupe's speaker button).
     pub(crate) movie_muted: bool,
+    /// Movies' volume, 0 to 1 (the loupe's slider).
+    pub(crate) movie_volume: f32,
     /// Develop: the photo being edited.
     pub(crate) develop: views::develop::State,
     /// The develop thread (prepares raw photos).
@@ -726,6 +729,7 @@ impl ShoeboxApp {
             display,
             target,
             movie_muted: false,
+            movie_volume: 1.0,
             develop: Default::default(),
             developer,
             objects,
@@ -767,6 +771,7 @@ impl ShoeboxApp {
             cameras: Vec::new(),
             lenses: Vec::new(),
             types: Vec::new(),
+            lengths: Vec::new(),
             compare: CompareState::default(),
             survey: Vec::new(),
             dupes: DupeState::default(),
@@ -1711,6 +1716,7 @@ impl ShoeboxApp {
         self.cameras = p.cameras;
         self.lenses = p.lenses;
         self.types = p.types;
+        self.lengths = p.lengths;
         // Likely edits are worked out again from the new catalog.
         self.idle_stale = true;
         // Drop what belongs to photos that are gone, and the images of

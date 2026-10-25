@@ -3,6 +3,7 @@
 //!
 //! Marks and capture details come from the stack's primary; file type and
 //! search look at every member (so "TIF" finds stacks with a TIFF export).
+//! A movie's length is its primary's (a Live Photo is a photo).
 
 use serde::{Deserialize, Serialize};
 
@@ -50,6 +51,47 @@ impl From<Label> for LabelName {
     }
 }
 
+/// A movie's length, in the ranges the filter offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum Length {
+    Under10s,
+    To1Min,
+    To5Min,
+    To20Min,
+    Longer,
+}
+
+impl Length {
+    pub const ALL: [Length; 5] = [
+        Length::Under10s,
+        Length::To1Min,
+        Length::To5Min,
+        Length::To20Min,
+        Length::Longer,
+    ];
+
+    /// The range `secs` is in.
+    pub fn of(secs: f64) -> Length {
+        match secs {
+            s if s < 10.0 => Length::Under10s,
+            s if s < 60.0 => Length::To1Min,
+            s if s < 300.0 => Length::To5Min,
+            s if s < 1200.0 => Length::To20Min,
+            _ => Length::Longer,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Length::Under10s => "Under 10 s",
+            Length::To1Min => "10 s to 1 min",
+            Length::To5Min => "1 to 5 min",
+            Length::To20Min => "5 to 20 min",
+            Length::Longer => "Over 20 min",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Filter {
     /// Minimum rating (0 = any).
@@ -62,6 +104,9 @@ pub struct Filter {
     /// File types; empty = any. A stack matches if any member has one.
     #[serde(default)]
     pub types: Vec<String>,
+    /// Movies of these lengths (the primary's); empty = any.
+    #[serde(default)]
+    pub lengths: Vec<Length>,
     #[serde(default)]
     pub camera: Option<String>,
     #[serde(default)]
@@ -149,6 +194,15 @@ pub fn matches(c: &Catalog, s: usize, f: &Filter) -> bool {
         && !st
             .all()
             .any(|i| f.types.iter().any(|t| t == c.photos[i].format.label()))
+    {
+        return false;
+    }
+    if !f.lengths.is_empty()
+        && !(p.format.is_movie()
+            && p.meta
+                .exif
+                .duration
+                .is_some_and(|d| f.lengths.contains(&Length::of(d))))
     {
         return false;
     }
@@ -290,6 +344,19 @@ pub fn types(c: &Catalog) -> Vec<(&'static str, usize)> {
         }
     }
     n.into_iter().map(|(f, k)| (f.label(), k)).collect()
+}
+
+/// The movies' lengths in the library, each with how many stacks a movie
+/// of that length leads (what the length filter finds), shortest first.
+pub fn lengths(c: &Catalog) -> Vec<(Length, usize)> {
+    let mut n = std::collections::BTreeMap::new();
+    for s in &c.stacks {
+        let p = &c.photos[s.primary];
+        if let Some(d) = p.meta.exif.duration.filter(|_| p.format.is_movie()) {
+            *n.entry(Length::of(d)).or_insert(0) += 1;
+        }
+    }
+    n.into_iter().collect()
 }
 
 #[cfg(test)]
@@ -443,6 +510,48 @@ mod tests {
             }),
             vec!["x.nef", "y.tif"]
         );
+    }
+
+    /// Movies by length: lone clips by theirs; a Live Photo (its photo
+    /// leads) and a movie of unknown length match no length.
+    #[test]
+    fn movies_by_length() {
+        let clip = |path: &str, secs: Option<f64>| {
+            let mut p = photo(path, 0, None, &[], false);
+            p.meta.exif.duration = secs;
+            p
+        };
+        let c = catalog(vec![
+            clip("/a/short.mov", Some(4.0)),
+            clip("/a/talk.mp4", Some(1500.0)),
+            clip("/a/odd.mpg", None),
+            clip("/b/IMG_0001.mov", Some(2.5)),
+            photo("/b/IMG_0001.jpg", 0, None, &[], false),
+        ]);
+        let names = |lengths: Vec<Length>| -> Vec<String> {
+            let f = Filter {
+                lengths,
+                ..Default::default()
+            };
+            let mut v: Vec<String> = run(&c, &f, Sort::FileName, false)
+                .into_iter()
+                .map(|i| c.photos[c.stacks[i].primary].rel.clone())
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(names(vec![Length::Under10s]), ["/a/short.mov"]);
+        assert_eq!(
+            names(vec![Length::Under10s, Length::Longer]),
+            ["/a/short.mov", "/a/talk.mp4"]
+        );
+        assert!(names(vec![Length::To1Min]).is_empty());
+        assert_eq!(
+            lengths(&c),
+            vec![(Length::Under10s, 1), (Length::Longer, 1)]
+        );
+        assert_eq!(Length::of(9.99), Length::Under10s);
+        assert_eq!(Length::of(60.0), Length::To5Min);
     }
 
     #[test]
