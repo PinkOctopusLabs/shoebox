@@ -9,6 +9,8 @@ use std::path::Path;
 use eframe::egui::{self, Color32, Rect, RichText, pos2, vec2};
 use shoebox_core::dupes::{self, Level, MAX_THRESHOLD};
 use shoebox_core::review::AutoSelect;
+
+use crate::jobs::ApplyStage;
 use shoebox_core::review::{Decision, Entry, Review};
 use shoebox_core::scan::Role;
 
@@ -25,6 +27,15 @@ pub fn plural(n: usize, word: &str) -> String {
         format!("1 {word}")
     } else {
         format!("{n} {word}s")
+    }
+}
+
+/// [`plural`] with thousands grouped: "17,964 files".
+fn plural_n(n: usize, word: &str) -> String {
+    if n == 1 {
+        format!("1 {word}")
+    } else {
+        format!("{} {word}s", group_digits(n))
     }
 }
 
@@ -257,6 +268,61 @@ fn auto_hint(rule: AutoSelect) -> String {
     }
 }
 
+/// While decisions are applied: the stage, a bar, how many of how many and
+/// the time left. Nothing can be decided meanwhile.
+fn applying_panel(app: &ShoeboxApp, ui: &mut egui::Ui) {
+    let Some((stage, done, total, since)) = app.dupes.applying else {
+        return;
+    };
+    let (what, unit) = match stage {
+        ApplyStage::Checking => (
+            "Checking the files are unchanged since they were found",
+            "files read",
+        ),
+        ApplyStage::Moving => ("Moving to _duplicates", "files and sidecars moved"),
+    };
+    ui.add_space(4.0);
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.add(egui::Spinner::new());
+            ui.strong(what);
+        });
+        let fraction = if total == 0 {
+            0.0
+        } else {
+            done as f32 / total as f32
+        };
+        ui.add(egui::ProgressBar::new(fraction).desired_width(ui.available_width().min(520.0)));
+        let elapsed = since.elapsed().as_secs_f64();
+        let left = (done > 0 && elapsed > 3.0).then(|| {
+            crate::panels::time_left(elapsed * (total - done.min(total)) as f64 / done as f64)
+        });
+        ui.weak(format!(
+            "{} of {} {unit}{}",
+            group_digits(done),
+            group_digits(total),
+            left.map(|l| format!(" · {l}")).unwrap_or_default()
+        ));
+        ui.weak(
+            "One batch: ⌘Z puts everything back. Then the library is read again and the \
+             duplicates found again.",
+        );
+    });
+}
+
+/// 17964 → "17,964".
+fn group_digits(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
 fn apply_button(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     let n = app.marked_to_move();
     let other = app
@@ -271,7 +337,7 @@ fn apply_button(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     };
     if ui
         .add_enabled(
-            (n > 0 || other) && !app.dupes.running,
+            (n > 0 || other) && !app.dupes.running && app.dupes.applying.is_none(),
             egui::Button::new(label),
         )
         .on_hover_text("Shows every change before anything moves")
@@ -351,15 +417,20 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             "Find duplicates"
         };
         if ui
-            .add_enabled(!app.dupes.running, egui::Button::new(label))
+            .add_enabled(
+                !app.dupes.running && app.dupes.applying.is_none(),
+                egui::Button::new(label),
+            )
             .clicked()
         {
             app.find_duplicates();
         }
         if app.dupes.running {
             ui.add(egui::Spinner::new());
-            match app.dupes.progress {
-                Some((d, t)) if d < t => ui.label(format!("Hashing {d}/{t}")),
+            match (app.dupes.progress, app.scan_progress) {
+                (Some((d, t)), _) if d < t => ui.label(format!("Hashing {d}/{t}")),
+                // After applying: the library is read again, then searched.
+                (None, Some((d, t))) => ui.label(format!("Reading the library {d}/{t}")),
                 _ => ui.label("Matching…"),
             };
         }
@@ -417,6 +488,7 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             ui.label(RichText::new(m).color(Color32::from_rgb(80, 200, 120)));
         }
     });
+    applying_panel(app, ui);
     ui.separator();
     let cloud = app.dupes.review.as_ref().map_or(0, |r| r.stats.cloud);
     if cloud > 0 {
@@ -599,7 +671,50 @@ fn entry_tile(app: &mut ShoeboxApp, ui: &mut egui::Ui, r: &Review, gi: usize, k:
     });
 }
 
-/// The dry-run table: every move (sidecars included) before anything runs.
+/// A file the dry run moves: its name and folder, how alike it is to the
+/// copy kept, and that copy.
+#[derive(Clone)]
+struct MoveRow {
+    name: String,
+    folder: String,
+    level: Level,
+    percent: u8,
+    kept: String,
+}
+
+/// The files marked to move among those listed, by folder, each with the
+/// copy that stays.
+fn move_rows(app: &ShoeboxApp, short: &dyn Fn(&Path) -> String) -> Vec<MoveRow> {
+    let Some(r) = &app.dupes.review else {
+        return Vec::new();
+    };
+    let mut rows: Vec<MoveRow> = r
+        .groups
+        .iter()
+        .flat_map(|g| g.entries.iter().map(move |e| (g, e)))
+        .filter(|(_, e)| app.dupes.decisions.get(&r.files[e.file].path) == Some(&Decision::Move))
+        .filter_map(|(g, e)| {
+            let path = &r.files[e.file].path;
+            let (other, m) = e.best.or(e.to_keeper.map(|m| (g.entries[0].file, m)))?;
+            Some(MoveRow {
+                name: path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                folder: path.parent().map(short).unwrap_or_default(),
+                level: m.level,
+                percent: m.percent(),
+                kept: short(&r.files[other].path),
+            })
+        })
+        .collect();
+    rows.sort_by(|a, b| (&a.folder, &a.name).cmp(&(&b.folder, &b.name)));
+    rows
+}
+
+/// The dry run: what applying does, in numbers, then every file to move
+/// beside the copy that stays. Sized to the window, the buttons always in
+/// view.
 pub fn apply_dialog(app: &mut ShoeboxApp, ctx: &egui::Context) {
     let Some(preview) = app.dupes.preview.clone() else {
         return;
@@ -615,29 +730,42 @@ pub fn apply_dialog(app: &mut ShoeboxApp, ctx: &egui::Context) {
             .iter()
             .find_map(|r| {
                 p.strip_prefix(r).ok().map(|rel| {
-                    format!(
-                        "{}/{}",
-                        r.file_name().unwrap_or_default().to_string_lossy(),
-                        rel.display()
-                    )
+                    let name = r.file_name().unwrap_or_default().to_string_lossy();
+                    if rel.as_os_str().is_empty() {
+                        name.into_owned()
+                    } else {
+                        format!("{name}/{}", rel.display())
+                    }
                 })
             })
             .unwrap_or_else(|| p.display().to_string())
     };
+    // Worked out once per dry run (thousands of rows).
+    let rows_id = egui::Id::unique("dupes-apply-rows");
+    let rows: std::sync::Arc<Vec<MoveRow>> = match ctx.data(|d| d.get_temp(rows_id)) {
+        Some(r) => r,
+        None => {
+            let r = std::sync::Arc::new(move_rows(app, &short));
+            ctx.data_mut(|d| d.insert_temp(rows_id, r.clone()));
+            r
+        }
+    };
+    let screen = ctx.content_rect();
+    let width = (screen.width() - 96.0).clamp(320.0, 980.0);
+    let list_height = (screen.height() - 380.0).max(120.0);
     let mut close = false;
     let mut confirm = false;
     egui::Modal::new(egui::Id::unique("dupes-apply")).show(ctx, |ui| {
-        ui.set_width(760.0);
+        ui.set_width(width);
         match &preview {
             Err(e) => {
                 ui.heading("Can't apply");
-                ui.label(e);
+                ui.add(egui::Label::new(e).wrap());
                 if ui.button("OK").clicked() {
                     close = true;
                 }
             }
             Ok(p) => {
-                ui.heading("Apply duplicate decisions");
                 let files = p
                     .moves
                     .iter()
@@ -648,56 +776,115 @@ pub fn apply_dialog(app: &mut ShoeboxApp, ctx: &egui::Context) {
                     })
                     .count();
                 let sidecars = p.moves.len() - files;
-                let mut lines = Vec::new();
+                ui.heading(if files > 0 {
+                    format!("Move {} to _duplicates?", plural_n(files, "file"))
+                } else {
+                    "Apply duplicate decisions?".to_owned()
+                });
+                ui.add_space(4.0);
                 if files > 0 {
-                    lines.push(format!(
-                        "Move {} to _duplicates{}",
-                        plural(files, "file"),
-                        if sidecars > 0 {
-                            format!(" (with {})", plural(sidecars, "sidecar"))
-                        } else {
-                            String::new()
-                        }
-                    ));
+                    let kinds = [
+                        (Level::Exact, "identical files (100%)"),
+                        (Level::ImageData, "the same image data (100%)"),
+                        (Level::NearIdentical, "near-identical"),
+                        (Level::Similar, "similar"),
+                    ];
+                    let parts: Vec<String> = kinds
+                        .iter()
+                        .filter_map(|&(l, name)| {
+                            let n = rows.iter().filter(|r| r.level == l).count();
+                            (n > 0).then(|| format!("{} {name}", group_digits(n)))
+                        })
+                        .collect();
+                    ui.label(parts.join(" · "));
+                    let lowest = rows.iter().map(|r| r.percent).min().unwrap_or(100);
+                    if lowest < 100 {
+                        ui.weak(format!(
+                            "The least alike is {lowest}%: check the list if that's lower than you meant."
+                        ));
+                    }
+                    // The first move, as an example of where they go.
+                    let example = p
+                        .moves
+                        .first()
+                        .map(|m| format!(" ({} goes to {})", short(&m.src), short(&m.dst)))
+                        .unwrap_or_default();
+                    ui.add(
+                        egui::Label::new(format!(
+                            "Each goes to _duplicates in its own library folder, keeping its \
+                             path{example}{}. Nothing is deleted, and the copy kept stays where \
+                             it is.",
+                            if sidecars > 0 {
+                                format!(", with its sidecar ({} in all)", group_digits(sidecars))
+                            } else {
+                                String::new()
+                            }
+                        ))
+                        .wrap(),
+                    );
                 }
                 if p.variants > 0 {
-                    lines.push(format!(
-                        "Add {} to stacks as variants",
-                        plural(p.variants, "file")
+                    ui.label(format!(
+                        "Add {} to stacks as variants.",
+                        plural_n(p.variants, "file")
                     ));
                 }
                 if p.ignores > 0 {
-                    lines.push(format!(
-                        "Remember {} as not duplicates",
-                        plural(p.ignores, "pair")
+                    ui.label(format!(
+                        "Remember {} as not duplicates.",
+                        plural_n(p.ignores, "pair")
                     ));
                 }
-                for l in lines {
-                    ui.label(l);
-                }
-                if !p.moves.is_empty() {
+                if !rows.is_empty() {
                     ui.add_space(6.0);
+                    let row_h = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+                    let pct_w = 48.0;
+                    let col = |ui: &egui::Ui| ((ui.available_width() - pct_w - 16.0) / 2.0).max(80.0);
+                    let cell = |ui: &mut egui::Ui, w: f32, text: RichText| {
+                        ui.allocate_ui_with_layout(
+                            vec2(w, row_h),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.set_width(w);
+                                ui.add(egui::Label::new(text).truncate())
+                            },
+                        );
+                    };
+                    ui.horizontal(|ui| {
+                        let w = col(ui);
+                        cell(ui, w, RichText::new("File to move").strong());
+                        cell(ui, pct_w, RichText::new("Alike").strong());
+                        cell(ui, w, RichText::new("Copy kept").strong());
+                    });
                     egui::ScrollArea::vertical()
-                        .max_height(360.0)
-                        .show(ui, |ui| {
-                            egui::Grid::new("dupe-moves")
-                                .striped(true)
-                                .num_columns(3)
-                                .show(ui, |ui| {
-                                    for m in &p.moves {
-                                        ui.label(RichText::new(short(&m.src)).monospace().small());
-                                        ui.weak("▶");
-                                        ui.label(RichText::new(short(&m.dst)).monospace().small());
-                                        ui.end_row();
-                                    }
-                                });
+                        .max_height(list_height)
+                        .auto_shrink([false, true])
+                        .show_rows(ui, row_h, rows.len(), |ui, range| {
+                            for r in &rows[range] {
+                                ui.horizontal(|ui| {
+                                    let w = col(ui);
+                                    // The name first: a long folder is what gets cut.
+                                    cell(
+                                        ui,
+                                        w,
+                                        RichText::new(format!("{}  ·  {}", r.name, r.folder)).small(),
+                                    );
+                                    cell(ui, pct_w, RichText::new(format!("{}%", r.percent)).small());
+                                    cell(ui, w, RichText::new(&r.kept).small().weak());
+                                })
+                                .response
+                                .on_hover_text(format!(
+                                    "{}/{}\nkept: {}",
+                                    r.folder, r.name, r.kept
+                                ));
+                            }
                         });
                 }
                 ui.add_space(8.0);
                 ui.weak("One batch: ⌘Z (or `shoebox undo`) puts everything back.");
                 ui.horizontal(|ui| {
                     let go = if files > 0 {
-                        format!("Move {}", plural(files, "file"))
+                        format!("Move {}", plural_n(files, "file"))
                     } else {
                         "Apply".to_owned()
                     };
@@ -715,5 +902,8 @@ pub fn apply_dialog(app: &mut ShoeboxApp, ctx: &egui::Context) {
         app.confirm_apply();
     } else if close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         app.dupes.preview = None;
+    }
+    if app.dupes.preview.is_none() {
+        ctx.data_mut(|d| d.remove::<std::sync::Arc<Vec<MoveRow>>>(rows_id));
     }
 }

@@ -100,6 +100,14 @@ pub(crate) fn rows(app: &ShoeboxApp) -> Vec<Row> {
             since: Some(item.started),
             ..Row::new(item.what.clone())
         };
+        if item.what == "Moving duplicates"
+            && let Some((stage, done, total, _)) = app.dupes.applying
+        {
+            row = row.progress(done, total);
+            if stage == crate::jobs::ApplyStage::Checking {
+                row.what = "Moving duplicates · checking they're unchanged".to_owned();
+            }
+        }
         // The search runs beside the library's other work.
         if app.dupes.running
             && item.what == "Finding duplicates"

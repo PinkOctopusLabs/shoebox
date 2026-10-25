@@ -221,6 +221,9 @@ pub struct DupeState {
     pub auto: shoebox_core::review::AutoSelect,
     /// The list is being grouped again at another threshold.
     pub regrouping: bool,
+    /// Decisions being applied: the stage, done of total, and when the
+    /// stage started (for the time left).
+    pub applying: Option<(crate::jobs::ApplyStage, usize, usize, Instant)>,
     pub decisions: HashMap<PathBuf, Decision>,
     /// The group open in Compare or Survey.
     pub open: Option<usize>,
@@ -1594,9 +1597,21 @@ impl ShoeboxApp {
                     }
                     self.dupes.progress = Some((done, total));
                 }
-                LibraryEvent::DupePreview(p) => self.dupes.preview = Some(p),
+                LibraryEvent::DupesApplying { stage, done, total } => {
+                    let since = match self.dupes.applying {
+                        Some((s, _, _, t)) if s == stage => t,
+                        _ => Instant::now(),
+                    };
+                    self.dupes.applying = Some((stage, done, total, since));
+                }
+                LibraryEvent::DupePreview(p) => {
+                    // An apply that was refused comes back as a preview.
+                    self.dupes.applying = None;
+                    self.dupes.preview = Some(p);
+                }
                 LibraryEvent::DupesApplied { batch, moved } => {
                     self.dupes.preview = None;
+                    self.dupes.applying = None;
                     // Done: keep only the "keep" decisions.
                     self.dupes.decisions.retain(|_, d| *d == Decision::Keep);
                     self.dupes.message = Some(match batch {
@@ -3085,13 +3100,15 @@ impl ShoeboxApp {
 
     /// The person confirmed the dry-run table.
     pub fn confirm_apply(&mut self) {
+        let files = self.marked_to_move();
+        self.dupes.applying = Some((crate::jobs::ApplyStage::Checking, 0, files, Instant::now()));
+        self.dupes.message = None;
         self.dupes.preview = None;
         self.library.send(LibraryCommand::ApplyDuplicates(
             self.dupes.decisions.clone(),
         ));
     }
 
-    /// Files marked to move (for the Apply button).
     /// Files marked to move among those listed (a decision stays with a
     /// file the slider hides, and comes back with it; applying leaves it
     /// out).
@@ -3490,6 +3507,25 @@ impl ShoeboxApp {
 
     /// The duplicate finder hashing, its count last moved at `at` (tests).
     #[doc(hidden)]
+    /// Show applying at this stage, as if the library said so (tests).
+    pub fn pretend_applying(&mut self, moving: bool, done: usize, total: usize) {
+        let stage = if moving {
+            crate::jobs::ApplyStage::Moving
+        } else {
+            crate::jobs::ApplyStage::Checking
+        };
+        self.dupes.applying = Some((
+            stage,
+            done,
+            total,
+            Instant::now() - std::time::Duration::from_secs(60),
+        ));
+    }
+
+    pub fn stop_pretending_applying(&mut self) {
+        self.dupes.applying = None;
+    }
+
     pub fn pretend_dupe_progress(&mut self, done: usize, total: usize, at: Instant) {
         self.dupes.running = true;
         self.dupes.progress = Some((done, total));

@@ -1529,6 +1529,31 @@ fn undated_cleanup_in_the_app() {
     assert_eq!(h.state().dupe_preview(), Some(Ok(8)), "7 files + 1 sidecar");
     h.run_steps(2);
     snapshot(&mut h, "13-apply-dry-run");
+    // What it does in numbers, each file beside the copy that stays, and
+    // the buttons in view even in a small window.
+    assert!(h.query_by_label("Move 7 files to _duplicates?").is_some());
+    assert!(h.query_by_label("Copy kept").is_some());
+    h.set_size(egui::vec2(640.0, 480.0));
+    h.run_steps(3);
+    for b in ["Move 7 files", "Cancel"] {
+        let r = h.get_by_label(b).rect();
+        assert!(
+            r.min.x >= 0.0 && r.max.x <= 640.0 && r.max.y <= 480.0,
+            "{b} at {r:?}"
+        );
+    }
+    h.set_size(egui::vec2(1400.0, 900.0));
+    h.run_steps(3);
+    // While it runs: the stage, a bar, the count and the time left.
+    h.state_mut().pretend_applying(true, 1200, 4800);
+    h.run_steps(2);
+    assert!(h.query_by_label("Moving to _duplicates").is_some());
+    assert!(
+        h.query_by_label_contains("1,200 of 4,800 files and sidecars moved · about 3 min left")
+            .is_some()
+    );
+    snapshot(&mut h, "13b-applying");
+    h.state_mut().stop_pretending_applying();
     assert!(
         undated.join("f0001.jpg").exists(),
         "nothing moved before confirming"

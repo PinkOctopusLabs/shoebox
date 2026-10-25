@@ -722,6 +722,18 @@ impl FileOps {
         plan: &Plan,
         writes: Vec<(PathBuf, Vec<u8>)>,
     ) -> Result<i64> {
+        self.execute_with_writes_progress(label, plan, writes, &|_, _| {})
+    }
+
+    /// [`Self::execute_with_writes`], calling `progress(done, total)` after
+    /// each step.
+    pub fn execute_with_writes_progress(
+        &self,
+        label: &str,
+        plan: &Plan,
+        writes: Vec<(PathBuf, Vec<u8>)>,
+        progress: &dyn Fn(usize, usize),
+    ) -> Result<i64> {
         self.preflight(&plan.moves, &HashSet::new())?;
         for (path, _) in &writes {
             self.check_sidecar_target(path)?;
@@ -737,7 +749,11 @@ impl FileOps {
                     .map(|(path, bytes)| planned_write(path, bytes)),
             )
             .collect();
-        self.run("move", label, None, &ops, |_| Ok(()))
+        let total = ops.len();
+        self.run("move", label, None, &ops, |i| {
+            progress(i + 1, total);
+            Ok(())
+        })
     }
 
     /// Create an empty folder, journaled (undo leaves folders in place:

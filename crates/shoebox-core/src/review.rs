@@ -481,6 +481,38 @@ pub fn plan(r: &Review, decisions: &HashMap<PathBuf, Decision>) -> Result<Plan> 
 }
 
 /// The file about to move must be the file that was reviewed.
+/// [`check_unchanged`] for many files at once, read in parallel, calling
+/// `progress(done, total)` as each is checked. The first changed or
+/// unreadable file refuses the lot.
+pub fn check_all_unchanged(
+    r: &Review,
+    paths: &[&Path],
+    progress: &(dyn Fn(usize, usize) + Sync),
+) -> Result<()> {
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let by_path: HashMap<&Path, &Digest> = r
+        .files
+        .iter()
+        .map(|f| (f.path.as_path(), &f.blake3))
+        .collect();
+    let done = AtomicUsize::new(0);
+    paths.par_iter().try_for_each(|&path| {
+        let want = by_path
+            .get(path)
+            .ok_or_else(|| CoreError::Invalid(format!("{} isn't in the review", path.display())))?;
+        let data = std::fs::read(path).map_err(crate::error::io(path))?;
+        if crate::hash::blake3_of(&data) != **want {
+            return Err(CoreError::Refused(format!(
+                "{} changed since duplicates were found; find them again",
+                path.display()
+            )));
+        }
+        progress(done.fetch_add(1, Ordering::Relaxed) + 1, paths.len());
+        Ok(())
+    })
+}
+
 pub fn check_unchanged(r: &Review, path: &Path) -> Result<()> {
     let f = r
         .files

@@ -732,6 +732,14 @@ pub struct OrgPreview {
 pub type BatchRow = shoebox_core::fileops::BatchSummary;
 
 /// The dry-run table for applying duplicate decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplyStage {
+    /// Reading each file to move, to check it's the one that was found.
+    Checking,
+    /// Moving files and sidecars to `_duplicates/`.
+    Moving,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct DupePreview {
     /// Every move, sidecars included, with final (suffixed) destinations.
@@ -874,6 +882,13 @@ pub enum LibraryEvent {
     BatchResumed(Result<usize, String>),
     /// Duplicate groups found (also after applying decisions, or undo).
     Duplicates(Arc<Review>),
+    /// Applying duplicate decisions: checking the files are unchanged,
+    /// then moving them (files and sidecars), `done` of `total`.
+    DupesApplying {
+        stage: ApplyStage,
+        done: usize,
+        total: usize,
+    },
     DupeProgress {
         done: usize,
         total: usize,
@@ -2050,7 +2065,14 @@ fn library_worker(
             }
             LibraryCommand::ApplyDuplicates(decisions) => {
                 let Some(r) = dupes.as_ref() else { continue };
-                match apply_dupes(r, &decisions, &settings, &catalog, &fileops, &mut cache) {
+                let progress = |stage, done: usize, total: usize| {
+                    if done.is_multiple_of(16) || done == total {
+                        emit(LibraryEvent::DupesApplying { stage, done, total });
+                    }
+                };
+                match apply_dupes(
+                    r, &decisions, &settings, &catalog, &fileops, &mut cache, &progress,
+                ) {
                     Ok((batch, moved)) => {
                         if let Some(b) = batch {
                             undo.push(b);
@@ -2907,11 +2929,13 @@ fn apply_dupes(
     catalog: &Catalog,
     fileops: &FileOps,
     cache: &mut shoebox_core::cache::Cache,
+    progress: &(dyn Fn(ApplyStage, usize, usize) + Sync),
 ) -> Result<(Option<i64>, usize), String> {
     let plan = review::plan(r, decisions).map_err(|e| e.to_string())?;
-    for (src, _) in &plan.moves {
-        review::check_unchanged(r, src).map_err(|e| e.to_string())?;
-    }
+    let srcs: Vec<&Path> = plan.moves.iter().map(|(s, _)| s.as_path()).collect();
+    progress(ApplyStage::Checking, 0, srcs.len());
+    review::check_all_unchanged(r, &srcs, &|d, t| progress(ApplyStage::Checking, d, t))
+        .map_err(|e| e.to_string())?;
     let moves = shoebox_core::fileops::plan_moves(&plan.moves).map_err(|e| e.to_string())?;
     let writes = if plan.links.is_empty() {
         Vec::new()
@@ -2937,7 +2961,9 @@ fn apply_dupes(
         );
         Some(
             fileops
-                .execute_with_writes(&label, &moves, writes)
+                .execute_with_writes_progress(&label, &moves, writes, &|d, t| {
+                    progress(ApplyStage::Moving, d, t)
+                })
                 .map_err(|e| e.to_string())?,
         )
     };
