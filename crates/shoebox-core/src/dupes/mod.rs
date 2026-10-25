@@ -208,14 +208,14 @@ pub struct Group {
 
 fn format_rank(f: Format) -> u8 {
     match f {
-        Format::Nef => 0,
+        Format::Nef | Format::Arw => 0,
         // Raw data too (a camera's DNG, or a NEF converted).
         Format::Dng => 1,
-        Format::Tiff => 2,
+        Format::Tiff | Format::Psd => 2,
         // HEIC is a camera original (phone), so it ranks with the JPG.
         Format::Jpeg | Format::Heic => 3,
-        Format::Png | Format::Avif => 4,
-        Format::Mov | Format::Mp4 => 5,
+        Format::Png | Format::Avif | Format::Webp => 4,
+        Format::Mov | Format::Mp4 | Format::Mpg => 5,
     }
 }
 

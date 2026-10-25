@@ -120,7 +120,7 @@ pub fn analyze_path(path: &Path) -> Result<Analysis> {
     let format = Format::from_path(path)
         .ok_or_else(|| CoreError::Invalid(format!("unsupported file type: {}", path.display())))?;
     if format.is_movie() {
-        return analyze_movie(path);
+        return analyze_movie(path, format);
     }
     let data = std::fs::read(path).map_err(io(path))?;
     Ok(analyze_bytes(format, &data))
@@ -128,9 +128,8 @@ pub fn analyze_path(path: &Path) -> Result<Analysis> {
 
 /// A movie: exact copies only (BLAKE3, streamed, so a big clip isn't read
 /// into memory), with its size from the header. No perceptual hashes.
-fn analyze_movie(path: &Path) -> Result<Analysis> {
-    let mut f = std::fs::File::open(path).map_err(io(path))?;
-    let info = shoebox_decode::mov::info(&mut f).ok();
+fn analyze_movie(path: &Path, format: Format) -> Result<Analysis> {
+    let info = shoebox_decode::movie_info(format, path).ok();
     let mut f = std::fs::File::open(path).map_err(io(path))?;
     let mut h = blake3::Hasher::new();
     h.update_reader(&mut f).map_err(io(path))?;

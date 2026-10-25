@@ -36,7 +36,40 @@ fn every_real_file_analyses_cleanly() {
     for p in real_files() {
         let a = hash::analyze_path(&p).unwrap();
         assert!(a.error.is_none(), "{}: {:?}", p.display(), a.error);
-        assert_eq!(a.hashes.len(), 4, "{}", p.display());
+        // Movies are matched as exact copies only, with their size.
+        if Format::from_path(&p).is_some_and(Format::is_movie) {
+            assert!(a.hashes.is_empty() && a.width.is_some(), "{}", p.display());
+        } else {
+            assert_eq!(a.hashes.len(), 4, "{}", p.display());
+        }
+    }
+}
+
+/// Metadata of the formats added for a real library: an ARW's EXIF and
+/// size, a WebP's and PSD's size from their headers, and an MPG's size,
+/// dated by the file's modified time (the stream has no date).
+#[test]
+fn real_arw_webp_psd_and_mpg_metadata() {
+    for p in real_files() {
+        let Some(format) = Format::from_path(&p) else {
+            continue;
+        };
+        if !matches!(
+            format,
+            Format::Arw | Format::Webp | Format::Psd | Format::Mpg
+        ) {
+            continue;
+        }
+        let m = shoebox_core::meta::read(&p, format).unwrap();
+        assert!(m.width.is_some() && m.height.is_some(), "{}", p.display());
+        match format {
+            Format::Arw => {
+                assert!(m.exif.capture_time.is_some(), "{}", p.display());
+                assert_eq!(m.exif.make.as_deref(), Some("SONY"));
+            }
+            Format::Mpg => assert!(m.exif.capture_time.is_some(), "{}", p.display()),
+            _ => {}
+        }
     }
 }
 

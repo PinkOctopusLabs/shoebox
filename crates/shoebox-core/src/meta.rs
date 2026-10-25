@@ -126,12 +126,14 @@ fn dims_from(format: Format, data: &[u8]) -> Option<(u32, u32)> {
         Format::Png => shoebox_decode::dimensions(Format::Png, data).ok(),
         Format::Tiff => shoebox_decode::nef::ifd0_dimensions(data).ok().flatten(),
         // The largest image described in any IFD (the raw or JpgFromRaw).
-        Format::Nef => shoebox_decode::nef::max_dimensions(data).ok().flatten(),
+        Format::Nef | Format::Arw => shoebox_decode::nef::max_dimensions(data).ok().flatten(),
+        // From the header.
+        Format::Webp | Format::Psd => shoebox_decode::dimensions(format, data).ok(),
         // The raw image's default crop.
         Format::Dng => shoebox_decode::dng::dimensions(data).ok(),
         // The primary image's, turned by its own rotation (`irot`).
         Format::Avif => shoebox_decode::heif::dimensions(data).ok(),
-        Format::Heic | Format::Mov | Format::Mp4 => None,
+        Format::Heic | Format::Mov | Format::Mp4 | Format::Mpg => None,
     }
 }
 
@@ -161,12 +163,13 @@ fn from_bytes(format: Format, data: &[u8]) -> (Meta, bool) {
 /// (Apple's local creation date, else the UTC header time in local time).
 /// A movie with neither (an editor's export often has none) is dated by
 /// its modified time: unlike a photo's, that's usually when it was made.
-fn movie(path: &Path) -> Result<Meta> {
-    let mut f = std::fs::File::open(path).map_err(io(path))?;
-    let info = shoebox_decode::mov::info(&mut f).map_err(|e| crate::error::CoreError::Decode {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
+fn movie(path: &Path, format: Format) -> Result<Meta> {
+    let f = std::fs::File::open(path).map_err(io(path))?;
+    let info =
+        shoebox_decode::movie_info(format, path).map_err(|e| crate::error::CoreError::Decode {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
     let mut exif = ExifInfo::default();
     let local = movie_time(&info).or_else(|| {
         let modified = f.metadata().ok()?.modified().ok()?;
@@ -206,7 +209,7 @@ fn movie_time(info: &shoebox_decode::mov::MovInfo) -> Option<jiff::Zoned> {
 /// Read metadata, trying the first 256 KB before falling back to the whole file.
 pub fn read(path: &Path, format: Format) -> Result<Meta> {
     if format.is_movie() {
-        return movie(path);
+        return movie(path, format);
     }
     let mut f = std::fs::File::open(path).map_err(io(path))?;
     let mut prefix = Vec::with_capacity(PREFIX as usize);

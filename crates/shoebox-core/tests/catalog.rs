@@ -69,7 +69,8 @@ fn prefix_metadata_matches_full_read_on_real_files() {
     };
     for e in entries {
         let p = e.unwrap().path();
-        let Some(fmt) = shoebox_decode::Format::from_path(&p) else {
+        // Movies are dated from their headers (or modified time), not EXIF.
+        let Some(fmt) = shoebox_decode::Format::from_path(&p).filter(|f| !f.is_movie()) else {
             continue;
         };
         let fast = shoebox_core::meta::read(&p, fmt).unwrap();

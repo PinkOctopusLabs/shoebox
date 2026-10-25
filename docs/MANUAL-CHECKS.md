@@ -120,6 +120,21 @@ APFS clone, in folders by shoot.
   a few real photos, NEF+JPG stacks too. Passes: S opens the stack with
   each copy showing its own edit; D on a copy opens that copy; Delete Copy
   from its menu leaves the file alone.
+- [ ] **Sony ARW, PSD, WebP and MPG** (from 2026-10-25), on the
+  library's own: the NEX-3 ARWs of 30 Jun 2018, the Photoshop documents
+  of 23 Oct 2004 and 14 Aug 2010 (a panorama beside its frames), the WebPs
+  of 2023 and the MPG clips of 28 Jul 2018. Passes:
+  - each ARW shows the whole 3:2 frame (not the camera's 16:9 preview) and
+    leads an `ARW+JPG` stack; Info shows the date, camera and lens; the
+    loupe at 100% is sharp; Develop opens it as a raw and a default render
+    looks like its JPEG; Lens corrections find the lens (or say they
+    don't);
+  - each PSD shows its flattened image at its full size and leads its
+    stack over the JPEG of the same name; WebPs show like PNGs;
+  - each MPG shows a poster frame, dated by its sidecar (28 Jul 2018, not
+    when Drive wrote it), and opens in QuickTime Player;
+  - Find duplicates includes them (an ARW and its JPEG are a stack, not
+    duplicates).
 - [ ] **A camera DNG from another app** (from 2026-10-22): a DNG from Adobe
   DNG Converter (of a Z f NEF, with its default medium preview) and one
   from a phone or another camera (a Pixel or iPhone ProRAW, a Leica or

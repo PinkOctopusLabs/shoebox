@@ -658,7 +658,7 @@ pub fn names(folders: &[Folder], rel: &Path) -> (Vec<String>, Vec<String>) {
 /// returned. A copy's sidecar is made from the source's own (the plain
 /// copy of it is dropped from `plan.copies`); a library photo found again
 /// in a folder gets an edit to its sidecar, unless it's in a reference
-/// root. `stem_for_raw`: also write `name.xmp` for a library NEF.
+/// root. `stem_for_raw`: also write `name.xmp` for a library NEF or ARW.
 pub fn folder_writes(
     plan: &mut Plan,
     folders: &[Folder],
@@ -737,7 +737,7 @@ pub fn folder_writes(
             }
             let p = &library.photos[i];
             let new = with(&p.marks);
-            let also_stem = stem_for_raw && p.format == Format::Nef;
+            let also_stem = stem_for_raw && matches!(p.format, Format::Nef | Format::Arw);
             let w = sidecar::plan_write(&p.path, &p.marks, &new, also_stem)?;
             if !w.is_empty() {
                 out.writes.extend(w);

@@ -172,3 +172,70 @@ fn adobe_rgb_to_display_p3_matches_imageio_and_keeps_gamut() {
         "P3 should keep more of this green's gamut"
     );
 }
+
+/// The first real file with this extension's path, if there is one.
+fn real_path(ext: &str) -> Option<PathBuf> {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/real");
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext)))
+        .collect();
+    files.sort();
+    files.into_iter().next()
+}
+
+/// A Sony ARW shows the whole frame: the NEX-3's embedded JPEG is a 16:9
+/// crop of its 3:2 photo, so it's rendered from the raw data instead (with
+/// no image-data hash). Its raw data decodes for Develop.
+#[test]
+fn real_arw() {
+    let Some(data) = real("arw") else { return };
+    let (w, h) = shoebox_decode::dimensions(Format::Arw, &data).unwrap();
+    assert!(w.max(h) >= 4000, "{w}×{h}");
+    let img = shoebox_decode::render_srgb(Format::Arw, &data, Some(600), 1).unwrap();
+    assert_eq!(img.width.max(img.height), 600);
+    let ratio = f64::from(img.width) / f64::from(img.height);
+    assert!((ratio - 1.5).abs() < 0.02, "the whole 3:2 frame: {ratio}");
+    let full = shoebox_decode::render_srgb(Format::Arw, &data, None, 1).unwrap();
+    assert!(full.width >= w - 32 && full.height >= h - 32, "full size");
+    assert!(
+        shoebox_decode::image_data_ranges(Format::Arw, &data)
+            .unwrap()
+            .is_none()
+    );
+    let raw = shoebox_decode::raw::decode(&data).unwrap();
+    assert!(raw.is_mosaic());
+}
+
+/// WebP and PSD through ImageIO, their sizes from their headers.
+#[test]
+fn real_webp_and_psd() {
+    for (ext, format) in [("webp", Format::Webp), ("psd", Format::Psd)] {
+        let Some(data) = real(ext) else { continue };
+        let (w, h) = shoebox_decode::dimensions(format, &data).unwrap();
+        let img = shoebox_decode::render_srgb(format, &data, None, 1).unwrap();
+        assert_eq!((img.width, img.height), (w, h), "{ext}");
+        let small = shoebox_decode::render_srgb(format, &data, Some(128), 1).unwrap();
+        assert_eq!(small.width.max(small.height), 128, "{ext}");
+    }
+}
+
+/// An MPEG-1 clip: its size and duration from the stream, a poster frame
+/// from AVFoundation.
+#[test]
+fn real_mpg() {
+    let Some(path) = real_path("mpg") else { return };
+    let i = shoebox_decode::movie_info(Format::Mpg, &path).unwrap();
+    assert!(i.width.is_some() && i.height.is_some(), "{i:?}");
+    assert!(i.duration_secs.is_some_and(|d| d > 0.0), "{i:?}");
+    let poster = shoebox_decode::render_path(
+        Format::Mpg,
+        &path,
+        Some(320),
+        1,
+        shoebox_decode::Target::Srgb,
+    )
+    .unwrap();
+    assert_eq!(poster.width.max(poster.height), 320);
+}

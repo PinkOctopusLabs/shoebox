@@ -140,14 +140,18 @@ impl Drop for Cf {
 pub fn type_hint(format: crate::Format) -> &'static str {
     match format {
         crate::Format::Nef => "com.nikon.raw-image",
+        crate::Format::Arw => "com.sony.arw-raw-image",
         crate::Format::Dng => "com.adobe.raw-image",
         crate::Format::Jpeg => "public.jpeg",
         crate::Format::Tiff => "public.tiff",
         crate::Format::Png => "public.png",
         crate::Format::Heic => "public.heic",
         crate::Format::Avif => "public.avif",
+        crate::Format::Webp => "org.webmproject.webp",
+        crate::Format::Psd => "com.adobe.photoshop-image",
         crate::Format::Mov => "com.apple.quicktime-movie",
         crate::Format::Mp4 => "public.mpeg-4",
+        crate::Format::Mpg => "public.mpeg",
     }
 }
 

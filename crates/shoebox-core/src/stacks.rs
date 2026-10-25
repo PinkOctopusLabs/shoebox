@@ -87,15 +87,16 @@ impl Stack {
 
 fn rank(f: Format) -> u8 {
     match f {
-        Format::Nef => 0,
+        Format::Nef | Format::Arw => 0,
         Format::Dng => 1,
-        Format::Tiff => 2,
+        // A Photoshop document is an edit of the frame, like a TIFF.
+        Format::Tiff | Format::Psd => 2,
         Format::Jpeg => 3,
         Format::Png => 4,
         Format::Heic => 5,
-        Format::Avif => 6,
+        Format::Avif | Format::Webp => 6,
         // A Live Photo's video is never the photo shown.
-        Format::Mov | Format::Mp4 => 7,
+        Format::Mov | Format::Mp4 | Format::Mpg => 7,
     }
 }
 
@@ -373,6 +374,27 @@ mod tests {
         assert_eq!(of[6], of[1]);
         assert!(s.variants.contains(&6));
         assert_eq!(photos[s.primary].format, Format::Nef);
+    }
+
+    /// A Sony ARW is shown over its JPEG, as a NEF is; a Photoshop document
+    /// over the JPEG of the same name, as a TIFF is; an MPG never is.
+    #[test]
+    fn arw_and_psd_lead_their_stacks() {
+        let t = Some(("2018:06:30 11:58:08", "00"));
+        let photos = vec![
+            photo("/a/20180630-115808.jpg", t),
+            photo("/a/20180630-115808.arw", t),
+            photo("/b/20100814-135016.jpg", None),
+            photo("/b/20100814-135016.psd", None),
+            photo("/c/20180728-225846.mpg", None),
+            photo("/c/20180728-225846.webp", None),
+        ];
+        let (stacks, of) = build(&photos, &[]);
+        let s = &stacks[of[0]];
+        assert_eq!(photos[s.primary].format, Format::Arw);
+        assert_eq!(s.badge(&photos), "ARW+JPG");
+        assert_eq!(photos[stacks[of[2]].primary].format, Format::Psd);
+        assert_eq!(photos[stacks[of[4]].primary].format, Format::Webp);
     }
 
     #[test]

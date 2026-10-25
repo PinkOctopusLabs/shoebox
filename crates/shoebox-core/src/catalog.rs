@@ -413,7 +413,7 @@ impl Catalog {
         let mut writes = extra;
         for (i, new) in &updates {
             let p = &self.photos[*i];
-            let also_stem = stem_for_raw && p.format == Format::Nef;
+            let also_stem = stem_for_raw && matches!(p.format, Format::Nef | Format::Arw);
             writes.extend(sidecar::plan_write(&p.path, &p.marks, new, also_stem)?);
         }
         if writes.is_empty() {

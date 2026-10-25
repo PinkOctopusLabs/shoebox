@@ -13,6 +13,7 @@ pub mod heif;
 pub mod imageio;
 pub mod jpeg;
 pub mod mov;
+pub mod mpeg;
 pub mod nef;
 pub mod png;
 pub mod raw;
@@ -54,6 +55,10 @@ pub enum DecodeError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Format {
     Nef,
+    /// Sony's raw: TIFF-based like a NEF. Shown from an embedded JPEG only
+    /// if one has the whole frame (older bodies' are cropped to 16:9), else
+    /// rendered from the raw data like a DNG without previews.
+    Arw,
     /// Any DNG: a camera's, Adobe DNG Converter's, or Shoebox's own linear
     /// DNG exports. Shown from its previews, or rendered from the raw data
     /// (see [`dng`]).
@@ -66,12 +71,20 @@ pub enum Format {
     Heic,
     /// AVIF: like HEIC, decoded by the platform (ImageIO on macOS).
     Avif,
+    /// WebP: decoded by the platform, like HEIC.
+    Webp,
+    /// Photoshop document: its flattened image, decoded by the platform.
+    /// Shown and developed, never written to.
+    Psd,
     /// QuickTime movie (a Live Photo's video, or a clip): a poster frame
     /// through AVFoundation on macOS; see [`render_path`].
     Mov,
     /// MPEG-4 movie (`.mp4`, `.m4v`): the same box structure as QuickTime,
     /// handled the same way.
     Mp4,
+    /// MPEG-1 or MPEG-2 program stream (`.mpg`, `.mpeg`): an older camera's
+    /// clips. Its header is read by [`mpeg`], its picture by AVFoundation.
+    Mpg,
 }
 
 impl Format {
@@ -79,14 +92,18 @@ impl Format {
         let ext = path.extension()?.to_str()?.to_ascii_lowercase();
         Some(match ext.as_str() {
             "nef" => Format::Nef,
+            "arw" => Format::Arw,
             "dng" => Format::Dng,
             "jpg" | "jpeg" => Format::Jpeg,
             "tif" | "tiff" => Format::Tiff,
             "png" => Format::Png,
             "heic" | "heif" | "hif" => Format::Heic,
             "avif" => Format::Avif,
+            "webp" => Format::Webp,
+            "psd" => Format::Psd,
             "mov" => Format::Mov,
             "mp4" | "m4v" => Format::Mp4,
+            "mpg" | "mpeg" => Format::Mpg,
             _ => return None,
         })
     }
@@ -94,38 +111,46 @@ impl Format {
     pub fn label(self) -> &'static str {
         match self {
             Format::Nef => "NEF",
+            Format::Arw => "ARW",
             Format::Dng => "DNG",
             Format::Jpeg => "JPG",
             Format::Tiff => "TIF",
             Format::Png => "PNG",
             Format::Heic => "HEIC",
             Format::Avif => "AVIF",
+            Format::Webp => "WEBP",
+            Format::Psd => "PSD",
             Format::Mov => "MOV",
             Format::Mp4 => "MP4",
+            Format::Mpg => "MPG",
         }
     }
 
-    /// A movie (MOV or MP4): its picture comes from [`render_path`].
+    /// A movie (MOV, MP4 or MPG): its picture comes from [`render_path`].
     pub fn is_movie(self) -> bool {
-        matches!(self, Format::Mov | Format::Mp4)
+        matches!(self, Format::Mov | Format::Mp4 | Format::Mpg)
     }
 
-    /// Raw data from a camera (NEF or DNG): Develop decodes it rather than
-    /// a finished image.
+    /// Raw data from a camera (NEF, ARW or DNG): Develop decodes it rather
+    /// than a finished image.
     pub fn is_raw(self) -> bool {
-        matches!(self, Format::Nef | Format::Dng)
+        matches!(self, Format::Nef | Format::Arw | Format::Dng)
     }
 
-    /// Decoded by the platform (HEIC, AVIF): ImageIO applies the file's own
-    /// rotation and colour.
+    /// Decoded by the platform (HEIC, AVIF, WebP, PSD): ImageIO applies the
+    /// file's own rotation and colour.
     pub fn is_platform(self) -> bool {
-        matches!(self, Format::Heic | Format::Avif)
+        matches!(
+            self,
+            Format::Heic | Format::Avif | Format::Webp | Format::Psd
+        )
     }
 }
 
 /// The bytes whose pixels represent the file: the file itself, for a NEF
-/// its embedded full-size JPEG (`JpgFromRaw`), for a DNG its largest JPEG
-/// preview (the DNG itself if it has none).
+/// its embedded full-size JPEG (`JpgFromRaw`), for an ARW its largest
+/// whole-frame JPEG, for a DNG its largest JPEG preview (the ARW or DNG
+/// itself if it has none).
 pub fn display_source(format: Format, data: &[u8]) -> Result<(Format, &[u8]), DecodeError> {
     match format {
         Format::Nef => {
@@ -133,6 +158,10 @@ pub fn display_source(format: Format, data: &[u8]) -> Result<(Format, &[u8]), De
                 .ok_or_else(|| DecodeError::Format("NEF has no embedded JPEG".into()))?;
             Ok((Format::Jpeg, &data[r]))
         }
+        Format::Arw => Ok(match arw_previews(data).into_iter().last() {
+            Some((r, _)) => (Format::Jpeg, &data[r]),
+            None => (Format::Arw, data),
+        }),
         Format::Dng => {
             let largest = dng::previews(data)?
                 .into_iter()
@@ -163,12 +192,14 @@ pub fn decode_luma(format: Format, data: &[u8]) -> Result<Gray, DecodeError> {
     let (format, data) = display_source(format, data)?;
     match format {
         Format::Jpeg | Format::Nef => jpeg::decode_luma(data),
+        // No whole-frame preview: from the raw data.
+        Format::Arw => Ok(raw_render(Format::Arw, data, None, Target::Srgb)?.to_gray()),
         Format::Tiff => tiff::decode_luma(data),
         Format::Png => png::decode_luma(data),
         // No JPEG preview: from the raw data.
         Format::Dng => Ok(dng_render(data, None, 1, Target::Srgb)?.to_gray()),
-        Format::Heic | Format::Avif => platform_luma(format, data, 1 << 14),
-        Format::Mov | Format::Mp4 => Err(video_from_bytes()),
+        f if f.is_platform() => platform_luma(format, data, 1 << 14),
+        _ => Err(video_from_bytes()),
     }
 }
 
@@ -194,6 +225,9 @@ pub fn luma_thumbnail(format: Format, data: &[u8], long_edge: u32) -> Result<Gra
         Format::Dng => Ok(dng_render(data, Some(long_edge), 1, Target::Srgb)?
             .to_gray()
             .fit_long_edge(long_edge)),
+        Format::Arw => Ok(render(format, data, Some(long_edge), 1, Target::Srgb)?
+            .to_gray()
+            .fit_long_edge(long_edge)),
         _ => Ok(decode_luma(format, data)?.fit_long_edge(long_edge)),
     }
 }
@@ -202,7 +236,8 @@ pub fn luma_thumbnail(format: Format, data: &[u8], long_edge: u32) -> Result<Gra
 /// metadata: JPEG SOS..EOI, TIFF strips/tiles, PNG IDAT payloads. For a NEF this
 /// is the image data of its embedded JPEG, so a byte-identical carved preview
 /// produces the same hash; for a DNG, its raw image's strips or tiles.
-/// `None` for formats without a defined image-data hash (HEIC, AVIF).
+/// `None` for formats without a defined image-data hash (HEIC, AVIF, WebP,
+/// PSD, movies).
 pub fn image_data_ranges(
     format: Format,
     data: &[u8],
@@ -216,10 +251,19 @@ pub fn image_data_ranges(
             let abs = outer.start + inner.start..outer.start + inner.end;
             std::iter::once(abs).collect()
         }
+        // A whole-frame preview's, like a NEF's.
+        Format::Arw => match display_source(format, data)? {
+            (Format::Jpeg, jpg) => {
+                let start = jpg.as_ptr() as usize - data.as_ptr() as usize;
+                let inner = jpeg::scan_data_range(jpg)?;
+                std::iter::once(start + inner.start..start + inner.end).collect()
+            }
+            _ => return Ok(None),
+        },
         Format::Dng => dng::raw_data_ranges(data)?,
         Format::Tiff => tiff::image_data_ranges(data)?,
         Format::Png => png::idat_ranges(data)?,
-        Format::Heic | Format::Avif | Format::Mov | Format::Mp4 => return Ok(None),
+        _ => return Ok(None),
     }))
 }
 
@@ -234,11 +278,22 @@ pub fn dimensions(format: Format, data: &[u8]) -> Result<(u32, u32), DecodeError
                 return Ok(size);
             }
         }
+        Format::Webp => return webp_dimensions(data),
+        Format::Psd => return psd_dimensions(data),
+        Format::Mpg => {
+            let i = mpeg::info(&mut std::io::Cursor::new(data))?;
+            return i
+                .width
+                .zip(i.height)
+                .ok_or_else(|| DecodeError::Format("movie has no video size".into()));
+        }
         _ => {}
     }
     let (format, data) = display_source(format, data)?;
     match format {
         Format::Jpeg | Format::Nef => jpeg::dimensions(data),
+        Format::Arw => nef::max_dimensions(data)?
+            .ok_or_else(|| DecodeError::Format("ARW has no dimensions".into())),
         Format::Tiff => nef::ifd0_dimensions(data)?
             .ok_or_else(|| DecodeError::Format("TIFF has no dimensions".into())),
         Format::Png => {
@@ -249,11 +304,11 @@ pub fn dimensions(format: Format, data: &[u8]) -> Result<(u32, u32), DecodeError
             ))
         }
         Format::Dng => dng::dimensions(data),
-        Format::Heic | Format::Avif => {
+        f if f.is_platform() => {
             let g = platform_luma(format, data, 1 << 14)?;
             Ok((g.width, g.height))
         }
-        Format::Mov | Format::Mp4 => {
+        _ => {
             let i = mov::info(&mut std::io::Cursor::new(data))?;
             i.width
                 .zip(i.height)
@@ -269,7 +324,7 @@ fn jpeg_candidates(format: Format, data: &[u8]) -> Vec<(std::ops::Range<usize>, 
         Format::Jpeg => std::iter::once(0..data.len())
             .chain(jpeg::mpf_images(data))
             .collect(),
-        Format::Nef => nef::embedded_jpegs(data).unwrap_or_default(),
+        Format::Nef | Format::Arw => nef::embedded_jpegs(data).unwrap_or_default(),
         _ => Vec::new(),
     };
     ranges
@@ -312,6 +367,31 @@ pub fn render(
     target: Target,
 ) -> Result<Rgb8, DecodeError> {
     let (mut img, icc) = match format {
+        Format::Arw => {
+            let cands = arw_previews(data);
+            // Full size is the raw's: a smaller preview would be blown up.
+            let want = long_edge.or_else(|| {
+                nef::max_dimensions(data)
+                    .ok()
+                    .flatten()
+                    .map(|(w, h)| w.max(h))
+            });
+            // The smallest whole-frame preview that's big enough, else the
+            // raw data.
+            let Some(i) = want.and_then(|w| {
+                pick(&cands, Some(w)).filter(|&i| {
+                    u64::from(cands[i].1.0.max(cands[i].1.1)) * 20 >= u64::from(w) * 19
+                })
+            }) else {
+                let img = raw_render(Format::Arw, data, long_edge, target)?;
+                let img = match long_edge {
+                    Some(l) => img.fit_long_edge(l),
+                    None => img,
+                };
+                return Ok(img.orient(orientation));
+            };
+            jpeg::decode_rgb(&data[cands[i].0.clone()])?
+        }
         Format::Jpeg | Format::Nef => {
             let cands = jpeg_candidates(format, data);
             let i = pick(&cands, long_edge)
@@ -328,10 +408,10 @@ pub fn render(
         Format::Tiff => tiff::decode_rgb(data)?,
         Format::Png => png::decode_rgb(data)?,
         Format::Dng => return dng_render(data, long_edge, orientation, target),
-        Format::Heic | Format::Avif => {
+        f if f.is_platform() => {
             return platform_render(format, data, long_edge.unwrap_or(1 << 14), target);
         }
-        Format::Mov | Format::Mp4 => return Err(video_from_bytes()),
+        _ => return Err(video_from_bytes()),
     };
     if let Some(l) = long_edge {
         img = img.fit_long_edge(l);
@@ -361,9 +441,8 @@ pub fn render_path(
 fn video_poster(path: &std::path::Path, max: u32, target: Target) -> Result<Rgb8, DecodeError> {
     // Not the first frame (often black): a second in, or the middle of a
     // shorter clip.
-    let at = std::fs::File::open(path)
-        .ok()
-        .and_then(|mut f| mov::info(&mut f).ok())
+    let at = Format::from_path(path)
+        .and_then(|f| movie_info(f, path).ok())
         .and_then(|i| i.duration_secs)
         .map_or(0.0, |d| (d / 2.0).min(1.0));
     imageio::video_poster(path, max, at, target)
@@ -382,7 +461,7 @@ fn jpeg_icc(data: &[u8]) -> Option<Vec<u8>> {
     d.icc_profile()
 }
 
-/// HEIC and AVIF through ImageIO, which also applies the file's rotation
+/// HEIC, AVIF, WebP and PSD through ImageIO, which also applies the file's rotation
 /// and colour management (an ICC profile or nclx colour).
 #[cfg(target_os = "macos")]
 fn platform_render(
@@ -435,7 +514,7 @@ fn dng_render(
             rgb::convert(&mut img, icc.as_deref(), target);
             img
         }
-        None => dng_from_raw(data, long_edge, target)?,
+        None => raw_render(Format::Dng, data, long_edge, target)?,
     };
     if let Some(l) = long_edge {
         img = img.fit_long_edge(l);
@@ -443,16 +522,41 @@ fn dng_render(
     Ok(img.orient(orientation))
 }
 
-/// A DNG rendered from its raw data, not oriented: by ImageIO (Apple's raw
-/// engine) where it can, else by rawler ([`raw::render`]).
-fn dng_from_raw(data: &[u8], long_edge: Option<u32>, target: Target) -> Result<Rgb8, DecodeError> {
+/// An ARW's embedded JPEGs that show the whole frame (the raw's
+/// proportions, within 2%), smallest first. Older Sony bodies keep only a
+/// 16:9 crop and a 4:3 thumbnail, so they have none.
+fn arw_previews(data: &[u8]) -> Vec<(std::ops::Range<usize>, (u32, u32))> {
+    let Ok(Some((w, h))) = nef::max_dimensions(data) else {
+        return Vec::new();
+    };
+    let ratio = |w: u32, h: u32| f64::from(w.max(h)) / f64::from(w.min(h).max(1));
+    let want = ratio(w, h);
+    let mut out: Vec<_> = jpeg_candidates(Format::Arw, data)
+        .into_iter()
+        .filter(|(_, (pw, ph))| (ratio(*pw, *ph) / want - 1.0).abs() < 0.02)
+        .collect();
+    out.sort_by_key(|(_, (w, h))| *w.max(h));
+    out
+}
+
+/// A raw (DNG, ARW) rendered from its raw data, not oriented: by ImageIO
+/// (Apple's raw engine) where it can, else by rawler ([`raw::render`]).
+fn raw_render(
+    format: Format,
+    data: &[u8],
+    long_edge: Option<u32>,
+    target: Target,
+) -> Result<Rgb8, DecodeError> {
     #[cfg(target_os = "macos")]
     {
         let max = long_edge.unwrap_or(1 << 14);
-        let hint = Some(imageio::type_hint(Format::Dng));
+        let hint = Some(imageio::type_hint(format));
         match imageio::thumbnail_rgb(data, max, false, hint, target) {
             Ok(img) => return Ok(img),
-            Err(e) => tracing::debug!("ImageIO couldn't render a DNG ({e}): trying rawler"),
+            Err(e) => tracing::debug!(
+                "ImageIO couldn't render a {} ({e}): trying rawler",
+                format.label()
+            ),
         }
     }
     let mut img = raw::render(data, long_edge)?;
@@ -470,7 +574,7 @@ pub fn embedded_xmp(format: Format, data: &[u8]) -> Option<std::ops::Range<usize
             (m == 0xE1 && data[r.clone()].starts_with(JPEG_XMP))
                 .then(|| r.start + JPEG_XMP.len()..r.end)
         }),
-        Format::Tiff | Format::Nef | Format::Dng => {
+        Format::Tiff | Format::Nef | Format::Arw | Format::Dng => {
             let t = tiffparse::Tiff::parse(data).ok()?;
             let ifd0 = t.ifd0().ok()?;
             let raw = t.raw(ifd0.get(0x02BC)?).ok()?;
@@ -478,8 +582,64 @@ pub fn embedded_xmp(format: Format, data: &[u8]) -> Option<std::ops::Range<usize
             Some(start..start + raw.len())
         }
         Format::Png => png::itxt_xmp(data),
-        Format::Heic | Format::Avif | Format::Mov | Format::Mp4 => None,
+        _ => None,
     }
+}
+
+/// A movie's header: size, duration and creation date, read without the
+/// media data (QuickTime boxes, or an MPEG stream's headers).
+pub fn movie_info(format: Format, path: &std::path::Path) -> Result<mov::MovInfo, DecodeError> {
+    let mut f = std::fs::File::open(path)
+        .map_err(|e| DecodeError::Format(format!("{}: {e}", path.display())))?;
+    match format {
+        Format::Mpg => mpeg::info(&mut f),
+        _ => mov::info(&mut f),
+    }
+}
+
+/// A WebP's size from its first chunk (`VP8 `, `VP8L` or `VP8X`).
+fn webp_dimensions(data: &[u8]) -> Result<(u32, u32), DecodeError> {
+    if data.get(0..4) != Some(b"RIFF") || data.get(8..12) != Some(b"WEBP") {
+        return Err(DecodeError::Format("not a WebP".into()));
+    }
+    let b = |at: usize| {
+        data.get(at)
+            .copied()
+            .map(u32::from)
+            .ok_or(DecodeError::Truncated)
+    };
+    match data.get(12..16) {
+        // Lossy: 14-bit sizes after the key frame's start code.
+        Some(b"VP8 ") => Ok((
+            (b(26)? | b(27)? << 8) & 0x3FFF,
+            (b(28)? | b(29)? << 8) & 0x3FFF,
+        )),
+        // Lossless: 14 bits each, less one, after the signature byte.
+        Some(b"VP8L") => {
+            let bits = b(21)? | b(22)? << 8 | b(23)? << 16 | b(24)? << 24;
+            Ok(((bits & 0x3FFF) + 1, (bits >> 14 & 0x3FFF) + 1))
+        }
+        // Extended: 24 bits each, less one, after the flags.
+        Some(b"VP8X") => Ok((
+            (b(24)? | b(25)? << 8 | b(26)? << 16) + 1,
+            (b(27)? | b(28)? << 8 | b(29)? << 16) + 1,
+        )),
+        _ => Err(DecodeError::Format("WebP has no image chunk".into())),
+    }
+}
+
+/// A Photoshop document's size from its header (PSD or PSB).
+fn psd_dimensions(data: &[u8]) -> Result<(u32, u32), DecodeError> {
+    if data.get(0..4) != Some(b"8BPS") {
+        return Err(DecodeError::Format("not a Photoshop document".into()));
+    }
+    let be = |at: usize| {
+        data.get(at..at + 4)
+            .and_then(|b| b.try_into().ok())
+            .map(u32::from_be_bytes)
+            .ok_or(DecodeError::Truncated)
+    };
+    Ok((be(18)?, be(14)?))
 }
 
 #[cfg(test)]
@@ -506,5 +666,45 @@ mod tests {
         assert!(Format::Dng.is_raw() && Format::Nef.is_raw() && !Format::Tiff.is_raw());
         assert!(Format::Avif.is_platform() && !Format::Avif.is_raw());
         assert_eq!((Format::Dng.label(), Format::Avif.label()), ("DNG", "AVIF"));
+    }
+
+    #[test]
+    fn arw_webp_psd_mpg() {
+        let f = |p: &str| Format::from_path(Path::new(p));
+        assert_eq!(f("DSC01234.ARW"), Some(Format::Arw));
+        assert_eq!(f("a.webp"), Some(Format::Webp));
+        assert_eq!(f("a.PSD"), Some(Format::Psd));
+        assert_eq!(f("a.mpg"), Some(Format::Mpg));
+        assert_eq!(f("a.MPEG"), Some(Format::Mpg));
+        assert!(Format::Arw.is_raw() && !Format::Arw.is_platform());
+        assert!(Format::Webp.is_platform() && Format::Psd.is_platform());
+        assert!(Format::Mpg.is_movie() && !Format::Psd.is_movie());
+    }
+
+    #[test]
+    fn webp_and_psd_sizes_from_headers() {
+        // Lossy: RIFF, size, WEBP, "VP8 ", chunk size, frame tag, start code.
+        let mut lossy = b"RIFF\0\0\0\0WEBPVP8 \0\0\0\0".to_vec();
+        lossy.extend([0, 0, 0, 0x9D, 0x01, 0x2A]);
+        lossy.extend(540u16.to_le_bytes());
+        lossy.extend(765u16.to_le_bytes());
+        assert_eq!(super::webp_dimensions(&lossy).unwrap(), (540, 765));
+        // Extended: flags, three reserved bytes, then 24-bit sizes less one.
+        let mut ext = b"RIFF\0\0\0\0WEBPVP8X\0\0\0\0".to_vec();
+        ext.extend([0, 0, 0, 0]);
+        ext.extend(&1999u32.to_le_bytes()[..3]);
+        ext.extend(&2999u32.to_le_bytes()[..3]);
+        assert_eq!(super::webp_dimensions(&ext).unwrap(), (2000, 3000));
+        // Lossless: signature 0x2F, then width-1 and height-1 in 14 bits each.
+        let bits: u32 = 639 | 479 << 14;
+        let mut ll = b"RIFF\0\0\0\0WEBPVP8L\0\0\0\0\x2F".to_vec();
+        ll.extend(bits.to_le_bytes());
+        assert_eq!(super::webp_dimensions(&ll).unwrap(), (640, 480));
+
+        let mut psd = b"8BPS\0\x01\0\0\0\0\0\0\0\x03".to_vec();
+        psd.extend(2642u32.to_be_bytes());
+        psd.extend(21316u32.to_be_bytes());
+        assert_eq!(super::psd_dimensions(&psd).unwrap(), (21316, 2642));
+        assert!(super::psd_dimensions(b"nope").is_err());
     }
 }
