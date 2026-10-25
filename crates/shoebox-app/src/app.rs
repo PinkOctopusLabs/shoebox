@@ -483,10 +483,12 @@ pub struct ShoeboxApp {
     pub(crate) new_smart_filter: Option<String>,
     /// A photo to show among all photos, from the next frame.
     pub(crate) show_in_all_request: Option<PhotoId>,
-    /// Keywords in use (for autocomplete), cameras and lenses (for filters).
+    /// Keywords in use (for autocomplete), cameras, lenses and file types
+    /// (for filters).
     pub(crate) all_keywords: Vec<(String, usize)>,
     pub(crate) cameras: Vec<String>,
     pub(crate) lenses: Vec<String>,
+    pub(crate) types: Vec<(&'static str, usize)>,
     pub(crate) events: Vec<Event>,
     /// Member stacks per event id.
     pub(crate) event_members: HashMap<String, HashSet<usize>>,
@@ -746,6 +748,7 @@ impl ShoeboxApp {
             all_keywords: Vec::new(),
             cameras: Vec::new(),
             lenses: Vec::new(),
+            types: Vec::new(),
             compare: CompareState::default(),
             survey: Vec::new(),
             dupes: DupeState::default(),
@@ -1658,6 +1661,7 @@ impl ShoeboxApp {
         self.all_keywords = p.keywords;
         self.cameras = p.cameras;
         self.lenses = p.lenses;
+        self.types = p.types;
         // Likely edits are worked out again from the new catalog.
         self.idle_stale = true;
         // Drop what belongs to photos that are gone, and the images of

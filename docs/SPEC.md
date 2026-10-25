@@ -61,7 +61,7 @@ One window with a library browser on the left, the active view in the centre and
 
 The centre view changes with G, M, E, C, N and T; Tab folds the side panels away.
 
-- **Toolbar (top):** view switcher (Grid, Masonry, Loupe, Compare, Survey, Timeline); sort (capture time, filename, rating, modified); filter bar (rating, flag, label, file type, camera, lens, NEF missing, undated); search (filename, keyword); thumbnail size slider; a background-task indicator showing scan and hashing progress.
+- **Toolbar (top):** view switcher (Grid, Masonry, Loupe, Compare, Survey, Timeline); sort (capture time, filename, rating, modified); filter bar (rating, flag, label, file type, camera, lens, NEF missing, undated; file type lists the types in the library with how many photos each finds, and several can be ticked: a stack shows if any of its files is one of them); search (filename, keyword); thumbnail size slider; a background-task indicator showing scan and hashing progress.
 - **Left panel (resizable, collapsible, default 260 px):**
   - **Library**: each root as a folder tree with file counts, and a **+** button that opens a native folder picker. Right-click a folder to rescan, reveal in Finder, create a subfolder, mark as Reference, or remove from the library (files untouched).
   - Events, **Collections** and **Smart filters**.

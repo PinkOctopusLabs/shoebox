@@ -277,6 +277,21 @@ pub fn distinct(
     v
 }
 
+/// The file types in the library, each with how many stacks have a file of
+/// that type (what the file type filter finds), raw first, movies last.
+pub fn types(c: &Catalog) -> Vec<(&'static str, usize)> {
+    let mut n = std::collections::BTreeMap::new();
+    for s in &c.stacks {
+        let mut here: Vec<_> = s.all().map(|i| c.photos[i].format).collect();
+        here.sort();
+        here.dedup();
+        for f in here {
+            *n.entry(f).or_insert(0) += 1;
+        }
+    }
+    n.into_iter().map(|(f, k)| (f.label(), k)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,6 +420,8 @@ mod tests {
             }),
             vec!["x.nef", "z.jpg"]
         );
+        // What the filter offers: the stacks each type finds.
+        assert_eq!(types(&c), vec![("NEF", 1), ("JPG", 2), ("TIF", 1)]);
         assert_eq!(
             names(&Filter {
                 search: "kyoto".into(),

@@ -530,6 +530,7 @@ fn filter_bar(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                     );
                 }
             });
+        types_menu(app, ui);
         filters_button(app, ui);
         if !app.filter.is_empty() && ui.small_button("Clear").clicked() {
             app.filter = shoebox_core::query::Filter::default();
@@ -660,7 +661,6 @@ fn search_box(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
 /// How many of the less-used filters (in the Filters pop-over) are set.
 fn extra_filters(f: &shoebox_core::query::Filter) -> usize {
     [
-        !f.types.is_empty(),
         f.camera.is_some(),
         f.lens.is_some(),
         f.nef_missing,
@@ -673,16 +673,49 @@ fn extra_filters(f: &shoebox_core::query::Filter) -> usize {
     .count()
 }
 
-/// How many filters are set (rating, flag and label, and the rest).
+/// How many filters are set (rating, flag, label, file type and the rest).
 fn active_filters(f: &shoebox_core::query::Filter) -> usize {
     use shoebox_core::query::{FlagFilter, LabelFilter};
     usize::from(f.min_rating > 0)
         + usize::from(f.flag != FlagFilter::Any)
         + usize::from(f.label != LabelFilter::Any)
+        + usize::from(!f.types.is_empty())
         + extra_filters(f)
 }
 
-/// "More ▾": file type, camera, lens, NEF missing, undated, changed.
+/// File type: the types in the library, each with its count; several can
+/// be on (a stack shows if any of its files is one of them).
+fn types_menu(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
+    let text = match app.filter.types.as_slice() {
+        [] => "Any type".to_owned(),
+        [t] => t.clone(),
+        [t, rest @ ..] => format!("{t} +{}", rest.len()),
+    };
+    egui::ComboBox::from_id_salt("f-type")
+        .selected_text(text)
+        // Stays open while types are ticked.
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show_ui(ui, |ui| {
+            if ui
+                .selectable_label(app.filter.types.is_empty(), "Any type")
+                .clicked()
+            {
+                app.filter.types.clear();
+            }
+            for &(t, n) in &app.types {
+                let mut on = app.filter.types.iter().any(|x| x == t);
+                if ui.checkbox(&mut on, format!("{t}  ({n})")).changed() {
+                    if on {
+                        app.filter.types.push(t.to_owned());
+                    } else {
+                        app.filter.types.retain(|x| x != t);
+                    }
+                }
+            }
+        });
+}
+
+/// "More ▾": camera, lens, NEF missing, undated, changed.
 fn filters_button(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     let n = extra_filters(&app.filter);
     let text = if n == 0 {
@@ -695,21 +728,6 @@ fn filters_button(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
             ui.set_min_width(260.0);
-            ui.weak("File type");
-            ui.horizontal_wrapped(|ui| {
-                for t in [
-                    "NEF", "DNG", "JPG", "TIF", "PNG", "HEIC", "AVIF", "MOV", "MP4",
-                ] {
-                    let mut on = app.filter.types.iter().any(|x| x == t);
-                    if ui.toggle_value(&mut on, t).changed() {
-                        if on {
-                            app.filter.types.push(t.to_owned());
-                        } else {
-                            app.filter.types.retain(|x| x != t);
-                        }
-                    }
-                }
-            });
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 option_combo(

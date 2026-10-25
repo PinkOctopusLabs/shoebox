@@ -842,7 +842,32 @@ fn organise_marks_stacks_and_filters() {
     });
     h.run_steps(2);
     assert_eq!(h.state().shown_count(), 1);
-}
+
+    // File type, from the filter bar: the library's types with their
+    // counts; ticking one shows the stacks with a file of that type.
+    h.state_mut()
+        .set_filter(shoebox_core::query::Filter::default());
+    h.run_steps(2);
+    h.get_by_label("Filters").click();
+    h.run_steps(2);
+    h.get_by_value("Any type").click();
+    h.run_steps(2);
+    use egui_kittest::kittest::NodeT;
+    let tif = h.get_by_label_contains("TIF  (");
+    let n: usize = tif
+        .accesskit_node()
+        .label()
+        .and_then(|l| l.split('(').nth(1)?.trim_end_matches(')').parse().ok())
+        .unwrap();
+    tif.click();
+    h.run_steps(2);
+    assert!(h.state().filtered());
+    assert!(n > 0 && n < 14);
+    assert_eq!(h.state().shown_count(), n);
+    assert!(
+        h.query_by_label_contains("JPG  (").is_some(),
+        "the menu stays open for more"
+    );}
 
 /// Several folders at once (⌘-click), photos added to an event from the
 /// photo menu, and one source at a time: an event replaces the folders.

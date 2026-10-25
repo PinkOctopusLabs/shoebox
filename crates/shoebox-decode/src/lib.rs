@@ -51,8 +51,9 @@ pub enum DecodeError {
     Unsupported(String),
 }
 
-/// File formats the library understands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// File formats the library understands, in the order the file type
+/// filter lists them: raw, images, movies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Format {
     Nef,
     /// Sony's raw: TIFF-based like a NEF. Shown from an embedded JPEG only
