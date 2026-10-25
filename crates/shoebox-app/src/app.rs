@@ -1002,9 +1002,11 @@ impl ShoeboxApp {
         self.view
     }
 
-    /// Develop's edit of the current photo, once loaded (tests).
+    /// Develop's edit of the current photo, once loaded (tests). None
+    /// outside Develop: the last photo's edit stays loaded until the next
+    /// opens, and a wait for it must not see that one.
     pub fn develop_doc(&self) -> Option<&shoebox_develop::edit::EditDoc> {
-        self.develop.doc.as_ref()
+        self.develop.photo.and(self.develop.doc.as_ref())
     }
 
     /// Develop's histogram of the render, and whether clipping is shown
