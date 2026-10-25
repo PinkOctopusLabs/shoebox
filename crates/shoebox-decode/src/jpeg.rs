@@ -93,9 +93,11 @@ pub fn header_segments(data: &[u8]) -> Vec<(u8, Range<usize>)> {
     }
 }
 
-/// Byte ranges of the extra images listed in a JPEG's MPF index (CIPA
-/// DC-007), such as Nikon's 640×424 and full-HD "large thumbnails". The
-/// primary image (offset 0) is not included.
+/// Byte ranges of the previews listed in a JPEG's MPF index (CIPA DC-007):
+/// the images typed as large thumbnails, such as Nikon's 640×424 and full-HD
+/// ones. The primary image (offset 0) is not included, and nor are other
+/// kinds: an iPhone's Portrait-mode depth map and matte are listed too (as
+/// "undefined"), grey pictures of the same size that are not the photo.
 pub fn mpf_images(data: &[u8]) -> Vec<Range<usize>> {
     let mut out = Vec::new();
     for (marker, r) in header_segments(data) {
@@ -111,9 +113,17 @@ pub fn mpf_images(data: &[u8]) -> Vec<Range<usize>> {
             continue;
         };
         for chunk in entries.as_chunks::<16>().0 {
-            let (Some(size), Some(off)) = (tiff.u32_in(chunk, 4), tiff.u32_in(chunk, 8)) else {
+            let (Some(attr), Some(size), Some(off)) = (
+                tiff.u32_in(chunk, 0),
+                tiff.u32_in(chunk, 4),
+                tiff.u32_in(chunk, 8),
+            ) else {
                 continue;
             };
+            // Type code: 0x010001 large thumbnail (VGA), 0x010002 (full HD).
+            if !matches!(attr & 0x00FF_FFFF, 0x01_0001 | 0x01_0002) {
+                continue;
+            }
             if off == 0 {
                 continue; // the primary image
             }
@@ -179,6 +189,63 @@ pub fn decode_luma(data: &[u8]) -> Result<Gray, DecodeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A JPEG whose MPF index lists the primary and these extra images
+    /// (type code, bytes), appended after it.
+    fn with_mpf(extra: &[(u32, Vec<u8>)]) -> Vec<u8> {
+        let n = extra.len() + 1;
+        // MPF payload: "MPF\0", then a little-endian TIFF: header, an IFD
+        // with MPEntry (0xB002) pointing at n 16-byte entries after it.
+        let entries_at = 8 + 2 + 12 + 4;
+        let payload_len = 4 + entries_at + 16 * n;
+        let primary_len = 2 + 2 + 2 + payload_len + 2 + 2 + 2;
+        let mut tiff = b"II*\0".to_vec();
+        tiff.extend(8u32.to_le_bytes());
+        tiff.extend(1u16.to_le_bytes());
+        tiff.extend(0xB002u16.to_le_bytes());
+        tiff.extend(7u16.to_le_bytes());
+        tiff.extend((16 * n as u32).to_le_bytes());
+        tiff.extend((entries_at as u32).to_le_bytes());
+        tiff.extend(0u32.to_le_bytes());
+        // Offsets count from the TIFF header (4 bytes into the payload).
+        let base = 2 + 2 + 2 + 4;
+        let entry = |attr: u32, size: usize, off: usize| {
+            let mut e = attr.to_le_bytes().to_vec();
+            e.extend((size as u32).to_le_bytes());
+            e.extend((off as u32).to_le_bytes());
+            e.extend([0; 4]);
+            e
+        };
+        tiff.extend(entry(0x03_0000, primary_len, 0));
+        let mut at = primary_len;
+        for (code, img) in extra {
+            tiff.extend(entry(*code, img.len(), at - base));
+            at += img.len();
+        }
+        let mut j = vec![0xFF, 0xD8, 0xFF, 0xE2];
+        j.extend(((payload_len + 2) as u16).to_be_bytes());
+        j.extend(b"MPF\0");
+        j.extend(tiff);
+        j.extend([0xFF, 0xDA, 0x00, 0x02, 0xFF, 0xD9]);
+        assert_eq!(j.len(), primary_len);
+        for (_, img) in extra {
+            j.extend(img);
+        }
+        j
+    }
+
+    #[test]
+    fn mpf_previews_are_large_thumbnails_only() {
+        let img = |b: u8| vec![0xFF, 0xD8, b, b, 0xFF, 0xD9];
+        let j = with_mpf(&[
+            (0x01_0001, img(1)),
+            (0x00_0000, img(2)),
+            (0x01_0002, img(3)),
+        ]);
+        let found: Vec<u8> = mpf_images(&j).into_iter().map(|r| j[r.start + 2]).collect();
+        // The depth map (type undefined) is left out.
+        assert_eq!(found, [1, 3]);
+    }
 
     #[test]
     fn rejects_non_jpeg() {

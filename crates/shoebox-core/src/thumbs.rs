@@ -8,7 +8,9 @@ use shoebox_decode::{Format, Rgb8, Target};
 use crate::error::{CoreError, Result, io};
 
 /// Bump when rendering changes (colour, resampling), to regenerate.
-pub const RENDER_VERSION: u32 = 2;
+/// 3: JPEG previews are MPF large thumbnails only (an iPhone's depth map
+/// was shown as a Portrait photo's thumbnail).
+pub const RENDER_VERSION: u32 = 3;
 
 /// The two cached sizes from the spec.
 pub const SMALL: u32 = 256;
