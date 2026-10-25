@@ -339,6 +339,15 @@ pub fn regroup(found: std::sync::Arc<Found>, config: Config) -> Review {
             }
         })
         .collect();
+    // Most alike first (by each group's least alike match), then by the
+    // kept copy's path.
+    let mut groups: Vec<Group> = groups;
+    groups.sort_by_cached_key(|g| {
+        (
+            std::cmp::Reverse(g.summary().map_or(100, |m| m.percent())),
+            files[g.entries[0].file].path.clone(),
+        )
+    });
     Review {
         roots,
         files,

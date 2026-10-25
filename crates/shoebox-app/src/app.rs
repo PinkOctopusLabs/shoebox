@@ -221,6 +221,8 @@ pub struct DupeState {
     pub auto: shoebox_core::review::AutoSelect,
     /// The list is being grouped again at another threshold.
     pub regrouping: bool,
+    /// List the least alike groups first (to check the doubtful ones).
+    pub least_alike_first: bool,
     /// Decisions being applied: the stage, done of total, and when the
     /// stage started (for the time left).
     pub applying: Option<(crate::jobs::ApplyStage, usize, usize, Instant)>,
@@ -253,9 +255,13 @@ impl DupeState {
         let Some(r) = &self.review else {
             return Vec::new();
         };
-        (0..r.groups.len())
-            .filter(|&g| self.show_reference_only || !r.groups[g].reference_only(r))
-            .collect()
+        // The search lists them most alike first.
+        let keep = |&g: &usize| self.show_reference_only || !r.groups[g].reference_only(r);
+        if self.least_alike_first {
+            (0..r.groups.len()).rev().filter(keep).collect()
+        } else {
+            (0..r.groups.len()).filter(keep).collect()
+        }
     }
 }
 
@@ -3037,21 +3043,51 @@ impl ShoeboxApp {
 
     /// Apply the auto-select rules to one group (None = every group).
     pub fn auto_select(&mut self, group: Option<usize>) {
+        use shoebox_core::review::{AutoSelect, auto_select};
         let Some(r) = self.dupes.review.clone() else {
             return;
         };
+        let rule = self.dupes.auto;
+        // What the same rule would mark at any time, and at any likeness:
+        // to say why the rest were left.
+        let any_time = AutoSelect {
+            same_moment: false,
+            ..rule
+        };
+        let any = AutoSelect {
+            up_to: Some(shoebox_core::dupes::MAX_THRESHOLD),
+            same_moment: false,
+        };
+        let (mut marked, mut other_time, mut less_alike) = (0, 0, 0);
         for (gi, g) in r.groups.iter().enumerate() {
             if group.is_some_and(|x| x != gi) {
                 continue;
             }
-            for (e, d) in
-                g.entries
-                    .iter()
-                    .zip(shoebox_core::review::auto_select(&r, g, self.dupes.auto))
-            {
+            let ds = auto_select(&r, g, rule);
+            let at_any_time = auto_select(&r, g, any_time);
+            let at_all = auto_select(&r, g, any);
+            for (k, e) in g.entries.iter().enumerate() {
+                let d = ds[k];
+                match d {
+                    Decision::Move => marked += 1,
+                    Decision::Undecided if at_any_time[k] == Decision::Move => other_time += 1,
+                    Decision::Undecided if at_all[k] == Decision::Move => less_alike += 1,
+                    _ => {}
+                }
                 self.dupes.decisions.insert(r.files[e.file].path.clone(), d);
             }
         }
+        let mut msg = format!("Auto-select marked {marked} to move.");
+        if other_time > 0 {
+            msg.push_str(&format!(
+                " {other_time} left undecided: taken at another moment than their copy (untick \
+                 Only taken at the same moment to mark them)."
+            ));
+        }
+        if less_alike > 0 {
+            msg.push_str(&format!(" {less_alike} less alike than the slider."));
+        }
+        self.dupes.message = Some(msg);
     }
 
     /// Open a group: Compare for two files, Survey for more.

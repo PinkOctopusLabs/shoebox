@@ -1484,6 +1484,23 @@ fn undated_cleanup_in_the_app() {
         Decision::Undecided,
         "a burst frame 1 s later is left for a person"
     );
+    // Saying why, and how far apart.
+    let msg = h.state().dupe_message().unwrap_or_default().to_owned();
+    assert!(
+        msg.contains("1 left undecided: taken at another moment"),
+        "{msg}"
+    );
+    // Most alike first; least alike first brings the burst frame's group
+    // (99%, the lowest here) to the top.
+    h.get_by_value("Most alike first").click();
+    h.run_steps(2);
+    h.get_by_label("Least alike first").click();
+    h.run_steps(3);
+    assert!(
+        h.query_all_by_label_contains("taken 1.0 s apart")
+            .next()
+            .is_some()
+    );
     assert_eq!(
         h.state().decision_of("f0003.jpg"),
         Decision::Move,

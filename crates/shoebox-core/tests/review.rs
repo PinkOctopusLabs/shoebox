@@ -63,7 +63,8 @@ fn review_auto_select_apply_and_undo() {
     )
     .unwrap();
 
-    // Each file to decide on sits with its closest copy (the kept copy first).
+    // Each file to decide on sits with its closest copy (the kept copy
+    // first), most alike groups first.
     let groups: Vec<Vec<String>> = r
         .groups
         .iter()
@@ -76,21 +77,28 @@ fn review_auto_select_apply_and_undo() {
                 "ref/2026/2026-04-24/DSC_0001.JPG",
                 "scan/recovered/f0004.jpg"
             ],
-            vec![
-                "ref/2026/2026-04-24/DSC_0001.NEF",
-                "scan/recovered/f0001.jpg",
-                "scan/recovered/f0003.jpg",
-                "scan/recovered/f0010.jpg"
-            ],
+            vec!["scan/recovered/f0005.jpg", "scan/recovered/f0006.jpg"],
             vec![
                 "ref/2026/2026-04-24/DSC_0002.NEF",
                 "scan/recovered/f0002.jpg",
                 "scan/rotated/f0008.jpg"
             ],
             vec!["ref/lightroom/DSC_0001.tif", "scan/misc/f0007.png"],
-            vec!["scan/recovered/f0005.jpg", "scan/recovered/f0006.jpg"],
+            vec![
+                "ref/2026/2026-04-24/DSC_0001.NEF",
+                "scan/recovered/f0001.jpg",
+                "scan/recovered/f0003.jpg",
+                "scan/recovered/f0010.jpg"
+            ],
         ]
     );
+    // Most alike first: each group's least alike match, never rising.
+    let least: Vec<u8> = r
+        .groups
+        .iter()
+        .map(|g| g.summary().map_or(100, |m| m.percent()))
+        .collect();
+    assert!(least.windows(2).all(|w| w[0] >= w[1]), "{least:?}");
 
     // Within a scope (an event, collection or folder), both files of a
     // match are in it: f0001 goes with the JPG of its frame, the NEF being

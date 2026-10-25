@@ -30,6 +30,17 @@ pub fn plural(n: usize, word: &str) -> String {
     }
 }
 
+/// "0.4 s", "12 s", "3 min", "5 h", "2 days": a gap between capture times.
+fn span(secs: f64) -> String {
+    match secs {
+        s if s < 10.0 => format!("{s:.1} s"),
+        s if s < 90.0 => format!("{} s", s.round()),
+        s if s < 5400.0 => format!("{} min", (s / 60.0).round()),
+        s if s < 172_800.0 => format!("{} h", (s / 3600.0).round()),
+        s => format!("{} days", (s / 86_400.0).round()),
+    }
+}
+
 /// [`plural`] with thousands grouped: "17,964 files".
 fn plural_n(n: usize, word: &str) -> String {
     if n == 1 {
@@ -60,7 +71,8 @@ fn decision_colour(d: Decision) -> Color32 {
 }
 
 /// How a file matches its closest copy: "Same image data as x.nef",
-/// "Near-identical · 95%" (how alike: `Match::percent`), with "other exposure" or "unconfirmed" when it
+/// "Near-identical · 95%" (how alike: `Match::percent`), with how far apart
+/// they were taken ("taken 2.0 s apart") or "unconfirmed" when it
 /// isn't proposed for moving.
 pub fn match_text(r: &Review, keeper: usize, e: &Entry) -> String {
     let Some((other, m)) = e.best else {
@@ -85,7 +97,16 @@ pub fn match_text(r: &Review, keeper: usize, e: &Entry) -> String {
         s.push_str(&format!(" · {}°", m.rotation));
     }
     if !e.same_exposure {
-        s.push_str(" · other exposure");
+        // How far apart they were taken: a burst's frames are seconds apart,
+        // a copy with a different date often hours or a whole time zone.
+        let gap = [other, keeper].into_iter().find_map(|o| {
+            let (a, b) = (r.files[e.file].capture?, r.files[o].capture?);
+            Some((a - b).abs())
+        });
+        match gap {
+            Some(g) => s.push_str(&format!(" · taken {} apart", span(g))),
+            None => s.push_str(" · other exposure"),
+        }
     } else if !e.certain {
         s.push_str(" · no capture time to confirm");
     }
@@ -470,6 +491,18 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
                 "Matches inside the reference folders (such as a NEF and its export): nothing there can move",
             );
         }
+        egui::ComboBox::from_id_salt("dupes-order")
+            .selected_text(if app.dupes.least_alike_first {
+                "Least alike first"
+            } else {
+                "Most alike first"
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut app.dupes.least_alike_first, false, "Most alike first");
+                ui.selectable_value(&mut app.dupes.least_alike_first, true, "Least alike first");
+            })
+            .response
+            .on_hover_text("Each group by its least alike match");
         ui.separator();
         auto_controls(app, ui);
         if ui
