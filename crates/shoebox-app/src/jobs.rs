@@ -2169,7 +2169,10 @@ fn library_worker(
             LibraryCommand::LoadFromPhotos(photo) => {
                 let roots: Vec<PathBuf> = settings.roots.iter().map(|r| r.path.clone()).collect();
                 let (index, ledgers) = from_photos.get_or_insert_with(|| {
-                    let l = shoebox_core::photos::ledger::Ledgers::load(&roots);
+                    // Record files in a cloud drive only are left out: the
+                    // worker would wait for the drive, and everything queued
+                    // behind it (Apply, moves) with it.
+                    let (l, _) = shoebox_core::photos::ledger::Ledgers::load_here(&roots);
                     (l.files(&roots), l)
                 });
                 let found = index.get(&photo).copied();

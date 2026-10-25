@@ -210,8 +210,8 @@ impl Ledgers {
 
     /// [`Self::load`] without the record files that are in a cloud drive
     /// only (reading one waits for the drive to download it, which can take
-    /// minutes): for work that can go without them (Find dates). Returns
-    /// how many were left out.
+    /// minutes): for work that can go without them (Find dates, the Info
+    /// panel's iCloud Photos rows). Returns how many were left out.
     pub fn load_here(roots: &[PathBuf]) -> (Self, usize) {
         Self::load_from(roots, true)
     }

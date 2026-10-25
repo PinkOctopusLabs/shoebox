@@ -200,7 +200,7 @@ shoebox-app
 - **Unsafe:** add `crates/shoebox-photos/src/sys.rs` to CLAUDE.md's list of FFI wrappers.
 - **Bundle:** `scripts/bundle-macos.sh` adds `NSPhotoLibraryUsageDescription` ("Shoebox copies photos from your Photos library into your Shoebox library, and adds photos you send to Photos.") and the photos-library entitlement to the signing step. An unbundled `cargo run` binary can't get Photos access reliably (TCC attributes it to the terminal), so PhotoKit work is tested from a bundled build (`SHOEBOX_DATA_DIR=<scratch>`, `BUNDLE_ID=…photostest`).
 - **CLI:** `shoebox photos status --root <root>` (reads the ledger; no Photos access needed) and `shoebox photos import --root <root> --dry-run`. Real imports from the CLI need the terminal to have Photos access, so they're documented as a convenience, not the main path.
-- **Catalog:** a cached table `photos_assets(cloud_id, root_id, rel, kind, blake3)` rebuilt from the ledgers, for the Info panel's "From Photos" / "In Photos" rows and the stale-push badge.
+- **Catalog:** a cached table `photos_assets(cloud_id, root_id, rel, kind, blake3)` rebuilt from the ledgers, for the Info panel's "From Photos" / "In Photos" rows and the stale-push badge. The Info panel's rows read only the record files on the Mac: one in a cloud drive only is left out (reading it would wait for the drive), so the row shows nothing until it's here.
 
 ## Plan
 
