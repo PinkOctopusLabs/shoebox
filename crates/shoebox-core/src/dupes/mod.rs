@@ -236,16 +236,18 @@ fn format_rank(f: Format) -> u8 {
         // Raw data too (a camera's DNG, or a NEF converted).
         Format::Dng => 1,
         Format::Tiff | Format::Psd => 2,
-        // HEIC is a camera original (phone), so it ranks with the JPG.
-        Format::Jpeg | Format::Heic => 3,
-        Format::Png | Format::Avif | Format::Webp => 4,
-        Format::Mov | Format::Mp4 | Format::Mpg => 5,
+        // A phone's original: a JPG of the same picture is usually its
+        // conversion (an export, a share), with less colour depth.
+        Format::Heic => 3,
+        Format::Jpeg => 4,
+        Format::Png | Format::Avif | Format::Webp => 5,
+        Format::Mov | Format::Mp4 | Format::Mpg => 6,
     }
 }
 
-/// Keeper preference: reference copy, then NEF > DNG > TIFF > JPG > PNG,
+/// Keeper preference: reference copy, then NEF > DNG > TIFF > HEIC > JPG > PNG,
 /// then the highest resolution, then scan order.
-fn keeper_key(items: &[Item], i: usize) -> (bool, u8, std::cmp::Reverse<u64>, usize) {
+pub(crate) fn keeper_key(items: &[Item], i: usize) -> (bool, u8, std::cmp::Reverse<u64>, usize) {
     let it = &items[i];
     (
         it.role != Role::Reference,
@@ -467,6 +469,17 @@ mod tests {
         assert_eq!(suggestions(&g[0], &items), vec![Suggestion::Duplicate; 3]);
         assert!(!g[1].has_reference);
         assert_eq!(suggestions(&g[1], &items), vec![Suggestion::Review]);
+    }
+
+    #[test]
+    fn a_phones_heic_is_kept_over_its_jpg() {
+        // The same picture, the same size: the JPG is found first.
+        let mut jpg = item(Role::Scan, 1, None, Some(0));
+        jpg.format = Format::Jpeg;
+        let mut heic = item(Role::Scan, 2, None, Some(0b1));
+        heic.format = Format::Heic;
+        let g = find_groups(&[jpg, heic], &Config::default());
+        assert_eq!(g[0].keeper, 1);
     }
 
     #[test]

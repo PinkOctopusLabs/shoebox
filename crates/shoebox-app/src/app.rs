@@ -3051,12 +3051,12 @@ impl ShoeboxApp {
         // What the same rule would mark at any time, and at any likeness:
         // to say why the rest were left.
         let any_time = AutoSelect {
-            same_moment: false,
+            within: None,
             ..rule
         };
         let any = AutoSelect {
             up_to: Some(shoebox_core::dupes::MAX_THRESHOLD),
-            same_moment: false,
+            within: None,
         };
         let (mut marked, mut other_time, mut less_alike) = (0, 0, 0);
         for (gi, g) in r.groups.iter().enumerate() {
@@ -3079,9 +3079,16 @@ impl ShoeboxApp {
         }
         let mut msg = format!("Auto-select marked {marked} to move.");
         if other_time > 0 {
+            let when = match rule.within {
+                Some(0.0) | None => "at another moment than their copy".to_owned(),
+                w => format!(
+                    "more than {} from their copy",
+                    crate::views::duplicates::within_name(w)
+                ),
+            };
             msg.push_str(&format!(
-                " {other_time} left undecided: taken at another moment than their copy (untick \
-                 Only taken at the same moment to mark them)."
+                " {other_time} left undecided: taken {when} (a longer time in taken within \
+                 marks them)."
             ));
         }
         if less_alike > 0 {

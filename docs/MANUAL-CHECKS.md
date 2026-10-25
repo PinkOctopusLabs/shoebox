@@ -143,9 +143,11 @@ APFS clone, in folders by shoot.
   percentage (100% only for identical files and the same image data);
   dragging Show matches ≥ narrows and widens the list at once, with no
   Find again; Auto-select at 100% marks only 100% copies to move, and
-  lower with Only taken at the same moment leaves burst frames
+  lower with taken within the same moment leaves burst frames
   undecided. Note what Show matches ≥ needs to be to find the real
   copies without too many look-alikes (DECISIONS: the default).
+  Portrait-mode iPhone JPGs show the photo in the grid and Duplicates,
+  never their grey depth map.
 - [ ] **A camera DNG from another app** (from 2026-10-22): a DNG from Adobe
   DNG Converter (of a Z f NEF, with its default medium preview) and one
   from a phone or another camera (a Pixel or iPhone ProRAW, a Leica or

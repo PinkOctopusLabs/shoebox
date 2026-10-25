@@ -50,6 +50,9 @@ pub struct Entry {
     /// Taken at the same moment as the best match, or if either time is
     /// unknown, as the keeper (or that's unknown too).
     pub same_exposure: bool,
+    /// Seconds between this file's capture and that copy's when they
+    /// differ (None: the same moment, or no time to tell).
+    pub gap: Option<f64>,
     /// The copy is certain: identical bytes or image data, or both capture
     /// times are known and equal. Only these are proposed for moving.
     pub certain: bool,
@@ -119,8 +122,14 @@ pub enum Decision {
     Ignore,
 }
 
-/// (file, match to the kept copy, best match, same exposure, certain).
-type RawEntry = (usize, Option<Match>, Option<(usize, Match)>, bool, bool);
+/// (file, match to the kept copy, best match, gap in seconds, certain).
+type RawEntry = (
+    usize,
+    Option<Match>,
+    Option<(usize, Match)>,
+    Option<f64>,
+    bool,
+);
 
 /// Find duplicate groups across the roots (hashes come from the cache when
 /// files are unchanged). Dismissed pairs are left out, and so are files in
@@ -220,16 +229,16 @@ pub fn regroup(found: std::sync::Arc<Found>, config: Config) -> Review {
         let exact = best.is_some_and(|(_, x)| x.level <= dupes::Level::ImageData);
         // With no time on the closest copy, the kept copy's tells (a burst
         // neighbour of the keeper whose closest copy is an undated export).
-        let same_exposure = if times_known {
-            gap.is_none()
+        let apart = if times_known {
+            gap
         } else {
-            dupes::capture_gap(&items[root], &items[me]).is_none()
+            dupes::capture_gap(&items[root], &items[me])
         };
         (
             me,
             dupes::compare(&items[root], &items[me], &config),
             best,
-            same_exposure,
+            apart,
             exact || (times_known && gap.is_none()),
         )
     };
@@ -277,11 +286,10 @@ pub fn regroup(found: std::sync::Arc<Found>, config: Config) -> Review {
                 match best.get(&x) {
                     None => return x,
                     Some(&(b, _)) if items[b].role == Role::Reference => return b,
-                    // Two files each other's best: the larger one is kept.
+                    // Two files each other's best: the one a group would keep
+                    // (format, then the larger) is kept.
                     Some(&(b, _)) if best.get(&b).is_some_and(|&(c, _)| c == x) => {
-                        return if (std::cmp::Reverse(items[b].pixels), b)
-                            < (std::cmp::Reverse(items[x].pixels), x)
-                        {
+                        return if dupes::keeper_key(items, b) < dupes::keeper_key(items, x) {
                             b
                         } else {
                             x
@@ -320,16 +328,18 @@ pub fn regroup(found: std::sync::Arc<Found>, config: Config) -> Review {
                 to_keeper: None,
                 best: None,
                 same_exposure: true,
+                gap: None,
                 certain: true,
             }];
             let mut has_reference = items[root].role == Role::Reference;
-            for (me, to_keeper, best, same_exposure, certain) in members {
+            for (me, to_keeper, best, gap, certain) in members {
                 has_reference |= items[me].role == Role::Reference;
                 entries.push(Entry {
                     file: add(me),
                     to_keeper,
                     best: best.map(|(j, x)| (add(j), x)),
-                    same_exposure,
+                    same_exposure: gap.is_none(),
+                    gap,
                     certain,
                 });
             }
@@ -359,7 +369,7 @@ pub fn regroup(found: std::sync::Arc<Found>, config: Config) -> Review {
 }
 
 /// Proposed decisions for a group, entry by entry: keep the keeper (the
-/// reference copy, else NEF over TIFF over JPG, else the highest
+/// reference copy, else NEF over TIFF over HEIC over JPG, else the highest
 /// resolution), keep other reference files, move the copies taken at the
 /// same moment (or with no capture time to tell, like a resized export or
 /// a carved preview), and leave other exposures (a burst's neighbours,
@@ -373,7 +383,7 @@ pub fn auto_select(r: &Review, g: &Group, rule: AutoSelect) -> Vec<Decision> {
             let move_it = e.best.is_some_and(|(_, m)| {
                 m.level <= dupes::Level::ImageData
                     || (rule.up_to.is_some_and(|d| m.distance <= d)
-                        && (e.same_exposure || !rule.same_moment))
+                        && rule.within.is_none_or(|w| e.gap.is_none_or(|g| g <= w)))
             });
             if k == 0 || r.files[e.file].role == Role::Reference {
                 Decision::Keep
@@ -387,23 +397,23 @@ pub fn auto_select(r: &Review, g: &Group, rule: AutoSelect) -> Vec<Decision> {
 }
 
 /// Which copies auto-select marks to move (the rest stay undecided).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AutoSelect {
     /// The largest perceptual distance marked ([`dupes::percent`] shows it
     /// as a percentage); None marks only identical files and the same image
     /// data (100%), which are always marked.
     pub up_to: Option<u32>,
-    /// Below 100%, only copies taken at the same moment as the copy they
-    /// match, or with no capture time to tell (burst frames stay
-    /// undecided).
-    pub same_moment: bool,
+    /// Below 100%, only copies taken within this many seconds of the copy
+    /// they match (0: the same moment), or with no capture time to tell;
+    /// None: at any time. Burst frames are a second or so apart.
+    pub within: Option<f64>,
 }
 
 impl Default for AutoSelect {
     fn default() -> Self {
         Self {
             up_to: None,
-            same_moment: true,
+            within: Some(0.0),
         }
     }
 }

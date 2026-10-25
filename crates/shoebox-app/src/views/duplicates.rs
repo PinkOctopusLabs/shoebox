@@ -33,7 +33,8 @@ pub fn plural(n: usize, word: &str) -> String {
 /// "0.4 s", "12 s", "3 min", "5 h", "2 days": a gap between capture times.
 fn span(secs: f64) -> String {
     match secs {
-        s if s < 10.0 => format!("{s:.1} s"),
+        s if s < 10.0 && s.fract() != 0.0 => format!("{s:.1} s"),
+        s if s < 10.0 => format!("{s} s"),
         s if s < 90.0 => format!("{} s", s.round()),
         s if s < 5400.0 => format!("{} min", (s / 60.0).round()),
         s if s < 172_800.0 => format!("{} h", (s / 3600.0).round()),
@@ -96,17 +97,8 @@ pub fn match_text(r: &Review, keeper: usize, e: &Entry) -> String {
     if m.rotation != 0 {
         s.push_str(&format!(" · {}°", m.rotation));
     }
-    if !e.same_exposure {
-        // How far apart they were taken: a burst's frames are seconds apart,
-        // a copy with a different date often hours or a whole time zone.
-        let gap = [other, keeper].into_iter().find_map(|o| {
-            let (a, b) = (r.files[e.file].capture?, r.files[o].capture?);
-            Some((a - b).abs())
-        });
-        match gap {
-            Some(g) => s.push_str(&format!(" · taken {} apart", span(g))),
-            None => s.push_str(" · other exposure"),
-        }
+    if let Some(g) = e.gap {
+        s.push_str(&format!(" · taken {} apart", span(g)));
     } else if !e.certain {
         s.push_str(" · no capture time to confirm");
     }
@@ -250,7 +242,7 @@ fn percent_slider(ui: &mut egui::Ui, value: &mut i32, hundred: bool) -> egui::Re
     )
 }
 
-/// "Auto-select copies ≥ 100%" and "Only taken at the same moment".
+/// "Auto-select copies ≥ 100% taken within the same moment".
 fn auto_controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
     ui.label("Auto-select copies ≥");
     let rule = &mut app.dupes.auto;
@@ -260,19 +252,51 @@ fn auto_controls(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
          100%: only identical files and the same image data",
     );
     rule.up_to = u32::try_from(v).ok();
-    ui.add_enabled(
-        rule.up_to.is_some(),
-        egui::Checkbox::new(&mut rule.same_moment, "Only taken at the same moment"),
-    )
-    .on_hover_text(
-        "Below 100%, mark only copies taken at the same moment as the copy they \
-         match (or with no capture time to tell). Burst frames look alike (often \
-         over 90%) but are different photos, so they stay undecided",
-    );
+    {
+        ui.label("taken within");
+        egui::ComboBox::from_id_salt("dupes-within")
+            .selected_text(within_name(rule.within))
+            .show_ui(ui, |ui| {
+                for w in WITHINS {
+                    ui.selectable_value(&mut rule.within, w, within_name(w));
+                }
+            })
+            .response
+            .on_hover_text(
+                "Below 100%, mark only copies taken this close in time to the copy they \
+                 match (or with no capture time to tell). Burst frames are a second or so \
+                 apart and look alike (often over 95%) but are different photos; a copy \
+                 whose clock or time zone was off can be hours apart. At 100% it \
+                 doesn't matter: identical copies are marked whenever they were taken",
+            );
+    }
+    ui.separator();
+}
+
+/// The gaps "taken within" offers (None: any time).
+const WITHINS: [Option<f64>; 9] = [
+    Some(0.0),
+    Some(0.5),
+    Some(1.0),
+    Some(2.0),
+    Some(5.0),
+    Some(60.0),
+    Some(3600.0),
+    Some(86_400.0),
+    None,
+];
+
+/// "the same moment", "2 s", "1 h", "any time".
+pub(crate) fn within_name(w: Option<f64>) -> String {
+    match w {
+        Some(0.0) => "the same moment".to_owned(),
+        Some(s) => span(s),
+        None => "any time".to_owned(),
+    }
 }
 
 fn auto_hint(rule: AutoSelect) -> String {
-    let keep = "Keep the reference copy (else NEF > TIFF > JPG, then the largest)";
+    let keep = "Keep the reference copy (else NEF > TIFF > HEIC > JPG, then the largest)";
     match rule.up_to {
         None => format!(
             "{keep}; move identical files and copies with the same image data (100%); leave the rest undecided"
@@ -280,10 +304,9 @@ fn auto_hint(rule: AutoSelect) -> String {
         Some(d) => format!(
             "{keep}; move identical copies, and copies {}% alike or more{}; leave the rest undecided",
             dupes::percent(d),
-            if rule.same_moment {
-                " taken at the same moment"
-            } else {
-                ""
+            match rule.within {
+                Some(_) => format!(" taken within {} of their copy", within_name(rule.within)),
+                None => String::new(),
             }
         ),
     }
@@ -503,7 +526,9 @@ pub fn show(app: &mut ShoeboxApp, ui: &mut egui::Ui) {
             })
             .response
             .on_hover_text("Each group by its least alike match");
-        ui.separator();
+    });
+    // Auto-select and applying: a row of their own.
+    ui.horizontal_wrapped(|ui| {
         auto_controls(app, ui);
         if ui
             .button("Auto-select all")

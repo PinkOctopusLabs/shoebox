@@ -1461,7 +1461,7 @@ fn undated_cleanup_in_the_app() {
 
     // Auto-select at 100% (the default): the carved preview moves, the
     // resized copy waits.
-    assert!(h.query_by_label("Only taken at the same moment").is_some());
+    assert!(h.query_by_value("the same moment").is_some());
     h.get_by_label("Auto-select all").click();
     h.run_steps(2);
     assert_eq!(h.state().decision_of("f0001.jpg"), Decision::Move);
@@ -1472,7 +1472,7 @@ fn undated_cleanup_in_the_app() {
     h.state_mut()
         .set_dupe_auto(shoebox_core::review::AutoSelect {
             up_to: Some(shoebox_core::dupes::MAX_THRESHOLD),
-            same_moment: true,
+            within: Some(0.0),
         });
 
     h.get_by_label("Auto-select all").click();
@@ -1497,7 +1497,7 @@ fn undated_cleanup_in_the_app() {
     h.get_by_label("Least alike first").click();
     h.run_steps(3);
     assert!(
-        h.query_all_by_label_contains("taken 1.0 s apart")
+        h.query_all_by_label_contains("taken 1 s apart")
             .next()
             .is_some()
     );
@@ -1770,7 +1770,7 @@ fn real_undated_cleanup() {
     h.state_mut()
         .set_dupe_auto(shoebox_core::review::AutoSelect {
             up_to: Some(shoebox_core::dupes::MAX_THRESHOLD),
-            same_moment: true,
+            within: Some(0.0),
         });
     h.get_by_label("Auto-select all").click();
     h.run_steps(2);

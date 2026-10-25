@@ -138,7 +138,7 @@ fn review_auto_select_apply_and_undo() {
     // Any copy as alike as a match can be, if taken at the same moment.
     let every = review::AutoSelect {
         up_to: Some(shoebox_core::dupes::MAX_THRESHOLD),
-        same_moment: true,
+        within: Some(0.0),
     };
     let mut decisions: HashMap<PathBuf, Decision> = HashMap::new();
     let mut proposed: BTreeMap<String, Decision> = BTreeMap::new();
@@ -201,16 +201,26 @@ fn review_auto_select_apply_and_undo() {
     // Every copy taken at the same moment here is near-identical.
     let near = moved(review::AutoSelect {
         up_to: Some(shoebox_core::dupes::DEFAULT_NEAR_IDENTICAL),
-        same_moment: true,
+        within: Some(0.0),
     });
     assert_eq!(near, moved(every));
     assert!(identical.iter().all(|f| near.contains(f)) && near.len() == 7);
     let any_time = moved(review::AutoSelect {
-        same_moment: false,
+        within: None,
         ..every
     });
     assert!(any_time.contains(&"scan/recovered/f0010.jpg".to_owned()));
     assert_eq!(any_time.len(), 8);
+    // The burst frame is 1 s from its copy: within 2 s takes it, within
+    // half a second doesn't.
+    let within = |w| {
+        moved(review::AutoSelect {
+            within: Some(w),
+            ..every
+        })
+    };
+    assert_eq!(within(2.0), any_time);
+    assert_eq!(within(0.5), near);
 
     // The list follows the threshold without reading a file again: at the
     // strictest, only matches at 0 bits (99%) and 100% are left.
