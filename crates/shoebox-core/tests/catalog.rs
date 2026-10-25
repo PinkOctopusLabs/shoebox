@@ -334,6 +334,29 @@ fn cloud_only_files_are_listed_not_read() {
     assert_eq!((s.cached, s.cloud), (2, 0));
 }
 
+/// A file the scan found here but its drive sent back to the cloud before
+/// the duplicate finder reached it (Google Drive does when the disk fills)
+/// is left out as cloud-only: reading it would wait for a download.
+#[test]
+fn files_gone_to_the_cloud_since_the_scan_are_not_hashed() {
+    let t = tempfile::tempdir().unwrap();
+    let lib = t.path().canonicalize().unwrap().join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    let jpg = shoebox_fixtures::jpeg(&shoebox_fixtures::scene(1, 320, 240), 85).unwrap();
+    std::fs::write(lib.join("here.jpg"), &jpg).unwrap();
+    let gone = lib.join("gone.jpg");
+    std::fs::write(&gone, &jpg[..jpg.len() - 1]).unwrap();
+
+    let roots = vec![Root::new(&lib, Role::Scan).unwrap()];
+    let mut cache = Cache::open(&t.path().join("cache.sqlite")).unwrap();
+    let (files, _) = shoebox_core::scan::scan_with_sidecars(&roots, &[]).unwrap();
+    assert!(files.iter().all(|f| !f.cloud), "both here at the scan");
+    shoebox_core::cloud::pretend_cloud_only(&gone);
+    let (done, s) = shoebox_core::pipeline::analyze_all(&mut cache, &roots, files).unwrap();
+    assert_eq!((s.analyzed, s.cloud, s.unreadable), (1, 1, 0));
+    assert!(done.iter().all(|a| a.file.path != gone));
+}
+
 /// Dates set here (SPEC "Dates"): written to the sidecar, kept through
 /// rescans, reopening and duplicate analysis (which caches the file's own
 /// EXIF), and taken back by undo. An approximate date dates an undated

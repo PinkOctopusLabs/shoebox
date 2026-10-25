@@ -16,7 +16,8 @@ pub struct Stats {
     pub unreadable: usize,
     pub undecodable: usize,
     /// In the cloud only and not analysed before: left out (reading them
-    /// would download them).
+    /// would download them), including any that went back to the cloud
+    /// after the scan.
     pub cloud: usize,
 }
 
@@ -74,17 +75,26 @@ pub fn analyze_all_progress(
     let done_n = std::sync::atomic::AtomicUsize::new(0);
 
     for chunk in todo.chunks(STORE_CHUNK) {
+        let went = std::sync::atomic::AtomicUsize::new(0);
         let results: Vec<_> = chunk
             .par_iter()
             .filter_map(|f| {
-                let r = match hash::analyze_path(&f.path) {
-                    Ok(a) => Some(Analyzed {
-                        file: f.clone(),
-                        analysis: a,
-                    }),
-                    Err(e) => {
-                        tracing::warn!("skipping {e}");
-                        None
+                // A cloud drive may have sent it back to the cloud since the
+                // scan (Google Drive does when the disk is full): reading it
+                // now would wait for a download.
+                let r = if crate::cloud::path_is_cloud_only(&f.path) {
+                    went.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    None
+                } else {
+                    match hash::analyze_path(&f.path) {
+                        Ok(a) => Some(Analyzed {
+                            file: f.clone(),
+                            analysis: a,
+                        }),
+                        Err(e) => {
+                            tracing::warn!("skipping {e}");
+                            None
+                        }
                     }
                 };
                 let n = done_n.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -92,7 +102,9 @@ pub fn analyze_all_progress(
                 r
             })
             .collect();
-        stats.unreadable += chunk.len() - results.len();
+        let went = went.into_inner();
+        stats.cloud += went;
+        stats.unreadable += chunk.len() - results.len() - went;
         stats.analyzed += results.len();
         let exts: Vec<String> = results
             .iter()

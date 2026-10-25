@@ -12,6 +12,10 @@ use crate::app::ShoeboxApp;
 /// How long a download waits before it's said to be waiting for its drive.
 const WAITING: Duration = Duration::from_secs(10);
 
+/// How long the duplicate finder's count stands still before it's said to
+/// be waiting (a cloud drive that stopped sending a file).
+const STALLED: Duration = Duration::from_secs(300);
+
 /// What a row's Stop does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stop {
@@ -92,10 +96,25 @@ pub(crate) fn rows(app: &ShoeboxApp) -> Vec<Row> {
         )));
     }
     for item in board.iter().filter(|i| i.kind == Kind::Library) {
-        out.push(Row {
+        let mut row = Row {
             since: Some(item.started),
             ..Row::new(item.what.clone())
-        });
+        };
+        if app.dupes.running
+            && let Some((done, total)) = app.dupes.progress.filter(|(d, t)| d < t)
+        {
+            row = row.progress(done, total);
+            if let Some(still) = app.dupes.progress_at.map(|t| now.duration_since(t))
+                && still >= STALLED
+            {
+                row.what = format!(
+                    "{} · no file finished for {}: waiting for a cloud drive?",
+                    row.what,
+                    elapsed(still)
+                );
+            }
+        }
+        out.push(row);
     }
     if let Some((done, total)) = app.scan_progress {
         out.push(Row::new("Reading photos").progress(done, total));

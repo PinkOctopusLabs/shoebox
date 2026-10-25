@@ -214,6 +214,8 @@ pub struct DupeState {
     pub found_in: Option<DupeScope>,
     pub running: bool,
     pub progress: Option<(usize, usize)>,
+    /// When the count last moved (Activity says when it has stopped).
+    pub progress_at: Option<Instant>,
     pub config: shoebox_core::dupes::Config,
     pub decisions: HashMap<PathBuf, Decision>,
     /// The group open in Compare or Survey.
@@ -1561,6 +1563,7 @@ impl ShoeboxApp {
                 LibraryEvent::Duplicates(r) => {
                     self.dupes.running = false;
                     self.dupes.progress = None;
+                    self.dupes.progress_at = None;
                     // Groups are renumbered: go back to the list.
                     if self.dupes.open.take().is_some()
                         && matches!(self.view, View::Compare | View::Survey)
@@ -1571,6 +1574,9 @@ impl ShoeboxApp {
                 }
                 LibraryEvent::DupeProgress { done, total } => {
                     self.dupes.running = true;
+                    if self.dupes.progress != Some((done, total)) {
+                        self.dupes.progress_at = Some(Instant::now());
+                    }
                     self.dupes.progress = Some((done, total));
                 }
                 LibraryEvent::DupePreview(p) => self.dupes.preview = Some(p),
@@ -2889,6 +2895,7 @@ impl ShoeboxApp {
 
     pub fn find_duplicates(&mut self) {
         self.dupes.running = true;
+        self.dupes.progress_at = Some(Instant::now());
         self.dupes.message = None;
         let only = self.scope_files(&self.dupes.scope).map(Arc::new);
         self.dupes.found_in = Some(self.dupes.scope.clone());
@@ -3427,6 +3434,14 @@ impl ShoeboxApp {
     #[doc(hidden)]
     pub fn activity(&self) -> crate::activity::Board {
         self.activity.clone()
+    }
+
+    /// The duplicate finder hashing, its count last moved at `at` (tests).
+    #[doc(hidden)]
+    pub fn pretend_dupe_progress(&mut self, done: usize, total: usize, at: Instant) {
+        self.dupes.running = true;
+        self.dupes.progress = Some((done, total));
+        self.dupes.progress_at = Some(at);
     }
 
     /// Select photos by file name (tests).

@@ -6923,6 +6923,34 @@ fn activity_shows_what_waits_for_the_drive() {
     drop(task);
     h.run_steps(3);
     assert!(h.query_by_label("Nothing running.").is_some());
+
+    // The duplicate finder shows its count, and says when it has stood
+    // still: a file its drive sent back to the cloud mid-run.
+    let task = board.start(
+        shoebox_app::activity::Kind::Library,
+        "Finding duplicates",
+        None,
+    );
+    let now = std::time::Instant::now();
+    h.state_mut().pretend_dupe_progress(48, 900, now);
+    h.run_steps(3);
+    assert!(h.query_by_label("48 of 900").is_some());
+    assert!(
+        h.query_by_label_contains("waiting for a cloud drive")
+            .is_none()
+    );
+    h.state_mut()
+        .pretend_dupe_progress(48, 900, now - Duration::from_secs(400));
+    h.run_steps(3);
+    assert_eq!(
+        h.query_all_by_label(
+            "Finding duplicates · no file finished for 6 min: waiting for a cloud drive?"
+        )
+        .count(),
+        2,
+        "in the list and the status bar"
+    );
+    drop(task);
 }
 
 /// The first click after opening doesn't move the grid: the photos on
