@@ -4,7 +4,7 @@
 //! (`x.nef`, `x.jpg`, `x.tif`, `x-1.tif`), or the same capture time
 //! including sub-seconds plus camera serial (so an export in another folder
 //! joins its NEF, but burst frames a fraction of a second apart don't).
-//! The primary is the NEF, else a DNG, TIFF, JPG, PNG, HEIC, AVIF. A
+//! The primary is the NEF, else a DNG, TIFF, HEIC, JPG, PNG, AVIF. A
 //! camera DNG beside a NEF of the same name (one converted from it) stacks
 //! with it, the NEF first. A **variant** is a
 //! member carrying a `-N` suffix whose format another member already has
@@ -91,9 +91,10 @@ fn rank(f: Format) -> u8 {
         Format::Dng => 1,
         // A Photoshop document is an edit of the frame, like a TIFF.
         Format::Tiff | Format::Psd => 2,
-        Format::Jpeg => 3,
-        Format::Png => 4,
-        Format::Heic => 5,
+        // A phone's original over its JPG conversion, as Duplicates keeps it.
+        Format::Heic => 3,
+        Format::Jpeg => 4,
+        Format::Png => 5,
         Format::Avif | Format::Webp => 6,
         // A Live Photo's video is never the photo shown.
         Format::Mov | Format::Mp4 | Format::Mpg => 7,
@@ -395,6 +396,19 @@ mod tests {
         assert_eq!(s.badge(&photos), "ARW+JPG");
         assert_eq!(photos[stacks[of[2]].primary].format, Format::Psd);
         assert_eq!(photos[stacks[of[4]].primary].format, Format::Webp);
+    }
+
+    /// A phone's HEIC leads the JPG of the same name, as Duplicates keeps it.
+    #[test]
+    fn heic_leads_its_jpg() {
+        let photos = vec![
+            photo("/a/IMG_0001.jpg", None),
+            photo("/a/IMG_0001.heic", None),
+        ];
+        let (stacks, of) = build(&photos, &[]);
+        let s = &stacks[of[0]];
+        assert_eq!(photos[s.primary].format, Format::Heic);
+        assert_eq!(s.badge(&photos), "HEIC+JPG");
     }
 
     #[test]

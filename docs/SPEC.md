@@ -44,7 +44,7 @@ Everything in the app is one of these eight things, and all of them except colle
 | --- | --- |
 | Library root | A folder the user adds to the app; any number of roots can be added, and stacks, events, search and duplicate checks work across all of them. Scanned recursively and watched for changes. A root can be marked **Reference**: read-only, never moved, renamed or written to, and used as the "keep" side in duplicate detection. |
 | File | One file on disk: image, sidecar or other. |
-| Stack | All files of one frame. Grouped by capture time (DateTimeOriginal + SubSecTimeOriginal) plus camera serial, or by matching base name in the same folder. One **primary** member is shown in the grid (default order NEF or ARW, DNG, TIFF or PSD, JPG, PNG, HEIC, AVIF or WebP) with a badge listing the members, such as `NEF+JPG+TIF`. |
+| Stack | All files of one frame. Grouped by capture time (DateTimeOriginal + SubSecTimeOriginal) plus camera serial, or by matching base name in the same folder. One **primary** member is shown in the grid (default order NEF or ARW, DNG, TIFF or PSD, HEIC, JPG, PNG, AVIF or WebP; the same order Duplicates keeps) with a badge listing the members, such as `NEF+JPG+TIF`. |
 | Variant | A stack member with different pixels from the primary, such as a Lightroom virtual-copy export (`-2`). Shown when the stack is expanded. |
 | Sidecar | `<filename>.<ext>.xmp` next to a file, holding ratings, flags, labels and keywords. |
 | Collection | A named virtual set of stacks. No files move. Stored in the cache and mirrored to `<root>/.shoebox/collections.json`, so collections survive a cache rebuild. |
