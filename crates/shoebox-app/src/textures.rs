@@ -68,6 +68,16 @@ impl Textures {
     }
 
     pub fn insert(&mut self, ctx: &egui::Context, key: Key, img: &shoebox_decode::Rgb8) {
+        // Larger than the GPU takes would end the app (images are decoded
+        // to fit, `jobs::MAX_TEXTURE_SIDE`; this is the backstop).
+        let max = ctx.input(|i| i.max_texture_side) as u32;
+        let fitted;
+        let img = if img.width.max(img.height) > max {
+            fitted = img.fit_long_edge(max);
+            &fitted
+        } else {
+            img
+        };
         let size = [img.width as usize, img.height as usize];
         let color = egui::ColorImage::from_rgba_unmultiplied(size, &img.to_rgba());
         let tex = ctx.load_texture(format!("{key:?}"), color, egui::TextureOptions::LINEAR);
@@ -126,5 +136,35 @@ impl Textures {
 
     pub fn used_bytes(&self) -> usize {
         self.used
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    #[test]
+    fn larger_than_the_gpu_takes_is_fitted() {
+        let ctx = egui::Context::default();
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .textures_delta
+            .clear();
+        let max = ctx.input(|i| i.max_texture_side) as u32;
+        let img =
+            shoebox_decode::Rgb8::new(max * 2 + 10, 3, vec![0; ((max * 2 + 10) * 3 * 3) as usize])
+                .unwrap();
+        let mut t = Textures::new(1 << 30);
+        let key = Key {
+            photo: 1,
+            size: Size::Full,
+        };
+        t.insert(&ctx, key, &img);
+        let [w, _] = t.get(&key).unwrap().size();
+        assert_eq!(w as u32, max);
+        drop(t);
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .textures_delta
+            .clear();
     }
 }

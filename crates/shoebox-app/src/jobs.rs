@@ -308,6 +308,17 @@ fn next_job(q: &Queue) -> Option<(Key, Priority, Job)> {
     }
 }
 
+/// The largest texture the GPU takes (egui's `max_texture_side`, set by the
+/// app each frame): full-size images are decoded to fit it, so a panorama
+/// wider than that shows (softer at 100%) rather than failing to upload.
+pub static MAX_TEXTURE_SIDE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(8192);
+
+fn max_texture_side() -> u32 {
+    MAX_TEXTURE_SIDE
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .max(1)
+}
+
 fn worker(q: &Queue, tx: &Sender<Loaded>, thumbs: &ThumbCache, repaint: &(dyn Fn() + Send + Sync)) {
     while let Some((key, priority, job)) = next_job(q) {
         // An edited photo shows its preview (the original if that fails).
@@ -315,7 +326,7 @@ fn worker(q: &Queue, tx: &Sender<Loaded>, thumbs: &ThumbCache, repaint: &(dyn Fn
             let px = match key.size {
                 Size::Small => thumbs::SMALL,
                 Size::Large => thumbs::LARGE,
-                Size::Full => 1 << 14,
+                Size::Full => max_texture_side(),
             };
             if let Ok(img) =
                 shoebox_decode::render_path(Format::Jpeg, preview, Some(px), 1, job.target)
@@ -376,7 +387,7 @@ fn worker(q: &Queue, tx: &Sender<Loaded>, thumbs: &ThumbCache, repaint: &(dyn Fn
             Size::Full => shoebox_decode::render_path(
                 job.format,
                 &job.path,
-                None,
+                Some(max_texture_side()),
                 job.orientation,
                 job.target,
             )

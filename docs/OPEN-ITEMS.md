@@ -244,6 +244,11 @@ Defaults that are guesses so far.
 
 ### Library
 
+- [ ] **Loupe: panoramas sharp at 100%.** A photo wider or taller than
+  the GPU's largest texture (8,192 px here; about 140 panoramas in the
+  library, up to 21,316 px) is decoded to fit it (from 2026-10-25; it
+  used to end the app), so 100% and closer upscale it. Tile it instead:
+  the region shown at full resolution, as Develop's zoom does. M.
 - [ ] **Shift dates.** Move the dates of photos already dated by an offset
   (a camera whose clock was wrong, or set to another time zone), for a
   selection or a camera over a span, with the dry run and batch Set date…

@@ -4518,6 +4518,10 @@ impl ShoeboxApp {
 
 impl eframe::App for ShoeboxApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        crate::jobs::MAX_TEXTURE_SIDE.store(
+            ui.ctx().input(|i| i.max_texture_side) as u32,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let ctx = ui.ctx().clone();
         if let Some(d) = &self.display {
             d.ensure();
