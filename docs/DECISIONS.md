@@ -4667,3 +4667,19 @@ Asked for: a filter for movie length.
   file type filter does. It matches a stack's primary, so a Live Photo (its
   photo leads) is a photo and never a short clip. A movie whose length
   can't be read matches none. Info shows the length (`m:ss`).
+
+## Sidecar dates read again (2026-10-26)
+Reported: photos in year folders shown as Undated (284 in one year), though
+their sidecars have dates (iCloud Photos sync writes Photos' date there).
+- **Why:** before schema 9 a sidecar's date was cached in `exif`; reading
+  the file again (or hashing it for duplicates) replaces that row with the
+  file's own. Schema 9 moved the date to `marks.date` but only added the
+  column, and marks are re-read only when the sidecars' signature changes,
+  so those rows never got it.
+- **Schema 12** sets the signature of every cached row with sidecars and no
+  date to `cache::REREAD_SIDECAR`; the next refresh reads just those
+  sidecars (not the images), and doesn't record it as a change made
+  elsewhere. Rows whose sidecar has no date are read once more for nothing.
+- Find dates stays on `_undated/`: what's left undated in year folders is
+  mostly Photos' renders of edits synced before they were given their
+  original's date, which the next iCloud Photos sync fills in.

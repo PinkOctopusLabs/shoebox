@@ -5459,7 +5459,12 @@ fn develop_upright_levels_a_tilted_photo() {
     h.get_by_label("Transform").click();
     h.run_steps(2);
     h.get_by_label("Level").click();
-    h.run_steps(3);
+    // Found on a thread: slower when every core is busy.
+    wait_for(&mut h, Duration::from_secs(30), "level", |a| {
+        a.develop_doc()
+            .and_then(|d| d.history().last())
+            .is_some_and(|s| s.label == "Upright: Level")
+    });
     let doc = h.state().develop_doc().unwrap();
     let g = &doc.settings().geometry;
     assert!((g.rotate.abs() - 3.0).abs() < 0.3, "{g:?}");
@@ -5507,8 +5512,10 @@ fn develop_guided_upright_follows_drawn_lines() {
     h.get_by_label("Transform").click();
     h.run_steps(2);
     h.get_by_label("Guided").click();
+    wait_for(&mut h, Duration::from_secs(30), "guided", |a| {
+        a.develop_guided().0
+    });
     h.run_steps(3);
-    assert!(h.state().develop_guided().0);
     let photo = h.state().develop_photo_rect().unwrap();
     // A point on the turned grid (u across it, v along it), on screen.
     let at = |u: f64, v: f64| {

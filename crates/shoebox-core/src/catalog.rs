@@ -213,11 +213,15 @@ impl Catalog {
                             cloud: f.cloud,
                         });
                     }
-                    // Image unchanged, sidecar changed: re-read marks only.
+                    // Image unchanged, sidecar changed: re-read marks only
+                    // (not a change when the cache asked for it).
                     cm => todo.push(Todo {
                         f,
                         meta: Some(k.meta.clone()),
-                        what: cm.is_some().then_some(What::SIDECAR),
+                        what: cm
+                            .as_ref()
+                            .is_some_and(|cm| cm.sig != crate::cache::REREAD_SIDECAR)
+                            .then_some(What::SIDECAR),
                         prev: k.change.clone(),
                     }),
                 },

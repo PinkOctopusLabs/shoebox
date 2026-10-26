@@ -58,7 +58,11 @@ fn label_from(s: Option<String>) -> Option<Label> {
     s.and_then(|s| Label::ALL.into_iter().find(|l| l.name() == s))
 }
 
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
+
+/// A cached sidecar signature that matches no sidecars: the next refresh
+/// reads the file's sidecars again, without counting it as a change.
+pub const REREAD_SIDECAR: &str = "reread";
 
 /// Rebuildable tables, dropped when the schema version changes.
 /// `dupe_ignores` holds user decisions and is never dropped.
@@ -179,9 +183,8 @@ impl Cache {
                 "cache schema {version} is newer than this build ({SCHEMA_VERSION})"
             )));
         }
-        // 8, 9 and 11 add columns, 10 and 11 re-read some rows; a rebuild would throw away every hash, and
-        // what's known of cloud-only files. Rows from before 9 have the
-        // sidecars' dates in `exif` (they stay until the file is read again).
+        // 8, 9 and 11 add columns, 10 to 12 re-read some rows; a rebuild
+        // would throw away every hash, and what's known of cloud-only files.
         if version == 7 {
             conn.execute_batch("ALTER TABLE exif ADD COLUMN nef_compression INTEGER")?;
         }
@@ -196,6 +199,16 @@ impl Cache {
                 "ALTER TABLE exif ADD COLUMN duration REAL;
                  UPDATE files SET meta_version = NULL
                  WHERE lower(ext) IN ('mov', 'mp4', 'mpg')",
+            )?;
+        }
+        if (7..=11).contains(&version) {
+            // Before 9 a sidecar's date went into `exif`, which reading the
+            // file again (or hashing it) replaces with the file's own; the
+            // marks, cached by the sidecar's signature, never got it. Read
+            // every sidecar without a date again.
+            conn.execute(
+                "UPDATE marks SET sidecar_sig = ?1 WHERE date IS NULL AND sidecar_sig != ''",
+                [REREAD_SIDECAR],
             )?;
         } else if version != 0 && version < SCHEMA_VERSION {
             tracing::info!("cache schema {version} is out of date; rebuilding");

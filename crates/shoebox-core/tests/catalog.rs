@@ -532,3 +532,55 @@ fn dated_photos_leave_undated_by_the_import_template() {
     );
     assert_eq!(f.approximate, vec![dir.join("c.jpg")]);
 }
+
+/// Caches from before schema 9 kept a sidecar's date in `exif`, lost when
+/// the file was read again, and their marks never had it: upgrading reads
+/// those sidecars once more, without calling it a change.
+#[test]
+fn an_old_cache_reads_sidecar_dates_again() {
+    let t = tempfile::tempdir().unwrap();
+    let lib = t.path().join("lib");
+    shoebox_fixtures::build_library(&lib).unwrap();
+    let carved = lib.join("scan/recovered/f0003.jpg");
+    let xmp = shoebox_core::xmp::edit(
+        None,
+        &[(
+            shoebox_core::xmp::Prop::DateTimeOriginal,
+            Some(shoebox_core::xmp::Value::Text(
+                "2019-03-12T10:15:30+01:00".into(),
+            )),
+        )],
+    )
+    .unwrap();
+    std::fs::write(shoebox_core::sidecar::per_file(&carved), xmp).unwrap(); // test fixture, not library
+    let path = t.path().join("cache.sqlite");
+    let mut cache = Cache::open(&path).unwrap();
+    let (c, _) = Catalog::refresh(&mut cache, roots(&lib), &|_, _| {}).unwrap();
+    let time = |c: &Catalog| {
+        let p = c.photos.iter().find(|p| p.rel == "recovered/f0003.jpg");
+        p.unwrap().meta.exif.capture_time.clone()
+    };
+    assert_eq!(time(&c).as_deref(), Some("2019:03:12 10:15:30"));
+    drop(cache);
+
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("UPDATE marks SET date = NULL").unwrap();
+        conn.pragma_update(None, "user_version", 11).unwrap();
+    }
+    let mut cache = Cache::open(&path).unwrap();
+    assert_eq!(
+        time(&Catalog::from_cache(&cache, roots(&lib)).unwrap()),
+        None
+    );
+    let (c, s) = Catalog::refresh(&mut cache, roots(&lib), &|_, _| {}).unwrap();
+    assert_eq!(time(&c).as_deref(), Some("2019:03:12 10:15:30"));
+    assert_eq!(
+        s.changed, 0,
+        "every sidecar without a date is read, none changed"
+    );
+    assert!(c.photos.iter().all(|p| p.change.is_none()));
+    // And it's cached again.
+    let (_, s) = Catalog::refresh(&mut cache, roots(&lib), &|_, _| {}).unwrap();
+    assert_eq!(s.read, 0);
+}
